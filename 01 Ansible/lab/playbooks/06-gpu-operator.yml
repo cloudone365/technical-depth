@@ -1,0 +1,35 @@
+---
+- name: NVIDIA GPU Operator on k3s
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - role: gpu_operator
+  post_tasks:
+    - name: Launch a GPU test pod
+      kubernetes.core.k8s:
+        kubeconfig: "{{ gpu_operator_kubeconfig }}"
+        state: present
+        wait: true
+        wait_condition:
+          type: Ready
+          status: "False"
+          reason: PodCompleted
+        wait_timeout: 300
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: cuda-smoke
+            namespace: default
+          spec:
+            restartPolicy: Never
+            containers:
+              - name: cuda
+                image: nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04
+                command: [nvidia-smi, -L]
+                resources:
+                  limits:
+                    nvidia.com/gpu: 1
+      register: gpu_smoke
+      failed_when: false    # informational; inspect with: kubectl logs cuda-smoke

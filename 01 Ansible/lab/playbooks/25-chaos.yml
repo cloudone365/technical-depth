@@ -1,0 +1,91 @@
+---
+# Break-fix practice. Injects ONE reversible fault on ONE Spark; your job is to
+# detect it with the lab's own tools (validate, drift, alerts, logs) and fix it
+# with the normal playbooks. Faults are documented in Volume 25 — no peeking at
+# the task list until you've found it.
+#
+#   ansible-playbook playbooks/25-chaos.yml -l spark-02 -K -e chaos_fault=random
+#   ansible-playbook playbooks/25-chaos.yml -l spark-02 -K -e chaos_fault=3
+- name: Chaos injection
+  hosts: spark
+  become: true
+  gather_facts: false
+  vars:
+    chaos_fault: random
+    chaos_catalog: [1, 2, 3, 4, 5, 6, 7]
+  pre_tasks:
+    - name: One host at a time, explicitly
+      ansible.builtin.assert:
+        that: ansible_limit is defined and ansible_play_hosts_all | length == 1
+        fail_msg: "Use -l <one spark>"
+      run_once: true
+
+    - name: Pick the fault
+      ansible.builtin.set_fact:
+        chaos_id: "{{ (chaos_catalog | random(seed=now().isoformat())) if chaos_fault == 'random' else chaos_fault | int }}"
+
+    - name: Record what was injected (sealed — read it only after you've solved it)
+      ansible.builtin.copy:
+        dest: "{{ playbook_dir }}/../.cache/chaos-{{ inventory_hostname }}.sealed"
+        content: "{{ chaos_id | string | b64encode }}\n"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+
+  tasks:
+    - name: Fault 1
+      ansible.builtin.command: "ip link set dev {{ cx7_interfaces[0].name }} mtu 1500"
+      changed_when: true
+      when: chaos_id | int == 1 and cx7_interfaces | default([]) | length > 0
+
+    - name: Fault 2
+      ansible.builtin.shell: set -o pipefail; apt-mark showhold | grep -E '^(nvidia|libnvidia)' | head -3 | xargs -r apt-mark unhold
+      args: { executable: /bin/bash }
+      changed_when: true
+      when: chaos_id | int == 2
+
+    - name: Fault 3
+      ansible.builtin.systemd_service:
+        name: spark-gpu-metrics.timer
+        state: stopped
+        enabled: false
+      when: chaos_id | int == 3
+
+    - name: Fault 4
+      ansible.posix.sysctl:
+        name: vm.swappiness
+        value: "60"
+        sysctl_file: /etc/sysctl.d/90-spark.conf
+        reload: true
+      when: chaos_id | int == 4
+
+    - name: Fault 5
+      ansible.builtin.command: "scontrol update NodeName={{ inventory_hostname }} State=DRAIN Reason=chaos"
+      delegate_to: "{{ groups['slurm_controller'][0] }}"
+      changed_when: true
+      failed_when: false
+      when: chaos_id | int == 5
+
+    - name: Fault 6
+      ansible.builtin.shell: |
+        set -o pipefail
+        python3 - <<'PY'
+        import json; p='/etc/docker/daemon.json'; d=json.load(open(p)); d.pop('default-runtime', None); json.dump(d, open(p,'w'), indent=2)
+        PY
+        systemctl restart docker
+      args: { executable: /bin/bash }
+      changed_when: true
+      when: chaos_id | int == 6
+
+    - name: Fault 7
+      ansible.builtin.shell: |
+        set -o pipefail
+        f=/etc/cdi/nvidia.yaml
+        [ -f "$f" ] && sed -i 's/libcuda\.so\.[0-9.]*/libcuda.so.000.00.00/g' "$f"
+      args: { executable: /bin/bash }
+      changed_when: true
+      when: chaos_id | int == 7
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "A fault has been injected on {{ inventory_hostname }}. Find it. Reveal: base64 -d .cache/chaos-{{ inventory_hostname }}.sealed"

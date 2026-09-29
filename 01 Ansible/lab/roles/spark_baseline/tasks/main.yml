@@ -1,0 +1,24 @@
+---
+- name: Assert we are on a supported platform
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.os_family == 'Debian'
+      - ansible_facts.distribution_major_version is version('24', '>=')
+    fail_msg: "spark_baseline targets DGX OS 7 / Ubuntu 24.04+, got {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+    quiet: true
+
+- name: Packages
+  ansible.builtin.import_tasks: packages.yml
+  tags: [baseline, packages]
+
+- name: Users and SSH
+  ansible.builtin.import_tasks: users_ssh.yml
+  tags: [baseline, ssh]
+
+- name: Kernel and sysctl
+  ansible.builtin.import_tasks: kernel.yml
+  tags: [baseline, sysctl]
+
+- name: Time and logging
+  ansible.builtin.import_tasks: time_logging.yml
+  tags: [baseline, time]

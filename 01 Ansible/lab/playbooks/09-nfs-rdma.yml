@@ -1,0 +1,7 @@
+---
+- name: Shared model cache over NFS/RDMA
+  hosts: nfs_server:nfs_client
+  become: true
+  order: sorted
+  roles:
+    - role: nfs_rdma

@@ -1,256 +1,350 @@
-# Volume 12: Lossless RoCEv2 Network Tuning: PFC Priority 3, ECN & MTU 9000
+# Volume 12 — RoCEv2 Done Right: MTU, QoS (DSCP/PFC/ECN), and Proving NCCL Uses RDMA Across Sparks
 
-```
-====================================================================================================
-MODULE 01: ANSIBLE & BARE-METAL AI INFRASTRUCTURE AUTOMATION
-VOLUME 12: Lossless Ethernet, Priority Flow Control (PFC), DCQCN Congestion & Jumbo Frames
-====================================================================================================
-```
+> **Module 01 · Part III — High-Speed Fabric** · Prev: [11 CX-7 fabric](11-infiniband-fabric-automation-and-opensm.md) · Next: [13 Multus & secondary networks in k3s](13-multus-cni-and-secondary-rdma-networking.md)
 
----
-
-## 1. Executive Intuition: The Lossless Ethernet Imperative
-
-While native InfiniBand handles flow control through hardware credit tokens, RDMA over Converged Ethernet (RoCEv2) runs over standard IP/UDP packet fabrics. However, RoCEv2 hardware implementations are notoriously intolerant of packet loss:
-1. **The Go-Back-N Cliff:** When a switch drops a single packet during an RDMA transfer, the receiving HCA discards all subsequent out-of-order packets. The sender must rewind and retransmit the entire window from the dropped packet. Bandwidth instantly collapses from $400\text{ Gbps}$ down to $<5\text{ Gbps}$.
-2. **PFC Deadlocks & Pause Storms:** Priority Flow Control (PFC) pauses upstream switches when ingress buffers fill. If configured improperly across cyclic routing paths, pause frames propagate indefinitely, freezing all network traffic.
-3. **Congestion Collapse:** Without Explicit Congestion Notification (ECN) and Data Center QCN (DCQCN), senders inject packets at line rate until buffers overflow.
-
-```
-+-----------------------------------------------------------------------------------------+
-|                         ROCEv2 LOSSLESS MULTI-TIER COUPLING                             |
-+-----------------------------------------------------------------------------------------+
-| Traffic Separation:                                                                     |
-| Priority 3 (Lossless Storage): [RoCEv2 NVMe-oF / GDS] -> Protected by PFC & DCQCN       |
-| Priority 0 (Best Effort):     [K8s, SSH, DNS, Logs]   -> Standard droppable TCP/IP      |
-|                                                                                         |
-| Host Configuration Chain (Ansible Automated):                                           |
-| 1. Netplan: MTU 9000 on physical roce0 - roce7 interfaces                               |
-| 2. mlnx_qos: Set PFC mask 0,0,0,1,0,0,0,0 (Priority 3 only!)                           |
-| 3. mlnx_qos: Map DSCP 26 -> Priority 3                                                  |
-| 4. Kernel sysctl: Enforce BBR/DCTCP and high-concurrency socket buffers                 |
-+-----------------------------------------------------------------------------------------+
-```
-
-Automating an enterprise AI RoCEv2 fabric requires Ansible to configure **Host Interface MTUs**, **Hardware PFC Queues**, and **DSCP-to-Priority Mappings**.
+| | |
+|---|---|
+| **You will build** | A tuned RoCEv2 path (MTU 9000, optional DSCP/PFC/ECN via `12b-roce-qos.yml`), a two-node NCCL build and run (`10-nccl-test.yml`), and the skill to read NCCL logs to prove the data went over RDMA and not TCP sockets |
+| **Hardware** | 2× DGX Spark, direct cable (switch optional) |
+| **Time** | 90 min (the NCCL build takes about 10 min per node) |
+| **Risk** | Low. QoS settings are runtime-only until you persist them |
 
 ---
 
-## 2. Lineage & Evolution of RoCEv2 Networking
+## 1. What "lossless" means here, and when you need it
 
+RoCEv2 carries RDMA inside UDP/IP. RDMA transports react badly to packet loss, because a drop costs a go-back-N retransmit and throughput collapses. There are three tools:
+
+| Mechanism | Layer | Who configures it | Needed on a direct cable? | Needed with a switch? |
+|---|---|---|---|---|
+| **MTU 9000** | L2/L3 | Hosts (+ switch ports) | **Yes.** Fewer packets, larger RDMA MTU (4096) | Yes |
+| **ECN + DCQCN** | L3 marking + NIC rate control | Switch marks, NIC reacts (RP/NP enable) | No congestion point, so optional | **Yes**, the first line of defence |
+| **PFC** (per-priority pause) | L2 | Hosts **and** switch, on the same priority | No | Usually, for the RoCE class only |
+| **DSCP trust + ToS** | L3 → priority mapping | Hosts (`mlnx_qos --trust dscp`, RDMA-CM ToS) + switch | Harmless | **Yes**: classify RoCE into the lossless queue |
+
+```mermaid
+flowchart LR
+  subgraph TX["spark-01 CX-7"]
+    APP["NCCL / NFS-RDMA<br/>(RDMA-CM ToS 106)"] --> Q3["Priority 3 queue<br/>(DSCP 26 trusted)"]
+    CNP_RX["DCQCN RP:<br/>slows QP on CNP"]
+  end
+  subgraph SW["Switch (4+ Sparks)"]
+    ECN["WRED/ECN marking<br/>on prio-3 queue"]
+    PFC["PFC pause prio 3<br/>(last resort)"]
+  end
+  subgraph RX["spark-02 CX-7"]
+    NP["DCQCN NP:<br/>sees CE → sends CNP (DSCP 48)"]
+  end
+  Q3 --> ECN --> NP
+  NP -- CNP --> CNP_RX
+  PFC -. pause frames .-> Q3
 ```
-   [1980s: Classical Lossy Ethernet]
-                 |
-           (Best-effort packet delivery; TCP sliding windows handle all congestion)
-                 |
-   [2008: Data Center Bridging (DCB / IEEE 802.1Qbb)]
-                 |
-           (Priority-based Flow Control introduced for Fibre Channel over Ethernet - FCoE)
-                 |
-   [2014: RoCEv2 (Infiniband over UDP 4791)]
-                 |
-           (IB verbs encapsulated in routable Layer-3 UDP packets)
-                 |
-   [2015: DCQCN (Data Center Quantized Congestion Notification)]
-                 |
-           (Hardware end-to-end feedback loop combining switch ECN marking with NIC CNPs)
-                 |
-   [2024: NVIDIA Spectrum-X & Adaptive Packet Spraying]
-                 |
-           (Lossless Ethernet augmented with fine-grained telemetry and packet spraying)
-```
+
+**Rule of thumb:** direct cable → MTU 9000 is all you need. Switch → match DSCP 26 → prio 3, ECN on, PFC on prio 3 **identically on every host and switch port**. A mismatch is worse than not configuring it at all.
 
 ---
 
-## 3. First-Principles Mathematics: PFC Headroom & BDP Buffer Sizing
+## 2. Host QoS playbook (opt-in)
 
-To guarantee zero packet loss without triggering pause storms, the switch and NIC port ingress buffers must be sized to accommodate all in-flight bytes while a PFC pause frame travels across the wire.
-
-### 3.1 Headroom Buffer Sizing Formula
-Let:
-- $C$ = Link bandwidth ($400\text{ Gbps} = 50\text{ GB/s} = 50 \times 10^9\text{ bytes/sec}$)
-- $T_{\text{RTT}}$ = Round-trip propagation time across optical fiber ($T_{\text{RTT}} \approx 2 \times \frac{\text{Distance}}{2 \times 10^8\text{ m/s}}$)
-- $T_{\text{reaction}}$ = Switch pause generation time + NIC response and drain time ($\sim 1.5\ \mu\text{s}$)
-- $S_{\text{MTU}}$ = Maximum Transmission Unit ($9,216\text{ bytes}$ for Jumbo Frames)
-
-$$\text{Buffer}_{\text{headroom}} = (C \times T_{\text{RTT}}) + (C \times T_{\text{reaction}}) + S_{\text{MTU}}$$
-
-#### Concrete Numerical Calculation (100-meter Datacenter Run):
-- $T_{\text{RTT}} = 1.0\ \mu\text{s}$
-- Total reaction time $T_{\text{total}} = 1.0\ \mu\text{s} + 1.5\ \mu\text{s} = 2.5\ \mu\text{s}$
-
-$$\text{Buffer}_{\text{headroom}} = (50 \times 10^9\text{ B/s} \times 2.5 \times 10^{-6}\text{ s}) + 9,216\text{ B}$$
-$$\text{Buffer}_{\text{headroom}} = 125,000\text{ bytes} + 9,216\text{ bytes} \approx \mathbf{134.2\text{ Kilobytes}}$$
-
-> **Switch Invariant:** Every 400 Gbps switch port must reserve at least **$140\text{ KB}$ of dedicated headroom buffer** for Priority 3. If headroom is undersized, packets drop and RoCEv2 throughput collapses.
-
----
-
-## 4. Deep Architecture: DSCP-to-PFC Priority Mapping
-
-In Layer-3 networks, Ethernet Priority Code Point (PCP, 3 bits) is lost when crossing IP routers. Therefore, Quality of Service (QoS) must be carried in the IP header's **Differentiated Services Code Point (DSCP, 6 bits)** field:
-
-```
-+-----------------------------------------------------------------------------+
-|                      DSCP TO HARDWARE QUEUE MAPPING                         |
-+-----------------------------------------------------------------------------+
-|  Application Socket / Verbs (GPUDirect Storage, NCCL)                       |
-|    |                                                                        |
-|    v                                                                        |
-|  Sets IP ToS / DSCP Field: DSCP 26 (Storage) or DSCP 46 (Compute)           |
-|    |                                                                        |
-|    v                                                                        |
-|  Mellanox ConnectX HCA Hardware:                                            |
-|    |-- Inspects incoming packet DSCP field (Value: 26)                      |
-|    |-- Maps DSCP 26 -> Priority 3 (Lossless Storage Queue)                  |
-|    |-- Applies PFC Flow Control rules strictly to Priority 3                |
-|    +-- Passes Priority 0 packets (SSH, Logs) as Best-Effort (Droppable)    |
-+-----------------------------------------------------------------------------+
-```
-
----
-
-## 5. Concrete Production Lab: Automated RoCEv2 Host Tuning Role
-
-Below is an enterprise Ansible role that configures Netplan with MTU 9000 and deploys a systemd oneshot service that executes `mlnx_qos` to lock PFC Priority 3 and map DSCP 26 on all ConnectX interfaces.
-
-### 5.1 Playbook Tasks (`tasks/main.yml`)
 ```yaml
+# lab/playbooks/12b-roce-qos.yml
 ---
-- name: 1. Ensure Mellanox QoS utilities present
-  ansible.builtin.apt:
-    name: mlnx-tools
-    state: present
+# Host-side RoCEv2 QoS for CX-7 — needed when Sparks share a SWITCH with other
+# traffic (4+ node topology). On a direct cable it is optional (no congestion point).
+#
+# Conventional RoCE marking (keep identical on hosts AND switch):
+#   RoCE data  : DSCP 26 → priority 3 → PFC enabled on prio 3 (lossless class)
+#   CNP (DCQCN): DSCP 48 → priority 6
+#   ECN        : marked by the switch, reacted to by the NIC (DCQCN)
+#
+#   ansible-playbook playbooks/12b-roce-qos.yml -K [-e roce_qos_pfc=false]   # ECN-only ("lossy RoCE")
+- name: RoCEv2 QoS on CX-7 ports
+  hosts: spark
+  become: true
+  gather_facts: false
+  vars:
+    roce_qos_prio: 3
+    roce_qos_dscp: 26
+    roce_qos_pfc: true
+    roce_qos_tos: "{{ (roce_qos_dscp * 4) + 2 }}"       # DSCP<<2 | ECT(0) = 106
+    # "0,0,0,1,0,0,0,0" — PFC on the RoCE priority only
+    roce_qos_pfc_vector: >-
+      {%- for p in range(8) -%}{{ '1' if (p == roce_qos_prio | int and roce_qos_pfc | bool) else '0' }}{{ '' if loop.last else ',' }}{%- endfor -%}
+  tasks:
+    - name: Check for mlnx_qos (DOCA / MLNX tools)
+      ansible.builtin.command: which mlnx_qos
+      register: roce_qos_tool
+      changed_when: false
+      failed_when: false
 
-- name: 2. Discover all Mellanox RoCEv2 Ethernet interfaces
-  ansible.builtin.shell: >
-    ls -l /sys/class/net/ | grep -E "mlx5_[0-9]" | awk '{print $9}'
-  register: roce_interfaces_raw
-  changed_when: false
+    - name: Stop with guidance when the tool is missing
+      ansible.builtin.meta: end_host
+      when: roce_qos_tool.rc != 0
 
-- name: Parse interface list
-  ansible.builtin.set_fact:
-    roce_interfaces: "{{ roce_interfaces_raw.stdout_lines }}"
+    - name: Read current QoS state
+      ansible.builtin.command: "mlnx_qos -i {{ item.name }}"
+      loop: "{{ cx7_interfaces }}"
+      loop_control: { label: "{{ item.name }}" }
+      register: roce_qos_before
+      changed_when: false
 
-- name: 3. Configure Persistent Netplan MTU 9000 on RoCE Interfaces
-  ansible.builtin.copy:
-    dest: /etc/netplan/90-roce-mtu.yaml
-    content: |
-      network:
-        version: 2
-        ethernets:
-      {% for iface in roce_interfaces %}
-          {{ iface }}:
-            mtu: 9000
-      {% endfor %}
-  notify: Apply Netplan
+    - name: Trust DSCP and set PFC vector
+      ansible.builtin.command: >-
+        mlnx_qos -i {{ item.item.name }} --trust dscp --pfc {{ roce_qos_pfc_vector }}
+      loop: "{{ roce_qos_before.results }}"
+      loop_control: { label: "{{ item.item.name }}" }
+      when: >-
+        ('Priority trust state: dscp' not in item.stdout)
+        or (roce_qos_pfc and not (item.stdout is search('enabled\s+(\d\s+){' ~ roce_qos_prio ~ '}1')))
+      changed_when: true
 
-- name: 4. Deploy RoCEv2 Hardware QoS Tuning Script
-  ansible.builtin.copy:
-    dest: /usr/local/bin/tune-roce-qos.sh
-    mode: '0755'
-    content: |
-      #!/usr/bin/env bash
-      set -euo pipefail
-      
-      {% for iface in roce_interfaces %}
-      echo "Configuring RoCEv2 QoS on {{ iface }}..."
-      # Set MTU 9000
-      ip link set dev {{ iface }} mtu 9000
-      
-      # Enable PFC strictly on Priority 3 (Storage Queue), disable all others
-      mlnx_qos -i {{ iface }} --pfc 0,0,0,1,0,0,0,0
-      
-      # Map DSCP 26 to Priority 3
-      mlnx_qos -i {{ iface }} --dscp2prio 26:3
-      
-      # Set Trust state to DSCP (trust L3 IP headers rather than L2 802.1p)
-      mlnx_qos -i {{ iface }} --trust dscp
-      {% endfor %}
+    - name: Enable ECN reaction point + notification point for the RoCE priority (DCQCN)
+      ansible.builtin.shell: |
+        set -e
+        changed=0
+        for role in roce_rp roce_np; do
+          f=/sys/class/net/{{ item.name }}/ecn/$role/enable/{{ roce_qos_prio }}
+          [ -e "$f" ] || { echo "missing $f"; exit 3; }
+          if [ "$(cat $f)" != "1" ]; then echo 1 > $f; changed=1; fi
+        done
+        echo "changed=$changed"
+      args: { executable: /bin/bash }
+      loop: "{{ cx7_interfaces }}"
+      loop_control: { label: "{{ item.name }}" }
+      register: roce_qos_ecn
+      changed_when: "'changed=1' in roce_qos_ecn.stdout"
+      failed_when: roce_qos_ecn.rc not in [0, 3]
 
-- name: 5. Create Systemd Service to Enforce RoCE QoS at Boot
-  ansible.builtin.copy:
-    dest: /etc/systemd/system/roce-qos-tuning.service
-    content: |
-      [Unit]
-      Description=Enforce Mellanox Lossless RoCEv2 QoS & PFC Tuning
-      After=network-online.target
-      Wants=network-online.target
+    - name: Default ToS for RDMA-CM connections (NCCL, NFS/RDMA use RDMA-CM)
+      ansible.builtin.shell: |
+        set -e
+        d=/sys/kernel/config/rdma_cm/{{ item.rdma_dev }}
+        mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
+        modprobe rdma_cm
+        [ -d "$d" ] || mkdir "$d"
+        cur=$(cat $d/ports/1/default_roce_tos)
+        if [ "$cur" != "{{ roce_qos_tos }}" ]; then echo {{ roce_qos_tos }} > $d/ports/1/default_roce_tos; echo changed; fi
+      args: { executable: /bin/bash }
+      loop: "{{ cx7_interfaces }}"
+      loop_control: { label: "{{ item.rdma_dev }}" }
+      register: roce_qos_cm
+      changed_when: "'changed' in roce_qos_cm.stdout"
 
-      [Service]
-      Type=oneshot
-      ExecStart=/usr/local/bin/tune-roce-qos.sh
-      RemainAfterExit=true
+    - name: Read back
+      ansible.builtin.command: "mlnx_qos -i {{ item.name }}"
+      loop: "{{ cx7_interfaces }}"
+      loop_control: { label: "{{ item.name }}" }
+      register: roce_qos_after
+      changed_when: false
 
-      [Install]
-      WantedBy=multi-user.target
-  notify: Reload Systemd
+    - name: Show trust + PFC lines
+      ansible.builtin.debug:
+        msg: "{{ item.item.name }}: {{ item.stdout_lines | select('search', 'trust|enabled|buffer') | list }}"
+      loop: "{{ roce_qos_after.results }}"
+      loop_control: { label: "{{ item.item.name }}" }
 
-- name: 6. Enable and Execute RoCE QoS Tuning Service
-  ansible.builtin.systemd:
-    name: roce-qos-tuning
-    state: started
-    enabled: true
-    daemon_reload: true
-
-- name: 7. Audit Hardware PFC Counters Post-Tuning
-  ansible.builtin.command: "mlnx_qos -i {{ item }}"
-  loop: "{{ roce_interfaces }}"
-  register: qos_audits
-  changed_when: false
-  failed_when: "'pfc: 0,0,0,1,0,0,0,0' not in qos_audits.stdout"
-
-handlers:
-  - name: Apply Netplan
-    ansible.builtin.command: netplan apply
-
-  - name: Reload Systemd
-    ansible.builtin.systemd:
-      daemon_reload: true
+    - name: Note on persistence
+      ansible.builtin.debug:
+        msg: >-
+          mlnx_qos / sysfs / configfs settings do not survive reboot. Re-run this play from a
+          systemd unit or AWX schedule at boot, or bake it into a oneshot service (exercise in Volume 12).
 ```
 
----
-
-## 6. Comparative Transport Matrix
-
-| Feature | Lossy TCP/IP | Standard RoCEv2 (Untuned) | Lossless RoCEv2 (Tuned) |
-| :--- | :--- | :--- | :--- |
-| **Packet Drop Policy** | Sliding Window Backoff | Hardware Go-Back-N Drop | **PFC Lossless Queue (Zero Drop)** |
-| **Congestion Control** | CUBIC / BBR | None | **DCQCN (ECN + CNPs)** |
-| **MTU Size** | 1,500 bytes | 1,500 bytes | **9,000 bytes (Jumbo Frames)** |
-| **Effective Throughput** | ~85 Gbps (CPU bound) | ~15 Gbps (Drop collapse) | **~385 Gbps (96% Line Rate)** |
-| **Tail Latency (p99)** | 1,500 microseconds | 20,000 microseconds | **12 microseconds** |
-
----
-
-## 7. SRE Diagnostics & Troubleshooting Playbook
-
-```
-+---------------------------------------------------------------------------------------------------+
-|                        ROCEv2 NETWORK SRE DIAGNOSTIC MATRIX                                       |
-+------------------------------------+--------------------------+-----------------------------------+
-| Symptom / Failure Mode             | Root Cause Hypothesis    | Triage & Remediation Command      |
-+------------------------------------+--------------------------+-----------------------------------+
-| Cluster-wide latency spikes;       | PFC Pause Storm: Faulty  | Inspect pause counters:           |
-| non-storage services time out.     | cable or NIC flooding    | `ethtool -S <iface> | grep pause` |
-|                                    | PFC frames upstream.     | Enable switch PFC watchdog timers.|
-+------------------------------------+--------------------------+-----------------------------------+
-| NVMe-oF disconnects during large   | MTU mismatch: Host MTU   | Run trace path ping with DF bit:  |
-| checkpoint writes.                 | 9000, but switch port    | `ping -M do -s 8972 <storage_ip>` |
-|                                    | set to 1500 (blackhole). | Align MTU across all switches.    |
-+------------------------------------+--------------------------+-----------------------------------+
-| High CNP packet rates; RoCEv2      | Over-aggressive ECN      | Adjust switch ECN WRED thresholds:|
-| throughput throttled below 50%.    | threshold causing false  | Raise `min_threshold` buffer limit|
-|                                    | congestion backoff.      | to absorb transient bursts.       |
-+------------------------------------+--------------------------+-----------------------------------+
+```bash
+cd "01 Ansible/lab"
+ansible-playbook playbooks/12b-roce-qos.yml -K
+ssh nvidia@10.10.10.11 'sudo mlnx_qos -i enp1s0f1np1 | sed -n "1,20p"'
 ```
 
+Persist it: create a oneshot systemd unit that runs the same commands at boot. Templating that unit is the exercise at the end of this volume. Or have AWX run the play on a boot-triggered webhook.
+
 ---
 
-## 8. Verification & Architectural Synthesis Checklist
+## 3. NCCL across two Sparks
 
-- [ ] **PFC Enabled on Priority 3 Only:** Verified with `mlnx_qos -i <iface>` showing mask `0,0,0,1,0,0,0,0`.
-- [ ] **DSCP 26 Mapped:** DSCP to priority mapping verified with `mlnx_qos --dscp2prio 26:3`.
-- [ ] **Jumbo Frames Active:** `ip link show` confirms MTU 9000 across all high-speed interfaces.
-- [ ] **Zero Buffer Drops:** `ethtool -S <iface>` confirms `rx_out_of_buffer` and `rx_discards` are zero.
-- [ ] **Switch Watchdog Tuned:** Switch PFC watchdog configured with $200\text{ ms}$ timeout to prevent deadlocks.
+### 3.1 How NCCL picks a transport
+
+```mermaid
+flowchart TB
+  START[ncclCommInit] --> BOOT["Bootstrap over TCP<br/>NCCL_SOCKET_IFNAME (mgmt: enP7s7)"]
+  BOOT --> NET{"RDMA devices usable?<br/>(libibverbs, NCCL_IB_HCA, GID)"}
+  NET -- yes --> IB["NET/IB transport<br/>'Using [0]rocep1s0f1:1/RoCE'"]
+  NET -- no --> SOCK["NET/Socket fallback<br/>(TCP, much slower)"]
+  IB --> RUN[collectives]
+  SOCK --> RUN
+```
+
+NVIDIA's Spark NCCL guide bootstraps over the **management** interface (`NCCL_SOCKET_IFNAME=enP7s7`, also passed to UCX and Open MPI) and lets NCCL discover the RoCE devices for data. The lab playbook does the same, but pins `NCCL_IB_HCA` from inventory, so it can't pick a wrong or down device.
+
+### 3.2 Build and run
+
+```yaml
+# lab/playbooks/10-nccl-test.yml
+---
+# Builds NCCL + nccl-tests for Blackwell (sm_121) on every Spark, then runs
+# all_gather_perf across the CX-7 link from the first node. Mirrors NVIDIA's
+# "NCCL for Multiple Sparks" playbook, but idempotent and inventory-driven.
+- name: Build NCCL and nccl-tests
+  hosts: spark
+  become: true
+  vars:
+    nccl_version: v2.30.7-1
+    nccl_user: "{{ spark_admin_user }}"
+    nccl_home: "/home/{{ spark_admin_user }}"
+  tasks:
+    - name: Build dependencies
+      ansible.builtin.apt:
+        name: [libopenmpi-dev, openmpi-bin, build-essential, git]
+        state: present
+
+    - name: Clone NCCL
+      ansible.builtin.git:
+        repo: https://github.com/NVIDIA/nccl.git
+        dest: "{{ nccl_home }}/nccl"
+        version: "{{ nccl_version }}"
+        depth: 1
+      become: true
+      become_user: "{{ nccl_user }}"
+
+    - name: Build NCCL for sm_121 (≈10 min first time)
+      ansible.builtin.command: make -j20 src.build NVCC_GENCODE="-gencode=arch=compute_121,code=sm_121"
+      args:
+        chdir: "{{ nccl_home }}/nccl"
+        creates: "{{ nccl_home }}/nccl/build/lib/libnccl.so"   # rm -rf ~/nccl/build to force a rebuild
+      environment:
+        CUDA_HOME: /usr/local/cuda
+        PATH: "/usr/local/cuda/bin:{{ ansible_env.PATH }}"
+      become: true
+      become_user: "{{ nccl_user }}"
+      async: 3600
+      poll: 30
+
+    - name: Clone nccl-tests
+      ansible.builtin.git:
+        repo: https://github.com/NVIDIA/nccl-tests.git
+        dest: "{{ nccl_home }}/nccl-tests"
+        version: master
+        depth: 1
+        update: false
+      become: true
+      become_user: "{{ nccl_user }}"
+
+    - name: Build nccl-tests with MPI
+      ansible.builtin.command: >-
+        make -j20 MPI=1 MPI_HOME=/usr/lib/aarch64-linux-gnu/openmpi
+        CUDA_HOME=/usr/local/cuda NCCL_HOME={{ nccl_home }}/nccl/build
+      args:
+        chdir: "{{ nccl_home }}/nccl-tests"
+        creates: "{{ nccl_home }}/nccl-tests/build/all_gather_perf"
+      become: true
+      become_user: "{{ nccl_user }}"
+
+- name: Run all_gather_perf across all Sparks
+  hosts: spark[0]
+  gather_facts: false
+  become: false
+  vars:
+    nccl_home: "/home/{{ spark_admin_user }}"
+    nccl_bytes: 16G
+  tasks:
+    - name: Skip on single node
+      ansible.builtin.meta: end_play
+      when: groups['spark'] | length < 2
+
+    - name: Run mpirun over the management network, data over CX-7 RoCE
+      ansible.builtin.shell: |
+        export LD_LIBRARY_PATH={{ nccl_home }}/nccl/build/lib:/usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu/openmpi/lib:$LD_LIBRARY_PATH
+        mpirun -np {{ groups['spark'] | length }} \
+          -H {{ groups['spark'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '$', ':1') | join(',') }} \
+          --mca plm_rsh_agent "ssh -o StrictHostKeyChecking=accept-new" \
+          --mca btl_tcp_if_include {{ mgmt_interface }} \
+          -x LD_LIBRARY_PATH \
+          -x NCCL_SOCKET_IFNAME={{ mgmt_interface }} \
+          -x UCX_NET_DEVICES={{ mgmt_interface }} \
+          -x NCCL_IB_HCA={{ cx7_interfaces | map(attribute='rdma_dev') | join(',') }} \
+          -x NCCL_DEBUG=INFO -x NCCL_DEBUG_SUBSYS=INIT,NET \
+          {{ nccl_home }}/nccl-tests/build/all_gather_perf -b {{ nccl_bytes }} -e {{ nccl_bytes }} -f 2
+      args:
+        executable: /bin/bash
+      register: nccl_run
+      changed_when: false
+
+    - name: Extract bus bandwidth
+      ansible.builtin.set_fact:
+        nccl_busbw: "{{ nccl_run.stdout | regex_search('Avg bus bandwidth\\s*:\\s*([\\d.]+)', '\\1') | first | default('n/a') }}"
+        nccl_transport: "{{ nccl_run.stdout_lines | select('search', 'NET/IB|NET/Socket|Using network') | list | unique | first | default('unknown') }}"
+
+    - name: Result
+      ansible.builtin.debug:
+        msg:
+          - "Avg bus bandwidth: {{ nccl_busbw }} GB/s"
+          - "Transport line   : {{ nccl_transport }}"
+          - "If this says NET/Socket, RDMA isn't in use — see Volume 12 troubleshooting."
+```
+
+```bash
+ansible-playbook playbooks/10-nccl-test.yml -K
+```
+
+### 3.3 Prove it used RDMA
+
+With `NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,NET` you'll see lines like:
+
+```
+NCCL INFO NET/IB : Using [0]rocep1s0f1:1/RoCE [1]roceP2p1s0f1:1/RoCE ; OOB enP7s7:10.10.10.11<0>
+NCCL INFO Channel 00/0 : 0[0] -> 1[0] [send] via NET/IB/0
+```
+
+| You see | Meaning | Action |
+|---|---|---|
+| `NET/IB : Using [...]/RoCE` + `via NET/IB` | RDMA data path ✅ | Compare busbw to your perftest numbers |
+| `NET/Socket : Using [0]enP7s7` / `via NET/Socket` | TCP fallback ❌ | Check `NCCL_IB_HCA` names, `ibv_devinfo` state, GID index, whether libibverbs is inside containers |
+| `NET/IB : No device found` | verbs can't open devices | `rdma link show`; container needs `/dev/infiniband` + `--cap-add IPC_LOCK` (or `--privileged` for tests) |
+| Hang at init | Bootstrap can't connect | Firewall/SSH/MPI on the mgmt network; test `mpirun -np 2 -H a:1,b:1 hostname` first |
+
+### 3.4 Useful NCCL knobs for Spark pairs
+
+| Variable | Typical value | When |
+|---|---|---|
+| `NCCL_SOCKET_IFNAME` | `enP7s7` (or `wlP9s9` if you only have Wi-Fi, but **all nodes must use the same kind**) | Always |
+| `NCCL_IB_HCA` | `rocep1s0f1,roceP2p1s0f1` (from `cx7_fabric_hca_list`) | Pin devices |
+| `NCCL_IB_GID_INDEX` | from `cx7_fabric_roce_gid_index` | If autodetection picks a non-v2 GID |
+| `NCCL_IB_SUBNET_AWARE_ROUTING=1`, `NCCL_NET_PLUGIN=none` | — | 3-Spark **ring** (NVIDIA guidance) |
+| `NCCL_DEBUG=INFO` | — | Whenever you're not sure |
+
+The same variables go into vLLM or TRT-LLM multi-node launches. NVIDIA's vLLM Spark guide passes `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME` and `UCX_NET_DEVICES` into the Ray containers. Template them from the fabric facts rather than hand-typing.
+
+---
+
+## 4. Integrations
+
+| Consumer | Uses from this volume |
+|---|---|
+| vLLM / TRT-LLM tensor-parallel across 2 Sparks | NCCL env from fabric facts; `--tensor-parallel-size 2` |
+| Slurm (Volume 18) | `srun --mpi=pmix` or `mpirun` jobs inherit the same NCCL env via `/etc/profile.d/nccl.sh` (template it) |
+| k3s + Multus (Volume 13) | Pods need the RDMA device, plus the same GID/HCA choices |
+| NFS over RDMA (Volume 15) | Uses RDMA-CM, so it inherits the ToS set by `12b-roce-qos.yml` |
+
+## 5. Troubleshooting & diagnostics
+
+| Symptom | Diagnose | Fix |
+|---|---|---|
+| NCCL busbw far below perftest | NCCL log transport line; `nvidia-smi` clocks during the run | Socket fallback, or only one logical port in `NCCL_IB_HCA` |
+| `mpirun` hangs before NCCL starts | `mpirun -np 2 -H ip1:1,ip2:1 hostname` | Passwordless SSH both ways, same username, same paths on both nodes |
+| `libnccl.so: cannot open shared object` on node 2 | `-x LD_LIBRARY_PATH` missing / different home dirs | Same build path on both (the playbook builds in `~nvidia` on each) |
+| Different results each run, occasional `NCCL WARN NET/IB : Got completion ... error 12` | `ethtool -S` for drops/pauses | Retry-exceeded → loss: MTU mismatch, or QoS mismatch on a switch |
+| After enabling PFC, the whole port stalls | Switch/host priority mismatch → pause storms | Remove PFC (`-e roce_qos_pfc=false`), keep ECN; fix the switch config to match |
+| `mlnx_qos: command not found` | — | Not all DGX OS images ship MLNX tools; the play skips cleanly. Use the switch-side QoS + ECN sysfs only |
+
+Counters to watch during a run:
+
+```bash
+watch -n1 "ethtool -S enp1s0f1np1 | grep -E 'rx_prio3_(bytes|pause)|tx_prio3_(bytes|pause)|rx_discards|np_cnp_sent|rp_cnp_handled'"
+```
+
+## 6. Validation
+
+- [ ] NCCL log shows `via NET/IB` for every channel.
+- [ ] `all_gather_perf` busbw recorded at 16 GB message size, and within a sensible fraction of your perftest line rate.
+- [ ] (Switch users) `mlnx_qos` shows `trust dscp` and PFC `0,0,0,1,0,0,0,0` on every node, matching the switch.
+- [ ] (Exercise) QoS persisted through a reboot via a templated systemd oneshot.

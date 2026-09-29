@@ -1,278 +1,313 @@
-# Volume 04: Advanced Jinja2 Filters, JMESPath Queries & Data Transformation
+# Volume 04 — Jinja2 & Data Transforms: Turning Spark Command Output into Decisions
 
-```
-====================================================================================================
-MODULE 01: ANSIBLE & BARE-METAL AI INFRASTRUCTURE AUTOMATION
-VOLUME 04: JMESPath Projections, Complex Telemetry Parsing, Netplan Templating & Custom Python Filters
-====================================================================================================
-```
+> **Module 01 · Part I — Foundations** · Prev: [03B Vault](03-hashicorp-vault-deep-dive.md) · Next: [05 Roles, collections & EEs](05-role-architecture-collections-and-galaxy.md)
 
----
+| | |
+|---|---|
+| **You will build** | Fluency in the handful of transforms infrastructure automation keeps needing: text to dict, CSV to typed records, log mining to decisions, JMESPath over API objects, safe deep merges, and config generated from inventory |
+| **Hardware** | **None required.** The kata runs on localhost with output captured from a Spark; then you point it at the real thing |
+| **Time** | 60–90 min |
+| **Risk** | None |
 
-## 1. Executive Intuition: The Telemetry Parsing Crisis
-
-In modern AI supercomputing, automation playbooks constantly ingest complex, nested, non-uniform telemetry streams:
-- `nvidia-smi -q -x`: A 2-megabyte deeply nested XML document describing clocks, thermals, power, and PCIe link counters for 8 GPUs.
-- `ibv_devinfo -v` / `ibstat`: Multi-port InfiniBand HCA link states, GID tables, and active rates.
-- `ip -j link` / `ip -j route`: Modern Linux kernel JSON interface and routing tables.
-- `lshw -json` / `lspci -Dvmmn`: Hierarchical PCIe root complex bus and NUMA socket layouts.
-
-Attempting to parse these nested structures with fragile shell pipelines (`awk`, `sed`, `grep`, `cut`) leads to silent production catastrophes: a trailing whitespace or unexpected XML tag silently evaluates to empty string, causing Ansible to write broken configuration files across hundreds of servers.
-
-```
-+-----------------------------------------------------------------------------------------+
-|                        DECLARATIVE TELEMETRY TRANSFORMATION                             |
-+-----------------------------------------------------------------------------------------+
-| Raw Nested JSON / XML Telemetry (nvidia-smi, ip -j, netbox)                             |
-|   |                                                                                     |
-|   v                                                                                     |
-| In-Memory Data Pipeline (Ansible Engine)                                                |
-|   |-- JMESPath Projections: Extracting exactly the PCIe BDF and Power Cap               |
-|   |-- IP Address Filters: Computing RoCEv2 secondary subnet offsets                     |
-|   +-- Custom Python Filter Plugins: Mapping GPU index to NUMA CPU cores                 |
-|   v                                                                                     |
-| Deterministic Configuration Generation (/etc/netplan/01-roce.yaml, /etc/cufile.json)    |
-+-----------------------------------------------------------------------------------------+
-```
-
-High-reliability AI automation demands declarative transformation engines: **JMESPath Projections (`json_query`)**, **Network CIDR Math (`ansible.utils.ipaddr`)**, and **Custom Python Filter Plugins**.
+Automation on GPU nodes is mostly **parsing**. `nvidia-smi`, `ibdev2netdev`, `ibv_devinfo`, `dmesg`, `kubectl -o json` and `sinfo` all produce text or JSON that you have to turn into a yes/no decision before touching anything.
 
 ---
 
-## 2. Lineage & Evolution of Ansible Data Transformation
+## 1. Where templating happens (and why escaping bites)
 
+```mermaid
+flowchart LR
+  Y["YAML parser<br/>(scalar style decides backslash handling)"] --> J["Jinja2 engine<br/>(string literals, filters, tests)"]
+  J --> T["Ansible type coercion<br/>'{...}' → dict, '[..]' → list, 'True' → bool"]
+  T --> M["Module args / set_fact / template file"]
 ```
-   [2012: Basic String Interpolation]
-                 |
-           (Basic {{ var }} substitution; primitive filters like | lower, | default)
-                 |
-   [2015: Jinja2 Loops & Conditionals]
-                 |
-           (Embedded {% for host in groups['gpu'] %} templates; string munging)
-                 |
-   [2017: JMESPath Query Engine (json_query)]
-                 |
-           (Declarative JSON transformation based on RFC specification for query paths)
-                 |
-   [2020: Ansible Utils Collection (ipaddr)]
-                 |
-           (Dedicated collection for RFC 1918 / CIDR subnet calculation)
-                 |
-   [2024: Native Python Typed Filter Plugins]
-                 |
-           (Type-safe, compiled Python filter plugins directly executed in control node memory)
-```
+
+Three layers each get a chance to eat your backslashes and quotes:
+
+| You write in YAML as… | YAML turns `\\d` into | What the regex engine sees |
+|---|---|---|
+| `"{{ x \| regex_findall('\\d+') }}"` (double-quoted) | `\d` | `\d` ✅ |
+| `'{{ x \| regex_findall("\d+") }}'` (single-quoted) | `\d` (no escapes in single quotes) | `\d` ✅ |
+| `>-` folded / `\|` literal block, writing `'\\d+'` | `\\d` (block scalars don't process escapes) | `\\d` ❌ literal backslash |
+| `>-` folded block, writing `'\d+'` | `\d` | `\d` ✅ |
+
+**Rule:** in block scalars (`>-`, `|`), write regexes with **single** backslashes. In double-quoted scalars, **double** them. When it gets hairy, put the pattern in a `vars:` entry using single quotes and reference it by name, as K1 and K4 below do.
 
 ---
 
-## 3. First-Principles Mathematics: Network CIDR Math & Subnet Offsets
+## 2. The kata
 
-When configuring secondary high-speed networks (such as 8 dedicated RoCEv2 or InfiniBand storage interfaces per DGX node), IP addressing follows strict mathematical offsets.
+Run it first, then read each block:
 
-### 3.1 Subnet Derivation Formula
-Given a base supernet $S = \text{10.200.0.0/16}$, each of the 8 storage rails requires an isolated Layer-3 subnet:
-
-$$\text{Rail Prefix Length} = 16 + \lceil \log_2(8) \rceil = 16 + 3 = 19$$
-
-Rail $k$ ($0 \le k \le 7$) has subnet prefix:
-$$\text{Base IP}_k = \text{Base Supernet} + (k \times 2^{32 - 19}) = \text{Base Supernet} + (k \times 8192)$$
-
+```bash
+cd "01 Ansible/lab"
+ansible-playbook playbooks/15-jinja-lab.yml        # → "7/7 Jinja katas passed"
 ```
-+-----------------------------------------------------------------------------------------+
-|                         DGX RAIL-ALIGNED STORAGE SUBNET MAP                             |
-+--------+------------------+---------------------+---------------------+-----------------+
-| Rail # | Interface Name   | Subnet CIDR (/19)   | Subnet Range        | Broadcast IP    |
-+--------+------------------+---------------------+---------------------+-----------------+
-| Rail 0 | roce0 (NIC 0)    | 10.200.0.0/19       | 10.200.0.1 - 31.254 | 10.200.31.255   |
-| Rail 1 | roce1 (NIC 1)    | 10.200.32.0/19      | 10.200.32.1 - 63.254| 10.200.63.255   |
-| Rail 2 | roce2 (NIC 2)    | 10.200.64.0/19      | 10.200.64.1 - 95.254| 10.200.95.255   |
-| Rail 3 | roce3 (NIC 3)    | 10.200.96.0/19      | 10.200.96.1 - 127.254| 10.200.127.255  |
-+--------+------------------+---------------------+---------------------+-----------------+
-```
-
-Instead of hardcoding hundreds of IP addresses in inventory files, Jinja2 network filters compute these addresses dynamically from the node index ($N_{\text{id}}$):
-
-$$\text{IP}(N_{\text{id}}, k) = \text{Subnet}_k + N_{\text{id}}$$
-
----
-
-## 4. Deep Architecture: JMESPath Query Patterns for AI Telemetry
-
-JMESPath is a query language for JSON. It allows projection, filtering, and slicing of deep structures:
-
-### 4.1 Extracting GPU Bus IDs and Memory Utilization
-Given JSON output from `nvidia-smi --query-gpu=pci.bus_id,memory.total,memory.free --format=json`:
 
 ```yaml
-# Extract all GPU Bus IDs where free memory is less than 10,000 MiB
-- name: Query memory-constrained GPUs
-  ansible.builtin.set_fact:
-    constrained_gpus: "{{ gpu_telemetry | community.general.json_query(query) }}"
+# lab/playbooks/15-jinja-lab.yml
+---
+# Jinja2 / data-transform kata using REAL DGX Spark command output.
+# Runs on localhost (no Spark needed):  ansible-playbook playbooks/15-jinja-lab.yml
+# Each task transforms raw text → structured data and ASSERTS the result.
+- name: Jinja2 transforms on Spark data
+  hosts: localhost
+  connection: local
+  gather_facts: false
   vars:
-    query: "gpus[?memory_free < `10000`].pci_bus_id"
+    # ---------- canned command output (captured on a Spark) ----------
+    raw_ibdev2netdev: |
+      roceP2p1s0f0 port 1 ==> enP2p1s0f0np0 (Down)
+      roceP2p1s0f1 port 1 ==> enP2p1s0f1np1 (Up)
+      rocep1s0f0 port 1 ==> enp1s0f0np0 (Down)
+      rocep1s0f1 port 1 ==> enp1s0f1np1 (Up)
+    raw_smi_csv: |
+      index, name, temperature.gpu, power.draw [W], utilization.gpu [%], memory.used [MiB]
+      0, NVIDIA GB10, 43, 12.31 W, 7 %, [N/A]
+    raw_dmesg: |
+      [ 1203.114] NVRM: Xid (PCI:000f:01:00): 13, pid=4242, name=python3, Graphics Exception
+      [ 5402.771] NVRM: Xid (PCI:000f:01:00): 31, pid=5150, name=vllm, Ch 00000010, MMU Fault
+      [ 9001.002] NVRM: Xid (PCI:000f:01:00): 79, pid=0, name=, GPU has fallen off the bus.
+      [ 9001.010] mlx5_core 0000:01:00.1: Port module event: module 1, Cable unplugged
+    k8s_nodes_json:
+      items:
+        - metadata: { name: spark-01, labels: { nvidia.com/gpu.product: GB10 } }
+          status:
+            allocatable: { nvidia.com/gpu: "4", memory: 110Gi }
+            conditions: [{ type: Ready, status: "True" }]
+        - metadata: { name: spark-02, labels: { nvidia.com/gpu.product: GB10 } }
+          status:
+            allocatable: { memory: 110Gi }
+            conditions: [{ type: Ready, status: "False" }]
+    xid_severity:
+      "13": app       # graphics/compute exception — usually the application
+      "31": app       # MMU fault — bad pointer / OOB in the app
+      "43": app
+      "48": hw        # DBE ECC
+      "63": hw
+      "74": fabric
+      "79": hw        # fell off the bus — node must be drained
+      "94": hw
+      "95": hw
+      "119": hw       # GSP timeout
+  tasks:
+    # 1 ─ line-oriented text → dict  (regex_findall + zip + dict)
+    - name: "K1 ibdev2netdev → {netdev: {rdma, state}}"
+      ansible.builtin.set_fact:
+        k1: >-
+          {{ dict(raw_ibdev2netdev | regex_findall(k1_re) | map('list') | map('community.general.json_query', '[1]')
+                  | zip(raw_ibdev2netdev | regex_findall(k1_re) | map('list')
+                        | map('community.general.json_query', '{rdma: [0], state: [2]}'))) }}
+      vars:
+        k1_re: '(\S+) port \d+ ==> (\S+) \((\w+)\)'
+    - name: K1 check
+      ansible.builtin.assert:
+        that:
+          - k1['enp1s0f1np1'].rdma == 'rocep1s0f1'
+          # GOTCHA: Jinja's sort is case-INsensitive by default; DGX netdev names mix case (enP2… vs enp1…)
+          - k1 | dict2items | selectattr('value.state', 'eq', 'Up') | map(attribute='key') | sort(case_sensitive=true) == ['enP2p1s0f1np1', 'enp1s0f1np1']
+
+    # 2 ─ CSV with units and N/A → typed list of dicts (community.general.from_csv)
+    - name: K2 nvidia-smi CSV → typed records
+      ansible.builtin.set_fact:
+        k2_clean: >-
+          {%- set out = [] -%}
+          {%- for row in (raw_smi_csv | community.general.from_csv(skipinitialspace=true)) -%}
+            {%- set r = {} -%}
+            {%- for k, v in row.items() -%}
+              {%- set key = k | regex_replace('\s*\[.*\]$', '') | replace('.', '_') -%}
+              {%- set val = v | regex_replace('\s*(W|%|MiB)$', '') -%}
+              {%- set _ = r.update({key: (none if val == '[N/A]' else (val | float if val is match('^[\d.]+$') else val))}) -%}
+            {%- endfor -%}
+            {%- set _ = out.append(r) -%}
+          {%- endfor -%}
+          {{ out }}
+    - name: K2 check (memory.used is N/A on a UMA GPU → None, not a crash)
+      ansible.builtin.assert:
+        that:
+          - k2_clean[0].name == 'NVIDIA GB10'
+          - k2_clean[0].power_draw == 12.31
+          - k2_clean[0].memory_used is none
+
+    # 3 ─ log mining: extract Xid codes, classify, decide an action
+    - name: K3 Xid classification
+      ansible.builtin.set_fact:
+        k3_codes: "{{ raw_dmesg | regex_findall('NVRM: Xid \\([^)]*\\): (\\d+)') }}"
+    - name: K3 Decide
+      ansible.builtin.set_fact:
+        k3_action: >-
+          {{ 'drain' if (k3_codes | map('extract', xid_severity) | select('in', ['hw', 'fabric']) | list | length > 0)
+             else ('notify-owner' if k3_codes | length > 0 else 'none') }}
+        k3_cable_events: "{{ raw_dmesg | regex_findall('mlx5_core (\\S+): .*Cable unplugged') }}"
+    - name: K3 check
+      ansible.builtin.assert:
+        that:
+          - k3_codes == ['13', '31', '79']
+          - k3_action == 'drain'
+          - k3_cable_events == ['0000:01:00.1']      # PCI BDF of the CX-7 function
+
+    # 4 ─ JMESPath over API objects (json_query)
+    - name: K4 Nodes that are Ready AND advertise GPUs
+      ansible.builtin.set_fact:
+        k4: "{{ k8s_nodes_json | community.general.json_query(k4_query) }}"
+      vars:
+        # Keys containing dots/slashes must be quoted in JMESPath — keep the query in a var to dodge YAML+Jinja escaping
+        k4_query: >-
+          items[?status.conditions[?type=='Ready' && status=='True']]
+          | [?status.allocatable."nvidia.com/gpu"].metadata.name
+    - name: K4 check
+      ansible.builtin.assert:
+        that: k4 == ['spark-01']
+
+    # 5 ─ deep merge without clobbering (daemon.json pattern)
+    - name: K5 recursive combine keeps unknown keys, list_merge controls arrays
+      ansible.builtin.set_fact:
+        k5: >-
+          {{ {'runtimes': {'nvidia': {'path': 'nvidia-container-runtime'}}, 'insecure-registries': ['10.10.10.11:5000']}
+             | combine({'default-runtime': 'nvidia', 'insecure-registries': ['10.10.10.12:5000'],
+                        'runtimes': {'nvidia': {'args': []}}}, recursive=True, list_merge='append_rp') }}
+    - name: K5 check
+      ansible.builtin.assert:
+        that:
+          - k5.runtimes.nvidia.path == 'nvidia-container-runtime'
+          - k5.runtimes.nvidia.args == []
+          - k5['insecure-registries'] | length == 2
+
+    # 6 ─ generate config lines from inventory (Slurm NodeName, /etc/hosts)
+    - name: K6 Build /etc/hosts fabric entries from host_vars
+      ansible.builtin.set_fact:
+        k6: >-
+          {{ groups['spark'] | map('extract', hostvars, ['cx7_interfaces', 0, 'address'])
+             | map('regex_replace', '/\d+$', '')
+             | zip(groups['spark'] | map('regex_replace', '$', '-fab'))
+             | map('join', ' ') | list }}
+    - name: K6 check
+      ansible.builtin.assert:
+        that: k6 == ['192.168.100.11 spark-01-fab', '192.168.100.12 spark-02-fab']
+
+    # 7 ─ safe defaults & type tests
+    - name: K7 Defaults that don't hide bugs
+      ansible.builtin.assert:
+        that:
+          - (undefined_thing | default('fallback')) == 'fallback'
+          - ('' | default('x', true)) == 'x'                 # true → also replace falsy values
+          - ('580.82.09'.split('.')[0] | int) >= 580
+          - ('13.0' is version('13.0', '>='))
+          - ('GB10' is search('gb10', ignorecase=true))
+
+    - name: All katas passed
+      ansible.builtin.debug:
+        msg: "7/7 Jinja katas passed"
 ```
 
-### 4.2 Flattening InfiniBand Port States Across Multi-HCA Servers
-```yaml
-# Extract all active 400 Gbps InfiniBand interfaces
-- name: Extract healthy InfiniBand ports
-  ansible.builtin.set_fact:
-    healthy_ib_ports: "{{ ib_status | community.general.json_query('adapters[*].ports[?state==`ACTIVE` && rate==`400 Gb/s`].interface') | flatten }}"
+### 2.1 What each kata teaches
+
+| Kata | Real-world use in the lab | Key tools | Gotcha it encodes |
+|---|---|---|---|
+| **K1** text → dict | `cx7_fabric`, `spark.fact` | `regex_findall`, `map('list')`, `json_query`, `zip`, `dict` | `regex_findall` returns **tuples**, and JMESPath can't index tuples, so `map('list')` first. Jinja `sort` is **case-insensitive by default**; DGX netdevs mix case (`enP2…`/`enp1…`), so use `sort(case_sensitive=true)` |
+| **K2** CSV → typed | textfile collector, validation | `community.general.from_csv`, `regex_replace`, per-field typing | On a UMA GPU, `memory.used` is `[N/A]`. Map it to `none` explicitly instead of letting `float` blow up |
+| **K3** logs → action | Slurm health check, drain runbook | `regex_findall`, `extract`, `select('in', …)` | Classify **codes**, not messages. Xid 13/31/43 usually mean the app (notify its owner); 48/63/74/79/94/95/119 mean hardware or driver (drain) |
+| **K4** JMESPath on API JSON | `spark_validate`, GPU operator checks | `community.general.json_query` | Keys with dots (`nvidia.com/gpu`) need `"double quotes"` inside JMESPath. Keep the query in a var |
+| **K5** deep merge | `container_runtime` daemon.json | `combine(recursive=True, list_merge=...)` | Default `list_merge='replace'` silently drops existing registries. Choose `append_rp`/`prepend_rp` deliberately |
+| **K6** inventory → config | `/etc/hosts`, `slurm.conf`, Prometheus targets | `extract` with key path, `zip`, `join` | `extract(hostvars, ['a', 0, 'b'])` walks nested keys without a loop |
+| **K7** defaults & tests | everywhere | `default(x, true)`, `version`, `search` | `default` without `true` does **not** replace empty strings |
+
+### 2.2 Jinja loops inside `set_fact`: when filters get unreadable
+
+The `cx7_fabric` role uses a Jinja block for the peer-pair calculation because the pure-filter version is unreadable. The pattern:
+
+```jinja
+{%- set pairs = [] -%}
+{%- for peer in groups['spark'] | difference([inventory_hostname]) -%}
+  {%- for p in hostvars[peer].cx7_interfaces | default([]) -%}
+    {%- for mine in cx7_fabric_interfaces -%}
+      {%- if p.address.split('.')[:3] == mine.address.split('.')[:3] -%}
+        {%- set _ = pairs.append({'peer': peer, 'ip': p.address.split('/')[0], 'dev': mine.name}) -%}
+      {%- endif -%}
+    {%- endfor -%}
+  {%- endfor -%}
+{%- endfor -%}
+{{ pairs }}
 ```
 
----
+- The `-` in `{%-`/`-%}` strips whitespace, so the result is a clean `[...]` string, which Ansible then converts to a real list.
+- `set _ = list.append(...)` is the idiom for mutation, because Jinja has no statement form of it.
+- If the logic grows past about 15 lines, write a **filter plugin** (`filter_plugins/spark.py`) and unit-test it with `pytest` instead.
 
-## 5. Concrete Production Lab: Custom Python Filter Plugin (`filter_plugins/gpu_filters.py`)
-
-Below is a complete, production-grade Ansible filter plugin that computes NUMA node affinity bindings, parses PCIe BDF addresses, and calculates rail-aligned IP addresses.
+### 2.3 A custom filter for the hardest one
 
 ```python
-#!/usr/bin/python
-# -*- coding: utf-8 -*-
-"""
-Production Lab: Custom Ansible Filter Plugin for GPU & Fabric Systems.
-Place in `filter_plugins/gpu_filters.py` in your playbook or role directory.
-"""
-
-import ipaddress
+# lab/filter_plugins/spark_filters.py  (optional exercise)
 import re
 
-class FilterModule(object):
+def ibdev2netdev(text):
+    """'rocep1s0f1 port 1 ==> enp1s0f1np1 (Up)' → {'enp1s0f1np1': {'rdma': 'rocep1s0f1', 'state': 'Up'}}"""
+    out = {}
+    for rdma, netdev, state in re.findall(r"(\S+) port \d+ ==> (\S+) \((\w+)\)", text):
+        out[netdev] = {"rdma": rdma, "state": state}
+    return out
+
+class FilterModule:
     def filters(self):
-        return {
-            'gpu_numa_affinity': self.gpu_numa_affinity,
-            'bdf_to_sysfs_path': self.bdf_to_sysfs_path,
-            'rail_storage_ip': self.rail_storage_ip,
-        }
+        return {"ibdev2netdev": ibdev2netdev}
+```
 
-    def gpu_numa_affinity(self, gpu_index: int, gpus_per_socket: int = 4) -> dict:
-        """
-        Calculates optimal CPU NUMA node and CPU core range for a given GPU index.
-        HGX 8-GPU nodes pair GPUs 0-3 with NUMA 0, and GPUs 4-7 with NUMA 1.
-        """
-        socket_id = 0 if gpu_index < gpus_per_socket else 1
-        core_start = socket_id * 64
-        core_end = core_start + 63
-        
-        return {
-            "gpu_index": gpu_index,
-            "numa_socket": socket_id,
-            "core_mask": f"{core_start}-{core_end}",
-            "optimal_nic": f"mlx5_{gpu_index}"
-        }
-
-    def bdf_to_sysfs_path(self, bdf_string: str) -> str:
-        """
-        Normalizes short BDF (e.g. '41:00.0') to full Linux sysfs path
-        (e.g. '/sys/bus/pci/devices/0000:41:00.0').
-        """
-        clean_bdf = bdf_string.strip()
-        if not clean_bdf.startswith("0000:"):
-            clean_bdf = f"0000:{clean_bdf}"
-        return f"/sys/bus/pci/devices/{clean_bdf}"
-
-    def rail_storage_ip(self, base_supernet: str, rail_index: int, node_offset: int) -> str:
-        """
-        Dynamically computes rail-aligned IP address for multi-rail storage networks.
-        """
-        supernet = ipaddress.ip_network(base_supernet)
-        # Subnet into 8 isolated /19s
-        subnets = list(supernet.subnets(new_prefix=19))
-        if rail_index >= len(subnets):
-            raise ValueError(f"Rail index {rail_index} exceeds available subnets")
-        
-        target_subnet = subnets[rail_index]
-        # Target host IP = network address + node_offset
-        host_ip = target_subnet.network_address + node_offset
-        return f"{host_ip}/{target_subnet.prefixlen}"
-
-if __name__ == '__main__':
-    # Local verification
-    f = FilterModule()
-    filters = f.filters()
-    
-    # Test NUMA affinity
-    affinity = filters['gpu_numa_affinity'](5)
-    print(f"GPU 5 Affinity: {affinity}")
-    assert affinity['numa_socket'] == 1
-    
-    # Test Rail IP calculation
-    rail_ip = filters['rail_storage_ip']("10.200.0.0/16", rail_index=2, node_offset=14)
-    print(f"Rail 2 Node 14 IP: {rail_ip}")
-    assert rail_ip == "10.200.64.14/19"
+```yaml
+- ansible.builtin.set_fact:
+    cx7_map: "{{ ibdev_raw.stdout | ibdev2netdev }}"
 ```
 
 ---
 
-## 6. Concrete Production Lab: Dynamic Netplan Storage Template (`netplan_roce.j2`)
+## 3. Point it at your real Spark
 
-```jinja2
-# {{ ansible_managed }}
-# Auto-generated high-performance RoCEv2 multi-rail network configuration
-network:
-  version: 2
-  renderer: networkd
-  ethernets:
-{% for i in range(8) %}
-    roce{{ i }}:
-      match:
-        name: roce{{ i }}
-      addresses:
-        - {{ '10.200.0.0/16' | rail_storage_ip(i, host_node_id | int) }}
-      mtu: 9000
-      routes:
-        - to: {{ '10.200.0.0/16' | rail_storage_ip(i, 0) | ansible.utils.ipaddr('network') }}/19
-          via: {{ '10.200.0.0/16' | rail_storage_ip(i, 1) | ansible.utils.ipaddr('address') }}
-          metric: 10{{ i }}
-      dhcp4: false
-      dhcp6: false
-{% endfor %}
+Replace the canned vars with live output:
+
+```yaml
+- hosts: spark
+  gather_facts: false
+  tasks:
+    - ansible.builtin.command: ibdev2netdev
+      register: ib
+      changed_when: false
+    - ansible.builtin.command: >
+        nvidia-smi --query-gpu=index,name,temperature.gpu,power.draw,utilization.gpu,memory.used --format=csv
+      register: smi
+      changed_when: false
+    - ansible.builtin.shell: set -o pipefail; journalctl -k --no-pager | grep -E 'NVRM|mlx5' | tail -200
+      args: { executable: /bin/bash }
+      register: kern
+      changed_when: false
+      failed_when: false
+    - ansible.builtin.include_tasks: katas-on-live-data.yml   # your version of K1–K3 using ib.stdout, smi.stdout, kern.stdout
 ```
 
 ---
 
-## 7. Comparative Filter Processing Matrix
+## 4. Troubleshooting & diagnostics
 
-| Processing Technique | Implementation | Performance | Maintainability | Error Safety |
-| :--- | :--- | :--- | :--- | :--- |
-| **Shell Command Pipelines** | `shell: "grep ... \| awk ..."` | Very Slow (Subprocesses) | Very Low (Fragile) | Poor (Silent empty string) |
-| **Basic Jinja2 String Splitting** | `{{ var.split(',')[0] }}` | Fast | Low (Unreadable) | Poor (IndexError) |
-| **JMESPath (`json_query`)** | Declarative query string | Fast (Optimized C/Python) | High | High (Returns None on miss)|
-| **Custom Python Filter Plugin** | Pure Python Class | **Fastest (Native memory)** | **Highest (Unit-testable)** | **Type-safe with exceptions** |
+| Symptom | Cause | Fix |
+|---|---|---|
+| `set_fact` result is a **string** that looks like a dict | Leading/trailing text or whitespace defeated type coercion | Use `{%-`/`-%}` whitespace control; make sure the output starts with `{`/`[`; or `\| from_yaml` |
+| `json_query` returns `null` / `[]` on data you can see | Tuples (from `regex_findall`/`zip`), or unquoted dotted keys | `map('list')`; quote keys: `"nvidia.com/gpu"` |
+| `template error ... expected token ','` | Quotes nested three levels deep | Move the literal into `vars:` |
+| Regex matches in regex101 but not in Ansible | Backslash layering (§1) | Block scalar → single `\`; double-quoted → `\\` |
+| `'dict object' has no attribute 'x'` for a key that exists | Key contains `-` or `.` | Bracket syntax: `item['insecure-registries']` |
+| Comparison of versions is wrong (`580.9 > 580.82`) | String comparison | `is version('580.82', '>=')` |
+| `combine` lost list items | `list_merge` defaults to `replace` | `list_merge='append_rp'` |
+| Output differs between localhost and AWX | Different Jinja/Ansible version in the EE | Pin ansible-core in the EE (Volume 05) |
 
----
+Tools for debugging expressions:
 
-## 8. SRE Diagnostics & Troubleshooting Playbook
-
-```
-+---------------------------------------------------------------------------------------------------+
-|                        JINJA2 & DATA TRANSFORM SRE DIAGNOSTIC MATRIX                              |
-+------------------------------------+--------------------------+-----------------------------------+
-| Symptom / Failure Mode             | Root Cause Hypothesis    | Triage & Remediation Command      |
-+------------------------------------+--------------------------+-----------------------------------+
-| `json_query: You need to install   | `jmespath` Python package| Install requirement on control:   |
-| "jmespath" on control machine`.    | missing in virtualenv.   | `pip install jmespath`            |
-+------------------------------------+--------------------------+-----------------------------------+
-| Template error: `UndefinedError:   | Variable missing or mistyped| Run task in debug mode:        |
-| 'dict object' has no attribute 'x'`. in dynamic hostvars.     | `ansible -m debug -a "var=dict"`  |
-|                                    |                          | Use `| default('fallback')`.      |
-+------------------------------------+--------------------------+-----------------------------------+
-| `FilterModule` not loaded:         | Plugin directory name    | Ensure folder is named:           |
-| `TemplateFilterError: no filter`.  | misspelled or misplaced. | `filter_plugins/` adjacent to     |
-|                                    |                          | playbook or inside role root.     |
-+------------------------------------+--------------------------+-----------------------------------+
-| Netplan configuration fails with   | Indentation error in     | Validate generated YAML syntax:   |
-| YAML parse error on target host.   | Jinja2 template loop.    | `yamllint /etc/netplan/*.yaml`    |
-|                                    |                          | Test with `netplan try`.          |
-+------------------------------------+--------------------------+-----------------------------------+
+```bash
+ansible localhost -m debug -a "msg={{ '580.82.09' is version('580', '>=') }}"
+ansible spark-01 -m debug -a "msg={{ hostvars['spark-02'].cx7_interfaces | map(attribute='address') }}"
+ansible-console localhost      # then: debug msg="{{ ... }}"
 ```
 
----
+## 5. Validation
 
-## 9. Verification & Architectural Synthesis Checklist
-
-- [ ] **JMESPath Standardized:** Nested JSON/XML telemetry parsed using `json_query` rather than shell pipelines.
-- [ ] **Custom Filters Tested:** Python filter plugins verified in unit test suite (`gpu_numa_affinity`, `rail_storage_ip`).
-- [ ] **Network CIDR Math Automated:** Multi-rail storage IP assignments calculated dynamically from node offsets.
-- [ ] **Type-Safe Templates:** Jinja2 templates include `default()` guards for all optional variables.
-- [ ] **Zero-Shell Parsing:** All raw command outputs registered as structured facts and processed in control node memory.
+- [ ] `15-jinja-lab.yml` passes 7/7.
+- [ ] You broke K1 by removing `map('list')` and explained the `null`.
+- [ ] You rewrote one kata against live Spark output.
+- [ ] (Stretch) The `ibdev2netdev` filter plugin exists with a pytest test.

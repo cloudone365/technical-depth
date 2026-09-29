@@ -1,0 +1,124 @@
+---
+# Day-1 bootstrap for a Spark that just finished the first-boot wizard.
+# Password auth is still on, you have no key trust yet, and it's on DHCP.
+#
+#   ansible-playbook playbooks/00-bootstrap.yml -l spark-02 -k -K \
+#     -e bootstrap_current_ip=<current DHCP IP> [-e bootstrap_static_ip=true]
+#
+# NOTE: don't pass -e ansible_host=… — extra vars outrank set_fact, so Ansible
+# could never switch to the new address and the rollback would always fire.
+#
+# The static-IP step uses a DEAD-MAN SWITCH: a systemd timer restores the old
+# netplan in 180 s unless Ansible reconnects on the new IP and cancels it.
+- name: Bootstrap a freshly installed DGX Spark
+  hosts: spark
+  become: true
+  gather_facts: false          # we must redirect the connection before the first SSH
+  vars:
+    bootstrap_static_ip: false
+    bootstrap_prefix: "{{ mgmt_cidr | default('10.10.10.0/24') | regex_replace('^.*/', '') }}"
+    bootstrap_rollback_seconds: 180
+    bootstrap_netplan: /etc/netplan/30-mgmt.yaml
+  tasks:
+    - name: Remember the inventory (target) IP, connect via the current one
+      ansible.builtin.set_fact:
+        bootstrap_target_ip: "{{ ansible_host }}"
+        ansible_host: "{{ bootstrap_current_ip | default(ansible_host) }}"
+
+    - name: Gather facts on the current address
+      ansible.builtin.setup:
+
+    - name: Set hostname to the inventory name
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+
+    - name: Make the hostname resolvable locally (sudo is slow without it)
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1\s'
+        line: "127.0.1.1 {{ inventory_hostname }}.{{ lab_domain | default('lab.local') }} {{ inventory_hostname }}"
+        mode: "0644"
+
+    - name: Install control-node SSH key(s)
+      ansible.posix.authorized_key:
+        user: "{{ spark_admin_user }}"
+        key: "{{ item }}"
+      loop: "{{ spark_admin_pubkeys | select | list }}"
+
+    - name: Ensure OpenSSH server is enabled
+      ansible.builtin.systemd_service:
+        name: ssh
+        enabled: true
+        state: started
+
+    # ------------------------------------------------------------ static mgmt IP with rollback
+    - name: Static management IP (dead-man switch)
+      when: bootstrap_static_ip | bool
+      block:
+        - name: Back up current netplan directory
+          ansible.builtin.command: cp -a /etc/netplan /root/netplan.pre-bootstrap
+          args:
+            creates: /root/netplan.pre-bootstrap
+
+        - name: Write rollback script
+          ansible.builtin.copy:
+            dest: /root/netplan-rollback.sh
+            mode: "0700"
+            content: |
+              #!/bin/sh
+              rm -f {{ bootstrap_netplan }}
+              cp -a /root/netplan.pre-bootstrap/. /etc/netplan/
+              netplan apply
+              logger -t bootstrap "netplan rolled back — Ansible did not confirm new IP"
+
+        - name: Render static netplan for the mgmt NIC
+          ansible.builtin.copy:
+            dest: "{{ bootstrap_netplan }}"
+            mode: "0600"
+            content: |
+              # {{ ansible_managed }}
+              network:
+                version: 2
+                ethernets:
+                  {{ mgmt_interface }}:
+                    dhcp4: false
+                    addresses: [{{ bootstrap_target_ip }}/{{ bootstrap_prefix }}]
+                    routes: [{to: default, via: {{ mgmt_gateway }}}]
+                    nameservers: {addresses: {{ dns_servers | to_json }}}
+
+        - name: Arm the dead-man switch
+          ansible.builtin.command: >-
+            systemd-run --unit=netplan-rollback --on-active={{ bootstrap_rollback_seconds }}
+            /root/netplan-rollback.sh
+          changed_when: true
+
+        - name: Apply netplan in the background (our SSH session will drop)
+          ansible.builtin.shell: sleep 2 && netplan apply
+          async: 60
+          poll: 0
+          changed_when: true
+
+        - name: Switch Ansible to the new address
+          ansible.builtin.set_fact:
+            ansible_host: "{{ bootstrap_target_ip }}"
+
+        - name: Reconnect on the new IP
+          ansible.builtin.wait_for_connection:
+            delay: 5
+            timeout: 90
+
+        - name: Disarm the dead-man switch
+          ansible.builtin.systemd_service:
+            name: netplan-rollback.timer
+            state: stopped
+
+        - name: Remove DHCP-era netplan files that would fight the static one
+          ansible.builtin.find:
+            paths: /etc/netplan
+            patterns: ["*.yaml"]
+            excludes: ["30-mgmt.yaml", "40-cx7.yaml"]
+          register: bootstrap_old_netplan
+
+        - name: Show what else configures the mgmt NIC (remove by hand if it duplicates)
+          ansible.builtin.debug:
+            msg: "Review: {{ bootstrap_old_netplan.files | map(attribute='path') | list }}"

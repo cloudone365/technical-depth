@@ -1,0 +1,17 @@
+---
+- name: Restart munge
+  ansible.builtin.service:
+    name: munge
+    state: restarted
+
+- name: Restart slurmctld
+  ansible.builtin.service:
+    name: slurmctld
+    state: restarted
+  when: inventory_hostname in groups[slurm_cluster_controller_group]
+
+- name: Restart slurmd
+  ansible.builtin.service:
+    name: slurmd
+    state: restarted
+  when: inventory_hostname in groups[slurm_cluster_compute_group]

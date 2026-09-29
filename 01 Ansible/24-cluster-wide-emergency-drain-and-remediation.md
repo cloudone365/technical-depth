@@ -1,537 +1,353 @@
-# Volume 24 — Cluster-Wide Emergency Drain, Node Fencing & XID Remediation
+# Volume 24 — Incident Response for DGX Spark: Drain, Capture Evidence, Remediate, Prove, Return to Service
 
-> **AI Supercomputing Ansible Masterclass · 01 Ansible · Volume 24 of 25**
+> **Module 01 · Part V — Production SRE** · Prev: [23 Logging & audit](23-high-cardinality-logging-and-audit-compliance.md) · Next: [25 Capstone & test harness](25-hands-on-ansible-mastery-lab-and-test-harness.md)
 
----
-
-## 1. Executive Intuition
-
-At 02:13 on a Tuesday, one H100 node begins emitting XID 79 (GPU reset) at
-40 Hz. Within 60 seconds, its NCCL ring collapses, the 512-GPU training job
-crashes, and 511 healthy GPUs sit idle burning \$12 000/hr. The SRE on call
-has 3 minutes to fence the bad node before the next job scheduler wave picks
-it up and re-queues against the same broken hardware.
-
-**Ansible emergency response playbooks** automate exactly this: detect the
-XID storm via DCGM telemetry, drain the node from Slurm (preventing new job
-allocation), fence it from the Kubernetes GPU operator (cordon + taint),
-collect diagnostics (nvidia-bug-report, DCGM health check, dmesg), and open
-a hardware ticket — all in under 90 seconds, without paging a human.
-
-This volume covers: XID taxonomy, automated fencing choreography, MUNGE-
-authenticated Slurm drain over Ansible, GPU reset loop remediation, and a
-Python lab implementing the full emergency response engine.
+| | |
+|---|---|
+| **You will build** | One drain role that works across k3s and Slurm (`node_drain`), a forensics bundle collected **before** anything is restarted, runbooks A–E for the failure modes a Spark actually has (GPU hang, Xid, unified-memory pressure, CX-7 degradation, unreachable node), and an alert-to-automation path |
+| **Hardware** | 1–2× DGX Spark |
+| **Time** | 90 min (including drills) |
+| **Risk** | Medium. You'll deliberately take nodes out of service |
 
 ---
 
-## 2. Lineage & Evolution
+## 1. The drain contract
 
-```
-2015 ──► Manual Slurm `scontrol update NodeName=X State=DRAIN`
-2017 ──► Ansible playbooks for ad-hoc node drain (community patterns)
-2018 ──► DCGM 1.6: health check API → scriptable XID detection
-2019 ──► NCCL 2.4: watchdog timeout → job abort on ring collapse
-2020 ──► Prometheus DCGM exporter: XID counter as time-series metric
-2021 ──► Alertmanager → AWX webhook: automated playbook trigger
-2022 ──► NVIDIA Fabric Manager 22.x: NVSwitch isolation API
-2023 ──► Slurm 23.11: REST API for drain (no SSH to slurmctld needed)
-2024 ──► GPU Operator 24.x: node taint via Kubernetes label-selector
-2025 ──► DCGM-Exporter 3.4: XID storm detection with debounce filter
+```mermaid
+flowchart LR
+  A["1 · Stop NEW work<br/>k8s cordon+drain · Slurm DRAIN"] --> B["2 · Capture evidence<br/>nvidia-smi -q · kernel log · Xid lines ·<br/>ibv_devinfo · docker ps · (bug report)"]
+  B --> C["3 · Stop RUNNING GPU work<br/>docker stop (nvidia runtime)"]
+  C --> D["4 · Remediate<br/>reboot · driver reload · cable · config"]
+  D --> E["5 · Prove<br/>spark_validate (+ smoke)"]
+  E -->|pass| F["6 · Return<br/>uncordon · RESUME"]
+  E -->|fail| G["stay drained → escalate<br/>(bundle + ticket)"]
 ```
 
----
+**Evidence before remediation.** A reboot destroys the most useful data (GPU state, `nvidia-smi -q`, in-memory logs). The role collects first, time-boxing every command so that a hung GPU can't hang the drain.
 
-## 3. First-Principles Mathematics
-
-### 3.1 XID Storm Detection Threshold
-
-DCGM exports `DCGM_FI_DEV_XID_ERRORS` as a monotonic counter. Compute
-the rate over a window $w$ seconds:
-
-$$
-\dot{X} = \frac{\Delta X}{\Delta t}
-$$
-
-Define a storm when:
-
-$$
-\dot{X} > \theta_{\text{xid}}\;\text{events/s}
-$$
-
-With $\theta_{\text{xid}} = 1$ (1 XID per second sustained over $w = 30$ s),
-most transient resets (XID 31, driver recovery) are filtered. Only persistent
-failures (XID 79 = GPU reset required) breach the threshold.
-
-### 3.2 Drain Time Budget
-
-Total drain + fence time must be less than the Slurm cycle time $T_{\text{sched}}$
-to prevent the scheduler from allocating the faulty node to the next job:
-
-$$
-T_{\text{drain}} + T_{\text{fence}} + T_{\text{cordon}} < T_{\text{sched}}
-$$
-
-Typical values:
-- $T_{\text{drain}} = 10\;\text{s}$ (Slurm drain via REST API)
-- $T_{\text{fence}} = 5\;\text{s}$ (NVSwitch isolation via FM)
-- $T_{\text{cordon}} = 3\;\text{s}$ (kubectl cordon + taint)
-- $T_{\text{sched}} = 60\;\text{s}$ (Slurm scheduling cycle)
-
-$$
-10 + 5 + 3 = 18\;\text{s} \ll 60\;\text{s} \quad \checkmark
-$$
-
-### 3.3 NCCL Ring Recovery Time
-
-After draining the faulty node, the remaining $N-1$ nodes must reconstruct
-the NCCL ring. Ring rebuild time is proportional to the number of remaining
-nodes and the all-reduce latency:
-
-$$
-T_{\text{rebuild}} \approx 2 \times N_{\text{remaining}} \times \alpha_{\text{IB}}
-$$
-
-Where $\alpha_{\text{IB}} \approx 1\;\mu\text{s}$ per hop on InfiniBand. For
-$N_{\text{remaining}} = 511$:
-
-$$
-T_{\text{rebuild}} \approx 2 \times 511 \times 1\;\mu\text{s} = 1.022\;\text{ms}
-$$
-
-NCCL ring rebuild is effectively instantaneous — the dominant cost is the
-**job requeue** and **checkpoint restore**, not the ring itself.
+**`serial: 1`, and refuse to run without `-l`.** A drain that runs against every host at once is an outage you caused yourself.
 
 ---
 
-## 4. Deep Architecture
+## 2. The role
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│            XID Emergency Response Automation                          │
-│                                                                       │
-│  DCGM Prometheus Exporter                                            │
-│    DCGM_FI_DEV_XID_ERRORS{gpu="0",host="node-07"} rate > 1/s        │
-│         │                                                             │
-│         ▼ Alertmanager fires                                          │
-│  AWX Webhook → Emergency Workflow Job                                │
-│                                                                       │
-│  ┌──── Phase 1: Fence (< 30 s) ──────────────────────────────────┐  │
-│  │  Task 1: Slurm drain node                                      │  │
-│  │    slurm_rest_api PUT /slurm/v0.0.39/node/{node}              │  │
-│  │    state: DRAIN, reason: "XID-79 auto-fence"                   │  │
-│  │                                                                 │  │
-│  │  Task 2: Kubernetes cordon + taint                             │  │
-│  │    kubectl cordon node-07                                       │  │
-│  │    kubectl taint nodes node-07 xid-fault:NoSchedule            │  │
-│  │                                                                 │  │
-│  │  Task 3: NVSwitch isolation (Fabric Manager API)               │  │
-│  │    nv-hostengine --isolate node-07                             │  │
-│  └────────────────────────────────────────────────────────────────┘  │
-│                                                                       │
-│  ┌──── Phase 2: Diagnose (30 s – 5 min) ──────────────────────────┐ │
-│  │  Task 4: nvidia-bug-report.sh → /tmp/nv-bugreport-node07.gz   │  │
-│  │  Task 5: dcgmi diag -r 3 → full GPU diagnostic                │  │
-│  │  Task 6: dmesg -T --level=err → kernel error ring             │  │
-│  │  Task 7: Fetch GPU serial numbers for RMA filing              │  │
-│  └────────────────────────────────────────────────────────────────┘  │
-│                                                                       │
-│  ┌──── Phase 3: Notify & Ticket ──────────────────────────────────┐  │
-│  │  Task 8: Slack #ops-critical webhook                           │  │
-│  │  Task 9: ServiceNow / PagerDuty ticket creation                │  │
-│  │  Task 10: Archive diagnostics to GCS / S3                     │  │
-│  └────────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────────┘
+```yaml
+# lab/roles/node_drain/defaults/main.yml
+---
+# What the drain does, in order. Toggle stages per incident.
+node_drain_k8s: "{{ inventory_hostname in groups['k3s_server'] | default([]) + groups['k3s_agent'] | default([]) }}"
+node_drain_slurm: "{{ inventory_hostname in groups['slurm_compute'] | default([]) }}"
+node_drain_stop_containers: true        # docker containers using the GPU
+node_drain_collect: true                # forensic bundle before anything is restarted
+node_drain_bug_report: false            # nvidia-bug-report.sh takes minutes; enable for Xid cases
+node_drain_reboot: false
+node_drain_undrain_after: false         # only after reboot + validation passes
+node_drain_reason: "maint: ansible drain {{ now(utc=true, fmt='%Y-%m-%dT%H:%MZ') }}"
+node_drain_kubeconfig: "{{ playbook_dir }}/../.cache/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
+node_drain_bundle_dir: "{{ playbook_dir }}/../.cache/incidents"
 ```
 
+```yaml
+# lab/roles/node_drain/tasks/main.yml
 ---
+# Order matters: stop NEW work → collect evidence → stop RUNNING work → remediate → prove → return.
+- name: "1/6 Cordon + drain Kubernetes node"
+  kubernetes.core.k8s_drain:
+    kubeconfig: "{{ node_drain_kubeconfig }}"
+    name: "{{ inventory_hostname }}"
+    state: drain
+    delete_options:
+      ignore_daemonsets: true
+      delete_emptydir_data: true
+      terminate_grace_period: 60
+      wait_timeout: 300
+  delegate_to: localhost
+  become: false
+  when: node_drain_k8s | bool
 
-## 5. Concrete Production Lab
+- name: "2/6 Drain in Slurm (running jobs finish, no new ones start)"
+  ansible.builtin.command: >-
+    scontrol update NodeName={{ inventory_hostname }} State=DRAIN Reason="{{ node_drain_reason }}"
+  delegate_to: "{{ groups['slurm_controller'][0] }}"
+  changed_when: true
+  when: node_drain_slurm | bool
 
-```python
-#!/usr/bin/env python3
-"""
-gpu_emergency_response_engine.py
-Simulates the Ansible-driven GPU emergency response pipeline:
-  - XID storm detection from DCGM metrics
-  - Fencing decision logic
-  - Playbook generation for drain + cordon + diagnose
-  - Timeline audit trail
+- name: "3/6 Collect forensic bundle"
+  when: node_drain_collect | bool
+  block:
+    - name: Create remote bundle dir
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: incident-
+      register: node_drain_tmp
 
-Run: python3 gpu_emergency_response_engine.py
-"""
+    - name: Capture state (each command time-boxed; a hung GPU must not hang the drain)
+      ansible.builtin.shell: |
+        set -o pipefail
+        cd {{ node_drain_tmp.path }}
+        timeout 30 nvidia-smi -q                > nvidia-smi-q.txt 2>&1
+        timeout 30 nvidia-smi                   > nvidia-smi.txt 2>&1
+        journalctl -k --since "-2h" --no-pager  > kernel.log 2>&1
+        journalctl -k -b -1 --no-pager          > kernel-prev-boot.log 2>&1 || true   # after a hard power-cycle
+        journalctl -k --no-pager | grep -E 'NVRM|Xid|mlx5' > nvrm-xid.log 2>&1 || true
+        journalctl -u docker -u k3s -u k3s-agent -u slurmd --since "-2h" --no-pager > services.log 2>&1
+        cat /proc/meminfo > meminfo.txt
+        ibdev2netdev > ibdev2netdev.txt 2>&1
+        for d in $(ls /sys/class/infiniband 2>/dev/null); do ibv_devinfo -d $d; done > ibv_devinfo.txt 2>&1
+        ip -s link > ip-link.txt
+        docker ps -a > docker-ps.txt 2>&1
+        {% if node_drain_bug_report %}
+        timeout 600 nvidia-bug-report.sh --output-file nvidia-bug-report.log.gz >/dev/null 2>&1
+        {% endif %}
 
-import json, time, sys
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional
-from enum import Enum
+        tar czf /tmp/{{ inventory_hostname }}-incident.tgz -C {{ node_drain_tmp.path }} .
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false        # read-only probe: must also run under --check (drift detection)
 
-# ── XID taxonomy ─────────────────────────────────────────────────────────────
+    - name: Pull bundle to the control node
+      ansible.builtin.fetch:
+        src: "/tmp/{{ inventory_hostname }}-incident.tgz"
+        dest: "{{ node_drain_bundle_dir }}/{{ inventory_hostname }}-{{ now(fmt='%Y%m%d-%H%M%S') }}.tgz"
+        flat: true
 
-class XIDSeverity(Enum):
-    INFO     = "info"
-    WARNING  = "warning"
-    CRITICAL = "critical"
-    FATAL    = "fatal"
+- name: "4/6 Stop GPU containers"
+  ansible.builtin.shell: |
+    set -o pipefail
+    ids=$(docker ps -q)
+    [ -z "$ids" ] && exit 0
+    docker inspect $ids --format '{{ '{{' }}.Id{{ '}}' }} {{ '{{' }}.HostConfig.Runtime{{ '}}' }} {{ '{{' }}json .HostConfig.DeviceRequests{{ '}}' }}' \
+      | awk '/nvidia/ {print $1}' | xargs -r docker stop -t 60
+  args:
+    executable: /bin/bash
+  register: node_drain_stopped
+  changed_when: node_drain_stopped.stdout | length > 0
+  when: node_drain_stop_containers | bool
 
-XID_CATALOG = {
-    8:  ("CPU bus error",       XIDSeverity.CRITICAL),
-    31: ("GPU memory page fault", XIDSeverity.WARNING),
-    48: ("DBE (Double Bit Error)", XIDSeverity.CRITICAL),
-    74: ("NVLink error",        XIDSeverity.CRITICAL),
-    79: ("GPU reset required",  XIDSeverity.FATAL),
-    92: ("High single-bit ECC", XIDSeverity.WARNING),
-    94: ("Uncontained error",   XIDSeverity.FATAL),
-}
+- name: "5/6 Reboot (optional)"
+  ansible.builtin.reboot:
+    reboot_timeout: 900
+    post_reboot_delay: 30
+    test_command: nvidia-smi -L
+  when: node_drain_reboot | bool
 
-@dataclass
-class DCGMMetricPoint:
-    host: str
-    gpu_id: int
-    xid_code: int
-    timestamp: float  # epoch seconds
-    counter: int      # cumulative XID counter
+- name: "6/6 Validate, then return to service"
+  when: node_drain_undrain_after | bool
+  block:
+    - name: Run validation role
+      ansible.builtin.include_role:
+        name: spark_validate
 
-@dataclass
-class FencingDecision:
-    host: str
-    xid_code: int
-    rate_per_second: float
-    severity: XIDSeverity
-    should_fence: bool
-    reason: str
+    - name: Uncordon Kubernetes node
+      kubernetes.core.k8s_drain:
+        kubeconfig: "{{ node_drain_kubeconfig }}"
+        name: "{{ inventory_hostname }}"
+        state: uncordon
+      delegate_to: localhost
+      become: false
+      when: node_drain_k8s | bool
 
-# ── Storm detector ────────────────────────────────────────────────────────────
+    - name: Resume in Slurm
+      ansible.builtin.command: scontrol update NodeName={{ inventory_hostname }} State=RESUME
+      delegate_to: "{{ groups['slurm_controller'][0] }}"
+      changed_when: true
+      when: node_drain_slurm | bool
+```
 
-class XIDStormDetector:
-
-    def __init__(self,
-                 threshold_rate: float = 1.0,
-                 window_seconds: float = 30.0):
-        self.threshold_rate = threshold_rate
-        self.window_seconds = window_seconds
-        # {(host, gpu_id): [(timestamp, counter), ...]}
-        self._history: Dict[tuple, List] = {}
-
-    def ingest(self, point: DCGMMetricPoint):
-        key = (point.host, point.gpu_id)
-        self._history.setdefault(key, []).append(
-            (point.timestamp, point.counter)
-        )
-        # Prune old points outside window
-        cutoff = point.timestamp - self.window_seconds
-        self._history[key] = [
-            p for p in self._history[key] if p[0] >= cutoff
-        ]
-
-    def rate(self, host: str, gpu_id: int, xid_code: int) -> float:
-        key = (host, gpu_id)
-        pts = self._history.get(key, [])
-        if len(pts) < 2:
-            return 0.0
-        delta_t = pts[-1][0] - pts[0][0]
-        delta_c = pts[-1][1] - pts[0][1]
-        if delta_t <= 0:
-            return 0.0
-        return delta_c / delta_t
-
-    def evaluate(self, point: DCGMMetricPoint) -> FencingDecision:
-        self.ingest(point)
-        r = self.rate(point.host, point.gpu_id, point.xid_code)
-        sev_tuple = XID_CATALOG.get(point.xid_code,
-                                    ("Unknown XID", XIDSeverity.WARNING))
-        sev = sev_tuple[1]
-        desc = sev_tuple[0]
-
-        should_fence = (
-            r > self.threshold_rate
-            or sev == XIDSeverity.FATAL
-        )
-        reason = (
-            f"XID {point.xid_code} ({desc}): "
-            f"rate={r:.2f}/s threshold={self.threshold_rate}/s "
-            f"severity={sev.value}"
-        )
-        return FencingDecision(
-            host=point.host,
-            xid_code=point.xid_code,
-            rate_per_second=r,
-            severity=sev,
-            should_fence=should_fence,
-            reason=reason,
-        )
-
-
-# ── Playbook generator ────────────────────────────────────────────────────────
-
-class EmergencyPlaybookGenerator:
-
-    def __init__(self, slurm_api_url: str = "http://slurmctld:6820"):
-        self.slurm_api_url = slurm_api_url
-
-    def fence_playbook(self, host: str, xid_code: int) -> dict:
-        """Generate Ansible playbook YAML (as dict) for emergency fencing."""
-        return {
-            "name": f"Emergency GPU Fence — {host} XID-{xid_code}",
-            "hosts": host,
-            "gather_facts": False,
-            "become": True,
-            "vars": {
-                "target_node": host,
-                "xid_code": xid_code,
-                "slurm_api_url": self.slurm_api_url,
-                "drain_reason": f"auto-fence XID-{xid_code} {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
-            },
-            "tasks": [
-                {
-                    "name": "Drain node in Slurm via REST API",
-                    "ansible.builtin.uri": {
-                        "url": f"{self.slurm_api_url}/slurm/v0.0.39/node/{{{{ target_node }}}}",
-                        "method": "POST",
-                        "headers": {
-                            "Content-Type": "application/json",
-                            "X-SLURM-USER-NAME": "slurm",
-                        },
-                        "body_format": "json",
-                        "body": {
-                            "state": ["drain"],
-                            "reason": "{{ drain_reason }}",
-                        },
-                        "status_code": [200],
-                    },
-                    "delegate_to": "localhost",
-                },
-                {
-                    "name": "Cordon Kubernetes node",
-                    "ansible.builtin.command": {
-                        "cmd": "kubectl cordon {{ target_node }}",
-                    },
-                    "delegate_to": "localhost",
-                },
-                {
-                    "name": "Taint Kubernetes node — NoSchedule",
-                    "ansible.builtin.command": {
-                        "cmd": "kubectl taint nodes {{ target_node }} "
-                               f"xid-fault=xid-{xid_code}:NoSchedule --overwrite",
-                    },
-                    "delegate_to": "localhost",
-                },
-                {
-                    "name": "Collect nvidia-bug-report",
-                    "ansible.builtin.command": {
-                        "cmd": "nvidia-bug-report.sh --output /tmp/nv-bugreport-{{ target_node }}.gz",
-                    },
-                    "async": 120,
-                    "poll": 10,
-                },
-                {
-                    "name": "Collect DCGM diagnostic (level 3)",
-                    "ansible.builtin.command": {
-                        "cmd": "dcgmi diag -r 3 -j",
-                    },
-                    "register": "dcgm_diag",
-                    "ignore_errors": True,
-                },
-                {
-                    "name": "Collect kernel error dmesg",
-                    "ansible.builtin.command": {
-                        "cmd": "dmesg -T --level=err,crit,emerg",
-                    },
-                    "register": "dmesg_errs",
-                },
-                {
-                    "name": "Send Slack alert",
-                    "community.general.slack": {
-                        "token": "{{ lookup('env','SLACK_BOT_TOKEN') }}",
-                        "channel": "#ops-critical",
-                        "msg": f":rotating_light: *GPU FENCE* `{{{{ target_node }}}}` "
-                               f"XID-{xid_code} — auto-drained. Diagnostics collecting.",
-                        "color": "danger",
-                    },
-                    "delegate_to": "localhost",
-                    "ignore_errors": True,
-                },
-            ],
-        }
-
-    def generate_yaml_text(self, host: str, xid_code: int) -> str:
-        """Render playbook as YAML text."""
-        pb = self.fence_playbook(host, xid_code)
-        lines = [
-            "---",
-            f"- name: \"{pb['name']}\"",
-            f"  hosts: {pb['hosts']}",
-            f"  gather_facts: {str(pb['gather_facts']).lower()}",
-            f"  become: {str(pb['become']).lower()}",
-            "",
-            "  vars:",
-        ]
-        for k, v in pb["vars"].items():
-            val = f'"{v}"' if isinstance(v, str) else str(v)
-            lines.append(f"    {k}: {val}")
-        lines += ["", "  tasks:"]
-        for t in pb["tasks"]:
-            name = t.get("name", "")
-            lines.append(f'    - name: "{name}"')
-        return "\n".join(lines)
-
-
-# ── Verification tests ────────────────────────────────────────────────────────
-
-def test_xid_79_always_fatal():
-    det = XIDStormDetector()
-    # Single XID 79 — FATAL regardless of rate
-    p = DCGMMetricPoint("node-07", 0, 79, time.time(), 1)
-    dec = det.evaluate(p)
-    assert dec.severity == XIDSeverity.FATAL
-    assert dec.should_fence
-
-def test_xid_31_below_threshold_no_fence():
-    det = XIDStormDetector(threshold_rate=1.0)
-    now = time.time()
-    # One event in 30s window → rate=0 (need 2 points)
-    p = DCGMMetricPoint("node-01", 0, 31, now, 1)
-    dec = det.evaluate(p)
-    assert not dec.should_fence
-
-def test_xid_31_storm_triggers_fence():
-    det = XIDStormDetector(threshold_rate=1.0, window_seconds=30.0)
-    now = time.time()
-    # Counter goes from 0 to 60 in 30 seconds → rate=2/s > threshold=1
-    det.ingest(DCGMMetricPoint("node-02", 0, 31, now - 30, 0))
-    p = DCGMMetricPoint("node-02", 0, 31, now, 60)
-    dec = det.evaluate(p)
-    assert dec.rate_per_second == pytest_approx(2.0, 0.1)
-    assert dec.should_fence
-
-def pytest_approx(val, tol):
-    """Inline approx check."""
-    class _A:
-        def __eq__(self, other):
-            return abs(other - val) <= tol
-    return _A()
-
-def test_rate_zero_single_point():
-    det = XIDStormDetector()
-    p = DCGMMetricPoint("node-03", 1, 48, time.time(), 5)
-    dec = det.evaluate(p)
-    assert dec.rate_per_second == 0.0
-
-def test_playbook_contains_drain_task():
-    gen = EmergencyPlaybookGenerator()
-    pb = gen.fence_playbook("node-07", 79)
-    task_names = [t["name"] for t in pb["tasks"]]
-    assert any("Drain" in n for n in task_names)
-
-def test_playbook_contains_cordon():
-    gen = EmergencyPlaybookGenerator()
-    pb = gen.fence_playbook("node-07", 79)
-    task_names = [t["name"] for t in pb["tasks"]]
-    assert any("Cordon" in n for n in task_names)
-
-def test_playbook_yaml_text():
-    gen = EmergencyPlaybookGenerator()
-    yaml_txt = gen.generate_yaml_text("node-07", 79)
-    assert "node-07" in yaml_txt
-    assert "gather_facts: false" in yaml_txt
-
-def test_drain_time_budget():
-    # Total fence time must be < Slurm scheduling cycle
-    T_drain, T_fence, T_cordon, T_sched = 10, 5, 3, 60
-    assert T_drain + T_fence + T_cordon < T_sched
-
-def test_nccl_ring_rebuild_time():
-    alpha_ib_us = 1  # microseconds per hop
-    n_remaining = 511
-    T_rebuild_ms = (2 * n_remaining * alpha_ib_us) / 1000
-    assert T_rebuild_ms < 5.0  # well under 5 ms
-
-def run_tests():
-    tests = [
-        test_xid_79_always_fatal,
-        test_xid_31_below_threshold_no_fence,
-        test_xid_31_storm_triggers_fence,
-        test_rate_zero_single_point,
-        test_playbook_contains_drain_task,
-        test_playbook_contains_cordon,
-        test_playbook_yaml_text,
-        test_drain_time_budget,
-        test_nccl_ring_rebuild_time,
-    ]
-    passed = 0
-    for t in tests:
-        try:
-            t()
-            print(f"  [PASS] {t.__name__}")
-            passed += 1
-        except AssertionError as e:
-            print(f"  [FAIL] {t.__name__}: {e}")
-        except Exception as e:
-            print(f"  [FAIL] {t.__name__}: unexpected {type(e).__name__}: {e}")
-    print(f"\n{passed}/{len(tests)} tests passed.")
-    return passed == len(tests)
-
-
-if __name__ == "__main__":
-    print("── XID Emergency Response Engine — Demo ──")
-    det = XIDStormDetector(threshold_rate=1.0)
-    gen = EmergencyPlaybookGenerator()
-
-    # Simulate XID 79 storm on node-07 GPU 0
-    now = time.time()
-    for i, (t_offset, count) in enumerate([(0,0),(10,5),(20,15),(30,40)]):
-        p = DCGMMetricPoint("node-07", 0, 79, now - 30 + t_offset, count)
-        dec = det.evaluate(p)
-        if dec.should_fence:
-            print(f"\n  ⚠  FENCE TRIGGERED: {dec.reason}")
-            yaml_txt = gen.generate_yaml_text(dec.host, dec.xid_code)
-            out = "/tmp/emergency_fence_node07.yml"
-            with open(out, "w") as f:
-                f.write(yaml_txt)
-            print(f"  Playbook written → {out}")
-            break
-
-    print()
-    print("── Running verification tests ──")
-    ok = run_tests()
-    sys.exit(0 if ok else 1)
+```yaml
+# lab/playbooks/21-emergency-drain.yml
+---
+# ansible-playbook playbooks/21-emergency-drain.yml -l spark-02 \
+#   -e node_drain_reboot=true -e node_drain_undrain_after=true -e node_drain_bug_report=true
+- name: Emergency drain / remediation
+  hosts: spark
+  become: true
+  serial: 1                       # never take the whole lab down at once
+  max_fail_percentage: 0
+  pre_tasks:
+    - name: Refuse to run against every host without -l
+      ansible.builtin.assert:
+        that: ansible_limit is defined or (allow_all | default(false) | bool)
+        fail_msg: "Use -l <host> (or -e allow_all=true if you really mean it)"
+      run_once: true
+  roles:
+    - role: node_drain
 ```
 
 ---
 
-## 6. Comparative Matrix — XID Codes Requiring Immediate Fence
+## 3. Runbooks
 
-| XID | Description | Auto-Fence? | Typical Root Cause |
-|---|---|---|---|
-| 8 | CPU bus error | YES | PCIe root complex failure |
-| 31 | GPU memory page fault | Rate-based | Buggy CUDA kernel or corrupted ECC |
-| 48 | Double bit ECC error | YES | DRAM failure — GPU replacement needed |
-| 74 | NVLink error | YES | NVLink cable or retimer fault |
-| 79 | GPU reset required | YES (FATAL) | Hardware hang — RMA candidate |
-| 92 | High single-bit ECC | Rate-based | Approaching failure — schedule maintenance |
-| 94 | Uncontained error | YES (FATAL) | System integrity compromised — immediate isolation |
+### Runbook A — GPU hang (`nvidia-smi` doesn't answer)
+
+**Signals:** `SparkGPUUnresponsive` alert; Slurm health check drains the node (`healthcheck: nvidia-smi unresponsive`); workloads stuck in CUDA calls.
+
+```bash
+ansible-playbook playbooks/21-emergency-drain.yml -l spark-02 -K \
+  -e node_drain_bug_report=true -e node_drain_reboot=true -e node_drain_undrain_after=true
+```
+
+If it happens again after the reboot, keep the node drained and open a case with the bundle (`.cache/incidents/spark-02-*.tgz` includes `nvidia-bug-report.log.gz`), and check for a driver/firmware update (Volumes 07, 10).
+
+### Runbook B — Xid triage
+
+**Signals:** `SparkGPUXid` alert; Loki `|= "NVRM: Xid"`.
+
+```bash
+ansible spark-02 -b -m shell -a "journalctl -k --since '-24h' --no-pager | grep 'NVRM: Xid'"
+```
+
+| Xid (common meaning, per NVIDIA's Xid catalogue) | Usually | Action |
+|---|---|---|
+| 13 Graphics engine exception | Application (bad kernel, OOB) | Tell the workload owner; no drain unless repeated across apps |
+| 31 GPU memory page fault | Application (bad pointer) | Same |
+| 43 GPU stopped processing | Application / driver | Watch; drain if it repeats with different apps |
+| 45 Preemptive cleanup | Follow-on to another error | Look at the preceding Xid |
+| 48, 63, 64, 94, 95 ECC / memory-remap family | Hardware / memory | **Drain + bug report.** Tolerate no repeats |
+| 74 NVLink error | Interconnect | **Drain**, bug report |
+| 79 GPU has fallen off the bus | Hardware / power / PCIe | **Drain + reboot**; if it recurs → RMA path |
+| 119 / 120 GSP RPC timeout / error | Driver / firmware | Drain + reboot; check the driver/firmware update level |
+
+The Slurm health check (Volume 18) auto-drains on the hardware-class codes; the kata in Volume 04 (K3) is the same classification in Jinja. Check NVIDIA's Xid documentation for the codes and fields your driver branch reports.
+
+### Runbook C — Unified-memory pressure
+
+**Signals:** `SparkUnifiedMemoryLow`; CUDA OOM "while nvidia-smi shows nothing"; k3s `MemoryPressure` evictions; the OOM killer in `dmesg`.
+
+```yaml
+# lab/playbooks/24-uma-relief.yml
+---
+# Runbook C — unified-memory pressure on a DGX Spark.
+# Diagnose first (always), relieve second (opt-in flags).
+#   ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K                       # diagnose only
+#   ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K -e uma_drop_caches=true
+#   ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K -e uma_stop_label=spark.lab/idle=true
+- name: UMA pressure diagnosis and relief
+  hosts: spark
+  become: true
+  gather_facts: false
+  vars:
+    uma_drop_caches: false
+    uma_stop_label: ""          # stop running containers carrying this label (key=value)
+  tasks:
+    - name: Memory picture
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "== meminfo (GiB)"
+        awk '/MemTotal|MemAvailable|^Cached|Shmem:|AnonPages|Mlocked/{printf "%-14s %6.1f\n",$1,$2/1048576}' /proc/meminfo
+        echo "== top processes by RSS"
+        ps -eo pid,user,rss,comm --sort=-rss | head -8 | awk 'NR==1{print;next}{printf "%-8s %-10s %6.1fG %s\n",$1,$2,$3/1048576,$4}'
+        echo "== GPU compute processes (memory column is N/A on UMA)"
+        timeout 10 nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader || echo "nvidia-smi unavailable"
+        echo "== containers by memory"
+        docker stats --no-stream --format '{{ "{{" }}.MemUsage{{ "}}" }}\t{{ "{{" }}.Name{{ "}}" }}' 2>/dev/null | sort -h -r | head -8
+      args: { executable: /bin/bash }
+      register: uma_diag
+      changed_when: false
+      check_mode: false
+
+    - name: Show diagnosis
+      ansible.builtin.debug:
+        msg: "{{ uma_diag.stdout_lines }}"
+
+    - name: Record MemAvailable before
+      ansible.builtin.shell: awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo
+      register: uma_before
+      changed_when: false
+      check_mode: false
+
+    - name: Stop labelled containers
+      ansible.builtin.shell: |
+        set -o pipefail
+        ids=$(docker ps -q --filter "label={{ uma_stop_label }}")
+        [ -z "$ids" ] && exit 0
+        docker stop -t 30 $ids && echo "stopped: $ids"
+      args: { executable: /bin/bash }
+      register: uma_stopped
+      changed_when: "'stopped' in uma_stopped.stdout"
+      when: uma_stop_label | length > 0
+
+    - name: Drop page cache (safe; next model load will be cold)
+      ansible.builtin.shell: sync && echo 3 > /proc/sys/vm/drop_caches
+      changed_when: true
+      when: uma_drop_caches | bool
+
+    - name: Record MemAvailable after
+      ansible.builtin.shell: awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo
+      register: uma_after
+      changed_when: false
+      check_mode: false
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: "MemAvailable {{ uma_before.stdout }} GiB → {{ uma_after.stdout }} GiB"
+```
+
+```bash
+ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K                          # diagnose
+ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K -e uma_drop_caches=true   # relieve
+```
+
+Prevent it from recurring: set memory limits on model-server containers, keep the kubelet reserve (Volume 16), give idle services the `spark.lab/idle=true` label so this runbook can stop them, and don't run k3s and Slurm GPU jobs on the same node at the same time.
+
+### Runbook D — CX-7 link degraded / down
+
+**Signals:** `SparkCX7Degraded` (speed < 200G), NCCL falls back to `NET/Socket`, NFS falls back to TCP.
+
+```bash
+ansible spark -b -m shell -a "ibdev2netdev; ethtool enp1s0f1np1 | grep -E 'Speed|Link detected'"
+ansible-playbook playbooks/02-fabric.yml -K                   # re-assert config + verify
+ansible-playbook playbooks/11-rdma-perftest.yml -K            # measure after fixing
+```
+
+Fix order: reseat the cable, then check that the same cage is used on both ends, then check the switch port speed (forced 200G), and finally reboot both nodes (NVIDIA's documented step when links won't come up). Drain dependent Slurm or k3s multi-node jobs first. A 2-node job can't run on a broken link.
+
+### Runbook E — Node unreachable (no BMC)
+
+A Spark has **no out-of-band management**. When SSH and ping fail:
+
+1. Check from the other Spark over the fabric (`ping 192.168.100.12`). If that works, the problem is on the management network, not the node.
+2. Check the local console (monitor/keyboard), or the power LED.
+3. Power-cycle. For a desk lab, a **smart plug** with an API is the practical stand-in for a BMC power action. Ansible can drive it (e.g. a Home Assistant or Tasmota HTTP call from `delegate_to: localhost`).
+4. After it boots: `21-emergency-drain.yml -e node_drain_collect=true` still captures the *previous boot's* kernel log (`journalctl -k -b -1`) because journald is persistent (Volume 01A baseline).
 
 ---
 
-## 7. SRE Diagnostics Playbook
+## 4. From alert to automation
 
-| Symptom | Root Cause | Diagnostic | Remediation |
-|---|---|---|---|
-| XID 79 repeating after GPU reset | GPU hardware defect | `nvidia-smi --query-gpu=ecc.errors.uncorrected.aggregate.total --format=csv` | RMA GPU — file hardware ticket; replace node from spare pool |
-| Slurm drain succeeds but scheduler re-queues to same node | GRES plugin cache stale | `scontrol show node <node>` → check `State=DRAIN` | Restart `slurmctld` with `systemctl restart slurmctld`; verify `State=DRAIN+DOWN` |
-| kubectl cordon fails — API server unreachable | Control plane split | `kubectl cluster-info` from Ansible controller | Use Ansible to cordon via direct etcd write (break-glass); restore control plane |
-| nvidia-bug-report.sh hangs > 120 s | Driver wedged — GPU hung | `timeout 90 nvidia-bug-report.sh` | Collect `dmesg` only; schedule driver reload after fence |
-| NVSwitch isolation API fails | Fabric Manager not running | `systemctl status nvidia-fabricmanager` | Start FM: `systemctl start nvidia-fabricmanager`; re-issue isolation |
+```mermaid
+sequenceDiagram
+  participant P as Prometheus
+  participant AM as Alertmanager
+  participant AWX as AWX (webhook-enabled workflow)
+  participant OPS as On-call human
+  participant S as Spark
+  P->>AM: SparkGPUXid (host=spark-02)
+  AM->>AWX: webhook → launch "spark · drain" workflow, limit=spark-02
+  AWX->>S: drain + evidence (no reboot)
+  AWX->>OPS: approval: "Reboot spark-02?" (bundle link attached)
+  OPS-->>AWX: approve
+  AWX->>S: reboot → validate → return to service
+```
+
+Automate **steps 1–3** (safe and reversible). Gate **step 4** (reboot or reload) behind an approval node. On a single-user lab you can skip the approval, but keep the structure.
 
 ---
 
-## 8. Verification Checklist
+## 5. Troubleshooting the drain itself
 
-- [ ] DCGM Prometheus alert rule fires within 30 s of XID 79 rate > 1/s
-- [ ] AWX webhook triggers emergency workflow within 5 s of Alertmanager firing
-- [ ] Slurm drain completes with `State=DRAIN` visible in `scontrol show node`
-- [ ] Kubernetes node shows `Unschedulable=true` after cordon
-- [ ] `xid-fault:NoSchedule` taint present on affected node
-- [ ] `nvidia-bug-report.gz` archived to object storage within 3 min
-- [ ] Slack #ops-critical receives alert with node name and XID code
-- [ ] Total fence time (drain + cordon + taint) < 30 s
-- [ ] `python3 gpu_emergency_response_engine.py` prints `9/9 tests passed`
+| Symptom | Diagnose | Fix |
+|---|---|---|
+| k8s drain times out | `kubectl get pods -A -o wide --field-selector spec.nodeName=spark-02` | PodDisruptionBudgets or unmanaged pods; `terminate_grace_period`; delete stuck pods with the owner's consent |
+| Slurm DRAIN never reaches DRAINED | `squeue -w spark-02` | Running jobs finish first (by design); `scancel` only if agreed |
+| Evidence capture hangs | Which command? Everything is wrapped in `timeout` | A new command without `timeout` → add it |
+| Reboot task times out | Console | Capsule/firmware work on boot takes long (Volume 10), or the node didn't come back: Runbook E |
+| Returned to service but alerts fire again | Loki/Prometheus since the reboot | Root cause not fixed; re-drain with `node_drain_undrain_after=false` |
+
+## 6. Validation (drills)
+
+- [ ] Drill A: drain spark-02 with evidence and a reboot; the bundle exists; the node returns only after validation passes.
+- [ ] Drill C: load a model until `SparkUnifiedMemoryLow` fires; relieve with the runbook; record before/after GiB.
+- [ ] Drill D: pull the QSFP cable during a perftest; alert, then diagnosis, then recovery.
+- [ ] The playbook refuses to run without `-l`.

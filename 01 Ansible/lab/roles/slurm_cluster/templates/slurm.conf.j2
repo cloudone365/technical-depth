@@ -1,0 +1,45 @@
+# {{ ansible_managed }}
+ClusterName={{ slurm_cluster_name }}
+SlurmctldHost={{ groups[slurm_cluster_controller_group][0] }}({{ hostvars[groups[slurm_cluster_controller_group][0]].ansible_host }})
+
+AuthType=auth/munge
+CryptoType=crypto/munge
+# use `srun --mpi=pmix` if your build has it (check `srun --mpi=list`)
+MpiDefault=none
+ProctrackType=proctrack/cgroup
+TaskPlugin=task/cgroup,task/affinity
+SelectType=select/cons_tres
+SelectTypeParameters=CR_Core_Memory
+GresTypes=gpu
+
+SlurmctldPort=6817
+SlurmdPort=6818
+StateSaveLocation=/var/spool/slurmctld
+SlurmdSpoolDir=/var/spool/slurmd
+SlurmctldPidFile=/run/slurmctld.pid
+SlurmdPidFile=/run/slurmd.pid
+SlurmctldLogFile=/var/log/slurm/slurmctld.log
+SlurmdLogFile=/var/log/slurm/slurmd.log
+SlurmdDebug=info
+SlurmctldDebug=info
+
+# a node that reboots cleanly comes back automatically
+ReturnToService=2
+SlurmdTimeout=120
+InactiveLimit=0
+KillWait=30
+MinJobAge=300
+SchedulerType=sched/backfill
+JobAcctGatherType=jobacct_gather/cgroup
+JobAcctGatherFrequency=30
+
+# Health check: drain a node whose GPU stops answering (Volume 24)
+HealthCheckProgram=/usr/local/sbin/spark-slurm-healthcheck.sh
+HealthCheckInterval=120
+HealthCheckNodeState=ANY
+
+{% for h in groups[slurm_cluster_compute_group] %}
+NodeName={{ h }} NodeAddr={{ hostvars[h].ansible_host }} CPUs={{ slurm_cluster_cpus }} RealMemory={{ ((hostvars[h].ansible_facts.memtotal_mb | default(122880)) - slurm_cluster_mem_reserve_mb) | int }} Gres=gpu:{{ slurm_cluster_gpu_type }}:{{ slurm_cluster_gpu_devices | length }} State=UNKNOWN
+{% endfor %}
+
+PartitionName={{ slurm_cluster_partition }} Nodes={{ groups[slurm_cluster_compute_group] | join(',') }} Default=YES DefaultTime={{ slurm_cluster_default_time }} MaxTime={{ slurm_cluster_max_time }} State=UP OverSubscribe=NO

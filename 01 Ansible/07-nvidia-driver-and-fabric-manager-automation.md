@@ -1,244 +1,346 @@
-# Volume 07: NVIDIA Open Kernel Drivers, Fabric Manager & GSP Firmware Automation
+# Volume 07 — The NVIDIA Driver Stack on DGX Spark: Audit, Pin, Upgrade Safely (and Where Fabric Manager Fits)
 
-```
-====================================================================================================
-MODULE 01: ANSIBLE & BARE-METAL AI INFRASTRUCTURE AUTOMATION
-VOLUME 07: Open Kernel Drivers, GSP Firmware, Fabric Manager NVLink Training & Exact Pinning
-====================================================================================================
-```
+> **Module 01 · Part II — Node Provisioning** · Prev: [06 Provisioning](06-bare-metal-os-provisioning-pxe-and-redfish.md) · Next: [08 CUDA, containers & CDI](08-cuda-toolkit-cudnn-and-container-runtime.md)
 
----
-
-## 1. Executive Intuition: The Multi-Component GPU Subsystem
-
-Installing GPU software on an enterprise AI server (HGX H100 / B200) is fundamentally different from installing a desktop graphics card. The GPU subsystem is a distributed multi-tier architecture consisting of four tightly coupled components:
-
-1. **NVIDIA Open Kernel Drivers (`nvidia.ko`, `nvidia-uvm.ko`):** The kernel modules responsible for PCIe MMIO mappings, memory registration, and interrupt handling.
-2. **GPU System Processor (GSP) Firmware:** On modern architectures (Turing, Ampere, Hopper, Blackwell), low-level GPU initialization, power management, and engine scheduling are executed by an on-die RISC-V co-processor (the GSP) running proprietary firmware loaded by `nvidia.ko`.
-3. **NVIDIA Fabric Manager (`nvidia-fabricmanager`):** In SXM baseboards, GPUs communicate across high-speed NVLink switches (NVSwitches). **Without Fabric Manager, NVSwitches remain unconfigured and NVLink PHYs remain in reset.** Training jobs attempting multi-GPU communication immediately crash with NCCL timeout errors.
-4. **NVIDIA Persistence Daemon (`nvidia-persistenced`):** Keeps the driver loaded in kernel memory even when no CUDA processes are running, eliminating the 2–5 second driver teardown and warm-up latency on every job launch.
-
-```
-+-----------------------------------------------------------------------------------------+
-|                        NVIDIA GPU STACK COMPONENT COUPLING                              |
-+-----------------------------------------------------------------------------------------+
-| [User Space]: PyTorch / vLLM / CUDA Application                                        |
-|      |                                                                                  |
-|      v                                                                                  |
-| [NVIDIA Persistence Daemon]: nvidia-persistenced (Keeps device nodes warm)              |
-| [NVIDIA Fabric Manager]:     nvidia-fabricmanager (Configures NVSwitch Crossbars)       |
-|      |                                                                                  |
-|      v (IOCTL System Calls)                                                             |
-| [Kernel Space]:                                                                         |
-|   - nvidia.ko          (Core driver)                                                    |
-|   - nvidia-uvm.ko      (Unified Virtual Memory & page fault handling)                   |
-|   - nvidia-modeset.ko  (Display/compute engine modeset)                                 |
-|      |                                                                                  |
-|      v (PCIe DMA Transfers)                                                             |
-| [Hardware Silicon]:                                                                     |
-|   - GPU Silicon GSP    (RISC-V Firmware Execution Core)                                 |
-|   - NVSwitches         (Trained into full mesh crossbar by Fabric Manager)              |
-+-----------------------------------------------------------------------------------------+
-```
+| | |
+|---|---|
+| **You will build** | A driver-consistency audit (`16-driver-audit.yml`), apt holds that stop accidental driver moves, and a rolling DGX OS upgrade (`17-dgxos-upgrade.yml`: drain → upgrade → reboot → audit/validate → return) |
+| **Hardware** | 1–2× DGX Spark |
+| **Time** | 60 min (+ upgrade time) |
+| **Risk** | Medium during upgrades. Low for the audit |
 
 ---
 
-## 2. Lineage & Evolution of NVIDIA Driver Packaging
+## 1. The stack you're managing
 
+```mermaid
+flowchart TB
+  subgraph PKG["GB10 superchip (one package)"]
+    CPU["Grace CPU<br/>10× X925 + 10× A725"] <-->|"NVLink-C2C<br/>(on-package, coherent)"| GPU["Blackwell GPU<br/>sm_121"]
+    MEM[("128 GB LPDDR5x<br/>unified, 273 GB/s")]
+    CPU --- MEM
+    GPU --- MEM
+  end
+  subgraph KERNEL["Kernel space"]
+    KM["nvidia.ko · nvidia-uvm.ko · nvidia-modeset.ko · nvidia-drm.ko<br/>(open kernel modules)"]
+    GSP["GSP firmware (/lib/firmware/nvidia/…)"]
+  end
+  subgraph USER["User space"]
+    LIBS["libcuda.so · libnvidia-ml.so (NVML) · …"]
+    SMI["nvidia-smi · nvidia-persistenced"]
+    CUDA["/usr/local/cuda → CUDA 13.x toolkit"]
+    NCT["nvidia-container-toolkit (nvidia-ctk, CDI)"]
+  end
+  subgraph APPS["Workloads"]
+    NGC["NGC containers (PyTorch, vLLM, TRT-LLM)<br/>bring their own CUDA userland"]
+  end
+  GPU --- KM --- GSP
+  KM --- LIBS --- SMI
+  LIBS --- CUDA
+  LIBS --- NCT --- NGC
 ```
-   [2005: The .run File Era]
-                 |
-           (Proprietary monolithic .run binary blobs; broke on every kernel patch)
-                 |
-   [2015: Distribution DKMS Packaging]
-                 |
-           (Dynamic Kernel Module Support: Compiled driver source against host kernel)
-                 |
-   [2022: NVIDIA Open Kernel Modules (R515+)]
-                 |
-           (Open-source driver kernel modules on GitHub; GSP handles proprietary logic)
-                 |
-   [2024: Pre-Compiled KMOD Distribution Packages]
-                 |
-           (Distro-specific pre-compiled binaries; eliminates 5-minute GCC compilation)
-```
+
+**The invariant every layer depends on:** the loaded kernel module, the module on disk, and the userland libraries (`libnvidia-ml`, `libcuda`) must all be the **same driver version**. Containers bring their own CUDA *toolkit*, but they use the host's `libcuda` through the container toolkit, so a host mismatch breaks every container too.
+
+### 1.1 Where does Fabric Manager fit?
+
+| System | GPU interconnect | Fabric Manager? |
+|---|---|---|
+| HGX/DGX H100/H200/B200 (8 GPUs + NVSwitch) | NVLink through NVSwitch chips | **Required**. `nvidia-fabricmanager` must match the driver version exactly, or CUDA init fails |
+| GB200/GB300 NVL72 | NVLink Switch trays across the rack | Required, plus NVLink management (NMX) |
+| **DGX Spark (GB10)** | NVLink-C2C between CPU and GPU **inside one package**; no NVSwitch | **Not used**. Nothing to install or pin |
+| Multi-Spark | ConnectX-7 Ethernet/RoCE (Volumes 11–12) | Not applicable; NCCL uses the NIC |
+
+On a real HGX node, the rule you'd automate is "Fabric Manager version == driver version, installed together, held together, restarted together". The audit playbook's `nvswitch_present` field is where that check would go. The upgrade playbook's "unhold → upgrade → re-hold" flow is exactly what you'd use for `nvidia-fabricmanager-<branch>`.
 
 ---
 
-## 3. First-Principles Mathematics: The Exact-Pin Invariant
+## 2. LLD: what gets pinned and how
 
-The most common operational failure in AI infrastructure is a **Component Version Skew**. Fabric Manager, the Kernel Driver, and the User-Space Libraries must adhere to an **Exact String Equivalence Invariant**:
+| Mechanism | Where | Effect |
+|---|---|---|
+| `apt-mark hold` on `^(nvidia-driver-\|nvidia-dkms-\|nvidia-kernel-\|libnvidia-\|nvidia-firmware-\|cuda-drivers)` | `spark_baseline/tasks/packages.yml` | `apt upgrade` and unattended-upgrades skip the driver stack |
+| Dynamic package discovery (`package_facts` + regex) | same | No hard-coded package names, so it survives DGX OS renaming packages |
+| Unhold → upgrade → re-hold | `17-dgxos-upgrade.yml` | Driver moves only inside a drained, validated window |
+| `serial: 1`, `max_fail_percentage: 0` | upgrade play | Never both Sparks at once; the first failure stops the rollout |
 
-$$\text{Version}(\text{nvidia-driver}) \equiv \text{Version}(\text{nvidia-fabricmanager}) \equiv \text{Version}(\text{nvidia-persistenced})$$
-
-#### Failure Scenario:
-- Kernel driver package updates to `550.54.15` via unattended upgrades.
-- Fabric Manager package remains pinned at `550.54.14`.
-- **Result:** Upon boot, `nvidia-fabricmanager` inspects the kernel driver version via IOCTL, detects the minor discrepancy, and immediately halts:
-  ```
-  [ERROR] Driver version 550.54.15 is incompatible with Fabric Manager version 550.54.14. Exiting.
-  ```
-- **Cluster Blast Radius:** Every single GPU on the node is rendered incapable of NVLink P2P communication, crashing all distributed training jobs.
-
-```
-Ansible Rule: Never install 'nvidia-driver' without strict package version locks!
-```
+> **The DGX Dashboard "Update" button** upgrades packages *and firmware* and then reboots. That's fine for a single personal box. Once the Spark is a shared node (k3s/Slurm workloads, a second Spark depending on it), use the playbook so drain, validation and holds wrap the same apt operation. Firmware is covered in Volume 10.
 
 ---
 
-## 4. Deep Architecture: Fabric Manager NVSwitch Training
+## 3. Hands-on
 
-When `nvidia-fabricmanager` starts as a systemd service, it executes an automated hardware training sequence:
+### 3.1 Audit
 
-```
-+-----------------------------------------------------------------------------+
-|                     FABRIC MANAGER HARDWARE SEQUENCE                        |
-+-----------------------------------------------------------------------------+
-|  1. Detect GPU Topology: Queries PCI devices for NVSwitch crossbars (NVSwitch 3/4)
-|  2. Load Topology Configuration: /usr/share/nvidia/nvswitch/topology.conf  |
-|  3. Train NVLink High-Speed SerDes: 112 Gbps PAM4 electrical links          |
-|  4. Assign Routing Tables: Configures hardware routing tables in NVSwitches |
-|  5. Enable Fabric Routing: Toggles link operational state to 'ACTIVE'       |
-|  6. Signal Ready: Creates /var/run/nvidia-fabricmanager/socket              |
-+-----------------------------------------------------------------------------+
-```
-
----
-
-## 5. Concrete Production Lab: Automated Driver & Fabric Manager Role
-
-Below is an enterprise Ansible role implementation that adds the official NVIDIA package repository, strictly pins driver and Fabric Manager versions, configures persistence mode, and validates NVLink operational health.
-
-### 5.1 Role Variables (`vars/main.yml`)
 ```yaml
+# lab/playbooks/16-driver-audit.yml
 ---
-# Specific version pinning for production DGX/HGX clusters
-nvidia_cuda_repo_url: "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64"
-nvidia_branch: "550"
-nvidia_driver_full_version: "550.54.15"
-nvidia_driver_pkg_version: "550.54.15-0ubuntu1"
+# Is the NVIDIA stack on each Spark internally consistent?
+#   kernel module (loaded) == kernel module (on disk) == userland libs == what nvidia-smi reports
+# A mismatch is THE classic post-upgrade failure: "Failed to initialize NVML: Driver/library version mismatch".
+- name: NVIDIA driver stack audit
+  hosts: spark
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Loaded kernel module version (/proc/driver/nvidia/version)
+      ansible.builtin.slurp:
+        src: /proc/driver/nvidia/version
+      register: audit_proc
+      failed_when: false
+
+    - name: On-disk module version (what will load after reboot)
+      ansible.builtin.shell: set -o pipefail; modinfo nvidia | awk '/^version:/{print $2}'
+      args: { executable: /bin/bash }
+      register: audit_modinfo
+      changed_when: false
+      failed_when: false
+
+    - name: Userland NVML library version
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        ls /usr/lib/aarch64-linux-gnu/libnvidia-ml.so.* 2>/dev/null
+        | sed -n 's/.*libnvidia-ml\.so\.\([0-9][0-9.]*\)$/\1/p' | sort -V | tail -1
+      args: { executable: /bin/bash }
+      register: audit_nvml
+      changed_when: false
+
+    - name: What nvidia-smi says (fails on mismatch)
+      ansible.builtin.command: nvidia-smi --query-gpu=driver_version --format=csv,noheader
+      register: audit_smi
+      changed_when: false
+      failed_when: false
+
+    - name: Installed NVIDIA/CUDA packages
+      ansible.builtin.package_facts:
+        manager: apt
+
+    - name: Persistence daemon state
+      ansible.builtin.systemd_service:
+        name: nvidia-persistenced
+      register: audit_persist
+      failed_when: false
+
+    - name: Build report
+      ansible.builtin.set_fact:
+        driver_audit:
+          kernel_running: "{{ ansible_facts.kernel }}"
+          module_loaded: >-
+            {{ (audit_proc.content | default('') | b64decode
+                | regex_search('Kernel Module(?: for [a-z0-9]+)?\s+([0-9.]+)', '\1')
+                | default(['none'], true)) | first }}
+          module_flavor: "{{ 'open' if 'Open Kernel Module' in (audit_proc.content | default('') | b64decode) else 'proprietary/unknown' }}"
+          module_on_disk: "{{ audit_modinfo.stdout | default('none', true) }}"
+          nvml_userland: "{{ audit_nvml.stdout | default('none', true) }}"
+          nvidia_smi: "{{ audit_smi.stdout if audit_smi.rc == 0 else 'ERROR: ' ~ (audit_smi.stdout ~ audit_smi.stderr) | trim }}"
+          persistenced: "{{ audit_persist.status.ActiveState | default('absent') }}"
+          held: "{{ ansible_facts.packages.keys() | select('match', spark_nvidia_hold_regex) | list | length }}"
+          cuda_pkgs: "{{ ansible_facts.packages.keys() | select('match', '^cuda-toolkit-[0-9]') | list }}"
+          nvswitch_present: false     # GB10: GPU<->CPU is NVLink-C2C on package; no NVSwitch, no Fabric Manager
+
+    - name: Show report
+      ansible.builtin.debug:
+        var: driver_audit
+
+    - name: Verdict
+      ansible.builtin.assert:
+        that:
+          - driver_audit.module_loaded == driver_audit.module_on_disk
+          - driver_audit.module_loaded == driver_audit.nvml_userland
+          - driver_audit.nvidia_smi == driver_audit.module_loaded
+          - driver_audit.module_flavor == 'open'
+        fail_msg: >-
+          Driver stack inconsistent on {{ inventory_hostname }}:
+          loaded={{ driver_audit.module_loaded }} disk={{ driver_audit.module_on_disk }}
+          userland={{ driver_audit.nvml_userland }} smi={{ driver_audit.nvidia_smi }}.
+          Loaded != disk → reboot pending after an upgrade. Userland != loaded → partial upgrade;
+          see Volume 07 troubleshooting.
+        success_msg: "Driver {{ driver_audit.module_loaded }} ({{ driver_audit.module_flavor }}) consistent"
 ```
 
-### 5.2 Role Tasks (`tasks/main.yml`)
+```bash
+cd "01 Ansible/lab"
+ansible-playbook playbooks/16-driver-audit.yml -K
+```
+
+Healthy output (example):
+
 ```yaml
+driver_audit:
+  kernel_running: 6.x-…-nvidia
+  module_loaded: 580.82.09
+  module_flavor: open
+  module_on_disk: 580.82.09
+  nvml_userland: 580.82.09
+  nvidia_smi: 580.82.09
+  persistenced: active
+  held: 12
+  nvswitch_present: false
+```
+
+### 3.2 Rolling upgrade
+
+```yaml
+# lab/playbooks/17-dgxos-upgrade.yml
 ---
-- name: 1. Add NVIDIA Official CUDA Repository GPG Key
-  ansible.builtin.get_url:
-    url: "{{ nvidia_cuda_repo_url }}/3bf863cc.pub"
-    dest: /etc/apt/trusted.gpg.d/nvidia-cuda.asc
-    mode: '0644'
+# Controlled DGX OS update, one Spark at a time:
+#   drain → unhold → apt full-upgrade → reboot → audit + validate → re-hold → return to service
+# This is what the DGX Dashboard "Update" button does, wrapped in the safety
+# steps a shared/multi-node lab needs.
+#
+#   ansible-playbook playbooks/17-dgxos-upgrade.yml -l spark-02 -K
+#   ansible-playbook playbooks/17-dgxos-upgrade.yml -K -e upgrade_dry_run=true   # show what would change
+- name: Rolling DGX OS upgrade
+  hosts: spark
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    upgrade_dry_run: false
+    upgrade_reboot: true
+    upgrade_firmware: false          # fwupd capsules (UEFI/EC/SoC/PD/VBIOS) — see Volume 10
+  pre_tasks:
+    - name: What would be upgraded  # noqa: command-instead-of-module (apt module has no simulate-output mode)
+      ansible.builtin.command: apt-get -s full-upgrade
+      register: upgrade_sim
+      changed_when: false
 
-- name: 2. Add NVIDIA CUDA Package Repository
-  ansible.builtin.apt_repository:
-    repo: "deb [signed-by=/etc/apt/trusted.gpg.d/nvidia-cuda.asc] {{ nvidia_cuda_repo_url }} /"
-    state: present
-    filename: nvidia-cuda
+    - name: Summarise pending upgrades (NVIDIA lines first)
+      ansible.builtin.set_fact:
+        upgrade_pending: "{{ upgrade_sim.stdout_lines | select('match', '^Inst ') | list }}"
+        upgrade_pending_nvidia: "{{ upgrade_sim.stdout_lines | select('match', '^Inst (nvidia|libnvidia|cuda|linux-)') | list }}"
 
-- name: 3. Ensure Linux Kernel Headers and Build Essentials Present
-  ansible.builtin.apt:
-    name:
-      - "linux-headers-{{ ansible_kernel }}"
-      - build-essential
-      - dkms
-    state: present
-    update_cache: true
+    - name: Report
+      ansible.builtin.debug:
+        msg:
+          - "{{ upgrade_pending | length }} packages pending, {{ upgrade_pending_nvidia | length }} driver/CUDA/kernel"
+          - "{{ upgrade_pending_nvidia }}"
 
-- name: 4. Install Strictly Pinned NVIDIA Open Driver & Fabric Manager
-  ansible.builtin.apt:
-    name:
-      - "cuda-drivers-{{ nvidia_branch }}={{ nvidia_driver_pkg_version }}"
-      - "nvidia-driver-{{ nvidia_branch }}-open={{ nvidia_driver_pkg_version }}"
-      - "nvidia-fabricmanager-{{ nvidia_branch }}={{ nvidia_driver_pkg_version }}"
-      - "nvidia-persistenced={{ nvidia_driver_pkg_version }}"
-    state: present
-    allow_downgrades: true
+    - name: Stop here in dry-run mode
+      ansible.builtin.meta: end_host
+      when: upgrade_dry_run | bool or upgrade_pending | length == 0
 
-- name: 5. Configure APT Pinning Preferences to Prevent Unintended Upgrades
-  ansible.builtin.copy:
-    dest: /etc/apt/preferences.d/nvidia-driver-pin
-    content: |
-      Package: cuda-drivers* nvidia-*
-      Pin: version {{ nvidia_driver_full_version }}*
-      Pin-Priority: 1001
+  tasks:
+    - name: Drain the node (no forensics, no reboot yet)
+      ansible.builtin.include_role:
+        name: node_drain
+      vars:
+        node_drain_collect: false
+        node_drain_reboot: false
+        node_drain_undrain_after: false
+        node_drain_reason: "maint: dgxos upgrade"
 
-- name: 6. Enable and Start NVIDIA Persistence Daemon
-  ansible.builtin.systemd:
-    name: nvidia-persistenced
-    state: started
-    enabled: true
+    - name: Release NVIDIA holds for this upgrade
+      ansible.builtin.shell: >-
+        set -o pipefail; apt-mark showhold | grep -E '{{ spark_nvidia_hold_regex }}' | xargs -r apt-mark unhold
+      args: { executable: /bin/bash }
+      changed_when: true
 
-- name: 7. Enable and Start NVIDIA Fabric Manager
-  ansible.builtin.systemd:
-    name: nvidia-fabricmanager
-    state: started
-    enabled: true
+    - name: Full upgrade (async — kernel/driver postinst can take a while)
+      ansible.builtin.apt:
+        upgrade: full
+        update_cache: true
+        autoremove: false
+      async: 3600
+      poll: 15
 
-- name: 8. Verify GPU Hardware and Driver State
-  ansible.builtin.command: nvidia-smi --query-gpu=name,driver_version,pci.bus_id --format=csv,noheader
-  register: smi_verification
-  changed_when: false
-  retries: 3
-  delay: 5
-  until: smi_verification.rc == 0
+    - name: Stage firmware capsules (applied during the next reboot)
+      when: upgrade_firmware | bool
+      block:
+        - name: Refresh LVFS metadata
+          ansible.builtin.command: fwupdmgr refresh --force
+          register: upgrade_fw_refresh
+          changed_when: false
+          failed_when: upgrade_fw_refresh.rc not in [0, 2]
+        - name: Apply firmware without letting fwupd reboot on its own
+          ansible.builtin.command: fwupdmgr update -y --no-reboot-check
+          register: upgrade_fw
+          changed_when: upgrade_fw.rc == 0
+          failed_when: upgrade_fw.rc not in [0, 2]      # 2 = nothing to update
 
-- name: 9. Verify Fabric Manager Service State
-  ansible.builtin.command: systemctl is-active nvidia-fabricmanager
-  register: fm_status
-  changed_when: false
-  failed_when: fm_status.stdout != "active"
+    - name: Reboot and wait for the GPU (capsule flashing can take ~10 min — do NOT cut power)
+      ansible.builtin.reboot:
+        reboot_timeout: 1800
+        post_reboot_delay: 30
+        test_command: nvidia-smi -L
+      when: upgrade_reboot | bool
 
-- name: 10. Audit NVLink Operational State
-  ansible.builtin.command: nvidia-smi nvlink -s
-  register: nvlink_check
-  changed_when: false
-  failed_when: "'inactive' in nvlink_check.stdout.lower() or 'error' in nvlink_check.stdout.lower()"
+    - name: Re-apply holds and baseline (idempotent)
+      ansible.builtin.include_role:
+        name: spark_baseline
+        tasks_from: packages.yml
+
+    - name: Refresh facts
+      ansible.builtin.include_role:
+        name: spark_facts
+
+    - name: Regenerate CDI spec for the new driver
+      ansible.builtin.include_role:
+        name: container_runtime
+      vars:
+        container_runtime_smoke_test: true
+
+    - name: Validate and return to service
+      ansible.builtin.include_role:
+        name: node_drain
+      vars:
+        node_drain_k8s: "{{ inventory_hostname in (groups['k3s_server'] | default([])) + (groups['k3s_agent'] | default([])) }}"
+        node_drain_collect: false
+        node_drain_stop_containers: false
+        node_drain_undrain_after: true
+```
+
+```bash
+ansible-playbook playbooks/17-dgxos-upgrade.yml -K -e upgrade_dry_run=true    # what's pending, on every node
+ansible-playbook playbooks/17-dgxos-upgrade.yml -K -l spark-02                  # canary
+ansible-playbook playbooks/16-driver-audit.yml -K -l spark-02
+ansible-playbook playbooks/10-nccl-test.yml -K        # the cross-node check: mixed driver versions?
+ansible-playbook playbooks/17-dgxos-upgrade.yml -K -l spark-01
+```
+
+**Canary discipline:** upgrade one Spark, run real work on it (a vLLM or NCCL job), then do the other. For NCCL across two Sparks, keep **matching driver and NCCL versions on both nodes**. A mixed state is only acceptable during the rollout window.
+
+### 3.3 Check what `nvidia-smi` can and can't tell you on a UMA system
+
+```bash
+nvidia-smi --query-gpu=name,driver_version,compute_cap,memory.total,memory.used --format=csv
+# name, driver_version, compute_cap, memory.total [MiB], memory.used [MiB]
+# NVIDIA GB10, 580.xx.xx, 12.1, [N/A], [N/A]     <- expected on unified memory
+free -g        # the real memory signal for GPU workloads
 ```
 
 ---
 
-## 6. Comparative Driver Architecture Matrix
+## 4. Integrations
 
-| Architectural Vector | Closed-Source Driver | NVIDIA Open Kernel Modules | Pre-compiled Distro KMOD |
-| :--- | :--- | :--- | :--- |
-| **Kernel Source Code** | Proprietary binary blobs | **100% Open Source (GPL/MIT)**| Pre-compiled binaries |
-| **GSP Firmware Role** | Optional / Disabled | **Mandatory (Firmware handles HW)**| Mandatory |
-| **DKMS Build Time** | 3–6 Minutes / Node | 2–4 Minutes / Node | **Zero (Installs in seconds)** |
-| **Secure Boot Support** | Manual MOK key signing | Manual or Distro Signed | **Native Secure Boot Signed** |
-| **Hopper / Blackwell Fit**| Deprecated | **Official Reference Standard**| **Production Recommended** |
+| Downstream | Why it cares about the driver |
+|---|---|
+| CDI spec (Volume 08) | Hard-codes library paths and versions. **Regenerate after every driver change** (the upgrade playbook does) |
+| k3s + GPU Operator (Volumes 16–17) | Operator validator pods check the host driver; a mismatch blocks the device plugin |
+| Slurm (Volume 18) | The health check drains a node when `nvidia-smi` fails, which is what a mismatch looks like |
+| NCCL (Volume 12) | Mixed driver or NCCL versions across Sparks: hangs or crashes at init |
+| Drift (Volume 22) | `module_loaded != module_on_disk` = "reboot pending", a first-class drift signal |
 
----
+## 5. Troubleshooting & diagnostics
 
-## 7. SRE Diagnostics & Troubleshooting Playbook
+| Symptom | Meaning | Diagnose | Fix |
+|---|---|---|---|
+| `Failed to initialize NVML: Driver/library version mismatch` | Userland upgraded, old module still loaded | Audit: `nvml_userland != module_loaded` | Reboot (or unload and reload the modules with the GPU idle: stop persistenced, `rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia`, `modprobe nvidia`) |
+| Audit: `module_loaded != module_on_disk` | Upgrade done, reboot pending | `cat /proc/driver/nvidia/version` vs `modinfo nvidia` | Schedule a reboot through the drain playbook |
+| `nvidia-smi` hangs | GPU/driver wedged | `timeout 10 nvidia-smi; echo $?` → 124; `dmesg \| grep -i xid` | Volume 24 Runbook A (drain → bug report → reboot) |
+| `NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver` | Module not loaded | `lsmod \| grep nvidia`; `journalctl -k -b \| grep -i nvidia` | A kernel updated without a matching module? `apt install --reinstall` the matching `linux-modules-nvidia-*`; check Secure Boot/MOK |
+| Apt wants to remove `nvidia-*` during an upgrade | Held packages conflict with a new kernel | `apt-get -s full-upgrade \| grep -E '^Remv'` | Don't force it. Let the playbook unhold everything together, or wait for a consistent DGX OS release |
+| Containers: `could not select device driver "" with capabilities: [[gpu]]` | Docker has no nvidia runtime/CDI | `docker info \| grep -i runtime` | Volume 08 (`03-containers.yml`) |
+| CUDA app: `no kernel image is available for execution on the device` | Binary not built for sm_121 | `cuobjdump --list-elf app \| grep sm_` | Rebuild with `-gencode arch=compute_121,code=sm_121` (or embed PTX); use NGC containers built for Blackwell |
 
-```
-+---------------------------------------------------------------------------------------------------+
-|                        NVIDIA DRIVER SRE DIAGNOSTIC MATRIX                                        |
-+------------------------------------+--------------------------+-----------------------------------+
-| Symptom / Failure Mode             | Root Cause Hypothesis    | Triage & Remediation Command      |
-+------------------------------------+--------------------------+-----------------------------------+
-| `nvidia-smi` returns: "Unable to   | Driver version updated   | Reboot node to load new kmod:     |
-| determine device handle".          | but old module remains   | `reboot` or check active version: |
-|                                    | loaded in Linux kernel.  | `cat /proc/driver/nvidia/version` |
-+------------------------------------+--------------------------+-----------------------------------+
-| Fabric Manager fails with code 1:  | Package version mismatch | Compare exact package versions:   |
-| "Fabric Manager version mismatch". | between driver and FM.   | `dpkg -l | grep -E "nvidia-(driver|
-|                                    |                          | fabricmanager)"`                  |
-+------------------------------------+--------------------------+-----------------------------------+
-| Multi-GPU NCCL jobs stall during   | Fabric Manager crashed;  | Check Fabric Manager logs:        |
-| initialization: NVLink disabled.   | NVSwitch ports in reset. | `journalctl -u nvidia-fabricmanager|
-|                                    |                          |  -n 50 --no-pager`                |
-+------------------------------------+--------------------------+-----------------------------------+
-| Driver compilation fails:          | Kernel headers missing   | Install exact matching headers:   |
-| "scripts/basic/fixdep not found".  | for running kernel.      | `apt install linux-headers-$(uname -r)`|
-+------------------------------------+--------------------------+-----------------------------------+
+Evidence bundle for NVIDIA support:
+
+```bash
+sudo nvidia-bug-report.sh          # → nvidia-bug-report.log.gz  (or node_drain_bug_report=true in Volume 24)
 ```
 
----
+## 6. Validation
 
-## 8. Verification & Architectural Synthesis Checklist
-
-- [ ] **Exact String Pinning:** APT preferences configured with `Pin-Priority: 1001` for driver and FM packages.
-- [ ] **Open Kernel Modules Active:** Verified that `nvidia-driver-*-open` is deployed for Hopper/Blackwell nodes.
-- [ ] **Persistence Mode Enabled:** `nvidia-persistenced` confirmed running and surviving system reboots.
-- [ ] **Fabric Manager Verified:** `systemctl is-active nvidia-fabricmanager` reports `active`.
-- [ ] **All NVLink Interconnects Trained:** `nvidia-smi nvlink -s` confirms all links operational with zero inactive lanes.
+- [ ] `16-driver-audit.yml` passes on every Spark, with `module_flavor: open`.
+- [ ] `apt-mark showhold` lists the NVIDIA packages; `apt upgrade -s` doesn't touch them.
+- [ ] You ran `17-dgxos-upgrade.yml` in dry-run mode, and then for real on one node, with NCCL and a GPU container still working afterwards.

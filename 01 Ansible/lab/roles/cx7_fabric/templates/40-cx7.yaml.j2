@@ -1,0 +1,17 @@
+# {{ ansible_managed }}
+# ConnectX-7 fabric addressing for {{ inventory_hostname }}.
+# Management traffic stays on {{ mgmt_interface | default('enP7s7') }}; this file only touches CX-7 netdevs.
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+{% for itf in cx7_fabric_interfaces %}
+    {{ itf.name }}:
+      dhcp4: false
+      dhcp6: false
+      link-local: []
+      addresses:
+        - {{ itf.address }}
+      mtu: {{ itf.mtu | default(9000) }}
+      optional: true        # don't block boot if the cable is unplugged
+{% endfor %}

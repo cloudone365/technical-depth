@@ -1,242 +1,311 @@
-# Volume 16: Kubernetes Bare-Metal Bootstrapping on DGX/HGX with Kubespray
+# Volume 16 — Kubernetes on DGX Spark with k3s: GPU-Ready Bootstrap, Fabric-Aware Pod Networking, Upgrades (and When Kubespray Is the Right Tool)
 
-```
-====================================================================================================
-MODULE 01: ANSIBLE & BARE-METAL AI INFRASTRUCTURE AUTOMATION
-VOLUME 16: High-Availability etcd Quorums, containerd CRI, Kubespray Engine & GPU Node Hardening
-====================================================================================================
-```
+> **Module 01 · Part IV — Platforms** · Prev: [15 NFS/RDMA](15-parallel-file-system-client-orchestration.md) · Next: [17 GPU Operator](17-nvidia-gpu-operator-helm-automation.md)
 
----
-
-## 1. Executive Intuition: The Bare-Metal Kubernetes Chasm
-
-Deploying Kubernetes on bare-metal AI supercomputers (NVIDIA DGX / HGX clusters) is fundamentally different from clicking a button on AWS EKS or Google GKE. On bare metal, there is no underlying cloud provider to provision control plane load balancers, manage etcd snapshots, or configure virtual VPC routing:
-1. **The etcd Fsync Wall:** etcd is a write-ahead log (WAL) database using the Raft consensus algorithm. In a 1,000-node cluster with high churn, etcd requires sub-10ms disk fsync latency on dedicated NVMe drives. If disk latency spikes, leader elections flap and the API server crashes.
-2. **Containerd GPU Runtime Coupling:** The Kubernetes container runtime interface (`containerd`) must be pre-configured with the `nvidia-container-runtime` and Container Device Interface (CDI) hooks before the `kubelet` daemon starts; otherwise, GPU pods fail with device discovery errors.
-3. **Control Plane High Availability:** Control plane API traffic must be load-balanced across multiple master nodes using an internal Virtual IP (VIP) managed via **Keepalived** and **HAProxy**.
-
-```
-+-----------------------------------------------------------------------------------------+
-|                        KUBESPRAY BARE-METAL TOPOLOGY                                    |
-+-----------------------------------------------------------------------------------------+
-| [Control Plane VIP: 10.200.0.100 (Keepalived / HAProxy)]                                |
-|   |-- Master 01 (kube-apiserver + etcd member 1)                                        |
-|   |-- Master 02 (kube-apiserver + etcd member 2)                                        |
-|   +-- Master 03 (kube-apiserver + etcd member 3)                                        |
-|                                                                                         |
-| [Bare-Metal GPU Worker Nodes: 8x H100 / B200 Servers]                                   |
-|   |-- kubelet (configured with fail-swap-on=false)                                      |
-|   |-- containerd (CRI configured with default_runtime_name = "nvidia")                  |
-|   |-- Primary CNI: Cilium / Calico (eBPF host routing)                                  |
-|   +-- Secondary CNI: Multus (Injecting 400 Gbps RoCEv2 interfaces directly to pods)     |
-+-----------------------------------------------------------------------------------------+
-```
-
-**Kubespray**—an enterprise, production-grade Ansible framework maintained by the Kubernetes SIGs—is the definitive industry tool for deploying self-healing, bare-metal Kubernetes clusters on physical hardware.
+| | |
+|---|---|
+| **You will build** | A k3s cluster (spark-01 server, spark-02 agent) where GPU pods work out of the box (`default-runtime: nvidia`), pod-to-pod traffic rides the 200G CX-7 link (flannel on the fabric interface), the OS keeps a protected memory reserve on the unified pool, and the kubeconfig lands on your control node |
+| **Hardware** | 1–2× DGX Spark |
+| **Time** | 45 min |
+| **Risk** | Low–medium. Installs services; uninstall with `/usr/local/bin/k3s-uninstall.sh` / `k3s-agent-uninstall.sh` |
 
 ---
 
-## 2. Lineage & Evolution of Bare-Metal Kubernetes
+## 1. Why k3s here (and when Kubespray instead)
 
-```
-   [2015: Manual CoreOS & Flannel]
-                 |
-           (Manual bash scripts generating TLS certificates and static systemd units)
-                 |
-   [2016: kubeadm Utility]
-                 |
-           (Official Kubernetes bootstrapping CLI; handles certs and init, but single-node)
-                 |
-   [2017: Kubespray Project (Kubernetes SIGs)]
-                 |
-           (Enterprise Ansible roles coordinating HA etcd, VIPs, CNI, and multi-OS support)
-                 |
-   [2021: Lightweight Edge Distributions (K3s / RKE2)]
-                 |
-           (Packaged binary K8s with embedded sqlite/etcd; ideal for standalone DGX Spark)
-                 |
-   [2024: Automated GPU Operator Integration]
-                 |
-           (Kubespray orchestrating CDI, NVLink fabrics, and Dynamic Resource Allocation)
-```
+| | k3s | Kubespray (kubeadm-based) |
+|---|---|---|
+| Footprint | One ~70 MB binary; embedded containerd, flannel, CoreDNS, local-path storage | Full upstream components, many Ansible roles |
+| Time to a cluster | Minutes | 20–40 min |
+| Fits a 1–2 node desk lab with 128 GB shared with the GPU | ✅ | Works, but heavier |
+| HA control plane | Embedded etcd with 3 servers | Stacked or external etcd, 3+ masters |
+| When you move to a DGX cluster | Still viable at the edge | **Typical choice**, alongside NVIDIA Base Command Manager, which deploys Kubernetes on DGX clusters itself |
 
----
+The inventory model carries over. Kubespray's groups are `kube_control_plane`, `kube_node` and `etcd`. Map them from the same functional-group idea you used for `k3s_server`/`k3s_agent` (Volume 03A).
 
-## 3. First-Principles Mathematics: etcd Raft Quorum & Write Latency
+## 2. Architecture
 
-etcd uses the **Raft consensus algorithm** to replicate state across cluster masters.
+### 2.1 HLD
 
-### 3.1 Quorum Size & Fault Tolerance
-Let $N$ be the number of etcd members. The cluster requires an absolute majority (Quorum $Q$) to commit transactions:
-
-$$Q = \left\lfloor \frac{N}{2} \right\rfloor + 1$$
-
-$$\text{Fault Tolerance } F = N - Q = \left\lfloor \frac{N - 1}{2} \right\rfloor$$
-
-```
-+-----------------------------------------------------------------------------------------+
-|                         etcd RAFT QUORUM & FAULT CAPACITY                               |
-+-------------------+--------------------+-----------------------+------------------------+
-| Cluster Size (N)  | Quorum Required (Q)| Max Faults Tolerated  | Operational Recommendation|
-+-------------------+--------------------+-----------------------+------------------------+
-| 1                 | 1                  | 0                     | Development / Test only|
-| 3                 | 2                  | 1                     | Standard Production    |
-| 5                 | 3                  | 2                     | Hyperscale Production  |
-| 7                 | 4                  | 3                     | Extreme Scale Clusters |
-+-------------------+--------------------+-----------------------+------------------------+
+```mermaid
+flowchart TB
+  CTL["Control node<br/>kubectl + .cache/kubeconfig-spark-lab.yaml"] -->|"6443 (mgmt LAN)"| API
+  subgraph S1["spark-01 · k3s server"]
+    API["kube-apiserver / controller / scheduler<br/>(sqlite or embedded etcd)"]
+    CD1["containerd (k3s)<br/>runtimes: runc, nvidia (default)"]
+    FL1["flannel VXLAN on enp1s0f1np1"]
+    LP["local-path-provisioner<br/>/var/lib/rancher/k3s/storage"]
+  end
+  subgraph S2["spark-02 · k3s agent"]
+    CD2["containerd (k3s)<br/>runtimes: runc, nvidia (default)"]
+    FL2["flannel VXLAN on enp1s0f1np1"]
+  end
+  API <-->|"node-ip = mgmt 10.10.10.x"| S2
+  FL1 <==>|"pod traffic over CX-7 200G"| FL2
 ```
 
-> **Why Even Numbers (e.g. N=4) are Forbidden:** A 4-node cluster requires $Q = \lfloor 4/2 \rfloor + 1 = 3$ nodes for quorum. It can tolerate only $4 - 3 = 1$ failure. A 3-node cluster also tolerates 1 failure. Adding a 4th node adds network partition vulnerability without increasing fault tolerance! Always use **3 or 5** members.
+### 2.2 LLD: the config file
 
-### 3.2 Disk fsync Latency Constraint
-Every etcd write requires synchronous flush to non-volatile storage via the `fdatasync()` syscall:
-
-$$T_{\text{commit}} = T_{\text{network\_rtt}} + T_{\text{fsync\_disk}}$$
-
-If $T_{\text{fsync\_disk}} > 10\text{ ms}$, etcd logs: `etcdserver: read-only range request took too long`.
-If disk latency exceeds the Raft heartbeat interval ($100\text{ ms}$), etcd triggers catastrophic leader re-elections, freezing Kube-API requests.
-- **Ansible Invariant:** etcd data directory (`/var/lib/etcd`) must be mounted on dedicated PCIe NVMe drives, isolated from OS logs and container overlays.
-
----
-
-## 4. Deep Architecture: Kubespray Configuration Hierarchy
-
-Kubespray organizes configuration through structured group variables:
-
-```
-inventory/ai-cluster/
-├── hosts.yaml              # Node IPs, control-plane vs worker assignments
-└── group_vars/
-    ├── all/
-    │   ├── all.yml         # Global proxy, VIP, and upstream repository mirrors
-    │   └── containerd.yml  # Container runtime flags and NVIDIA hooks
-    └── k8s_cluster/
-        ├── k8s-cluster.yml # Kubernetes version, CNI choice (Cilium/Calico), VIP
-        └── addons.yml      # Metrics-server, local-path-provisioner
-```
-
----
-
-## 5. Concrete Production Lab: Automated Kubespray Deployment Playbook
-
-Below is an enterprise Ansible configuration deploying a 3-node HA control plane with containerd GPU hooks enabled.
-
-### 5.1 Kubespray Cluster Configuration (`group_vars/k8s_cluster/k8s-cluster.yml`)
 ```yaml
----
-# Kubernetes Core Settings
-kube_version: v1.29.3
-kube_network_plugin: cilium
-kube_service_addresses: 10.233.0.0/18
-kube_pods_subnet: 10.233.64.0/18
-
-# Load Balancer VIP for API Server
-loadbalancer_apiserver_localhost: true
-loadbalancer_apiserver:
-  address: 10.200.0.100
-  port: 6443
-
-# High-Performance Node Hardening
-kubelet_cgroup_driver: systemd
-kubelet_status_update_frequency: 5s
-kubelet_node_status_report_frequency: 1m
-
-# GPU Containerd Runtime Integration
-container_manager: containerd
-containerd_default_runtime: "nvidia"
-containerd_additional_runtimes:
-  nvidia:
-    type: "io.containerd.runc.v2"
-    engine: ""
-    root: ""
-    options:
-      BinaryName: "/usr/bin/nvidia-container-runtime"
+# lab/roles/k3s_cluster/templates/config.yaml.j2
+# {{ ansible_managed }}
+# /etc/rancher/k3s/config.yaml — read by both 'k3s server' and 'k3s agent'
+node-ip: {{ k3s_cluster_node_ip }}
+flannel-iface: {{ k3s_cluster_flannel_iface }}
+{% if k3s_cluster_role == 'server' %}
+write-kubeconfig-mode: "0640"
+tls-san:
+  - {{ k3s_cluster_node_ip }}
+  - {{ inventory_hostname }}
+disable:
+{% for d in k3s_cluster_disable %}
+  - {{ d }}
+{% endfor %}
+flannel-backend: vxlan
+{% else %}
+server: https://{{ hostvars[groups[k3s_cluster_server_group][0]].k3s_cluster_node_ip | default(hostvars[groups[k3s_cluster_server_group][0]].ansible_host) }}:6443
+{% endif %}
+{% if k3s_cluster_default_runtime_nvidia %}
+default-runtime: nvidia
+{% endif %}
+kubelet-arg:
+{% for a in k3s_cluster_kubelet_args %}
+  - "{{ a }}"
+{% endfor %}
+node-label:
+  - "nvidia.com/gpu.product=GB10"
+  - "spark.lab/node-index={{ spark_node_index | default(0) }}"
 ```
 
-### 5.2 Kubespray Execution Wrapper Playbook (`deploy_k8s_baremetal.yml`)
+| Key | Value | Reason |
+|---|---|---|
+| `node-ip` | mgmt IP | API, kubelet and SSH on the management network |
+| `flannel-iface` | CX-7 netdev when there are 2+ Sparks | Pod-to-pod VXLAN over 200G instead of 10G |
+| `default-runtime: nvidia` | on | k3s auto-detects `nvidia-container-runtime` at startup and adds an `nvidia` runtime to its containerd; making it the default means GPU pods need no `runtimeClassName` (convenient for a lab; for multi-tenant clusters use a RuntimeClass instead) |
+| `system-reserved` / `kube-reserved` / `eviction-hard` | 8 GiB + 2 GiB reserve, evict < 4 GiB | On UMA, pods (and their GPU allocations) share memory with DGX OS. Without a reserve, a big model can starve sshd and the Dashboard |
+| `disable: [traefik]` | — | Keep 80/443 free; choose your own ingress |
+| `node-label` | `nvidia.com/gpu.product=GB10`, node index | Scheduling selectors before GPU Operator's NFD labels exist |
+
+---
+
+## 3. The role
+
 ```yaml
+# lab/roles/k3s_cluster/tasks/main.yml
 ---
-- name: Phase 1 - Pre-flight Bare Metal OS Preparation
-  hosts: k8s_cluster
-  become: true
-  tasks:
-    - name: 1. Disable Linux Swap (Required by Kubernetes)
-      ansible.builtin.command: swapoff -a
-      changed_when: false
+- name: Determine this node's k3s role
+  ansible.builtin.set_fact:
+    k3s_cluster_role: "{{ 'server' if inventory_hostname in groups[k3s_cluster_server_group] else 'agent' }}"
 
-    - name: Remove swap entry from fstab
-      ansible.builtin.lineinfile:
-        path: /etc/fstab
-        regexp: '\sswap\s'
-        state: absent
+- name: Sanity — nvidia-container-runtime must exist for GPU pods
+  ansible.builtin.stat:
+    path: /usr/bin/nvidia-container-runtime
+  register: k3s_cluster_ncr
+  failed_when: not k3s_cluster_ncr.stat.exists
 
-    - name: 2. Enable Required Linux Kernel Networking Modules
-      community.general.modprobe:
-        name: "{{ item }}"
-        state: present
-      loop:
-        - overlay
-        - br_netfilter
+- name: Ensure k3s config directory exists
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
 
-    - name: 3. Configure Kubernetes Kernel Sysctl Parameters
-      ansible.posix.sysctl:
-        name: "{{ item.name }}"
-        value: "{{ item.value }}"
-        state: present
-        sysctl_file: /etc/sysctl.d/99-kubernetes-cri.conf
-        reload: true
-      loop:
-        - { name: "net.bridge.bridge-nf-call-iptables", value: "1" }
-        - { name: "net.bridge.bridge-nf-call-ip6tables", value: "1" }
-        - { name: "net.ipv4.ip_forward", value: "1" }
+- name: Write k3s config
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: /etc/rancher/k3s/config.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  register: k3s_cluster_config
 
-- name: Phase 2 - Trigger Kubespray Automated Orchestration
-  import_playbook: kubespray/cluster.yml
+- name: Check installed k3s version
+  ansible.builtin.command: k3s --version
+  register: k3s_cluster_installed
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  failed_when: false
+
+- name: Download installer
+  ansible.builtin.get_url:
+    url: "{{ k3s_cluster_install_url }}"
+    dest: /usr/local/bin/k3s-install.sh
+    mode: "0755"
+  when: k3s_cluster_version not in k3s_cluster_installed.stdout | default('')
+
+# --------------------------------------------------------------- server
+- name: Install / upgrade k3s server
+  ansible.builtin.command: /usr/local/bin/k3s-install.sh
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_cluster_version }}"
+    INSTALL_K3S_EXEC: server
+  changed_when: true
+  when:
+    - k3s_cluster_role == 'server'
+    - k3s_cluster_version not in k3s_cluster_installed.stdout | default('')
+
+- name: Restart server on config change
+  ansible.builtin.service:
+    name: k3s
+    state: restarted
+  when:
+    - k3s_cluster_role == 'server'
+    - k3s_cluster_config is changed
+    - k3s_cluster_version in k3s_cluster_installed.stdout | default('')
+
+- name: Wait for API server
+  ansible.builtin.command: k3s kubectl get --raw /readyz
+  register: k3s_cluster_ready
+  until: k3s_cluster_ready.rc == 0
+  retries: 30
+  delay: 5
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  when: k3s_cluster_role == 'server'
+
+- name: Read join token
+  ansible.builtin.slurp:
+    src: /var/lib/rancher/k3s/server/node-token
+  register: k3s_cluster_token_raw
+  no_log: true
+  when: k3s_cluster_role == 'server'
+
+# --------------------------------------------------------------- agents
+- name: Install / upgrade k3s agent
+  ansible.builtin.command: /usr/local/bin/k3s-install.sh
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_cluster_version }}"
+    INSTALL_K3S_EXEC: agent
+    K3S_TOKEN: "{{ hostvars[groups[k3s_cluster_server_group][0]].k3s_cluster_token_raw.content | b64decode | trim }}"
+  no_log: true
+  changed_when: true
+  when:
+    - k3s_cluster_role == 'agent'
+    - k3s_cluster_version not in k3s_cluster_installed.stdout | default('')
+
+- name: Restart agent on config change
+  ansible.builtin.service:
+    name: k3s-agent
+    state: restarted
+  when:
+    - k3s_cluster_role == 'agent'
+    - k3s_cluster_config is changed
+    - k3s_cluster_version in k3s_cluster_installed.stdout | default('')
+
+# --------------------------------------------------------------- verify
+- name: Wait for all nodes Ready
+  ansible.builtin.command: >-
+    k3s kubectl wait --for=condition=Ready node --all --timeout=180s
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  run_once: true
+  delegate_to: "{{ groups[k3s_cluster_server_group][0] }}"
+
+- name: Confirm containerd registered the nvidia runtime
+  ansible.builtin.command: >-
+    grep -A2 'runtimes."nvidia"' /var/lib/rancher/k3s/agent/etc/containerd/config.toml
+  register: k3s_cluster_rt
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  failed_when: k3s_cluster_rt.rc != 0
+
+- name: Fetch kubeconfig to the control node
+  ansible.builtin.fetch:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: "{{ k3s_cluster_kubeconfig_local }}"
+    flat: true
+  when: k3s_cluster_role == 'server'
+
+- name: Point kubeconfig at the server's mgmt IP
+  ansible.builtin.replace:
+    path: "{{ k3s_cluster_kubeconfig_local }}"
+    regexp: 'https://127\.0\.0\.1:6443'
+    replace: "https://{{ k3s_cluster_node_ip }}:6443"
+  delegate_to: localhost
+  become: false
+  when: k3s_cluster_role == 'server'
 ```
 
----
+Things worth noticing:
 
-## 6. Comparative Bare-Metal Orchestration Matrix
-
-| Feature | Managed Cloud K8s (EKS/GKE) | Manual `kubeadm` | Kubespray (Ansible) |
-| :--- | :--- | :--- | :--- |
-| **Hardware Control** | Zero (Cloud abstracted) | Full | **Full Bare-Metal Control** |
-| **High Availability etcd** | Handled by Cloud | Manual config | **Automated Raft Clustering** |
-| **GPU / CDI Integration** | Basic AMI | Manual hooks | **Pre-configured in containerd** |
-| **Multi-NIC / Multus** | Challenging | Manual | **Native Supported Addon** |
-| **Scale Limits** | Cloud Quota bounded | Operational burden | **1,000+ Bare-Metal Nodes** |
+- **Version-gated install.** The installer runs only if `k3s --version` doesn't already contain the pinned version, so re-runs are no-ops and bumping `k3s_cluster_version` is an upgrade.
+- **The join token is read with `slurp`** on the server and passed through `hostvars` to agents under `no_log`. It's never written to disk on the control node.
+- **Runtime proof:** the role greps k3s's generated containerd config for `runtimes."nvidia"`. If it's missing, the NVIDIA toolkit wasn't there when k3s started.
 
 ---
 
-## 7. SRE Diagnostics & Troubleshooting Playbook
+## 4. Hands-on
 
-```
-+---------------------------------------------------------------------------------------------------+
-|                        BARE-METAL KUBERNETES SRE DIAGNOSTIC MATRIX                                |
-+------------------------------------+--------------------------+-----------------------------------+
-| Symptom / Failure Mode             | Root Cause Hypothesis    | Triage & Remediation Command      |
-+------------------------------------+--------------------------+-----------------------------------+
-| `kubelet` fails to start:          | Linux Swap active on     | Disable swap immediately:         |
-| "Running with swap on is not supp".| node.                    | `swapoff -a && sed -i '/swap/d'   |
-|                                    |                          |  /etc/fstab`                      |
-+------------------------------------+--------------------------+-----------------------------------+
-| `etcd` logs: "took too long to     | High disk I/O latency on | Benchmark etcd disk latency:      |
-| execute fdatasync".                | storage drive.           | `fio --name=etcd --rw=write --bs=4k|
-|                                    |                          |  --size=1G --direct=1`            |
-+------------------------------------+--------------------------+-----------------------------------+
-| Kube-API server VIP unreachable;   | Keepalived split-brain or| Check keepalived VRRP status:     |
-| kubectl commands time out.         | HAProxy service dead.    | `systemctl status keepalived`     |
-|                                    |                          | Check local VIP binding: `ip a`   |
-+------------------------------------+--------------------------+-----------------------------------+
+```bash
+cd "01 Ansible/lab"
+ansible-playbook playbooks/05-k3s.yml -K
+export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
+kubectl get nodes -o wide
+kubectl describe node spark-01 | sed -n '/Allocatable/,/System Info/p'
 ```
 
+### 4.1 A GPU pod *before* any device plugin
+
+With `default-runtime: nvidia`, a pod can see the GPU even without the GPU Operator. That's useful for understanding what the operator adds (scheduling and accounting):
+
+```bash
+kubectl run smi --rm -it --restart=Never --image=nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04 \
+  --env NVIDIA_VISIBLE_DEVICES=all -- nvidia-smi -L
+```
+
+It works, but Kubernetes has no idea a GPU was used: no `nvidia.com/gpu` resource, so no scheduling guarantees. Volume 17 fixes that.
+
+### 4.2 Verify pod traffic uses the fabric
+
+```bash
+kubectl get pods -A -o wide | head
+ssh nvidia@10.10.10.11 'ip -d link show flannel.1 | grep -o "dev [^ ]*"'   # → dev enp1s0f1np1
+kubectl run a --image=nicolaka/netshoot --overrides='{"spec":{"nodeName":"spark-01"}}' -- sleep 1d
+kubectl run b --image=nicolaka/netshoot --overrides='{"spec":{"nodeName":"spark-02"}}' -- sleep 1d
+B=$(kubectl get pod b -o jsonpath='{.status.podIP}')
+kubectl exec b -- iperf3 -s -D; kubectl exec a -- iperf3 -c $B -P 4 -t 10
+```
+
+VXLAN over the CX-7 should comfortably beat the 10GbE ceiling. It won't reach RDMA numbers; for that, use Volume 13's secondary network.
+
+### 4.3 Upgrade k3s
+
+```bash
+# bump k3s_cluster_version in roles/k3s_cluster/defaults/main.yml (or -e), then:
+ansible-playbook playbooks/05-k3s.yml -K -e k3s_cluster_version=v1.33.1+k3s1 --check   # what would run
+ansible-playbook playbooks/05-k3s.yml -K -e k3s_cluster_version=v1.33.1+k3s1
+```
+
+Server first, then agents (`order: sorted` with the server listed first). Skip at most one minor version at a time. Drain an agent (Volume 24) before upgrading it if workloads are running.
+
 ---
 
-## 8. Verification & Architectural Synthesis Checklist
+## 5. Integrations
 
-- [ ] **Swap Completely Disabled:** `free -m` reports 0 MB swap across all nodes.
-- [ ] **etcd Quorum Verified:** `etcdctl endpoint health` confirms healthy consensus across all 3/5 members.
-- [ ] **Control Plane VIP Functional:** `kubectl cluster-info` reaches API server across load balancer VIP.
-- [ ] **NVIDIA Containerd Runtime Active:** containerd configured with `default_runtime_name = "nvidia"`.
-- [ ] **Overlay Networking Functional:** Pod-to-Pod ping across different nodes validates CNI routing.
+| Next step | Depends on |
+|---|---|
+| GPU Operator (Volume 17) | the containerd `nvidia` runtime; `toolkit.enabled=false` because DGX OS provides it |
+| Multus/RDMA (Volume 13) | k3s CNI paths (`/var/lib/rancher/k3s/agent/etc/cni/net.d`, `/var/lib/rancher/k3s/data/cni`) |
+| AWX (Volume 02B/20) | runs on this cluster; its PVC uses `local-path` |
+| NFS models (Volume 15) | `hostPath: /mnt/models` or `csi-driver-nfs` |
+| Vault (Volume 19) | pods get secrets via Vault Agent Injector or External Secrets |
+
+## 6. Troubleshooting & diagnostics
+
+| Symptom | Diagnose | Fix |
+|---|---|---|
+| Agent never joins | `journalctl -u k3s-agent -f` → `failed to get CA certs` / `401` | Wrong server URL or token; the server's `tls-san` must include the IP the agent uses |
+| Node `NotReady` | `kubectl describe node`; `journalctl -u k3s -n 100` | CNI: `flannel-iface` points at a down interface (cable pulled?). Fall back to `mgmt_interface` |
+| Role fails "nvidia runtime registered" check | `grep -n nvidia /var/lib/rancher/k3s/agent/etc/containerd/config.toml` | Toolkit installed after k3s started: `systemctl restart k3s` (or `k3s-agent`) |
+| GPU pod: `failed to create shim: ... nvidia-container-runtime: not found` | `which nvidia-container-runtime` | Run Volume 08 first; restart k3s |
+| Pods evicted with `MemoryPressure` while a model loads | `kubectl describe node \| grep -A5 Conditions`; `free -g` | Working as designed (eviction at < 4 GiB). Reduce model or batch size; stop idle pods; tune the reserve |
+| kubectl from the control node: `x509: certificate is valid for 127.0.0.1` | kubeconfig `server:` | The role rewrites `127.0.0.1` to the mgmt IP; re-fetch or edit |
+| `ImagePullBackOff` with `no match for platform` | `kubectl describe pod` | amd64-only image; find an arm64 build (Volume 08 §3.4) |
+
+## 7. Validation
+
+- [ ] `kubectl get nodes`: all `Ready`, `ARCH=arm64`.
+- [ ] `flannel.1` bound to the CX-7 interface on 2-node setups; pod-to-pod iperf beats 10 Gb/s.
+- [ ] The `smi` pod prints the GB10.
+- [ ] Re-running `05-k3s.yml` reports no installs (version-gated).

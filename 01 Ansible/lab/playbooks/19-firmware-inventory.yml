@@ -1,0 +1,106 @@
+---
+# Firmware + security-posture inventory across all Sparks.
+#  * fwupd device versions (UEFI, EC, SoC, USB-PD, …) and pending updates
+#  * GPU VBIOS, CX-7 firmware (read-only queries)
+#  * driver version vs the minimum fixed version from the latest NVIDIA security bulletin
+#  * cross-node consistency — mixed firmware across a cluster is a real, common finding
+- name: Collect firmware inventory
+  hosts: spark
+  become: true
+  gather_facts: false
+  vars:
+    # Set from the NVIDIA GPU Display Driver security bulletin that applies to your branch.
+    # Empty = skip the check.
+    spark_driver_min_secure: ""
+  tasks:
+    - name: Refresh fwupd metadata (LVFS)
+      ansible.builtin.command: fwupdmgr refresh --force
+      register: fw_refresh
+      changed_when: false
+      failed_when: fw_refresh.rc not in [0, 2]      # 2 = nothing to do / already fresh
+
+    - name: Devices known to fwupd
+      ansible.builtin.command: fwupdmgr get-devices --json
+      register: fw_devices
+      changed_when: false
+
+    - name: Pending firmware updates
+      ansible.builtin.command: fwupdmgr get-updates --json
+      register: fw_updates
+      changed_when: false
+      failed_when: fw_updates.rc not in [0, 2]       # 2 = no updates available
+
+    - name: GPU VBIOS and driver
+      ansible.builtin.command: nvidia-smi --query-gpu=vbios_version,driver_version --format=csv,noheader
+      register: fw_gpu
+      changed_when: false
+
+    - name: CX-7 firmware (ethtool -i on each configured port)
+      ansible.builtin.command: "ethtool -i {{ item.name }}"
+      loop: "{{ cx7_interfaces | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: fw_cx7
+      changed_when: false
+      failed_when: false
+
+    - name: Build per-host record
+      ansible.builtin.set_fact:
+        fw_record:
+          fwupd: >-
+            {{ (fw_devices.stdout | from_json).Devices | default([])
+               | selectattr('Version', 'defined')
+               | items2dict(key_name='Name', value_name='Version') }}
+          pending: >-
+            {{ (fw_updates.stdout | default('{}', true) | from_json).Devices | default([])
+               | map(attribute='Name') | list }}
+          vbios: "{{ fw_gpu.stdout.split(',')[0] | trim }}"
+          driver: "{{ fw_gpu.stdout.split(',')[1] | trim }}"
+          cx7: >-
+            {{ fw_cx7.results | default([])
+               | map(attribute='stdout') | map('regex_search', 'firmware-version: (.*)', '\1') | map('first') | list | unique }}
+
+    - name: Security floor for the driver
+      ansible.builtin.assert:
+        that: fw_record.driver is version(spark_driver_min_secure, '>=')
+        fail_msg: >-
+          {{ inventory_hostname }} driver {{ fw_record.driver }} is below the security floor
+          {{ spark_driver_min_secure }} — schedule playbooks/17-dgxos-upgrade.yml
+        success_msg: "driver {{ fw_record.driver }} >= {{ spark_driver_min_secure }}"
+      when: spark_driver_min_secure | length > 0
+
+- name: Cross-node comparison
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Collate
+      ansible.builtin.set_fact:
+        fw_all: "{{ dict(groups['spark'] | zip(groups['spark'] | map('extract', hostvars, 'fw_record'))) }}"
+
+    - name: Components whose version differs between nodes
+      ansible.builtin.set_fact:
+        fw_mismatch: >-
+          {%- set out = {} -%}
+          {%- set names = fw_all.values() | map(attribute='fwupd') | map('list') | flatten | unique -%}
+          {%- for n in names -%}
+            {%- set vers = fw_all.values() | map(attribute='fwupd') | map(attribute=n) | list | unique -%}
+            {%- if vers | length > 1 -%}{%- set _ = out.update({n: vers}) -%}{%- endif -%}
+          {%- endfor -%}
+          {%- for k in ['vbios', 'driver'] -%}
+            {%- set vers = fw_all.values() | map(attribute=k) | list | unique -%}
+            {%- if vers | length > 1 -%}{%- set _ = out.update({k: vers}) -%}{%- endif -%}
+          {%- endfor -%}
+          {{ out }}
+
+    - name: Write report
+      ansible.builtin.copy:
+        dest: "{{ playbook_dir }}/../.cache/firmware-inventory.json"
+        content: "{{ {'hosts': fw_all, 'mismatch': fw_mismatch} | to_nice_json }}"
+        mode: "0644"
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "Pending updates: {{ fw_all | dict2items | selectattr('value.pending') | map(attribute='key') | list }}"
+          - "Version mismatches across nodes: {{ fw_mismatch if fw_mismatch else 'none' }}"

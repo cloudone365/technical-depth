@@ -1,0 +1,82 @@
+---
+# Is the NVIDIA stack on each Spark internally consistent?
+#   kernel module (loaded) == kernel module (on disk) == userland libs == what nvidia-smi reports
+# A mismatch is THE classic post-upgrade failure: "Failed to initialize NVML: Driver/library version mismatch".
+- name: NVIDIA driver stack audit
+  hosts: spark
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Loaded kernel module version (/proc/driver/nvidia/version)
+      ansible.builtin.slurp:
+        src: /proc/driver/nvidia/version
+      register: audit_proc
+      failed_when: false
+
+    - name: On-disk module version (what will load after reboot)
+      ansible.builtin.shell: set -o pipefail; modinfo nvidia | awk '/^version:/{print $2}'
+      args: { executable: /bin/bash }
+      register: audit_modinfo
+      changed_when: false
+      failed_when: false
+
+    - name: Userland NVML library version
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        ls /usr/lib/aarch64-linux-gnu/libnvidia-ml.so.* 2>/dev/null
+        | sed -n 's/.*libnvidia-ml\.so\.\([0-9][0-9.]*\)$/\1/p' | sort -V | tail -1
+      args: { executable: /bin/bash }
+      register: audit_nvml
+      changed_when: false
+
+    - name: What nvidia-smi says (fails on mismatch)
+      ansible.builtin.command: nvidia-smi --query-gpu=driver_version --format=csv,noheader
+      register: audit_smi
+      changed_when: false
+      failed_when: false
+
+    - name: Installed NVIDIA/CUDA packages
+      ansible.builtin.package_facts:
+        manager: apt
+
+    - name: Persistence daemon state
+      ansible.builtin.systemd_service:
+        name: nvidia-persistenced
+      register: audit_persist
+      failed_when: false
+
+    - name: Build report
+      ansible.builtin.set_fact:
+        driver_audit:
+          kernel_running: "{{ ansible_facts.kernel }}"
+          module_loaded: >-
+            {{ (audit_proc.content | default('') | b64decode
+                | regex_search('Kernel Module(?: for [a-z0-9]+)?\s+([0-9.]+)', '\1')
+                | default(['none'], true)) | first }}
+          module_flavor: "{{ 'open' if 'Open Kernel Module' in (audit_proc.content | default('') | b64decode) else 'proprietary/unknown' }}"
+          module_on_disk: "{{ audit_modinfo.stdout | default('none', true) }}"
+          nvml_userland: "{{ audit_nvml.stdout | default('none', true) }}"
+          nvidia_smi: "{{ audit_smi.stdout if audit_smi.rc == 0 else 'ERROR: ' ~ (audit_smi.stdout ~ audit_smi.stderr) | trim }}"
+          persistenced: "{{ audit_persist.status.ActiveState | default('absent') }}"
+          held: "{{ ansible_facts.packages.keys() | select('match', spark_nvidia_hold_regex) | list | length }}"
+          cuda_pkgs: "{{ ansible_facts.packages.keys() | select('match', '^cuda-toolkit-[0-9]') | list }}"
+          nvswitch_present: false     # GB10: GPU<->CPU is NVLink-C2C on package; no NVSwitch, no Fabric Manager
+
+    - name: Show report
+      ansible.builtin.debug:
+        var: driver_audit
+
+    - name: Verdict
+      ansible.builtin.assert:
+        that:
+          - driver_audit.module_loaded == driver_audit.module_on_disk
+          - driver_audit.module_loaded == driver_audit.nvml_userland
+          - driver_audit.nvidia_smi == driver_audit.module_loaded
+          - driver_audit.module_flavor == 'open'
+        fail_msg: >-
+          Driver stack inconsistent on {{ inventory_hostname }}:
+          loaded={{ driver_audit.module_loaded }} disk={{ driver_audit.module_on_disk }}
+          userland={{ driver_audit.nvml_userland }} smi={{ driver_audit.nvidia_smi }}.
+          Loaded != disk → reboot pending after an upgrade. Userland != loaded → partial upgrade;
+          see Volume 07 troubleshooting.
+        success_msg: "Driver {{ driver_audit.module_loaded }} ({{ driver_audit.module_flavor }}) consistent"

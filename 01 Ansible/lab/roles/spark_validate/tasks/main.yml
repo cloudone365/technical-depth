@@ -1,0 +1,90 @@
+---
+# Every check records a result instead of failing immediately, so one run
+# produces the full picture. The final task fails if anything failed.
+- name: Refresh local facts
+  ansible.builtin.setup:
+    filter: [ansible_local, ansible_architecture, ansible_processor_nproc, ansible_memtotal_mb, ansible_distribution_major_version]
+
+- name: Hardware / OS invariants
+  ansible.builtin.set_fact:
+    spark_validate_results: >-
+      {{ {
+        'arch_aarch64': ansible_facts.architecture == spark_expected.arch,
+        'cpu_20_cores': ansible_facts.processor_nproc | int == spark_expected.cpu_cores,
+        'os_ubuntu24': ansible_facts.distribution_major_version == spark_expected.os_major,
+        'mem_ge_min': (ansible_facts.memtotal_mb / 1024) >= spark_expected.mem_total_gib_min,
+        'gpu_present': ansible_local.spark.gpu.present | default(false),
+        'gpu_is_gb10': (ansible_local.spark.gpu.name | default('')) is search(spark_expected.gpu_name_regex),
+        'driver_ge_min': (ansible_local.spark.gpu.driver_version | default('0')).split('.')[0] | int >= spark_expected.driver_major_min,
+        'cuda_major': (ansible_local.spark.gpu.cuda_driver_api | default('0')).split('.')[0] | int == spark_expected.cuda_major,
+        'compute_cap_12_1': ansible_local.spark.gpu.compute_cap | default('') == spark_expected.compute_capability,
+      } }}
+
+- name: Container GPU access
+  ansible.builtin.command: >-
+    docker run --rm --gpus all {{ spark_validate_image }} nvidia-smi -L
+  register: spark_validate_docker
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  failed_when: false
+  when: spark_validate_container | bool
+
+- name: Fabric state
+  ansible.builtin.set_fact:
+    spark_validate_fabric_ok: >-
+      {{ cx7_interfaces | default([])
+         | map(attribute='name')
+         | map('extract', ansible_local.spark.cx7.ports | default({}))
+         | selectattr('state', 'equalto', 'Up')
+         | selectattr('speed_mbps', 'equalto', 200000)
+         | list | length == cx7_interfaces | default([]) | length }}
+  when: spark_validate_fabric | bool
+
+- name: Kubernetes node Ready + GPU allocatable
+  ansible.builtin.shell: |
+    set -o pipefail
+    k3s kubectl get node {{ inventory_hostname }} -o json \
+      | jq -r '[(.status.conditions[] | select(.type=="Ready") | .status), (.status.allocatable["nvidia.com/gpu"] // "0")] | @tsv'
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ groups['k3s_server'][0] }}"
+  register: spark_validate_k8s_out
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  failed_when: false
+  when: spark_validate_k8s | bool
+
+- name: Slurm node state
+  ansible.builtin.command: sinfo -h -n {{ inventory_hostname }} -o %T
+  delegate_to: "{{ groups['slurm_controller'][0] }}"
+  register: spark_validate_slurm_out
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  failed_when: false
+  when: spark_validate_slurm | bool
+
+- name: Merge service-level results
+  ansible.builtin.set_fact:
+    spark_validate_results: >-
+      {{ spark_validate_results
+         | combine({'docker_gpu': spark_validate_docker.rc | default(1) == 0} if spark_validate_container | bool else {})
+         | combine({'cx7_links_200g': spark_validate_fabric_ok | bool} if spark_validate_fabric | bool else {})
+         | combine({'k8s_ready_gpu': (spark_validate_k8s_out.stdout | default('')).split('\t')[0] == 'True'
+                                     and ((spark_validate_k8s_out.stdout | default('')).split('\t') | last | int) > 0}
+                   if spark_validate_k8s | bool else {})
+         | combine({'slurm_usable': (spark_validate_slurm_out.stdout | default('')) in ['idle', 'mixed', 'allocated']}
+                   if spark_validate_slurm | bool else {}) }}
+
+- name: Write JSON report on the control node
+  ansible.builtin.copy:
+    content: "{{ {'host': inventory_hostname, 'time': now(utc=true).isoformat(), 'results': spark_validate_results} | to_nice_json }}"
+    dest: "{{ spark_validate_report_dir }}/{{ inventory_hostname }}.json"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+
+- name: Verdict
+  ansible.builtin.assert:
+    that: spark_validate_results | dict2items | rejectattr('value') | list | length == 0
+    fail_msg: "FAILED checks: {{ spark_validate_results | dict2items | rejectattr('value') | map(attribute='key') | list }}"
+    success_msg: "All {{ spark_validate_results | length }} checks passed"

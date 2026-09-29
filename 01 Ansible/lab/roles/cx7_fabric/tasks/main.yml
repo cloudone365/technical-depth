@@ -1,0 +1,7 @@
+---
+# Everything lives in fabric.yml. We use a conditional include instead of
+# `meta: end_host`: end_host would end the host for the WHOLE play, silently
+# skipping any roles that follow this one (e.g. in 20-drift-check.yml).
+- name: Configure and verify CX-7 fabric
+  ansible.builtin.include_tasks: fabric.yml
+  when: cx7_fabric_interfaces | length > 0

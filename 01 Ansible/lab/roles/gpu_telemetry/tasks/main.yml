@@ -1,0 +1,9 @@
+---
+- name: Node agent (every Spark)
+  ansible.builtin.import_tasks: node.yml
+  tags: [telemetry, telemetry_node]
+
+- name: Monitoring stack (monitoring group only)
+  ansible.builtin.include_tasks: stack.yml
+  when: inventory_hostname in groups['monitoring'] | default([])
+  tags: [telemetry, telemetry_stack]

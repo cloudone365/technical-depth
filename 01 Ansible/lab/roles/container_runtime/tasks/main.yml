@@ -1,0 +1,112 @@
+---
+- name: Ensure container packages are present
+  ansible.builtin.apt:
+    name: "{{ container_runtime_packages }}"
+    state: present
+  register: container_runtime_apt
+  retries: 3
+  delay: 10
+  until: container_runtime_apt is succeeded
+
+# ---- daemon.json: read-merge-write (keeps any keys DGX OS or you added) ----
+- name: Read current daemon.json
+  ansible.builtin.slurp:
+    src: /etc/docker/daemon.json
+  register: container_runtime_daemon_raw
+  failed_when: false
+
+- name: Merge overrides into daemon.json
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: >-
+      {{ ((container_runtime_daemon_raw.content | default('e30=') | b64decode | from_json)
+          | combine(container_runtime_daemon_overrides, recursive=True))
+         | to_nice_json(indent=2) }}
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: Restart docker
+
+# ---- CDI: lets docker/podman/containerd request GPUs by name (nvidia.com/gpu=all)
+- name: Check CDI spec freshness (driver version present AND every hostPath exists)
+  ansible.builtin.shell: |
+    set -o pipefail
+    spec={{ container_runtime_cdi_spec }}
+    [ -f "$spec" ] || { echo "stale: missing"; exit 0; }
+    drv=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)
+    grep -q "$drv" "$spec" || { echo "stale: driver $drv not referenced"; exit 0; }
+    missing=$(grep -oP 'hostPath: \K\S+' "$spec" | while read -r f; do [ -e "$f" ] || echo "$f"; done)
+    [ -n "$missing" ] && echo "stale: missing paths: $missing" || echo fresh
+  args:
+    executable: /bin/bash
+  register: container_runtime_cdi_state
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  when: container_runtime_generate_cdi | bool
+
+- name: Generate CDI spec (driver changed or missing)
+  ansible.builtin.command: >-
+    nvidia-ctk cdi generate --output={{ container_runtime_cdi_spec }}
+  changed_when: true
+  when:
+    - container_runtime_generate_cdi | bool
+    - container_runtime_cdi_state.stdout is match('stale')
+
+- name: Report a stale CDI spec as drift in check mode
+  ansible.builtin.debug:
+    msg: "CDI spec would be regenerated: {{ container_runtime_cdi_state.stdout }}"
+  changed_when: true
+  when:
+    - ansible_check_mode
+    - container_runtime_generate_cdi | bool
+    - container_runtime_cdi_state.stdout is match('stale')
+
+- name: Flush handlers so docker restarts before smoke test
+  ansible.builtin.meta: flush_handlers
+
+# ---- NGC registry login
+- name: Log in to nvcr.io
+  community.docker.docker_login:
+    registry_url: nvcr.io
+    username: "$oauthtoken"
+    password: "{{ container_runtime_ngc_api_key }}"
+    reauthorize: false
+  no_log: true
+  when:
+    - container_runtime_ngc_login | bool
+    - container_runtime_ngc_api_key | length > 0
+
+- name: Pre-pull NGC images (async — multi-GB pulls outlive SSH timeouts)
+  community.docker.docker_image_pull:
+    name: "{{ item }}"
+    platform: linux/arm64
+  loop: "{{ container_runtime_prepull }}"
+  async: 3600
+  poll: 15
+
+# ---- prove the GPU is reachable from a container
+- name: GPU smoke test via --gpus (legacy hook path)
+  ansible.builtin.command: >-
+    docker run --rm --gpus all {{ container_runtime_smoke_image }}
+    nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+  register: container_runtime_smoke
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  when: container_runtime_smoke_test | bool
+
+- name: GPU smoke test via CDI device name
+  ansible.builtin.command: >-
+    docker run --rm --device nvidia.com/gpu=all {{ container_runtime_smoke_image }}
+    nvidia-smi -L
+  register: container_runtime_smoke_cdi
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  failed_when: false
+  when: container_runtime_smoke_test | bool and container_runtime_generate_cdi | bool
+
+- name: Report container GPU visibility
+  ansible.builtin.debug:
+    msg:
+      - "--gpus : {{ container_runtime_smoke.stdout | default('skipped') }}"
+      - "CDI    : {{ container_runtime_smoke_cdi.stdout | default('skipped') }} (rc={{ container_runtime_smoke_cdi.rc | default('-') }})"

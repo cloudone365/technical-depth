@@ -1,0 +1,7 @@
+{"plays": [{"play": {"name": "Drift check"}, "tasks": [
+  {"task": {"name": "Apply sysctl tuning"}, "hosts": {
+     "spark-01": {"changed": false},
+     "spark-02": {"changed": true, "diff": [{"before_header": "/etc/sysctl.d/90-spark.conf", "after_header": "/etc/sysctl.d/90-spark.conf"}]}}},
+  {"task": {"name": "Render netplan for CX-7"}, "hosts": {
+     "spark-01": {"changed": false}, "spark-02": {"changed": false}}}]}],
+ "stats": {"spark-01": {"changed": 0, "failures": 0}, "spark-02": {"changed": 1, "failures": 0}}}

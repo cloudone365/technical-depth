@@ -1,0 +1,11 @@
+---
+# ansible-inventory -i inventory-examples/spark.mdns.yml --graph
+# Requires: avahi-utils on the control node, control node on the Sparks' LAN.
+plugin: spark_mdns
+name_regex: '^spark-\d+$'
+# interface: enp0s31f6          # your control node's LAN NIC
+compose:
+  ansible_user: "'nvidia'"
+keyed_groups:
+  - key: mdns_interface
+    prefix: seen_on

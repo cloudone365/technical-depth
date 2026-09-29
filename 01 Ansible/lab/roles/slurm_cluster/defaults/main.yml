@@ -1,0 +1,18 @@
+---
+slurm_cluster_name: spark
+slurm_cluster_controller_group: slurm_controller
+slurm_cluster_compute_group: slurm_compute
+slurm_cluster_packages_controller: [slurmctld, munge, slurm-client]
+slurm_cluster_packages_compute: [slurmd, munge, slurm-client]
+
+# GB10: 20 Arm cores, 1 GPU, 128 GB UMA. Keep memory back for DGX OS and —
+# crucially — for the GPU, which allocates from the SAME pool.
+slurm_cluster_cpus: 20
+slurm_cluster_mem_reserve_mb: 16384
+slurm_cluster_gpu_type: gb10
+slurm_cluster_gpu_devices: [/dev/nvidia0]
+
+slurm_cluster_partition: gpu
+slurm_cluster_default_time: "04:00:00"
+slurm_cluster_max_time: "2-00:00:00"
+slurm_cluster_munge_key_local: "{{ playbook_dir }}/../.cache/munge.key"

@@ -1,0 +1,49 @@
+---
+# DGX Spark has no BMC. To practise the Redfish automation you'll need on
+# DGX/HGX servers, run DMTF's Redfish Mockup Server on the Spark and point
+# community.general redfish modules at it (Volume 06).
+- name: Start a Redfish mockup server
+  hosts: spark[0]
+  become: true
+  vars:
+    redfish_mock_dir: /opt/redfish-mockup
+    redfish_mock_port: 8000
+  tasks:
+    - name: Clone DMTF Redfish-Mockup-Server
+      ansible.builtin.git:
+        repo: https://github.com/DMTF/Redfish-Mockup-Server.git
+        dest: "{{ redfish_mock_dir }}"
+        version: main
+        depth: 1
+    - name: Install its Python requirements in a venv
+      ansible.builtin.pip:
+        requirements: "{{ redfish_mock_dir }}/requirements.txt"
+        virtualenv: "{{ redfish_mock_dir }}/.venv"
+        virtualenv_command: python3 -m venv
+    - name: Run it as a transient systemd unit
+      ansible.builtin.command: >-
+        systemd-run --unit=redfish-mock --collect
+        {{ redfish_mock_dir }}/.venv/bin/python {{ redfish_mock_dir }}/redfishMockupServer.py
+        -H 0.0.0.0 -p {{ redfish_mock_port }} -D {{ redfish_mock_dir }}/public-rackmount1
+      register: redfish_mock_run
+      changed_when: redfish_mock_run.rc == 0
+      failed_when: redfish_mock_run.rc != 0 and 'already' not in redfish_mock_run.stderr
+
+- name: Query it like a real BMC
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    bmc: "{{ hostvars[groups['spark'][0]].ansible_host }}:8000"
+  tasks:
+    - name: Inventory via Redfish
+      community.general.redfish_info:
+        category: Systems,Chassis,Manager
+        command: GetSystemInventory,GetPsuInventory,GetFirmwareInventory,GetBootOverride
+        baseuri: "{{ bmc }}"
+        username: root
+        password: unused-by-mockup
+      register: redfish
+    - name: Show system inventory
+      ansible.builtin.debug:
+        var: redfish.redfish_facts.system

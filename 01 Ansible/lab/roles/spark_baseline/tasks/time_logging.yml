@@ -1,0 +1,28 @@
+---
+- name: Set timezone
+  community.general.timezone:
+    name: "{{ spark_baseline_timezone }}"
+  when: not spark_baseline_container_mode
+
+- name: Configure chrony
+  ansible.builtin.template:
+    src: chrony.conf.j2
+    dest: /etc/chrony/chrony.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart chrony
+
+- name: Persistent journald with a size cap
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/60-spark.conf
+    content: |
+      # managed by ansible (spark_baseline)
+      [Journal]
+      Storage=persistent
+      SystemMaxUse={{ spark_baseline_journald_max_use }}
+      Compress=yes
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart journald

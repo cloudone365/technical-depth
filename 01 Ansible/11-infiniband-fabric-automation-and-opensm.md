@@ -1,242 +1,488 @@
-# Volume 11: InfiniBand Fabric Automation: MOFED, OpenSM, PKeys & IPoIB
+# Volume 11 — ConnectX-7 Fabric Automation on DGX Spark: RDMA over Converged Ethernet, Topologies & Verification (with the InfiniBand/OpenSM Mapping)
 
-```
-====================================================================================================
-MODULE 01: ANSIBLE & BARE-METAL AI INFRASTRUCTURE AUTOMATION
-VOLUME 11: NVIDIA DOCA-OFED, OpenSM Subnet Management, Fat-Tree Routing & IPoIB Connected Mode
-====================================================================================================
-```
+> **Module 01 · Part III — High-Speed Fabric** · Prev: [10 Firmware](10-firmware-lifecycle-and-gpu-vulnerability-patch.md) · Next: [12 Lossless RoCEv2, MTU & NCCL tuning](12-lossless-rocev2-and-pfc-switch-host-tuning.md)
 
----
-
-## 1. Executive Intuition: The Managed Fabric Requirement
-
-InfiniBand (Quantum-2 NDR 400 Gbps / Quantum-X800 800 Gbps) is the premier low-latency, high-bandwidth interconnect for foundation model training. However, InfiniBand operates on a fundamental paradigm that separates it from standard Ethernet: **InfiniBand switches are physically incapable of forwarding packets autonomously without a centralized Subnet Manager (OpenSM)**.
-
-When an InfiniBand cable is plugged into a switch:
-1. **The Dark Fabric State:** The switch ports illuminate physically, but no traffic can flow. The nodes have no Local Identifiers (LIDs), and switch forwarding tables are blank.
-2. **The OpenSM Engine:** A designated Subnet Manager must sweep the fabric, discover the multi-tier Fat-Tree topology, calculate deadlock-free routing tables using algorithms like **Fat-Tree (`ftree`)**, assign 16-bit LIDs to every Host Channel Adapter (HCA), and program the Linear Forwarding Tables (LFTs) in every switch ASIC.
-3. **Partition Isolation (PKeys):** Tenant isolation and storage segregation are enforced at the hardware level using 16-bit **Partition Keys (PKeys)** managed by OpenSM's partition tables.
-
-```
-+-----------------------------------------------------------------------------------------+
-|                        INFINIBAND FABRIC CONTROL TOPOLOGY                               |
-+-----------------------------------------------------------------------------------------+
-| [Centralized Fabric Management Layer: OpenSM Service (Primary / Standby)]               |
-|   - Sweeps fabric every 10 seconds via Subnet Management Packets (SMPs)                 |
-|   - Computes credit-loop-free routing paths (Algorithm: ftree)                         |
-|   - Distributes Linear Forwarding Tables (LFTs) to Quantum-2 Switches                   |
-|   - Enforces Partition Keys: partitions.conf (Storage PKey: 0x8001, Compute: 0x8002)    |
-|                                                                                         |
-| [Compute Nodes: DGX H100 / HGX B200 Servers]                                            |
-|   - Driver: NVIDIA DOCA-OFED / MLNX_OFED (mlx5_core, mlx5_ib, ib_uverbs)                |
-|   - High-Speed Verbs: Native RDMA for NCCL AllReduce / GPUDirect RDMA                   |
-|   - IP-over-InfiniBand (IPoIB): ib0 / ib1 configured in Connected Mode (MTU 65520)      |
-+-----------------------------------------------------------------------------------------+
-```
-
-Automating an enterprise InfiniBand cluster requires Ansible to handle **DOCA-OFED compilation**, **High-Availability OpenSM deployment**, and **IPoIB network optimization**.
+| | |
+|---|---|
+| **You will build** | Addressed, verified CX-7 links between Sparks (`02-fabric.yml`), RDMA bandwidth and latency measurements (`11-rdma-perftest.yml`), and the mental model to carry this to InfiniBand clusters |
+| **Hardware** | 2× DGX Spark + 1 QSFP cable (direct-attach copper for 200G, or an AOC). 3–4 Sparks need a ring or a switch (§2.3) |
+| **Time** | 90 min |
+| **Risk** | Medium. Network reconfiguration, but only on CX-7 interfaces; management stays on `enP7s7` |
 
 ---
 
-## 2. Lineage & Evolution of InfiniBand Management
+## 1. The hardware, precisely
 
+Each Spark has a **ConnectX-7** with **two QSFP cages**, up to 200 Gb/s. Two things confuse everyone the first time:
+
+1. **Each physical cage appears as two netdevs and two RDMA devices**, because the NIC is attached through two PCIe roots:
+
+   | Cage | netdev (root 1) | RDMA dev | netdev (root 2) | RDMA dev |
+   |---|---|---|---|---|
+   | Port 0 | `enp1s0f0np0` | `rocep1s0f0` | `enP2p1s0f0np0` | `roceP2p1s0f0` |
+   | Port 1 | `enp1s0f1np1` | `rocep1s0f1` | `enP2p1s0f1np1` | `roceP2p1s0f1` |
+
+   NVIDIA's guidance is that **one cable can deliver full bandwidth**, but **both logical interfaces of that cage need IP addresses** to get it (and with two cables, all four).
+
+2. **It runs Ethernet, and RDMA is RoCE.** The RDMA device names (`roce…`) say so. There's no InfiniBand subnet manager here. NCCL, NFS/RDMA and perftest all use the RDMA verbs API over RoCEv2 (RDMA in UDP/IP).
+
+## 2. Architecture
+
+### 2.1 HLD: two Sparks, one cable
+
+```mermaid
+flowchart LR
+  subgraph S1["spark-01"]
+    A1["enp1s0f1np1<br/>192.168.100.11/24<br/>rocep1s0f1"]
+    B1["enP2p1s0f1np1<br/>192.168.101.11/24<br/>roceP2p1s0f1"]
+    M1["enP7s7 10GbE<br/>10.10.10.11 (mgmt)"]
+  end
+  subgraph S2["spark-02"]
+    A2["enp1s0f1np1<br/>192.168.100.12/24"]
+    B2["enP2p1s0f1np1<br/>192.168.101.12/24"]
+    M2["enP7s7<br/>10.10.10.12"]
+  end
+  A1 === |"QSFP cage 1 (one cable)"| A2
+  B1 === |"same cable, 2nd PCIe root"| B2
+  M1 --- LAN((mgmt switch)) --- M2
 ```
-   [2000: InfiniBand Trade Association (IBTA)]
-                 |
-           (Standardized credit-based flow control, hardware verbs, and subnet management)
-                 |
-   [2010: Mellanox OFED (MLNX_OFED)]
-                 |
-           (Enterprise Linux distribution packaging for InfiniBand verbs and IPoIB)
-                 |
-   [2018: InfiniBand Quantum HDR 200 Gbps & SHARP]
-                 |
-           (Scalable Hierarchical Aggregation and Reduction Protocol for in-network math)
-                 |
-   [2022: Quantum-2 NDR 400 Gbps & DOCA-OFED]
-                 |
-           (NVIDIA unifies networking stack under DOCA-OFED with automated tuning)
-```
+
+One **subnet per logical link** (`.100.x` and `.101.x`), so the kernel routes each pair over its own netdev and there's no ambiguity about which interface answers ARP.
+
+### 2.2 LLD
+
+| Setting | Value | Where |
+|---|---|---|
+| Netplan file | `/etc/netplan/40-cx7.yaml`, mode `0600`, `renderer: networkd` | `cx7_fabric` template |
+| Addressing | host_vars `cx7_interfaces[]` | `inventory/host_vars/spark-0N.yml` |
+| MTU | 9000 (both ends must match) | host_vars |
+| `optional: true` | Boot doesn't wait for an unplugged cable | template |
+| Link verification | operstate `up`, speed `200000`, MTU, `ibv_devinfo` `PORT_ACTIVE` | role asserts |
+| Reachability | `ping -M do -s 8972` (DF set, jumbo) to each same-subnet peer | role |
+| Published facts | `cx7_fabric_primary_if`, `_primary_ip`, `_hca_list`, `_roce_gid_index` | consumed by NCCL, vLLM, k3s, NFS |
+
+### 2.3 Scaling past two Sparks (NVIDIA-documented topologies)
+
+| Sparks | Topology | Addressing pattern | Notes |
+|---|---|---|---|
+| 2 | Direct cable | /24 per logical link (this lab) | Simplest |
+| 3 | **Ring**: each Spark uses both cages, one to each neighbour | One subnet per link (point-to-point) | NCCL settings for rings: `NCCL_IB_SUBNET_AWARE_ROUTING=1`, `NCCL_NET_PLUGIN=none` |
+| 4+ | **Switch** (QSFP56/QSFP56-DD, 200G ports) | One L2 bridge on the switch, one subnet, DHCP from the switch or static | Force 200G on switch ports if autonegotiation lands at 100G; use the same cage on every Spark |
+
+To model a ring in this lab, give each host **two** `cx7_interfaces` groups on different cages with per-link subnets. The role's peer computation (same /24 → peer) already handles it.
 
 ---
 
-## 3. First-Principles Mathematics: IPoIB Connected Mode vs. Datagram Mode
+## 3. Hands-on
 
-IP-over-InfiniBand (IPoIB) encapsulates standard IP packets inside InfiniBand transport. It operates in two modes:
+### 3.1 Cable and discover
 
-### 3.1 Datagram Mode (Unreliable Datagram - UD)
-- Packets are mapped directly onto InfiniBand UD transport.
-- Maximum Transmission Unit (MTU) is strictly bounded by the physical IB link MTU: **$2,044\text{ bytes}$** or **$4,092\text{ bytes}$**.
-- Generating a $100\text{ GB/s}$ ingestion stream with $4,092\text{ B}$ MTU generates:
-  $$\text{Packet Rate} = \frac{100 \times 10^9\text{ B/s}}{4,092\text{ B}} \approx \mathbf{24,437,927\text{ packets/sec}}$$
-  This creates massive CPU interrupt overhead, stalling system responsiveness.
-
-### 3.2 Connected Mode (Reliable Connection - RC)
-- Emulates a virtual streaming connection between endpoints.
-- Maximum Transmission Unit (MTU) expands to **$65,520\text{ bytes}$**!
-- Generating the same $100\text{ GB/s}$ stream with $65,520\text{ B}$ MTU generates:
-  $$\text{Packet Rate} = \frac{100 \times 10^9\text{ B/s}}{65,520\text{ B}} \approx \mathbf{1,526,251\text{ packets/sec}}$$
-
-$$\text{Packet / Interrupt Reduction Factor} = \frac{24.4\text{M}}{1.52\text{M}} \approx \mathbf{16.0\times}$$
-
-> **Performance Axiom:** In AI storage networks running over IPoIB, running in Datagram mode collapses throughput by over $60\%$. Ansible must explicitly configure `mode = connected` and `mtu = 65520`.
-
----
-
-## 4. Deep Architecture: OpenSM Fat-Tree Routing Algorithm (`ftree`)
-
-In a multi-tier Clos network (Leaf-Spine topology), naive routing algorithms (like MinHop) cause bandwidth bottlenecks by routing multiple flows through the same spine switch while leaving adjacent spines idle.
-
-The **Fat-Tree (`ftree`) Routing Engine** mathematically guarantees:
-1. **Full Bisection Bandwidth:** Traffic between compute nodes is evenly balanced across all available uplink paths.
-2. **Deadlock Freedom:** Enforces strict upward-then-downward routing, eliminating cyclic buffer dependencies.
-3. **Downward Path Balancing:** Preserves uniform port utilization on downward leaf links.
-
-```
-# /etc/opensm/opensm.conf snippet
-routing_engine ftree
-f_rebalance true
-sweep_interval 10
+```bash
+ssh nvidia@10.10.10.11 ibdev2netdev
+# rocep1s0f1 port 1 ==> enp1s0f1np1 (Up)
+# roceP2p1s0f1 port 1 ==> enP2p1s0f1np1 (Up)
 ```
 
----
+Use the **same cage number** on both Sparks. It keeps the config symmetric, and NVIDIA's NCCL guides recommend it. If nothing shows `Up`, reseat the cable and reboot both.
 
-## 5. Concrete Production Lab: Automated OFED & OpenSM Deployment Playbook
+### 3.2 Configure and verify the fabric
 
 ```yaml
+# lab/roles/cx7_fabric/tasks/main.yml
 ---
-# playbook: infiniband_fabric_orchestration.yml
-# Provisions NVIDIA DOCA-OFED, configures IPoIB Connected Mode, and deploys OpenSM
-- name: Phase 1 - Deploy OpenSM Fabric Subnet Manager (Manager Nodes)
-  hosts: infiniband_managers
+# Everything lives in fabric.yml. We use a conditional include instead of
+# `meta: end_host`: end_host would end the host for the WHOLE play, silently
+# skipping any roles that follow this one (e.g. in 20-drift-check.yml).
+- name: Configure and verify CX-7 fabric
+  ansible.builtin.include_tasks: fabric.yml
+  when: cx7_fabric_interfaces | length > 0
+```
+
+```yaml
+# lab/roles/cx7_fabric/tasks/fabric.yml
+---
+# ---------------------------------------------------------------- pre-flight
+- name: Discover RDMA <-> netdev mapping
+  ansible.builtin.command: ibdev2netdev
+  register: cx7_fabric_ibdev
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+
+# "rocep1s0f1 port 1 ==> enp1s0f1np1 (Up)"  ->  {"enp1s0f1np1": {"rdma_dev": "rocep1s0f1", "state": "Up"}}
+- name: Parse ibdev2netdev into a dict keyed by netdev
+  ansible.builtin.set_fact:
+    cx7_fabric_map: >-
+      {%- set m = {} -%}
+      {%- for line in cx7_fabric_ibdev.stdout_lines -%}
+        {%- set f = line.split() -%}
+        {%- if f | length >= 6 -%}
+          {%- set _ = m.update({f[4]: {'rdma_dev': f[0], 'state': f[5] | trim('()')}}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ m }}
+
+- name: Assert every configured interface exists
+  ansible.builtin.assert:
+    that: item.name in cx7_fabric_map
+    fail_msg: >-
+      {{ item.name }} not found. ibdev2netdev shows: {{ cx7_fabric_map.keys() | list }}.
+      Fix host_vars/{{ inventory_hostname }}.yml cx7_interfaces.
+    quiet: true
+  loop: "{{ cx7_fabric_interfaces }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# ---------------------------------------------------------------- configure
+- name: Render netplan for CX-7
+  ansible.builtin.template:
+    src: 40-cx7.yaml.j2
+    dest: "{{ cx7_fabric_netplan_file }}"
+    owner: root
+    group: root
+    mode: "0600"            # netplan warns on world-readable files
+  register: cx7_fabric_netplan
+
+- name: Validate netplan syntax before applying  # noqa: no-handler (must run before apply, in order)
+  ansible.builtin.command: netplan generate
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  when: cx7_fabric_netplan is changed
+
+- name: Apply netplan  # noqa: no-handler (later verify tasks need the links up in this run)
+  ansible.builtin.command: netplan apply
+  changed_when: true
+  when: cx7_fabric_netplan is changed
+
+- name: Wait for CX-7 links to come up
+  ansible.builtin.command: "cat /sys/class/net/{{ item.name }}/operstate"
+  register: cx7_fabric_oper
+  until: cx7_fabric_oper.stdout == 'up'
+  retries: 15
+  delay: 2
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  failed_when: false
+  loop: "{{ cx7_fabric_interfaces }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# ---------------------------------------------------------------- runtime reconciliation
+# The netplan FILE can be perfect while the RUNNING state is not (someone ran
+# `ip link set ... mtu 1500`). Compare live MTU with desired and re-apply.
+- name: Read live MTU per interface
+  ansible.builtin.command: "cat /sys/class/net/{{ item.name }}/mtu"
+  register: cx7_fabric_live_mtu
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  loop: "{{ cx7_fabric_interfaces }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Interfaces whose runtime MTU differs from desired
+  ansible.builtin.set_fact:
+    cx7_fabric_runtime_drift: >-
+      {%- set bad = [] -%}
+      {%- for r in cx7_fabric_live_mtu.results -%}
+        {%- if (r.stdout | int) != (r.item.mtu | default(9000) | int) -%}
+          {%- set _ = bad.append(r.item.name) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ bad }}
+
+- name: Re-apply netplan to fix runtime drift
+  ansible.builtin.command: netplan apply
+  changed_when: true
+  when:
+    - cx7_fabric_runtime_drift | length > 0
+    - not ansible_check_mode
+
+- name: Report runtime drift in check mode
+  ansible.builtin.debug:
+    msg: "Runtime MTU drift on {{ cx7_fabric_runtime_drift }} — netplan apply would fix it"
+  changed_when: true
+  when:
+    - cx7_fabric_runtime_drift | length > 0
+    - ansible_check_mode
+
+# ---------------------------------------------------------------- verify
+- name: Read link speed / MTU / RDMA port state
+  ansible.builtin.shell: |
+    set -o pipefail
+    printf '{"speed":%s,"mtu":%s,"oper":"%s","rdma_state":"%s"}' \
+      "$(cat /sys/class/net/{{ item.name }}/speed 2>/dev/null || echo -1)" \
+      "$(cat /sys/class/net/{{ item.name }}/mtu)" \
+      "$(cat /sys/class/net/{{ item.name }}/operstate)" \
+      "$(ibv_devinfo -d {{ item.rdma_dev }} 2>/dev/null | awk '/state:/{print $2; exit}')"
+  args:
+    executable: /bin/bash
+  register: cx7_fabric_link
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  loop: "{{ cx7_fabric_interfaces }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Build link report
+  ansible.builtin.set_fact:
+    cx7_fabric_report: >-
+      {{ cx7_fabric_report | default({}) | combine({item.item.name: (item.stdout | from_json)}) }}
+  loop: "{{ cx7_fabric_link.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Assert link health
+  ansible.builtin.assert:
+    that:
+      - cx7_fabric_report[item.name].oper == 'up'
+      - cx7_fabric_report[item.name].speed | int == cx7_fabric_expected_speed_mbps
+      - cx7_fabric_report[item.name].mtu | int == item.mtu | default(9000) | int
+      - cx7_fabric_report[item.name].rdma_state == 'PORT_ACTIVE'
+    fail_msg: "{{ item.name }} unhealthy: {{ cx7_fabric_report[item.name] }}"
+    success_msg: "{{ item.name }} OK: {{ cx7_fabric_report[item.name] }}"
+  register: cx7_fabric_assert
+  failed_when: cx7_fabric_strict | bool and cx7_fabric_assert.failed | default(false)
+  loop: "{{ cx7_fabric_interfaces }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Discover RoCEv2 IPv4 GID index (value for NCCL_IB_GID_INDEX)
+  ansible.builtin.shell: |
+    set -o pipefail
+    d=/sys/class/infiniband/{{ item.rdma_dev }}/ports/1
+    for t in "$d"/gid_attrs/types/*; do
+      idx=$(basename "$t")
+      type=$(cat "$t" 2>/dev/null) || continue
+      gid=$(cat "$d/gids/$idx")
+      # RoCE v2 + IPv4-mapped GID (0000:...:ffff:c0a8:640b)
+      if [ "$type" = "RoCE v2" ] && [[ "$gid" == 0000:0000:0000:0000:0000:ffff:* ]]; then
+        echo "$idx"; exit 0
+      fi
+    done
+    exit 1
+  args:
+    executable: /bin/bash
+  register: cx7_fabric_gid
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  failed_when: false
+  loop: "{{ cx7_fabric_interfaces }}"
+  loop_control:
+    label: "{{ item.rdma_dev }}"
+
+- name: Publish fabric facts for later roles (NCCL, Slurm, k3s, vLLM)
+  ansible.builtin.set_fact:
+    cx7_fabric_primary_if: "{{ cx7_fabric_interfaces[0].name }}"
+    cx7_fabric_primary_ip: "{{ cx7_fabric_interfaces[0].address.split('/')[0] }}"
+    cx7_fabric_hca_list: "{{ cx7_fabric_interfaces | map(attribute='rdma_dev') | join(',') }}"
+    cx7_fabric_roce_gid_index: "{{ cx7_fabric_gid_index or (cx7_fabric_gid.results[0].stdout | default('', true)) }}"
+
+# Build [peer_ip, my_interface] pairs for peers that share a /24 with one of my ports.
+- name: Compute fabric peers
+  ansible.builtin.set_fact:
+    cx7_fabric_peer_pairs: >-
+      {%- set pairs = [] -%}
+      {%- for peer in groups['spark'] | difference([inventory_hostname]) -%}
+        {%- for p in hostvars[peer].cx7_interfaces | default([]) -%}
+          {%- for mine in cx7_fabric_interfaces -%}
+            {%- if p.address.split('.')[:3] == mine.address.split('.')[:3] -%}
+              {%- set _ = pairs.append({'peer': peer, 'ip': p.address.split('/')[0], 'dev': mine.name, 'mtu': mine.mtu | default(9000)}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ pairs }}
+
+- name: Jumbo-frame reachability to peers (DF bit set, MTU-28 byte payload)
+  ansible.builtin.command: >-
+    ping -c 3 -W 1 -M do -s {{ item.mtu | int - 28 }} -I {{ item.dev }} {{ item.ip }}
+  loop: "{{ cx7_fabric_peer_pairs }}"
+  loop_control:
+    label: "{{ item.dev }} -> {{ item.peer }} ({{ item.ip }})"
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  when: cx7_fabric_verify_peers | bool
+```
+
+```bash
+cd "01 Ansible/lab"
+ansible-playbook playbooks/02-fabric.yml -K
+```
+
+Expected tail:
+
+```
+TASK [cx7_fabric : Assert link health]
+ok: [spark-01] => (item=enp1s0f1np1) => msg: 'enp1s0f1np1 OK: {''speed'': 200000, ''mtu'': 9000, ''oper'': ''up'', ''rdma_state'': ''PORT_ACTIVE''}'
+TASK [cx7_fabric : Jumbo-frame reachability to peers (DF bit set, MTU-28 byte payload)]
+ok: [spark-01] => (item=enp1s0f1np1 -> spark-02 (192.168.100.12))
+TASK [Print NCCL environment derived from the fabric]
+  - export NCCL_SOCKET_IFNAME=enp1s0f1np1
+  - export NCCL_IB_HCA=rocep1s0f1,roceP2p1s0f1
+  - export NCCL_IB_GID_INDEX=3
+```
+
+### 3.3 Measure RDMA
+
+```yaml
+# lab/playbooks/11-rdma-perftest.yml
+---
+# RDMA verbs bandwidth/latency between two Sparks over CX-7 (RoCEv2).
+# Server side runs on the 2nd Spark (async), client on the 1st.
+#   ansible-playbook playbooks/11-rdma-perftest.yml -K [-e perftest_port_idx=1] [-e perftest_qps=4]
+- name: RDMA perftest (ib_write_bw / ib_write_lat)
+  hosts: spark
   become: true
+  gather_facts: false
+  vars:
+    perftest_port_idx: 0            # which entry of cx7_interfaces to test
+    perftest_qps: 4                 # queue pairs; >1 needed to fill 200G
+    perftest_msg: 1048576
+    perftest_seconds: 10
+    perftest_server: "{{ groups['spark'][1] | default(None) }}"
+    perftest_client: "{{ groups['spark'][0] }}"
   tasks:
-    - name: 1. Install OpenSM Daemon
-      ansible.builtin.apt:
-        name: opensm
-        state: present
+    - name: Needs two Sparks
+      ansible.builtin.meta: end_play
+      when: groups['spark'] | length < 2
 
-    - name: 2. Configure High-Performance Fat-Tree OpenSM Configuration
-      ansible.builtin.copy:
-        dest: /etc/opensm/opensm.conf
-        content: |
-          # OpenSM Configuration for AI SuperPOD
-          routing_engine ftree
-          sweep_interval 10
-          log_file /var/log/opensm.log
-          log_max_size 1024
-          f_rebalance true
-          priority 15  # High priority for primary manager
-      notify: Restart OpenSM
+    - name: Select port + GID index
+      ansible.builtin.include_role:
+        name: cx7_fabric
+        tasks_from: main.yml
+      vars:
+        cx7_fabric_verify_peers: false
+        cx7_fabric_strict: false
 
-    - name: 3. Deploy Fabric Partition Table (PKeys)
-      ansible.builtin.copy:
-        dest: /etc/opensm/partitions.conf
-        content: |
-          # Global Default Partition
-          Default=0x7fff, ipoib, defmember=full : ALL=full ;
-          # Storage Dedicated Partition
-          Storage=0x8001, ipoib, defmember=full : ALL=full ;
-      notify: Restart OpenSM
+    - name: Facts for this port
+      ansible.builtin.set_fact:
+        perftest_dev: "{{ cx7_interfaces[perftest_port_idx | int].rdma_dev }}"
+        perftest_ip: "{{ cx7_interfaces[perftest_port_idx | int].address.split('/')[0] }}"
+        perftest_gid: "{{ cx7_fabric_gid.results[perftest_port_idx | int].stdout | default('3', true) }}"
 
-    - name: 4. Enable and Start OpenSM Service
-      ansible.builtin.systemd:
-        name: opensm
-        state: started
-        enabled: true
-
-  handlers:
-    - name: Restart OpenSM
-      ansible.builtin.systemd:
-        name: opensm
-        state: restarted
-
-- name: Phase 2 - Configure Compute Node HCAs & IPoIB (GPU Nodes)
-  hosts: gpu_nodes
-  become: true
-  tasks:
-    - name: 1. Ensure DOCA-OFED Kernel Modules Loaded
-      community.general.modprobe:
-        name: "{{ item }}"
-        state: present
-      loop:
-        - ib_core
-        - mlx5_core
-        - mlx5_ib
-        - ib_uverbs
-        - ib_ipoib
-
-    - name: 2. Configure IPoIB Connected Mode & MTU 65520 via Udev
-      ansible.builtin.copy:
-        dest: /etc/udev/rules.d/99-ipoib.rules
-        content: |
-          ACTION=="add", SUBSYSTEM=="net", NAME=="ib*", RUN+="/sbin/ip link set dev $name mode connected", RUN+="/sbin/ip link set dev $name mtu 65520"
-      notify: Trigger Udev Rules
-
-    - name: 3. Verify InfiniBand HCA Physical Link State
-      ansible.builtin.command: ibstat
-      register: ibstat_out
+    - name: Start ib_write_bw server (async, one-shot)
+      ansible.builtin.command: >-
+        timeout 60 ib_write_bw -d {{ perftest_dev }} -x {{ perftest_gid }} -q {{ perftest_qps }}
+        -s {{ perftest_msg }} -D {{ perftest_seconds }} --report_gbits -F
+      async: 90
+      poll: 0
+      register: perftest_srv
       changed_when: false
-      failed_when: "'State: Active' not in ibstat_out.stdout"
+      when: inventory_hostname == perftest_server
 
-    - name: 4. Audit Fabric Link Quality via perfquery
-      ansible.builtin.command: perfquery -r
-      register: perf_out
+    - name: Give the server a moment
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Run ib_write_bw client
+      ansible.builtin.command: >-
+        ib_write_bw -d {{ perftest_dev }} -x {{ perftest_gid }} -q {{ perftest_qps }}
+        -s {{ perftest_msg }} -D {{ perftest_seconds }} --report_gbits -F
+        {{ hostvars[perftest_server].perftest_ip }}
+      register: perftest_bw
       changed_when: false
-      failed_when: "'SymbolErrorCounter' in perf_out.stdout and 'SymbolErrorCounter: 0' not in perf_out.stdout"
+      when: inventory_hostname == perftest_client
 
-  handlers:
-    - name: Trigger Udev Rules
-      ansible.builtin.command: udevadm trigger
+    - name: Start ib_write_lat server
+      ansible.builtin.command: >-
+        timeout 60 ib_write_lat -d {{ perftest_dev }} -x {{ perftest_gid }} -F
+      async: 90
+      poll: 0
+      changed_when: false
+      when: inventory_hostname == perftest_server
+
+    - name: Pause
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Run ib_write_lat client
+      ansible.builtin.command: >-
+        ib_write_lat -d {{ perftest_dev }} -x {{ perftest_gid }} -F {{ hostvars[perftest_server].perftest_ip }}
+      register: perftest_lat
+      changed_when: false
+      when: inventory_hostname == perftest_client
+
+    - name: Parse results
+      ansible.builtin.set_fact:
+        perftest_result:
+          device: "{{ perftest_dev }} (GID idx {{ perftest_gid }})"
+          bw_gbps: >-
+            {{ (perftest_bw.stdout_lines | select('match', '^\s*\d+\s+\d+') | last | default('')).split()[3] | default('n/a') }}
+          lat_typical_usec: >-
+            {{ (perftest_lat.stdout_lines | select('match', '^\s*\d+\s+\d+') | last | default('')).split()[4] | default('n/a') }}
+      when: inventory_hostname == perftest_client
+
+    - name: Report
+      ansible.builtin.debug:
+        msg:
+          - "{{ perftest_result }}"
+          - >-
+            Each QSFP cage is split across two PCIe roots (two netdevs). One netdev alone typically
+            shows about half the cage rate; run idx 0 and 1 together to see the full link.
+          - "Low numbers? Check MTU (9000 both ends), -q (QPs), link speed (ethtool), and that GID index is RoCE v2."
+      when: inventory_hostname == perftest_client
+```
+
+```bash
+ansible-playbook playbooks/11-rdma-perftest.yml -K                       # port idx 0
+ansible-playbook playbooks/11-rdma-perftest.yml -K -e perftest_port_idx=1
+ansible-playbook playbooks/11-rdma-perftest.yml -K -e perftest_qps=1     # see why QPs matter
+```
+
+Manual equivalents, for when you're debugging by hand:
+
+```bash
+# spark-02 (server)
+ib_write_bw -d rocep1s0f1 -x 3 -q 4 -D 10 --report_gbits -F
+# spark-01 (client)
+ib_write_bw -d rocep1s0f1 -x 3 -q 4 -D 10 --report_gbits -F 192.168.100.12
+show_gids | grep -E 'rocep1s0f1|v2'          # which index is RoCE v2 + IPv4
 ```
 
 ---
 
-## 6. Comparative Fabric Architecture Matrix
+## 4. Carrying it to InfiniBand clusters: the concept map
 
-| Feature | InfiniBand Quantum-2 (NDR) | Lossless RoCEv2 (Ethernet) | Standard TCP/IP |
-| :--- | :--- | :--- | :--- |
-| **Control Plane** | **Centralized OpenSM (LIDs)** | Distributed BGP / EVPN | Distributed IP Routing |
-| **Lossless Guarantee** | **Link-layer credit tokens** | Priority Flow Control (PFC) | None (Packet drop & retry) |
-| **Latency (4KB Verbs)** | **0.8 - 1.5 microseconds** | 8.0 - 15.0 microseconds | 45.0 - 80.0 microseconds |
-| **Routing Algorithm** | Deterministic Fat-Tree (`ftree`)| Equal-Cost Multi-Path (ECMP)| Standard shortest path |
-| **Ingestion MTU** | **65,520 (Connected Mode)** | 9,000 (Jumbo Frames) | 1,500 (Standard) |
+| Concept | On DGX Spark (RoCE) | On an InfiniBand cluster |
+|---|---|---|
+| Link layer | Ethernet | InfiniBand |
+| Who assigns addresses/routes | You (netplan / DHCP) | **Subnet Manager** (OpenSM or UFM) assigns LIDs and computes routes (fat-tree/ftree, up-down) |
+| Addressing | IP → GID (RoCEv2 IPv4-mapped GID; pick the index) | LID (+ GID for routing across subnets) |
+| Isolation | VLAN / subnet | P_Key partitions (configured on the SM) |
+| IP over the fabric | Native IP | IPoIB (`ib0`, datagram vs connected mode) |
+| Congestion / loss | ECN/DCQCN; PFC on switches (Volume 12) | Credit-based link-level flow control (lossless by design) |
+| Health tools | `ibv_devinfo`, `ethtool -S`, `rdma link` | `ibstat`, `iblinkinfo`, `ibdiagnet`, `perfquery` |
+| Ansible's job | netplan, MTU, verify, publish NCCL env | Install DOCA-OFED, configure the SM(s) (HA priority), P_Keys, IPoIB, verify `ibdiagnet` |
 
----
-
-## 7. SRE Diagnostics & Troubleshooting Playbook
-
-```
-+---------------------------------------------------------------------------------------------------+
-|                        INFINIBAND FABRIC SRE DIAGNOSTIC MATRIX                                    |
-+------------------------------------+--------------------------+-----------------------------------+
-| Symptom / Failure Mode             | Root Cause Hypothesis    | Triage & Remediation Command      |
-+------------------------------------+--------------------------+-----------------------------------+
-| HCA port stuck in `Initializing`:  | OpenSM not running or    | Check Subnet Manager status:      |
-| Physical link UP, but no traffic.  | LID allocation full.     | `systemctl status opensm`         |
-|                                    |                          | Verify master OpenSM logs.        |
-+------------------------------------+--------------------------+-----------------------------------+
-| IPoIB throughput capped at 15 Gbps | Interface operating in   | Check IPoIB mode:                 |
-| on 400 Gbps Quantum-2 adapter.     | Datagram mode (MTU 2044) | `cat /sys/class/net/ib0/mode`     |
-|                                    | instead of Connected.    | Set `echo connected > .../mode`.  |
-+------------------------------------+--------------------------+-----------------------------------+
-| InfiniBand link experiences        | Dirty optical transceiver| Run hardware performance query:   |
-| intermittent packet drop spikes.   | or damaged MPO-12 fiber. | `perfquery -C <port>`             |
-|                                    |                          | Replace failing optical cable.    |
-+------------------------------------+--------------------------+-----------------------------------+
-| PKey mismatch error:               | OpenSM partitions.conf   | Query active PKey membership:     |
-| "Permission denied during RDMA".   | missing node GUID.       | `smpquery pkey <lid>`             |
-|                                    |                          | Add node GUID to partitions.conf. |
-+------------------------------------+--------------------------+-----------------------------------+
-```
+What stays the same, and what this volume trains: **inventory-driven addressing, pre-flight existence checks, link assertions, peer reachability, and publishing derived facts for NCCL.**
 
 ---
 
-## 8. Verification & Architectural Synthesis Checklist
+## 5. Troubleshooting & diagnostics
 
-- [ ] **OpenSM Service Active:** Master and standby OpenSM services running with Fat-Tree routing engine.
-- [ ] **IPoIB Connected Mode:** `/sys/class/net/ib*/mode` confirms `connected` with MTU $65,520$.
-- [ ] **Physical Links Trained:** `ibstat` asserts all ports operating at native link speed ($400\text{ Gbps}$ NDR).
-- [ ] **Symbol Errors Zero:** `perfquery` validates zero symbol errors or link recovery events across all ports.
-- [ ] **PKey Partitions Enforced:** Storage and compute traffic isolated via dedicated hardware PKeys.
+| Symptom | Diagnose | Fix |
+|---|---|---|
+| `ibdev2netdev` shows everything `Down` | Cable seated? Same cage on both ends? | Reseat; try the other cage; reboot both (NVIDIA's documented first step) |
+| Role asserts: `configured interface not found` | Names in host_vars vs `ibdev2netdev` | Fix host_vars; names differ between cages |
+| Speed `100000` instead of `200000` | `ethtool enp1s0f1np1 \| grep -E 'Speed\|Link'` | Cable rated for 100G; or a switch port autonegotiating: force 200G on the switch |
+| `ping -M do -s 8972` fails, plain ping works | MTU mismatch somewhere | Both ends 9000 (`ip link show`); on a switch, the port MTU must be ≥ 9000 plus headers |
+| Ping works on `.100`, not on `.101` | Second logical interface not addressed on one side | Both netdevs per cage need IPs; re-run `02-fabric.yml` |
+| `PORT_ACTIVE` but perftest `Couldn't connect` | Wrong GID index (a RoCE v1 or link-local GID) | `show_gids`; use the RoCE v2 IPv4 index; pass `-x` |
+| perftest reports roughly half the expected rate | Only one logical interface, or `-q 1` | Test both netdevs concurrently; raise `-q` to 4–8 |
+| Random loss under load (switch topology) | `ethtool -S enp1s0f1np1 \| grep -E 'discard\|pause\|ecn'` | Congestion: Volume 12 (ECN/PFC) |
+| Netplan apply cut the mgmt link | You put the mgmt NIC in `40-cx7.yaml` | Never. Mgmt lives in `30-mgmt.yaml` (Volume 06) |
+
+Fast triage bundle:
+
+```bash
+ibdev2netdev; rdma link show
+for d in rocep1s0f1 roceP2p1s0f1; do ibv_devinfo -d $d | grep -E 'state|active_mtu|link_layer'; done
+ethtool enp1s0f1np1 | grep -E 'Speed|Duplex|Link detected'
+ethtool -S enp1s0f1np1 | grep -Ei 'err|drop|discard' | grep -v ': 0$'
+ip -s link show enp1s0f1np1
+```
+
+## 6. Validation
+
+- [ ] `02-fabric.yml`: all asserts pass and jumbo pings succeed on both subnets.
+- [ ] `11-rdma-perftest.yml` results recorded for idx 0, idx 1 and `-q 1` vs `-q 4`.
+- [ ] You can explain why the Spark needs no subnet manager, and what OpenSM would do on an IB cluster.

@@ -1,0 +1,45 @@
+---
+# Validated automatically before the role's tasks run (ansible-core >= 2.11).
+# A typo in host_vars now fails in <1 s with a clear message instead of
+# half-configuring a 200G link.
+argument_specs:
+  main:
+    short_description: Configure and verify ConnectX-7 fabric interfaces on DGX Spark
+    options:
+      cx7_fabric_interfaces:
+        type: list
+        elements: dict
+        required: true
+        description: CX-7 logical interfaces to address (see `ibdev2netdev`).
+        options:
+          name:
+            type: str
+            required: true
+            description: netdev name, e.g. enp1s0f1np1
+          rdma_dev:
+            type: str
+            required: true
+            description: RDMA device, e.g. rocep1s0f1
+          address:
+            type: str
+            required: true
+            description: IPv4 CIDR, e.g. 192.168.100.11/24
+          mtu:
+            type: int
+            default: 9000
+            choices: [1500, 4200, 9000]
+      cx7_fabric_expected_speed_mbps:
+        type: int
+        default: 200000
+      cx7_fabric_strict:
+        type: bool
+        default: true
+      cx7_fabric_verify_peers:
+        type: bool
+        default: true
+      cx7_fabric_netplan_file:
+        type: path
+        default: /etc/netplan/40-cx7.yaml
+      cx7_fabric_gid_index:
+        type: str
+        default: ""

@@ -1,0 +1,8 @@
+# {{ ansible_managed }}
+{% for server in spark_baseline_ntp_servers %}
+pool {{ server }} iburst maxsources 2
+{% endfor %}
+driftfile /var/lib/chrony/chrony.drift
+makestep 1.0 3
+rtcsync
+logdir /var/log/chrony

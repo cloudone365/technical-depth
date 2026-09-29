@@ -1,0 +1,9 @@
+---
+- name: OS baseline + custom facts
+  hosts: spark
+  become: true
+  roles:
+    - role: spark_facts
+      tags: [facts]
+    - role: spark_baseline
+      tags: [baseline]

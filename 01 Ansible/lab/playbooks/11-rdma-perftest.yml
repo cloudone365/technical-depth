@@ -1,0 +1,95 @@
+---
+# RDMA verbs bandwidth/latency between two Sparks over CX-7 (RoCEv2).
+# Server side runs on the 2nd Spark (async), client on the 1st.
+#   ansible-playbook playbooks/11-rdma-perftest.yml -K [-e perftest_port_idx=1] [-e perftest_qps=4]
+- name: RDMA perftest (ib_write_bw / ib_write_lat)
+  hosts: spark
+  become: true
+  gather_facts: false
+  vars:
+    perftest_port_idx: 0            # which entry of cx7_interfaces to test
+    perftest_qps: 4                 # queue pairs; >1 needed to fill 200G
+    perftest_msg: 1048576
+    perftest_seconds: 10
+    perftest_server: "{{ groups['spark'][1] | default(None) }}"
+    perftest_client: "{{ groups['spark'][0] }}"
+  tasks:
+    - name: Needs two Sparks
+      ansible.builtin.meta: end_play
+      when: groups['spark'] | length < 2
+
+    - name: Select port + GID index
+      ansible.builtin.include_role:
+        name: cx7_fabric
+        tasks_from: main.yml
+      vars:
+        cx7_fabric_verify_peers: false
+        cx7_fabric_strict: false
+
+    - name: Facts for this port
+      ansible.builtin.set_fact:
+        perftest_dev: "{{ cx7_interfaces[perftest_port_idx | int].rdma_dev }}"
+        perftest_ip: "{{ cx7_interfaces[perftest_port_idx | int].address.split('/')[0] }}"
+        perftest_gid: "{{ cx7_fabric_gid.results[perftest_port_idx | int].stdout | default('3', true) }}"
+
+    - name: Start ib_write_bw server (async, one-shot)
+      ansible.builtin.command: >-
+        timeout 60 ib_write_bw -d {{ perftest_dev }} -x {{ perftest_gid }} -q {{ perftest_qps }}
+        -s {{ perftest_msg }} -D {{ perftest_seconds }} --report_gbits -F
+      async: 90
+      poll: 0
+      register: perftest_srv
+      changed_when: false
+      when: inventory_hostname == perftest_server
+
+    - name: Give the server a moment
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Run ib_write_bw client
+      ansible.builtin.command: >-
+        ib_write_bw -d {{ perftest_dev }} -x {{ perftest_gid }} -q {{ perftest_qps }}
+        -s {{ perftest_msg }} -D {{ perftest_seconds }} --report_gbits -F
+        {{ hostvars[perftest_server].perftest_ip }}
+      register: perftest_bw
+      changed_when: false
+      when: inventory_hostname == perftest_client
+
+    - name: Start ib_write_lat server
+      ansible.builtin.command: >-
+        timeout 60 ib_write_lat -d {{ perftest_dev }} -x {{ perftest_gid }} -F
+      async: 90
+      poll: 0
+      changed_when: false
+      when: inventory_hostname == perftest_server
+
+    - name: Pause
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Run ib_write_lat client
+      ansible.builtin.command: >-
+        ib_write_lat -d {{ perftest_dev }} -x {{ perftest_gid }} -F {{ hostvars[perftest_server].perftest_ip }}
+      register: perftest_lat
+      changed_when: false
+      when: inventory_hostname == perftest_client
+
+    - name: Parse results
+      ansible.builtin.set_fact:
+        perftest_result:
+          device: "{{ perftest_dev }} (GID idx {{ perftest_gid }})"
+          bw_gbps: >-
+            {{ (perftest_bw.stdout_lines | select('match', '^\s*\d+\s+\d+') | last | default('')).split()[3] | default('n/a') }}
+          lat_typical_usec: >-
+            {{ (perftest_lat.stdout_lines | select('match', '^\s*\d+\s+\d+') | last | default('')).split()[4] | default('n/a') }}
+      when: inventory_hostname == perftest_client
+
+    - name: Report
+      ansible.builtin.debug:
+        msg:
+          - "{{ perftest_result }}"
+          - >-
+            Each QSFP cage is split across two PCIe roots (two netdevs). One netdev alone typically
+            shows about half the cage rate; run idx 0 and 1 together to see the full link.
+          - "Low numbers? Check MTU (9000 both ends), -q (QPs), link speed (ethtool), and that GID index is RoCE v2."
+      when: inventory_hostname == perftest_client

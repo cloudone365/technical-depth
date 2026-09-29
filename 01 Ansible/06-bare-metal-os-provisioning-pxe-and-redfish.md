@@ -1,267 +1,400 @@
-# Volume 06: Bare-Metal OS Provisioning, Redfish API, IOMMU & Kernel Hugepages
+# Volume 06 — Provisioning Without a BMC: Day-0/Day-1 on DGX Spark, Safe Network Cut-over, and Practising Redfish & PXE
 
-```
-====================================================================================================
-MODULE 01: ANSIBLE & BARE-METAL AI INFRASTRUCTURE AUTOMATION
-VOLUME 06: Out-of-Band BMC Automation, Redfish REST APIs, Kernel Parameters & 1GB Hugepages
-====================================================================================================
-```
+> **Module 01 · Part II — Node Provisioning** · Prev: [05 Roles & EEs](05-role-architecture-collections-and-galaxy.md) · Next: [07 Driver stack & version pinning](07-nvidia-driver-and-fabric-manager-automation.md)
 
----
-
-## 1. Executive Intuition: The Out-of-Band Foundation
-
-An AI server (such as an NVIDIA DGX H100 or HGX B200) cannot be configured like a standard cloud virtual machine. Before the Linux operating system boots, dozens of critical physical, electrical, and bus-level parameters must be precisely aligned in the server's BIOS/UEFI:
-1. **IOMMU Passthrough:** If `intel_iommu=on iommu=pt` or `amd_iommu=on` is not declared in the kernel, GPUDirect RDMA and GPUDirect Storage transactions will be trapped by hypervisor translation layers, degrading network and storage throughput by up to $60\%$.
-2. **PCIe Power Throttling (ASPM):** Active State Power Management (ASPM) powers down idle PCIe lanes to save watts. In an AI cluster, transient idle periods during gradient descent sync cause PCIe links to drop into low-power states, introducing millisecond wake-up latencies that stall all-reduce barriers.
-3. **Memory TLB Thrashing:** Managing 2 Terabytes of host memory using standard $4\text{ KB}$ pages requires millions of page table entries, thrashing the CPU Translation Lookaside Buffer (TLB). Pre-allocating **1 GB Hugepages** or **2 MB Hugepages** is mandatory for high-speed DMA transfers.
-
-```
-+-----------------------------------------------------------------------------------------+
-|                    THE BARE-METAL PROVISIONING HIERARCHY                                |
-+-----------------------------------------------------------------------------------------+
-| [Out-of-Band Management: BMC (Baseboard Management Controller)]                         |
-|   - Protocol: DMTF Redfish REST API over HTTPS (Port 443)                               |
-|   - Ansible: community.general.redfish_config / redfish_command                         |
-|   - Configuration: Enable SR-IOV, Disable PCIe ASPM, Lock CPU Performance Governor       |
-|                                                                                         |
-| [Pre-Boot Network Phase: PXE / iPXE / UEFI HTTP Boot]                                   |
-|   - Automated OS Installation (Ubuntu 22.04/24.04 Server LTS or Rocky Linux 9)          |
-|                                                                                         |
-| [In-Band Kernel Hardening: Linux OS Level]                                              |
-|   - GRUB Cmdline: intel_iommu=on iommu=pt pcie_aspm=off processor.max_cstate=0          |
-|   - Memory: Allocate 512 GB of 2MB Hugepages (vm.nr_hugepages = 262144)                 |
-+-----------------------------------------------------------------------------------------+
-```
+| | |
+|---|---|
+| **You will build** | A repeatable path from *fresh out of the box* (or *just re-imaged*) to *managed by Ansible*: first-boot wizard → key trust → hostname → static mgmt IP with an automatic rollback → baseline. Then a Redfish practice target and a PXE design for when you graduate to DGX/HGX |
+| **Hardware** | 1× DGX Spark (recovery USB stick optional) |
+| **Time** | 2 h (+30 min if you do a full re-image drill) |
+| **Risk** | **Medium.** Changing the management IP on a headless box can lock you out, which is exactly what the dead-man switch below prevents |
 
 ---
 
-## 2. Lineage & Evolution of Bare-Metal Provisioning
+## 1. What's different about a Spark
 
+| Data-centre DGX/HGX | DGX Spark | Consequence for automation |
+|---|---|---|
+| BMC with Redfish/IPMI (power, virtual media, boot order, sensors) | **No BMC** | No remote power cycling or console. A hung box needs a human (or a smart plug) |
+| PXE + autoinstall, fully unattended | **First-boot wizard** (local display, or headless via a Wi-Fi hotspot whose SSID, password and URL are on the Quick Start Guide sticker) | Day 0 is manual. Ansible takes over at Day 1 |
+| Re-image over the network | **USB recovery media** from NVIDIA/OEM; a re-install takes roughly 25–30 min | Your playbooks must rebuild everything after a re-image, and that's the point of this module |
+| OS images you build | **DGX OS 7** (Ubuntu 24.04 based) with NVIDIA's kernel, driver, CUDA, Docker and toolkit preinstalled | Converge the vendor image; don't fight it |
+
+```mermaid
+stateDiagram-v2
+  direction LR
+  [*] --> Unboxed
+  Unboxed --> OOBE: power on
+  OOBE --> DHCP_Ready: wizard (user, Wi-Fi/Ethernet, updates)
+  DHCP_Ready --> Bootstrapped: 00-bootstrap.yml (-k -K)
+  Bootstrapped --> Baselined: 01-baseline.yml
+  Baselined --> Operational: 02..09 (fabric, runtime, k3s, slurm…)
+  Operational --> Operational: drift check / day-2
+  Operational --> Recovery: disk failure · bad update · "start clean"
+  Recovery --> OOBE: USB recovery image (25–30 min)
 ```
-   [1998: IPMI v1.0 / v2.0 (RMCP+)]
-                 |
-           (Raw UDP packets on port 623; complex hex sensors; insecure cipher suite 0)
-                 |
-   [2015: DMTF Redfish Specification]
-                 |
-           (RESTful JSON over HTTPS; vendor-neutral schema for chassis, BIOS, and power)
-                 |
-   [2018: Ansible Redfish Collection]
-                 |
-           (community.general.redfish: Declarative Ansible modules managing BMCs)
-                 |
-   [2024: Open Compute Project (OCP) OpenBMC]
-                 |
-           (Linux-based BMC firmware running native REST/gRPC interfaces on DGX systems)
-```
+
+> **Do not power off during the first-boot update.** NVIDIA warns that interrupting the initial software download and install can damage the system. Let it finish before running any playbook.
 
 ---
 
-## 3. First-Principles Mathematics: Page Table Footprint & Hugepages Physics
+## 2. Architecture
 
-In an enterprise GPU server equipped with $2\text{ TB}$ ($2,048\text{ GB}$) of host DRAM:
+### 2.1 HLD: control-plane responsibilities by phase
 
-### 3.1 Standard 4 KB Page Table Overhead
-The number of virtual-to-physical memory translations required:
+```mermaid
+flowchart LR
+  subgraph D0["Day 0 (human)"]
+    W["First-boot wizard<br/>user · locale · network · updates"]
+  end
+  subgraph D1["Day 1 (00-bootstrap.yml)"]
+    K["SSH key trust"] --> H["hostname + /etc/hosts"] --> N["static mgmt IP<br/>with dead-man rollback"]
+  end
+  subgraph D2["Day 1½ (01-baseline.yml)"]
+    F["spark.fact"] --> B["packages · NVIDIA holds ·<br/>sysctl · sshd · chrony · journald"]
+  end
+  D0 --> D1 --> D2 --> Rest["Volumes 07–25"]
+```
 
-$$N_{\text{pages}} = \frac{2 \times 1024^3\text{ KB}}{4\text{ KB}} = 536,870,912\text{ pages}$$
+### 2.2 LLD: the dead-man switch for network changes
 
-Each 64-bit Page Table Entry (PTE) consumes 8 bytes. In a 4-level x86-64 page table structure (PML4 $\to$ PDPT $\to$ PD $\to$ PT), the total physical memory consumed purely by kernel page tables is:
+```mermaid
+sequenceDiagram
+  participant A as Ansible (control node)
+  participant S as Spark (old IP, DHCP)
+  participant T as systemd timer
+  A->>S: back up /etc/netplan → /root/netplan.pre-bootstrap
+  A->>S: write /etc/netplan/30-mgmt.yaml (static)
+  A->>T: systemd-run --on-active=180 /root/netplan-rollback.sh
+  A->>S: async: sleep 2 && netplan apply   (SSH drops)
+  Note over S: now on the static IP
+  A->>A: set_fact ansible_host = new IP
+  A->>S: wait_for_connection (≤ 90 s)
+  alt reconnected
+    A->>T: stop netplan-rollback.timer  ✅
+  else never reconnected
+    T->>S: restore old netplan + netplan apply  ↩️ (you're back on DHCP)
+  end
+```
 
-$$\text{PTE Memory} = 536,870,912 \times 8\text{ bytes} \approx 4,294,967,296\text{ bytes} \approx \mathbf{4.0\text{ Gigabytes}}$$
-
-Furthermore, modern CPU L1/L2 TLBs can cache only $1,024 - 2,048$ entries ($4\text{ MB} - 8\text{ MB}$ total reach). Every GPU DMA access outside this reach incurs a high-latency **4-level Page Table Walk** across host memory buses ($\sim 80\text{ ns}$).
-
-### 3.2 Sizing 2 MB and 1 GB Hugepages
-With **2 MB Hugepages**:
-$$N_{\text{pages}} = \frac{2 \times 1024\text{ GB}}{2\text{ MB}} = 1,048,576\text{ pages}$$
-$$\text{PTE Memory} = 1,048,576 \times 8\text{ bytes} \approx \mathbf{8.0\text{ Megabytes}}\quad (99.8\%\text{ reduction!})$$
-
-With **1 GB Hugepages**:
-$$N_{\text{pages}} = \frac{2 \times 1024\text{ GB}}{1\text{ GB}} = 2,048\text{ pages}$$
-$$\text{PTE Memory} = 2,048 \times 8\text{ bytes} \approx \mathbf{16.0\text{ Kilobytes}}$$
-
-The CPU TLB can now hold the entire $2\text{ TB}$ physical address space simultaneously, eliminating TLB misses during multi-hundred GB/s GPUDirect Storage transfers.
-
-#### Sizing Equation for Ansible sysctl:
-To allocate $512\text{ GB}$ of $2\text{ MB}$ Hugepages in `/etc/sysctl.d/99-hugepages.conf`:
-
-$$\text{vm.nr\_hugepages} = \frac{512 \times 1024\text{ MB}}{2\text{ MB}} = \mathbf{262,144}$$
+The same pattern protects **any** change that can cut your own access: sshd config, firewall rules, bonding, VLANs.
 
 ---
 
-## 4. Deep Architecture: Out-of-Band Redfish REST State Machine
+## 3. Hands-on
 
-Ansible communicates with the BMC over an isolated Out-of-Band (OOB) management network.
+### 3.1 Day 0: the first-boot wizard
 
-```
-+-----------------------------------------------------------------------------+
-|                     REDFISH BIOS AUTOMATION WORKFLOW                        |
-+-----------------------------------------------------------------------------+
-|  Ansible Control Node                                                       |
-|    |                                                                        |
-|    | (1) POST /redfish/v1/SessionService/Sessions (Auth Token generated)    |
-|    v                                                                        |
-|  DGX BMC (Baseboard Management Controller)                                  |
-|    |                                                                        |
-|    | (2) PATCH /redfish/v1/Systems/Self/Bios/Settings                       |
-|    |     Payload: { "Attributes": { "WorkloadProfile": "HPC",               |
-|    |                                "SriovEnable": "Enabled",               |
-|    |                                "PcieAspm": "Disabled" } }              |
-|    |                                                                        |
-|    | (3) BMC creates Pending Configuration Object                           |
-|    v                                                                        |
-|  Ansible Control Node                                                       |
-|    |                                                                        |
-|    | (4) POST /redfish/v1/Systems/Self/Actions/ComputerSystem.Reset         |
-|    |     Payload: { "ResetType": "GracefulRestart" }                        |
-|    v                                                                        |
-|  DGX Server: Cold boots, flashes UEFI NVRAM, trains PCIe Gen5 buses         |
-+-----------------------------------------------------------------------------+
-```
+1. Connect the 10GbE port to your management LAN (recommended over Wi-Fi for everything that follows).
+2. Power on. Either use a monitor and keyboard, or join the setup hotspot from a laptop and open the URL on the Quick Start Guide sticker.
+3. Create the user. Use **the same username on every Spark** (`nvidia` in this lab); NVIDIA's multi-node playbooks and MPI depend on it.
+4. Let the updates finish, including the reboot.
+5. Find its DHCP address from your router, or with `avahi-browse -rt _ssh._tcp` from the control node (Volume 03A).
 
----
-
-## 5. Concrete Production Lab: End-to-End Bare-Metal Provisioning Playbook
+### 3.2 Day 1: bootstrap with Ansible
 
 ```yaml
+# lab/playbooks/00-bootstrap.yml
 ---
-# playbook: bare_metal_foundation.yml
-# Provisions BMC BIOS parameters via Redfish and hardens Linux kernel for AI
-- name: Phase 1 - Out-of-Band BIOS Configuration via Redfish
-  hosts: bmc_nodes
-  gather_facts: false
-  connection: local
-  tasks:
-    - name: 1. Ensure High-Performance Compute BIOS attributes
-      community.general.redfish_config:
-        category: Systems
-        command: SetBiosAttributes
-        baseuri: "{{ bmc_ip }}"
-        username: "{{ bmc_user }}"
-        password: "{{ bmc_password }}"
-        bios_attributes:
-          WorkloadProfile: "HPC"
-          SriovEnable: "Enabled"
-          IntelVirtualizationTechnology: "Enabled"
-          PcieAspmSupport: "Disabled"
-          EnergyPerfBias: "MaxPerformance"
-      register: bios_result
-
-    - name: 2. Trigger Graceful Restart if BIOS configuration changed
-      when: bios_result.changed
-      community.general.redfish_command:
-        category: Systems
-        command: PowerReboot
-        baseuri: "{{ bmc_ip }}"
-        username: "{{ bmc_user }}"
-        password: "{{ bmc_password }}"
-
-- name: Phase 2 - In-Band Linux Kernel Hardening & Memory Tuning
-  hosts: gpu_nodes
+# Day-1 bootstrap for a Spark that just finished the first-boot wizard.
+# Password auth is still on, you have no key trust yet, and it's on DHCP.
+#
+#   ansible-playbook playbooks/00-bootstrap.yml -l spark-02 -k -K \
+#     -e bootstrap_current_ip=<current DHCP IP> [-e bootstrap_static_ip=true]
+#
+# NOTE: don't pass -e ansible_host=… — extra vars outrank set_fact, so Ansible
+# could never switch to the new address and the rollback would always fire.
+#
+# The static-IP step uses a DEAD-MAN SWITCH: a systemd timer restores the old
+# netplan in 180 s unless Ansible reconnects on the new IP and cancels it.
+- name: Bootstrap a freshly installed DGX Spark
+  hosts: spark
   become: true
-  gather_facts: true
+  gather_facts: false          # we must redirect the connection before the first SSH
+  vars:
+    bootstrap_static_ip: false
+    bootstrap_prefix: "{{ mgmt_cidr | default('10.10.10.0/24') | regex_replace('^.*/', '') }}"
+    bootstrap_rollback_seconds: 180
+    bootstrap_netplan: /etc/netplan/30-mgmt.yaml
   tasks:
-    - name: 1. Configure Linux Kernel Boot Parameters (GRUB)
+    - name: Remember the inventory (target) IP, connect via the current one
+      ansible.builtin.set_fact:
+        bootstrap_target_ip: "{{ ansible_host }}"
+        ansible_host: "{{ bootstrap_current_ip | default(ansible_host) }}"
+
+    - name: Gather facts on the current address
+      ansible.builtin.setup:
+
+    - name: Set hostname to the inventory name
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+
+    - name: Make the hostname resolvable locally (sudo is slow without it)
       ansible.builtin.lineinfile:
-        path: /etc/default/grub
-        regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
-        line: 'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash intel_iommu=on iommu=pt pcie_aspm=off processor.max_cstate=0 intel_idle.max_cstate=0 transparent_hugepage=never default_hugepagesz=1G hugepagesz=1G hugepages=256"'
-      notify: Update GRUB
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1\s'
+        line: "127.0.1.1 {{ inventory_hostname }}.{{ lab_domain | default('lab.local') }} {{ inventory_hostname }}"
+        mode: "0644"
 
-    - name: 2. Allocate 2MB Hugepages via Sysctl
-      ansible.posix.sysctl:
-        name: vm.nr_hugepages
-        value: "262144"  # 512 GB in 2MB pages
-        state: present
-        sysctl_file: /etc/sysctl.d/99-ai-memory.conf
-        reload: true
+    - name: Install control-node SSH key(s)
+      ansible.posix.authorized_key:
+        user: "{{ spark_admin_user }}"
+        key: "{{ item }}"
+      loop: "{{ spark_admin_pubkeys | select | list }}"
 
-    - name: 3. Maximize Network & IPC Memory Buffers
-      ansible.posix.sysctl:
-        name: "{{ item.name }}"
-        value: "{{ item.value }}"
-        state: present
-        sysctl_file: /etc/sysctl.d/99-ai-sysctl.conf
-        reload: true
-      loop:
-        - { name: "net.core.rmem_max", value: "67108864" }        # 64 MB
-        - { name: "net.core.wmem_max", value: "67108864" }        # 64 MB
-        - { name: "net.core.optmem_max", value: "67108864" }
-        - { name: "net.ipv4.tcp_rmem", value: "4096 87380 67108864" }
-        - { name: "net.ipv4.tcp_wmem", value: "4096 65536 67108864" }
-        - { name: "vm.max_map_count", value: "2621440" }          # Required for PyTorch/CUDA
-        - { name: "fs.file-max", value: "2097152" }
+    - name: Ensure OpenSSH server is enabled
+      ansible.builtin.systemd_service:
+        name: ssh
+        enabled: true
+        state: started
 
-    - name: 4. Lock CPU Scaling Governor to Maximum Performance
-      ansible.builtin.apt:
-        name: cpufrequtils
-        state: present
+    # ------------------------------------------------------------ static mgmt IP with rollback
+    - name: Static management IP (dead-man switch)
+      when: bootstrap_static_ip | bool
+      block:
+        - name: Back up current netplan directory
+          ansible.builtin.command: cp -a /etc/netplan /root/netplan.pre-bootstrap
+          args:
+            creates: /root/netplan.pre-bootstrap
 
-    - name: Set governor in /etc/default/cpufrequtils
+        - name: Write rollback script
+          ansible.builtin.copy:
+            dest: /root/netplan-rollback.sh
+            mode: "0700"
+            content: |
+              #!/bin/sh
+              rm -f {{ bootstrap_netplan }}
+              cp -a /root/netplan.pre-bootstrap/. /etc/netplan/
+              netplan apply
+              logger -t bootstrap "netplan rolled back — Ansible did not confirm new IP"
+
+        - name: Render static netplan for the mgmt NIC
+          ansible.builtin.copy:
+            dest: "{{ bootstrap_netplan }}"
+            mode: "0600"
+            content: |
+              # {{ ansible_managed }}
+              network:
+                version: 2
+                ethernets:
+                  {{ mgmt_interface }}:
+                    dhcp4: false
+                    addresses: [{{ bootstrap_target_ip }}/{{ bootstrap_prefix }}]
+                    routes: [{to: default, via: {{ mgmt_gateway }}}]
+                    nameservers: {addresses: {{ dns_servers | to_json }}}
+
+        - name: Arm the dead-man switch
+          ansible.builtin.command: >-
+            systemd-run --unit=netplan-rollback --on-active={{ bootstrap_rollback_seconds }}
+            /root/netplan-rollback.sh
+          changed_when: true
+
+        - name: Apply netplan in the background (our SSH session will drop)
+          ansible.builtin.shell: sleep 2 && netplan apply
+          async: 60
+          poll: 0
+          changed_when: true
+
+        - name: Switch Ansible to the new address
+          ansible.builtin.set_fact:
+            ansible_host: "{{ bootstrap_target_ip }}"
+
+        - name: Reconnect on the new IP
+          ansible.builtin.wait_for_connection:
+            delay: 5
+            timeout: 90
+
+        - name: Disarm the dead-man switch
+          ansible.builtin.systemd_service:
+            name: netplan-rollback.timer
+            state: stopped
+
+        - name: Remove DHCP-era netplan files that would fight the static one
+          ansible.builtin.find:
+            paths: /etc/netplan
+            patterns: ["*.yaml"]
+            excludes: ["30-mgmt.yaml", "40-cx7.yaml"]
+          register: bootstrap_old_netplan
+
+        - name: Show what else configures the mgmt NIC (remove by hand if it duplicates)
+          ansible.builtin.debug:
+            msg: "Review: {{ bootstrap_old_netplan.files | map(attribute='path') | list }}"
+```
+
+```bash
+cd "01 Ansible/lab"
+# First run: password SSH (-k) and sudo (-K), on the DHCP address, no IP change yet
+ansible-playbook playbooks/00-bootstrap.yml -l spark-02 -k -K -e bootstrap_current_ip=10.10.10.137
+
+# Second run: move it to its inventory IP (10.10.10.12) with the dead-man switch
+ansible-playbook playbooks/00-bootstrap.yml -l spark-02 -K \
+  -e bootstrap_current_ip=10.10.10.137 -e bootstrap_static_ip=true
+
+# From now on, plain inventory addressing works
+ansible-playbook playbooks/00-ping.yml -l spark-02
+ansible-playbook playbooks/01-baseline.yml -l spark-02 -K
+```
+
+**Test the rollback on purpose, once.** Point the node at an address your control node can't reach, e.g. `-e bootstrap_target_ip=10.99.99.99`. (`-e` beats the playbook's own `set_fact`, so this is a handy way to force a bad target.) The reconnect times out, and 180 s later the Spark is back on its old address. `journalctl -t bootstrap` on the Spark shows the rollback.
+
+> **Precedence trap (the reason for `bootstrap_current_ip`):** extra vars (`-e`) outrank everything, including `set_fact`. If you passed the DHCP address as `-e ansible_host=…`, the play could never switch its connection to the new IP, and the dead-man switch would roll back every time. Always carry "where it is now" in a separate variable.
+
+### 3.3 Managing kernel arguments (when you have a reason)
+
+DGX OS ships tuned kernel parameters, so don't change them casually. When you must (a vendor-advised setting, or a debugging flag), use a GRUB drop-in plus a controlled reboot, never a `sed` on `/etc/default/grub`:
+
+```yaml
+- name: Kernel arguments via GRUB drop-in
+  hosts: spark
+  become: true
+  serial: 1                               # one node at a time
+  vars:
+    spark_kernel_args: []                 # e.g. ["nvidia.NVreg_EnableStreamMemOPs=1"] — only if advised
+  tasks:
+    - name: Drop-in
       ansible.builtin.copy:
-        dest: /etc/default/cpufrequtils
+        dest: /etc/default/grub.d/90-spark-lab.cfg
         content: |
-          GOVERNOR="performance"
-      notify: Restart CPUFreq
-
-  handlers:
-    - name: Update GRUB
+          # {{ ansible_managed }}
+          GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT {{ spark_kernel_args | join(' ') }}"
+        mode: "0644"
+      register: grub_dropin
+    - name: Regenerate GRUB
       ansible.builtin.command: update-grub
-
-    - name: Restart CPUFreq
-      ansible.builtin.systemd:
-        name: cpufrequtils
-        state: restarted
+      when: grub_dropin is changed
+      changed_when: true
+    - name: Reboot and wait for the GPU to come back
+      ansible.builtin.reboot:
+        reboot_timeout: 900
+        test_command: nvidia-smi -L
+      when: grub_dropin is changed
+    - name: Verify args are live
+      ansible.builtin.command: cat /proc/cmdline
+      register: cmdline
+      changed_when: false
+      failed_when: spark_kernel_args | reject('in', cmdline.stdout) | list | length > 0
 ```
+
+### 3.4 Recovery drill: prove you can rebuild
+
+The real test of provisioning automation is to wipe a node and rebuild it:
+
+1. Record the state: `ansible-playbook playbooks/30-validate.yml -l spark-02 -K` (keep `.cache/validation/spark-02.json`).
+2. Re-image spark-02 from the USB recovery media (the OEM/NVIDIA guide covers creating it with `dd`; verify the checksum first).
+3. Complete the wizard (§3.1).
+4. `00-bootstrap.yml` (both runs), then `site.yml -l spark-02`.
+5. Validate again and `diff` the two JSON reports. **Anything that differs is something you did by hand and never automated.**
+
+Time the whole thing. Under an hour from USB boot to validated is a good target.
 
 ---
 
-## 6. Comparative Bare-Metal Configuration Matrix
+## 4. Practising Redfish (for DGX/HGX) on the Spark
 
-| Setting | Default Linux Server | Tuned AI Supercomputer Node | Impact of Misconfiguration |
-| :--- | :--- | :--- | :--- |
-| **IOMMU Mode** | `intel_iommu=off` | `intel_iommu=on iommu=pt` | GDS and InfiniBand P2P fail completely |
-| **PCIe ASPM** | `pcie_aspm=default` (Active)| `pcie_aspm=off` (Disabled) | Multi-millisecond PCIe latency spikes |
-| **Hugepages** | Transparent (THP Enabled) | **Explicit 1GB/2MB Locked** | Severe memory fragmentation & CUDA OOM |
-| **CPU Governor** | `powersave` / `schedutil` | **`performance`** | CPU clock throttling stalls DataLoader |
-| **C-States** | Deep sleep (C6/C8 allowed) | **Locked to C0 (`max_cstate=0`)** | Core wake-up latency ruins barrier sync |
+The Spark has no BMC, but the Redfish automation you'll use on DGX B200/GB200 systems (power control, boot override, firmware inventory, sensors) can be practised against DMTF's **Redfish Mockup Server**, which serves a realistic BMC tree from static JSON:
+
+```yaml
+# lab/playbooks/12-redfish-practice.yml
+---
+# DGX Spark has no BMC. To practise the Redfish automation you'll need on
+# DGX/HGX servers, run DMTF's Redfish Mockup Server on the Spark and point
+# community.general redfish modules at it (Volume 06).
+- name: Start a Redfish mockup server
+  hosts: spark[0]
+  become: true
+  vars:
+    redfish_mock_dir: /opt/redfish-mockup
+    redfish_mock_port: 8000
+  tasks:
+    - name: Clone DMTF Redfish-Mockup-Server
+      ansible.builtin.git:
+        repo: https://github.com/DMTF/Redfish-Mockup-Server.git
+        dest: "{{ redfish_mock_dir }}"
+        version: main
+        depth: 1
+    - name: Install its Python requirements in a venv
+      ansible.builtin.pip:
+        requirements: "{{ redfish_mock_dir }}/requirements.txt"
+        virtualenv: "{{ redfish_mock_dir }}/.venv"
+        virtualenv_command: python3 -m venv
+    - name: Run it as a transient systemd unit
+      ansible.builtin.command: >-
+        systemd-run --unit=redfish-mock --collect
+        {{ redfish_mock_dir }}/.venv/bin/python {{ redfish_mock_dir }}/redfishMockupServer.py
+        -H 0.0.0.0 -p {{ redfish_mock_port }} -D {{ redfish_mock_dir }}/public-rackmount1
+      register: redfish_mock_run
+      changed_when: redfish_mock_run.rc == 0
+      failed_when: redfish_mock_run.rc != 0 and 'already' not in redfish_mock_run.stderr
+
+- name: Query it like a real BMC
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    bmc: "{{ hostvars[groups['spark'][0]].ansible_host }}:8000"
+  tasks:
+    - name: Inventory via Redfish
+      community.general.redfish_info:
+        category: Systems,Chassis,Manager
+        command: GetSystemInventory,GetPsuInventory,GetFirmwareInventory,GetBootOverride
+        baseuri: "{{ bmc }}"
+        username: root
+        password: unused-by-mockup
+      register: redfish
+    - name: Show system inventory
+      ansible.builtin.debug:
+        var: redfish.redfish_facts.system
+```
+
+```bash
+ansible-playbook playbooks/12-redfish-practice.yml -K
+curl -s http://10.10.10.11:8000/redfish/v1/Systems | jq '.Members'
+```
+
+Real-BMC equivalents of what you just ran:
+
+| Task | Module / command | On a real DGX/HGX BMC |
+|---|---|---|
+| Inventory | `community.general.redfish_info` `GetSystemInventory` | CPU/GPU/DIMM/PSU inventory |
+| One-time PXE boot | `redfish_command` `SetOneTimeBoot` `bootdevice: Pxe` | Next boot from the network |
+| Power | `redfish_command` `PowerGracefulRestart` / `PowerForceOff` | Remote power-cycle a hung node (you **can't** do this on a Spark; a smart plug is the home-lab stand-in) |
+| Virtual media | `redfish_command` `VirtualMediaInsert` | Boot an ISO without USB |
+| Firmware | `redfish_info` `GetFirmwareInventory` + `redfish_command` `MultipartHTTPPushUpdate` | BMC/BIOS/GPU firmware |
+
+## 5. PXE / autoinstall design (reference for data-centre nodes)
+
+Not runnable on a Spark (no network install path documented for it), but here's the blueprint the rest of this module plugs into:
+
+```mermaid
+flowchart LR
+  BMC["BMC (Redfish)<br/>SetOneTimeBoot=Pxe + reboot"] --> NIC["Node UEFI PXE"]
+  NIC -->|DHCP option 67| DHCP["dnsmasq / Kea<br/>per-MAC reservations from NetBox"]
+  NIC -->|HTTP| IPXE["iPXE script"] --> K["kernel + initrd"]
+  K -->|autoinstall ds=nocloud-net| AI["user-data (Ansible-templated)<br/>storage · users · SSH key · late-commands"]
+  AI --> OS["OS installed → reboot"]
+  OS --> CB["cloud-init phone-home → AWX webhook"]
+  CB --> AWX["AWX: site.yml -l <new node>"]
+```
+
+Ansible owns every box in that diagram: it templates the dnsmasq reservations from NetBox (Volume 03A), renders the per-node `user-data`, flips the BMC boot order through Redfish, and receives the phone-home webhook in AWX.
 
 ---
 
-## 7. SRE Diagnostics & Troubleshooting Playbook
+## 6. Troubleshooting & diagnostics
 
-```
-+---------------------------------------------------------------------------------------------------+
-|                        BARE-METAL OS SRE DIAGNOSTIC MATRIX                                        |
-+------------------------------------+--------------------------+-----------------------------------+
-| Symptom / Failure Mode             | Root Cause Hypothesis    | Triage & Remediation Command      |
-+------------------------------------+--------------------------+-----------------------------------+
-| `nvidia-fs` driver fails to load:  | IOMMU passthrough        | Verify active kernel boot params: |
-| "IOMMU disabled or missing pt".    | disabled in GRUB.        | `cat /proc/cmdline | grep iommu`  |
-|                                    |                          | Must contain `iommu=pt`.          |
-+------------------------------------+--------------------------+-----------------------------------+
-| Hugepages allocation fails:        | Memory fragmented; kernel| Pre-allocate pages at boot via    |
-| `vm.nr_hugepages` rejected.        | cannot find contiguous   | GRUB cmdline (`hugepages=...`)    |
-|                                    | physical 2MB blocks.     | instead of runtime sysctl.        |
-+------------------------------------+--------------------------+-----------------------------------+
-| Redfish API returns 401:           | Expired token or default | Test Redfish auth via curl:       |
-| `Unauthorized`.                    | OEM password changed.    | `curl -k -u user:pass https://$BMC|
-|                                    |                          | /redfish/v1/Systems/Self`         |
-+------------------------------------+--------------------------+-----------------------------------+
-| Random GPU all-reduce stalls on    | CPU core downclocking    | Check current CPU core frequency: |
-| specific workers.                  | under powersave governor.| `cat /proc/cpuinfo | grep MHz`    |
-|                                    |                          | Force governor to performance.    |
-+------------------------------------+--------------------------+-----------------------------------+
-```
+| Symptom | Diagnose | Fix |
+|---|---|---|
+| Can't find the Spark after the wizard | Router DHCP leases; `avahi-browse -rt _ssh._tcp`; `arp -a` | Use a wired connection; the Wi-Fi hotspot is setup-only |
+| `-k` fails: `to use the 'ssh' connection type with passwords, you must install the sshpass program` | — | `apt install sshpass` / `brew install hudochenkov/sshpass/sshpass` on the control node |
+| Bootstrap: `wait_for_connection` times out and then the old IP answers again | The dead-man switch worked | Check the new IP/prefix/gateway; `journalctl -t bootstrap`; make sure you used `bootstrap_current_ip`, **not** `-e ansible_host`; fix and re-run |
+| Both the old DHCP and the new static address are present | Another netplan file (from the wizard/NetworkManager) still configures the NIC | Review the files the last task lists; `netplan get`; remove the duplicate; `netplan apply` |
+| `netplan apply` warns `Permissions for /etc/netplan/*.yaml are too open` | `ls -l /etc/netplan` | `mode: "0600"` (the roles already do this) |
+| After `update-grub` + reboot, the GPU is missing | `nvidia-smi`; `dmesg \| grep -i nvrm` | Remove the drop-in, `update-grub`, reboot; bisect the argument you added |
+| Redfish mockup: `Connection refused` | `systemctl status redfish-mock` on the Spark | `systemctl reset-failed redfish-mock`; re-run; check the port with `ss -ltnp \| grep 8000` |
 
----
+## 7. Validation
 
-## 8. Verification & Architectural Synthesis Checklist
-
-- [ ] **Redfish BIOS Hardened:** Out-of-band automation validated for PCIe ASPM disablement and SR-IOV.
-- [ ] **IOMMU Passthrough Confirmed:** `dmesg | grep -i iommu` confirms `IOMMU enabled, passthrough active`.
-- [ ] **Hugepages Locked:** `/proc/meminfo` confirms `HugePages_Total` matches target memory allocation.
-- [ ] **CPU Frequency Fixed:** All CPU cores verified running at maximum non-throttled frequency in C0 state.
-- [ ] **Network Buffers Sized:** Linux sysctl `rmem_max` and `wmem_max` tuned to $64\text{ MB}$ for high-BDP fabrics.
+- [ ] A Spark goes from wizard-complete to `01-baseline.yml changed=0` using only playbooks.
+- [ ] You triggered the dead-man rollback deliberately and watched it recover.
+- [ ] (Drill) Re-image → rebuild → `diff` of the validation JSON is empty.
+- [ ] `redfish_info` returns system inventory from the mockup.

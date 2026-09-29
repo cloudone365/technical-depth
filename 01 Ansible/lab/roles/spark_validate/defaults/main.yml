@@ -1,0 +1,7 @@
+---
+spark_validate_container: true
+spark_validate_fabric: "{{ cx7_interfaces | default([]) | length > 0 }}"
+spark_validate_k8s: "{{ inventory_hostname in (groups['k3s_server'] | default([])) + (groups['k3s_agent'] | default([])) }}"
+spark_validate_slurm: "{{ inventory_hostname in groups['slurm_compute'] | default([]) }}"
+spark_validate_image: nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04
+spark_validate_report_dir: "{{ playbook_dir }}/../.cache/validation"

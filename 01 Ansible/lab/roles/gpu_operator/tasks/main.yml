@@ -1,0 +1,79 @@
+---
+# Runs on the control node (localhost) against the k3s API.
+- name: Add NVIDIA Helm repo
+  kubernetes.core.helm_repository:
+    name: nvidia
+    repo_url: https://helm.ngc.nvidia.com/nvidia
+
+- name: Create namespace (privileged PSA — operator pods need host access)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ gpu_operator_kubeconfig }}"
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ gpu_operator_namespace }}"
+        labels:
+          pod-security.kubernetes.io/enforce: privileged
+
+- name: Time-slicing ConfigMap
+  kubernetes.core.k8s:
+    kubeconfig: "{{ gpu_operator_kubeconfig }}"
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: time-slicing-config
+        namespace: "{{ gpu_operator_namespace }}"
+      data:
+        any: |-
+          version: v1
+          flags:
+            migStrategy: none
+          sharing:
+            timeSlicing:
+              renameByDefault: false
+              failRequestsGreaterThanOne: true
+              resources:
+                - name: nvidia.com/gpu
+                  replicas: {{ gpu_operator_timeslice_replicas }}
+
+- name: Install / upgrade GPU Operator
+  kubernetes.core.helm:
+    kubeconfig: "{{ gpu_operator_kubeconfig }}"
+    name: gpu-operator
+    chart_ref: nvidia/gpu-operator
+    chart_version: "{{ gpu_operator_chart_version }}"
+    release_namespace: "{{ gpu_operator_namespace }}"
+    values: "{{ gpu_operator_values }}"
+    wait: true
+    wait_timeout: 15m
+    atomic: true            # roll back automatically if pods never go Ready
+
+- name: Wait for validator to succeed
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ gpu_operator_kubeconfig }}"
+    kind: Pod
+    namespace: "{{ gpu_operator_namespace }}"
+    label_selectors: [app=nvidia-operator-validator]
+  register: gpu_operator_validator
+  until: >-
+    gpu_operator_validator.resources | length > 0 and
+    gpu_operator_validator.resources | map(attribute='status.phase') | unique == ['Running']
+  retries: 40
+  delay: 15
+
+- name: Read allocatable GPUs per node
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ gpu_operator_kubeconfig }}"
+    kind: Node
+  register: gpu_operator_nodes
+
+- name: Assert every node advertises time-sliced GPUs
+  ansible.builtin.assert:
+    that: (item.status.allocatable['nvidia.com/gpu'] | default('0') | int) == gpu_operator_timeslice_replicas
+    fail_msg: "{{ item.metadata.name }} allocatable nvidia.com/gpu={{ item.status.allocatable['nvidia.com/gpu'] | default('0') }}"
+    success_msg: "{{ item.metadata.name }} advertises {{ gpu_operator_timeslice_replicas }} GPU slices"
+  loop: "{{ gpu_operator_nodes.resources }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"

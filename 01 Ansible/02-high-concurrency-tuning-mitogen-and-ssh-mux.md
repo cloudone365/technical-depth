@@ -1,317 +1,324 @@
-# Volume 02: High-Concurrency Scale Tuning — Mitogen, ControlMaster & Fork Physics
+# Volume 02A — Performance at Scale: SSH Multiplexing, Pipelining, Forks & Mitogen (Measured on a Spark)
+
+> **Module 01 · Part I — Foundations** · Prev: [01B Execution internals](01-ansible-core-engine-and-execution-internals.md) · Next: [02B AWX on the Spark](02-ansible-tower-awx-deep-dive.md)
+
+| | |
+|---|---|
+| **You will build** | A 32–64-node **simulated fleet** (sshd containers) on one DGX Spark, a benchmark playbook, and a tuned `ansible.cfg` backed by your own numbers |
+| **Hardware** | 1× DGX Spark (20 cores / 128 GB is plenty for 64 fake nodes) |
+| **Time** | 90 min |
+| **Risk** | Low. The containers are labelled and removed by the same playbook |
+
+You only own one or two Sparks, but the problems you'll meet on a 256-node DGX cluster (fork exhaustion, SSH storms, fact-gathering minutes) only show up with many hosts. The Spark has enough cores and RAM to fake that fleet.
+
+---
+
+## 1. Where the time goes
+
+For **H hosts**, **T tasks**, **F forks**, and a per-task cost **c**:
 
 ```
-====================================================================================================
-MODULE 01: ANSIBLE & BARE-METAL AI INFRASTRUCTURE AUTOMATION
-VOLUME 02: SSH Multiplexing, Mitogen Python Bypass, Connection Pools & File Descriptor Sizing
-====================================================================================================
+wall_time ≈ ceil(H / F) × T × c
+c = SSH round-trips × RTT + remote Python start (≈50–150 ms on Arm) + module work
+```
+
+| Setting | Round-trips per task | Effect on `c` |
+|---|---|---|
+| No ControlPersist, no pipelining | 5 × (TCP + SSH handshake) | Worst case: each task pays a full SSH handshake several times |
+| ControlPersist, no pipelining | 5 × channel open | Removes the handshakes, keeps the `mkdir/put/chmod/exec/rm` dance |
+| ControlPersist + pipelining | 1 | Module goes over stdin; nothing is written to disk |
+| Mitogen | ~0 per task (persistent interpreter) | Also removes Python start-up; compatibility risk |
+
+Forks only help until something else saturates: the control node's CPU (each fork is a Python process of roughly 50–80 MB), the target's `sshd` `MaxStartups`, or a shared API.
+
+```mermaid
+flowchart LR
+  subgraph CN[Control node]
+    W1[worker 1] & W2[worker 2] & Wn[worker F]
+    CM[(ControlMaster sockets<br/>~/.ansible/cp/*)]
+  end
+  subgraph Spark["spark-01 (Docker)"]
+    direction TB
+    N1[fleet-001 :22001] & N2[fleet-002 :22002] & N3[... ] & N64[fleet-064 :22064]
+  end
+  W1 --> CM --> N1
+  W2 --> CM --> N2
+  Wn --> CM --> N64
 ```
 
 ---
 
-## 1. Executive Intuition: The 1,000-Node Wall
+## 2. Build the simulated fleet
 
-When operations engineers attempt to run standard Ansible playbooks against enterprise AI clusters spanning 1,024 to 16,384 GPU nodes, they invariably hit the **1,000-Node Wall**:
-1. **SSH Process Storm:** If `forks = 256` is configured, the control node spawns 256 separate `/usr/bin/ssh` child processes for every single task in the playbook. Forking 256 heavy processes saturates the control node's CPU, thrashing the kernel scheduler.
-2. **Repeated Cryptographic Handshakes:** For every task, standard Ansible performs a full SSH connection teardown and renegotiation: TCP 3-way handshake, Diffie-Hellman key exchange, host key verification, and symmetric cipher negotiation ($30\text{ ms} - 100\text{ ms}$ latency penalty per task per host).
-3. **Python Cold-Start Tax:** On every task, the managed GPU node launches a brand new `/usr/bin/python3` process, dynamically imports the entire standard library (`import os, sys, json, re`), executes the module, and exits. Across 100 tasks on 1,024 nodes, the cluster wastes over 100,000 Python process boots.
-
-```
-+-----------------------------------------------------------------------------------------+
-|                  EXECUTION LATENCY PROFILES: DEFAULT VS. MITOGEN                        |
-+-----------------------------------------------------------------------------------------+
-| [Default Ansible Execution]:                                                            |
-| Task N: [SSH Handshake (45ms)] -> [SCP Ansiballz (80ms)] -> [Python Boot (90ms)]       |
-| Total Per Task: ~215 ms per host. (100 tasks on 1,000 hosts = 21,500 host-seconds)       |
-|                                                                                         |
-| [Tuned Ansible + SSH ControlMaster Multiplexing]:                                       |
-| Task N: [Reusable Unix Socket (5ms)] -> [Pipelined Exec (50ms)] -> [Python Boot (90ms)] |
-| Total Per Task: ~145 ms per host. (~32% reduction)                                      |
-|                                                                                         |
-| [Mitogen Accelerator Engine]:                                                           |
-| Task N: [Single persistent Python worker in RAM] -> [In-Memory RPC over Pipe (12ms)]    |
-| Total Per Task: ~12 ms per host. (94.4% reduction!)                                     |
-+-----------------------------------------------------------------------------------------+
+```dockerfile
+# lab/tools/fleet-sim/Dockerfile
+# A minimal "fake node": sshd + python3, arm64-native on the Spark.
+FROM ubuntu:24.04
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      openssh-server python3 sudo iproute2 \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /run/sshd \
+ && useradd -m -s /bin/bash nvidia \
+ && echo 'nvidia ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/nvidia \
+ && sed -i 's/^#\?MaxStartups.*/MaxStartups 200:30:400/' /etc/ssh/sshd_config
+COPY authorized_keys /home/nvidia/.ssh/authorized_keys
+RUN chown -R nvidia:nvidia /home/nvidia/.ssh && chmod 700 /home/nvidia/.ssh && chmod 600 /home/nvidia/.ssh/authorized_keys
+EXPOSE 22
+CMD ["/usr/sbin/sshd", "-D", "-e"]
 ```
 
-Breaking through the 1,000-Node Wall requires two architectural pillars: **OpenSSH Connection Multiplexing (`ControlMaster`)** and the **Mitogen Execution Framework**.
+```yaml
+# lab/playbooks/13-fleet-sim.yml
+---
+# Spin up N fake nodes (sshd containers) on spark-01 to practise fleet-scale
+# tuning — forks, pipelining, ControlPersist, strategies, Mitogen (Volume 02A).
+#
+#   ansible-playbook playbooks/13-fleet-sim.yml -e fleet_size=64 -K
+#   ansible-playbook -i .cache/fleet.ini playbooks/14-fleet-bench.yml -f 50
+#   ansible-playbook playbooks/13-fleet-sim.yml -e fleet_state=absent -K
+- name: Fake fleet on the Spark
+  hosts: spark[0]
+  become: true
+  vars:
+    fleet_size: 32
+    fleet_state: present
+    fleet_base_port: 22000
+    fleet_dir: /opt/fleet-sim
+    fleet_cpus: "0.25"            # 64 nodes x 0.25 = 16 of the 20 cores
+    fleet_mem: 256m
+  tasks:
+    - name: Build context
+      ansible.builtin.file:
+        path: "{{ fleet_dir }}"
+        state: directory
+        mode: "0755"
+      when: fleet_state == 'present'
+
+    - name: Copy Dockerfile
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../tools/fleet-sim/Dockerfile"
+        dest: "{{ fleet_dir }}/Dockerfile"
+        mode: "0644"
+      when: fleet_state == 'present'
+
+    - name: Authorise the control node's key inside the fake nodes
+      ansible.builtin.copy:
+        content: "{{ spark_admin_pubkeys | select | join('\n') }}\n"
+        dest: "{{ fleet_dir }}/authorized_keys"
+        mode: "0644"
+      when: fleet_state == 'present'
+
+    - name: Build image (native arm64)
+      community.docker.docker_image_build:
+        name: fleet-node
+        tag: latest
+        path: "{{ fleet_dir }}"
+        rebuild: always
+      when: fleet_state == 'present'
+
+    - name: Fake nodes
+      community.docker.docker_container:
+        name: "fleet-{{ '%03d' | format(item) }}"
+        image: fleet-node:latest
+        state: "{{ 'started' if fleet_state == 'present' else 'absent' }}"
+        restart_policy: unless-stopped
+        cpus: "{{ fleet_cpus }}"
+        memory: "{{ fleet_mem }}"
+        published_ports: ["{{ fleet_base_port + item }}:22"]
+        labels: { spark.lab/fleet-sim: "true" }
+      loop: "{{ range(1, fleet_size | int + 1) | list }}"
+      loop_control:
+        label: "fleet-{{ '%03d' | format(item) }}"
+
+    - name: Write inventory on the control node
+      ansible.builtin.copy:
+        dest: "{{ playbook_dir }}/../.cache/fleet.ini"
+        mode: "0644"
+        content: |
+          [fleet]
+          {% for i in range(1, fleet_size | int + 1) %}
+          fleet-{{ '%03d' | format(i) }} ansible_host={{ ansible_host }} ansible_port={{ fleet_base_port + i }}
+          {% endfor %}
+          [fleet:vars]
+          ansible_user=nvidia
+          ansible_python_interpreter=/usr/bin/python3
+          ansible_ssh_common_args=-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+      delegate_to: localhost
+      become: false
+      when: fleet_state == 'present'
+```
+
+```bash
+cd "01 Ansible/lab"
+ansible-playbook playbooks/13-fleet-sim.yml -e fleet_size=64 -K
+ansible -i .cache/fleet.ini fleet -m ping -f 64 -o | sort | head -3
+```
+
+The benchmark workload (facts plus ten `copy` tasks, a typical baseline shape):
+
+```yaml
+# lab/playbooks/14-fleet-bench.yml
+---
+# A representative workload: facts + 10 small idempotent tasks.
+# Compare wall time across forks / pipelining / strategy / Mitogen settings.
+- name: Fleet benchmark
+  hosts: fleet
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Ten config-file tasks (typical of a baseline role)
+      ansible.builtin.copy:
+        dest: "/etc/bench-{{ item }}.conf"
+        content: "setting_{{ item }} = {{ inventory_hostname }}\n"
+        mode: "0644"
+      loop: "{{ range(10) | list }}"
+    - name: One package-manager style query
+      ansible.builtin.command: dpkg -s python3
+      changed_when: false
+```
 
 ---
 
-## 2. Lineage & Evolution of High-Concurrency Ansible
+## 3. Run the experiment matrix
 
+Keep everything identical except one variable per run. `ANSIBLE_CALLBACKS_ENABLED=ansible.posix.timer` prints the wall time.
+
+```bash
+bench() {  # usage: bench <label> [env...]
+  label=$1; shift
+  rm -rf ~/.ansible/cp/*   # cold mux sockets each run
+  t=$( env "$@" ANSIBLE_CALLBACKS_ENABLED=ansible.posix.timer \
+       ansible-playbook -i .cache/fleet.ini playbooks/14-fleet-bench.yml 2>&1 \
+       | awk '/Playbook run took/{print $(NF-3)*60+$(NF-1)}' )
+  echo "$label,$t" | tee -a .cache/bench.csv
+}
+bench baseline-f5           ANSIBLE_FORKS=5  ANSIBLE_PIPELINING=0 ANSIBLE_SSH_ARGS="-o ControlMaster=no"
+bench mux-f5                ANSIBLE_FORKS=5  ANSIBLE_PIPELINING=0
+bench mux-pipe-f5           ANSIBLE_FORKS=5
+bench mux-pipe-f20          ANSIBLE_FORKS=20
+bench mux-pipe-f64          ANSIBLE_FORKS=64
+bench mux-pipe-f64-free     ANSIBLE_FORKS=64 ANSIBLE_STRATEGY=free
+bench mux-pipe-f64-nofacts  ANSIBLE_FORKS=64 ANSIBLE_GATHERING=explicit
 ```
-   [2012: The Fork-Per-Task Model]
-                 |
-           (Standard Ansible: 1 fresh SSH fork + 1 SCP session per task per node)
-                 |
-   [2014: OpenSSH ControlMaster Integration]
-                 |
-           (Persistent UNIX domain socket multiplexing across consecutive SSH calls)
-                 |
-   [2016: Ansible SSH Pipelining]
-                 |
-           (Streaming Python code directly to python stdin over SSH without SCP)
-                 |
-   [2017: The Mitogen Revolution (David Wilson)]
-                 |
-           (Replaces Ansible fork model with persistent remote Python interpreter daemon)
-                 |
-   [2024: AAP Receptor Distributed Mesh]
-                 |
-           (Decentralized control plane running execution environments over WebSocket mesh)
+
+Record your results in a table like this. The shape is what matters; absolute numbers depend on your control node:
+
+| Run | Expect relative to baseline | What you're seeing |
+|---|---|---|
+| `mux-f5` | noticeably faster | SSH handshakes amortised |
+| `mux-pipe-f5` | faster again | 5 round-trips → 1 |
+| `mux-pipe-f20` | ~3–4× faster than f5 | parallelism, until the control-node CPU saturates |
+| `mux-pipe-f64` | small gain or worse | contention: control-node CPU, container CPU quota (0.25 core each) |
+| `-free` | small gain | hosts don't wait for the slowest one on each task |
+| `-nofacts` | big gain for short plays | `setup` is often the most expensive task |
+
+Watch the saturation point live while `f64` runs:
+
+```bash
+# control node
+top -o %CPU     # ansible-playbook workers
+# on the Spark
+docker stats --no-stream | sort -k3 -h | tail
+journalctl -u ssh --since "-5min" | grep -c 'beginning MaxStartups throttling'
 ```
 
 ---
 
-## 3. First-Principles Mathematics: Latency & File Descriptor Limits
+## 4. Tuning levers, in order of payoff
 
-### 3.1 Task Execution Duration Decomposition
-
-The execution time for a task $k$ on node $j$ is governed by:
-
-$$T_{\text{task}} = T_{\text{tcp}} + T_{\text{crypto}} + T_{\text{transfer}} + T_{\text{py\_boot}} + T_{\text{mod\_exec}}$$
-
-```
-+-----------------------------------------------------------------------------------------+
-|                         TASK TIMING COMPONENTS (1,024 NODES)                            |
-+-------------------------+--------------------+--------------------+---------------------+
-| Phase                   | Standard Ansible   | SSH Multiplexing   | Mitogen Linear      |
-+-------------------------+--------------------+--------------------+---------------------+
-| TCP Handshake           | 1.5 ms             | 0.0 ms (Socket reuse)| 0.0 ms (Persistent)|
-| SSH Crypto Exchange     | 45.0 ms            | 0.0 ms (Socket reuse)| 0.0 ms (Persistent)|
-| Payload Transfer (SCP)  | 60.0 ms            | 15.0 ms (Pipelined)| 0.5 ms (Memory pipe)|
-| Python Interpreter Boot | 85.0 ms            | 85.0 ms            | 0.0 ms (Hot worker) |
-| Module Execution        | 20.0 ms            | 20.0 ms            | 12.0 ms             |
-+-------------------------+--------------------+--------------------+---------------------+
-| Total Latency per Task  | ~211.5 ms          | ~120.0 ms          | ~12.5 ms            |
-+-------------------------+--------------------+--------------------+---------------------+
-```
-
-$$\text{Mitogen Acceleration Factor} = \frac{211.5\text{ ms}}{12.5\text{ ms}} \approx \mathbf{16.92\times}$$
-
----
-
-### 3.2 File Descriptor & Process Sizing Mathematics
-
-When executing with $F$ parallel forks on the control node, the operating system allocates file descriptors for each active connection:
-- Each SSH process consumes: 3 FDs (stdin, stdout, stderr) + 1 TCP socket FD + 1 ControlPath UNIX socket FD = 5 FDs.
-- Master Ansible runner maintains internal pipe buffers and inventory file locks (~64 FDs).
-
-$$\text{Required FDs}_{\text{control}} \ge (F \times 5) + 64$$
-
-For $F = 512$:
-$$\text{Required FDs} \ge (512 \times 5) + 64 = 2,624\text{ FDs}$$
-
-If the system default `ulimit -n` is left at the standard Linux default of `1024`, Ansible will crash mid-playbook with:
-`Fatal error: Too many open files`.
-
-**Control Node Sizing Rules:**
-1. Set control machine `ulimit -n 65536`.
-2. Configure `/etc/ssh/sshd_config` on managed nodes:
-   $$\text{MaxStartups} \ge 256:30:512$$
-   $$\text{MaxSessions} \ge 128$$
-
----
-
-## 4. Deep Architecture: OpenSSH ControlMaster Multiplexing
-
-Connection multiplexing allows subsequent SSH sessions to reuse an existing master TCP connection via a local UNIX domain socket.
-
-```
-+-----------------------------------------------------------------------------+
-|                      SSH CONTROLMASTER MULTIPLEXING                         |
-+-----------------------------------------------------------------------------+
-|  Ansible Control Node                                                       |
-|  +-----------------------------------------------------------------------+  |
-|  | Task 1: Initiates Master Connection                                   |  |
-|  |   - Performs TCP handshake + Diffie-Hellman exchange                 |  |
-|  |   - Creates UNIX Domain Socket: /root/.ansible/cp/ansible-ssh-gpu01   |  |
-|  +-----------------------------------+-----------------------------------+  |
-|                                      |                                      |
-|                                      v                                      |
-|  +-----------------------------------------------------------------------+  |
-|  | Tasks 2 to 100: Secondary Connections                                 |  |
-|  |   - Skips network handshake completely!                               |  |
-|  |   - Connects directly to local UNIX domain socket                     |  |
-|  |   - Multiplexes interactive channel over existing TCP tunnel          |  |
-|  +-----------------------------------------------------------------------+  |
-+-----------------------------------------------------------------------------+
-```
-
-### 4.1 Production `ansible.cfg` Multiplexing Configuration
+### 4.1 SSH multiplexing and pipelining (already on in `lab/ansible.cfg`)
 
 ```ini
-[defaults]
-forks = 256
-timeout = 30
-gathering = smart
-fact_caching = jsonfile
-fact_caching_connection = /tmp/ansible_facts_cache
-fact_caching_timeout = 86400
-
 [ssh_connection]
-# Enable SSH pipelining to avoid transient SFTP file uploads
-pipelining = True
-
-# Reusable ControlMaster connection socket settings
-ssh_args = -C -o ControlMaster=auto -o ControlPersist=60m -o PreferredAuthentications=publickey
+ssh_args         = -o ControlMaster=auto -o ControlPersist=600s -o ServerAliveInterval=30
 control_path_dir = ~/.ansible/cp
-control_path = %(directory)s/%%h-%%r
-retries = 3
+pipelining       = True
 ```
 
----
-
-## 5. Deep Architecture: The Mitogen Execution Engine
-
-While ControlMaster eliminates SSH handshaking, it cannot eliminate the Python interpreter cold-start on the managed GPU node. **Mitogen** replaces Ansible's entire SSH subsystem with an asynchronous, event-driven C/Python runtime.
+Pipelining requires that sudo does not demand a TTY (Ubuntu's default is fine). If a hardened image sets `Defaults requiretty`, override it for the automation user:
 
 ```
-+-----------------------------------------------------------------------------+
-|                         MITOGEN EXECUTION TOPOLOGY                          |
-+-----------------------------------------------------------------------------+
-|  Control Machine (Mac / Linux Control Server)                               |
-|    |                                                                        |
-|    | (1) Initiates single SSH connection to target node                     |
-|    v                                                                        |
-|  Target GPU Node (Managed Node)                                             |
-|    |                                                                        |
-|    | (2) Launches tiny bootstrap script: spawns persistent Python slave daemon|
-|    | (3) Slave daemon stays resident in RAM throughout playbook execution   |
-|    |                                                                        |
-|  Control Machine <=======================================> Managed Node     |
-|              (Single Bi-directional Stdio Stream / UNIX Pipe)               |
-|                                                                             |
-|  - Task 1: Stream serialized Python bytecode function -> Executed in RAM    |
-|  - Task 2: Stream next function -> Executed in same memory context          |
-|  - Task N: Return results instantly over persistent multiplexed channel     |
-+-----------------------------------------------------------------------------+
+# /etc/sudoers.d/ansible
+Defaults:nvidia !requiretty
 ```
 
-### 5.1 Activating Mitogen in `ansible.cfg`
+### 4.2 Facts: gather less, cache more
 
 ```ini
 [defaults]
-strategy_plugins = /opt/mitogen/ansible_mitogen/plugins/strategy
-strategy = mitogen_linear
-forks = 256
-host_key_checking = False
+gathering               = smart            # gather once per host per cache lifetime
+fact_caching            = jsonfile         # or redis for AWX / many control nodes
+fact_caching_connection = ./.cache/facts
+fact_caching_timeout    = 7200
 ```
 
-**Key Advantages of Mitogen:**
-- **Zero Disk Writes on Target:** Modules are executed directly from memory; `/tmp/.ansible/` is never touched.
-- **Microsecond Latency:** Task overhead drops from $200\text{ ms}$ to $12\text{ ms}$.
-- **Dramatic CPU Savings:** The control node operates with up to $80\%$ lower CPU utilization, allowing a single control host to manage 4,096+ GPUs concurrently.
+```yaml
+- hosts: spark
+  gather_facts: true
+  module_defaults:
+    ansible.builtin.setup:
+      gather_subset: [min, hardware, network, local]   # skip 'all' (virtual, ohai/facter probes, …)
+```
+
+### 4.3 Forks: size to the control node, not the fleet
+
+A reasonable starting point is `forks ≈ 2–4 × control-node cores`, capped by memory at roughly 80 MB per fork. Then measure. For a laptop controlling two Sparks, `forks = 10` is plenty. For AWX controlling a 256-node cluster, scale out with execution nodes (Volume 20) rather than setting `forks = 256` on one pod.
+
+### 4.4 Target-side limits
+
+| Limit | Default | Symptom when hit | Fix |
+|---|---|---|---|
+| `sshd MaxStartups` | `10:30:100` | Random `Connection reset by peer` under high forks | `MaxStartups 30:30:100` (set by `spark_baseline`) |
+| `MaxSessions` | 10 | `channel N: open failed` with ControlPersist | Raise, or reduce parallel tasks per host |
+| systemd `TasksMax` for user slices | varies | `fork: Resource temporarily unavailable` | `UserTasksMax` / slice limits |
+
+### 4.5 Mitogen, with eyes open
+
+Mitogen replaces per-task SSH and Python start-up with a persistent interpreter tree and can be several times faster on task-heavy plays. The trade-offs:
+
+- It **lags ansible-core releases**. Check the Mitogen changelog for your exact `ansible-core` version before upgrading either one.
+- Some modules and connection plugins behave differently under it (become edge cases, `async`, `raw`).
+- It isn't supported inside AWX execution environments by Red Hat.
+
+```bash
+pip install mitogen
+ANSIBLE_STRATEGY_PLUGINS=$(python -c 'import ansible_mitogen,os;print(os.path.dirname(ansible_mitogen.__file__)+"/plugins/strategy")') \
+ANSIBLE_STRATEGY=mitogen_linear \
+  ansible-playbook -i .cache/fleet.ini playbooks/14-fleet-bench.yml -f 20
+```
+
+Add it as another row in your benchmark. **Adopt it only if** (a) it's a large win on *your* playbooks and (b) `molecule test` and `20-drift-check.yml` pass unchanged under it.
 
 ---
 
-## 6. Concrete Production Lab: Benchmarking Execution Strategies
+## 5. Integrations
 
-Below is a self-contained Python benchmark harness comparing standard execution, SSH ControlMaster, and Mitogen simulation across 100 simulated nodes.
+| Where the tuning matters | Setting |
+|---|---|
+| AWX job templates (Volume 20) | `forks` per template; container groups scale horizontally |
+| Drift checks every 30 min (Volume 22) | fact cache + `gather_subset` keep them cheap |
+| Emergency drain (Volume 24) | `serial: 1` makes speed deliberately irrelevant; correctness first |
+| NCCL build (`10-nccl-test.yml`) | `async` + `strategy: free` on 2+ nodes |
 
-```python
-#!/usr/bin/env python3
-"""
-Production Lab: High-Concurrency Execution Benchmark Harness.
-Simulates task latency and control-plane scaling for Standard,
-SSH ControlMaster, and Mitogen strategies across N nodes.
-"""
+## 6. Troubleshooting & diagnostics
 
-import time
-import math
+| Symptom | Diagnose | Fix |
+|---|---|---|
+| `Control socket connect(...): No such file or directory` / stale socket | `ls -la ~/.ansible/cp/` | `rm ~/.ansible/cp/*`; very long hostnames can overflow the 108-char socket path, so shorten `control_path_dir` |
+| Fleet hosts randomly `UNREACHABLE` at high forks | `journalctl -u ssh \| grep MaxStartups` inside a container, or on the host | Raise `MaxStartups`; lower forks |
+| Control node swaps during a run | `free -m` during the run | Fewer forks; or run from a bigger box (the Spark itself) |
+| Pipelining silently not used | `-vvvv` shows `PUT` lines | A `become` method or plugin that disables it; `Defaults requiretty` |
+| Mitogen: `ansible_mitogen ... unsupported Ansible version` | `pip show mitogen ansible-core` | Pin to a compatible pair, or drop Mitogen |
+| Runs slow only when the first task is `setup` | `profile_tasks` output | `gather_subset`, `gathering=smart`, fact cache |
 
-class ExecutionSimulator:
-    def __init__(self, num_nodes: int = 1000, num_tasks: int = 50, forks: int = 256):
-        self.num_nodes = num_nodes
-        self.num_tasks = num_tasks
-        self.forks = forks
+## 7. Clean up and validate
 
-    def simulate_strategy(self, name: str, tcp_ms: float, crypto_ms: float, scp_ms: float, py_boot_ms: float, exec_ms: float):
-        # Calculate per-task latency per node
-        t_task_ms = tcp_ms + crypto_ms + scp_ms + py_boot_ms + exec_ms
-        t_task_sec = t_task_ms / 1000.0
-        
-        # Calculate number of parallel batches
-        batches = math.ceil(self.num_nodes / self.forks)
-        
-        # Total wall clock time
-        total_time_sec = batches * (self.num_tasks * t_task_sec)
-        
-        return {
-            "strategy": name,
-            "latency_per_task_ms": round(t_task_ms, 2),
-            "batches": batches,
-            "total_time_sec": round(total_time_sec, 2),
-            "total_time_min": round(total_time_sec / 60.0, 2)
-        }
-
-if __name__ == "__main__":
-    sim = ExecutionSimulator(num_nodes=1024, num_tasks=40, forks=256)
-    
-    print("=== ANSIBLE HIGH-CONCURRENCY SCALE BENCHMARK (1,024 NODES, 40 TASKS) ===")
-    
-    # 1. Default Ansible (No multiplexing, forks=5)
-    default_sim = ExecutionSimulator(num_nodes=1024, num_tasks=40, forks=5)
-    res_def = default_sim.simulate_strategy("Default Ansible (Forks=5)", 1.5, 45.0, 60.0, 85.0, 20.0)
-    
-    # 2. Tuned Forks + ControlMaster (forks=256)
-    res_cm = sim.simulate_strategy("Tuned SSH ControlMaster (Forks=256)", 0.0, 0.0, 15.0, 85.0, 20.0)
-    
-    # 3. Mitogen Linear Strategy (forks=256)
-    res_mito = sim.simulate_strategy("Mitogen Linear Engine (Forks=256)", 0.0, 0.0, 0.5, 0.0, 12.0)
-    
-    for r in [res_def, res_cm, res_mito]:
-        print(f"\nStrategy: {r['strategy']}")
-        print(f"  Latency/Task: {r['latency_per_task_ms']} ms")
-        print(f"  Batches     : {r['batches']}")
-        print(f"  Total Time  : {r['total_time_sec']} seconds ({r['total_time_min']} minutes)")
+```bash
+ansible-playbook playbooks/13-fleet-sim.yml -e fleet_state=absent -e fleet_size=64 -K
+docker ps --filter label=spark.lab/fleet-sim=true -q | wc -l     # 0
 ```
 
----
-
-## 7. Comparative Scale Strategy Matrix
-
-| Metric | Default Ansible | SSH ControlMaster | Mitogen Linear Engine | AWX / AAP Receptor |
-| :--- | :--- | :--- | :--- | :--- |
-| **Task Overhead** | $210–350\text{ ms}$ | $110–180\text{ ms}$ | **$10–20\text{ ms}$** | $120–250\text{ ms}$ |
-| **Control CPU Utilization**| Very High (100% Sat)| High (60–80%) | **Low (15–25%)** | Distributed (Mesh) |
-| **Target Disk Footprint** | Writes to `/tmp` | Writes to `/tmp` | **Zero (In-Memory)** | Writes to `/tmp` |
-| **Pipelining Support** | Optional | Native | Built-in byte stream | Containerized |
-| **Max Practical Cluster** | 50 Nodes | 500 Nodes | **5,000+ Nodes** | 20,000+ Nodes |
-
----
-
-## 8. SRE Diagnostics & Troubleshooting Playbook
-
-```
-+---------------------------------------------------------------------------------------------------+
-|                        HIGH-CONCURRENCY SRE DIAGNOSTIC MATRIX                                     |
-+------------------------------------+--------------------------+-----------------------------------+
-| Symptom / Failure Mode             | Root Cause Hypothesis    | Triage & Remediation Command      |
-+------------------------------------+--------------------------+-----------------------------------+
-| `ControlPath socket error`: path   | UNIX socket path exceeds | Set short path in `ansible.cfg`:  |
-| too long (OS 108-char limit).      | OS sockaddr_un limit.    | `control_path = /tmp/%%h-%%r`     |
-+------------------------------------+--------------------------+-----------------------------------+
-| Playbooks hang randomly on 5% of   | Stale dead ControlMaster | Sweep and remove dead sockets:    |
-| nodes after previous abort.        | socket held in `/tmp`.   | `find ~/.ansible/cp -type s -delete`|
-+------------------------------------+--------------------------+-----------------------------------+
-| `Too many open files`: playbook    | Control node exhausted   | Raise file descriptor limits:     |
-| crashes with Python OSError.       | process file descriptors.| `ulimit -n 65536`                 |
-|                                    |                          | Update `/etc/security/limits.conf`|
-+------------------------------------+--------------------------+-----------------------------------+
-| SSH server rejects connections:    | `MaxStartups` reached on | Increase limits on targets:       |
-| `Connection reset by peer`.        | managed node sshd.       | `echo "MaxStartups 500:30:1000"   |
-|                                    |                          | >> /etc/ssh/sshd_config`          |
-+------------------------------------+--------------------------+-----------------------------------+
-```
-
----
-
-## 9. Verification & Architectural Synthesis Checklist
-
-- [ ] **SSH Multiplexing Active:** `ControlMaster=auto`, `ControlPersist=60m` confirmed in `ansible.cfg`.
-- [ ] **Pipelining Enabled:** `pipelining = True` verified without `requiretty` sudoers conflicts.
-- [ ] **Mitogen Deployed:** `strategy = mitogen_linear` active for hyper-scale cluster playbooks.
-- [ ] **OS Limits Hardened:** Control node configured with `ulimit -n 65536`.
-- [ ] **sshd Concurrency Scaled:** Target DGX/HGX nodes configured with `MaxStartups 500:30:1000`.
+- [ ] `.cache/bench.csv` has at least 7 rows and you can explain each delta.
+- [ ] You identified your control node's fork saturation point.
+- [ ] Your final `ansible.cfg` values are justified by your numbers, not by folklore.

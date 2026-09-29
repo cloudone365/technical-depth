@@ -1,0 +1,18 @@
+---
+- name: Verify
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Sshd config validates
+      ansible.builtin.command: sshd -t
+      changed_when: false
+    - name: Root login disabled
+      ansible.builtin.command: grep -q '^PermitRootLogin no' /etc/ssh/sshd_config.d/60-spark-hardening.conf
+      changed_when: false
+    - name: Journald is persistent
+      ansible.builtin.command: grep -q 'Storage=persistent' /etc/systemd/journald.conf.d/60-spark.conf
+      changed_when: false
+    - name: Chrony is configured
+      ansible.builtin.command: grep -q '^pool ' /etc/chrony/chrony.conf
+      changed_when: false

@@ -1,464 +1,443 @@
-# Volume 23 — High-Cardinality Logging, ARA Records & Audit Compliance
+# Volume 23 — Logging & Audit Trails: Who Changed What, When, and Through Which Automation
 
-> **AI Supercomputing Ansible Masterclass · 01 Ansible · Volume 23 of 25**
+> **Module 01 · Part V — Production SRE** · Prev: [22 Drift](22-configuration-drift-detection-and-self-healing.md) · Next: [24 Emergency drain & remediation](24-cluster-wide-emergency-drain-and-remediation.md)
 
----
-
-## 1. Executive Intuition
-
-When a rogue playbook runs at 03:47 and wipes the wrong set of nodes, the
-first question from the CISO is: **"Who ran what, on which nodes, with which
-arguments, and when?"** If you cannot answer this within 5 minutes from an
-immutable audit log, your AI cluster is not enterprise-grade.
-
-**ARA Records Ansible** (ARA) is a callback plugin + REST API + web UI that
-automatically captures every Ansible playbook execution: play, task, host,
-result, diff, and elapsed time — stored in SQLite or PostgreSQL. Combined
-with **structured JSONL stdout** piped to Elasticsearch/Splunk, and
-Prometheus histogram recording per-task latency, you have a three-layer
-observability stack that satisfies SOC 2 Type II, PCI-DSS, and NIST 800-53
-AU control families.
+| | |
+|---|---|
+| **You will build** | Four linked audit layers: **auditd** on every Spark (changes to sudoers, sshd, netplan, docker, k3s, slurm, vault; every root command), **journald → Grafana Alloy → Loki** for searchable logs (including NVRM/Xid kernel lines), **ARA** recording every playbook run task by task, and the **Vault audit log** for secret access, all viewable in the Grafana from Volume 09 |
+| **Hardware** | 1–2× DGX Spark (Loki + ARA on the monitoring host) |
+| **Time** | 60 min |
+| **Risk** | Low. Watch disk: Loki retention is 30 days by default |
 
 ---
 
-## 2. Lineage & Evolution
+## 1. The questions an audit trail must answer
 
-```
-2013 ──► Ansible stdout_callback: human-readable output only
-2015 ──► ansible-callback-plugins: early community JSON formatters
-2017 ──► ARA 0.x: SQLite-backed playbook recording (David Moreau Simard)
-2019 ──► ARA 1.x: REST API, web UI, ara-plugins collection
-2020 ──► ARA 1.4: PostgreSQL backend for HA; distributed API server
-2021 ──► structured JSON callback: community.general.json_callback
-2022 ──► OpenTelemetry Ansible callback (alpha) — spans per task
-2023 ──► ARA 1.7: OIDC auth on web UI; Prometheus exporter endpoint
-2024 ──► ansible-runner 2.4: built-in event JSON socket streaming
-2025 ──► ARA 2.0: native OTEL traces, S3-backed artifact storage
-```
+| Question | Layer that answers it |
+|---|---|
+| "Which playbook run changed `/etc/sysctl.d/90-spark.conf` on spark-02 last Tuesday, and with what diff?" | **ARA** (+ `ansible.log`) |
+| "Did someone edit netplan by hand outside Ansible?" | **auditd** key `network` + drift (Volume 22) |
+| "What did the kernel say about the GPU right before the job died?" | **Loki**: `{host="spark-02"} \|= "NVRM: Xid"` |
+| "Who read the NGC key?" | **Vault audit log** (Volume 03B) |
+| "Who launched the remediation job and who approved it?" | **AWX** activity stream + job history (Volume 20) |
 
----
+## 2. Architecture
 
-## 3. First-Principles Mathematics
-
-### 3.1 Log Volume Estimation
-
-For a cluster with $N$ nodes, running $T$ tasks, each log line $\approx L$
-bytes:
-
-$$
-V_{\text{daily}} = R_{\text{runs/day}} \times N \times T \times L
-$$
-
-**Example:** 10 playbook runs/day × 1 000 nodes × 200 tasks × 800 bytes:
-
-$$
-V_{\text{daily}} = 10 \times 1000 \times 200 \times 800 = 1.6\;\text{GB/day}
-$$
-
-At 90-day retention: $V_{90} = 144\;\text{GB}$ — fits in a small
-Elasticsearch index with gzip compression (~60 GB compressed at ratio 2.4).
-
-### 3.2 Task Latency Percentiles
-
-For a set of task durations $\{t_1, \dots, t_n\}$ sorted ascending,
-the $p$-th percentile:
-
-$$
-t_p = t_{\lfloor (p/100)(n+1) \rfloor}
-$$
-
-SRE alert threshold: when $t_{99} > 3 \times t_{50}$ (99th percentile
-more than 3× the median), the task is exhibiting a **latency tail** — 
-indicative of I/O contention, SSH backpressure, or a slow fork-join
-on one slow node.
-
-### 3.3 Audit Event Rate (Compliance Sizing)
-
-For compliance frameworks requiring complete event capture, the required
-event ingestion rate:
-
-$$
-\lambda_{\text{audit}} = \frac{V_{\text{daily}}}{86400\;\text{s}} = \frac{1.6 \times 10^9}{86400} \approx 18.5\;\text{KB/s}
-$$
-
-This is well within Elasticsearch ingest capacity (typically > 50 MB/s per
-data node). A 3-node Elasticsearch cluster with 10 TB NVMe handles this
-load with ample headroom.
-
----
-
-## 4. Deep Architecture
-
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                    Ansible Execution Context                          │
-│                                                                       │
-│  ansible-playbook / ansible-runner                                   │
-│         │                                                             │
-│         │ callback plugin hooks (v2_runner_on_ok, v2_runner_on_failed│
-│         ▼                                                             │
-│  ┌────────────────────┬──────────────────┬────────────────────────┐  │
-│  │ ara.plugins.action │ json_callback     │ opentelemetry_callback │  │
-│  │ (ARA recorder)     │ (stdout JSONL)    │ (OTEL spans)           │  │
-│  └──────────┬─────────┴────────┬──────────┴───────────┬────────────┘  │
-│             │                  │                       │               │
-│             ▼                  ▼                       ▼               │
-│      ARA API Server     Filebeat / Fluentd       OTEL Collector       │
-│      (PostgreSQL)       (log shipper)             (gRPC 4317)         │
-│             │                  │                       │               │
-│             ▼                  ▼                       ▼               │
-│      ARA Web UI /       Elasticsearch /           Jaeger / Tempo      │
-│      REST API           Splunk                    (trace backend)     │
-│             │                  │                                       │
-│             ▼                  ▼                                       │
-│      Prometheus          Kibana / Grafana          Grafana Tempo       │
-│      (ara_exporter)      Dashboard                 Traces UI           │
-└──────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+  subgraph NODES["Every Spark"]
+    AU["auditd<br/>/etc/audit/rules.d/60-spark.rules<br/>→ /var/log/audit/audit.log"] --> AL
+    K["kernel (NVRM, mlx5)"] --> J
+    SVC["sshd · sudo · k3s · slurmd · docker · vault"] --> J
+    J["journald<br/>(persistent, 4G cap)"] --> AL["Grafana Alloy<br/>loki.source.journal + loki.source.file"]
+  end
+  subgraph MON["monitoring host (spark-01)"]
+    LOKI["Loki :3100<br/>tsdb v13, 30d retention"]
+    ARA["ARA API :8000<br/>sqlite"]
+    GRAF["Grafana :3000<br/>datasources: Prometheus + Loki"]
+    VA["Vault audit.log"] --> J2["journald → Alloy"]
+  end
+  AL -->|push| LOKI
+  CN["Control node / AWX<br/>ansible-playbook"] -->|"ara callback"| ARA
+  CN -->|"log_path"| LOG[".cache/ansible.log"]
+  LOKI --> GRAF
 ```
 
+| Component | Image / package | Config |
+|---|---|---|
+| auditd | `auditd`, `audispd-plugins` | `playbooks/templates/spark-audit.rules.j2` |
+| Loki | `grafana/loki:3.5.1` (validated with `loki -verify-config`) | `playbooks/templates/loki.yaml.j2` |
+| Alloy | `grafana/alloy:v1.9.1` (config checked with `alloy fmt`) | `playbooks/templates/alloy.river.j2` |
+| ARA | `pip install ara[server]` in a venv, systemd unit | `/opt/ara/settings.yaml` |
+
+> **Why Alloy, not Promtail?** Promtail is in maintenance, and Grafana's supported collector going forward is Alloy. The journal source and labels map one to one.
+
 ---
 
-## 5. Concrete Production Lab
+## 3. The code
 
-```python
-#!/usr/bin/env python3
-"""
-ansible_audit_log_analyzer.py
-Parses structured Ansible JSON callback output (JSONL format)
-to produce:
-  - Per-task latency statistics (p50, p95, p99)
-  - Audit trail report (who ran what, when)
-  - Compliance summary (failed tasks, changed sensitive tasks)
-  - Prometheus text format export
+```bash
+# lab/playbooks/templates/spark-audit.rules.j2
+## {{ ansible_managed }}
+## Who changed what on a DGX Spark. Keys make searching easy: ausearch -k <key>
+-w /etc/sudoers -p wa -k priv
+-w /etc/sudoers.d/ -p wa -k priv
+-w /etc/ssh/sshd_config -p wa -k sshd
+-w /etc/ssh/sshd_config.d/ -p wa -k sshd
+-w /etc/ssh/trusted-user-ca-keys.pem -p wa -k sshd
+-w /etc/netplan/ -p wa -k network
+-w /etc/docker/daemon.json -p wa -k container-runtime
+-w /etc/cdi/ -p wa -k container-runtime
+-w /etc/nvidia-container-runtime/ -p wa -k container-runtime
+-w /etc/rancher/k3s/ -p wa -k k3s
+-w /etc/slurm/ -p wa -k slurm
+-w /etc/munge/munge.key -p rwa -k slurm-secret
+-w /etc/vault.d/ -p wa -k vault
+-w /etc/sysctl.d/ -p wa -k kernel-tuning
+-w /etc/modprobe.d/ -p wa -k kernel-tuning
+-w /etc/default/grub.d/ -p wa -k boot
+## package database changes (apt/dpkg) and apt-mark holds
+-w /var/lib/dpkg/status -p wa -k packages
+-w /usr/bin/apt-mark -p x -k packages
+## every command run as root through sudo
+-a always,exit -F arch=b64 -S execve -F euid=0 -F auid>=1000 -F auid!=4294967295 -k root-cmd
+```
 
-Usage:
-  python3 ansible_audit_log_analyzer.py            # runs self-tests
-  python3 ansible_audit_log_analyzer.py --log <file.jsonl>
-"""
+```hcl
+# lab/playbooks/templates/alloy.river.j2
+// {{ ansible_managed }}
+// Grafana Alloy on {{ inventory_hostname }}: ship the systemd journal (kernel NVRM/Xid,
+// sshd, sudo, k3s, slurmd, docker, vault, auditd via journald) to Loki.
+loki.relabel "journal" {
+  forward_to = []
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "level"
+  }
+  rule {
+    source_labels = ["__journal_syslog_identifier"]
+    target_label  = "ident"
+  }
+  rule {
+    source_labels = ["__journal__transport"]
+    target_label  = "transport"
+  }
+}
 
-import json, sys, math, argparse
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional
-from datetime import datetime, timezone
+loki.source.journal "journal" {
+  forward_to    = [loki.write.default.receiver]
+  relabel_rules = loki.relabel.journal.rules
+  max_age       = "12h"
+  labels        = { host = "{{ inventory_hostname }}", job = "systemd-journal", lab = "{{ lab_name | default('spark-lab') }}" }
+}
 
-# ── Data models ──────────────────────────────────────────────────────────────
+loki.write "default" {
+  endpoint {
+    url = "http://{{ hostvars[groups['monitoring'][0]].ansible_host }}:3100/loki/api/v1/push"
+  }
+}
 
-@dataclass
-class AnsibleEvent:
-    """Represents one structured JSON log line from json_callback."""
-    event_type: str          # runner_on_ok, runner_on_failed, runner_on_changed
-    timestamp: str
-    playbook: str
-    play: str
-    task: str
-    host: str
-    duration_ms: float
-    status: str              # ok, failed, changed, skipped, unreachable
-    user: str = "ansible"    # runner identity (from AWX job)
-    sensitive: bool = False  # tagged no_log or sensitive
+// auditd writes to its own file (not reliably to journald) — tail it separately.
+local.file_match "audit" {
+  path_targets = [{ "__path__" = "/var/log/audit/audit.log", host = "{{ inventory_hostname }}", job = "auditd" }]
+}
 
-@dataclass
-class AuditSummary:
-    total_events: int = 0
-    total_changed: int = 0
-    total_failed: int = 0
-    total_sensitive_changed: int = 0
-    unique_playbooks: set = field(default_factory=set)
-    unique_hosts: set = field(default_factory=set)
-    users: set = field(default_factory=set)
+loki.source.file "audit" {
+  targets    = local.file_match.audit.targets
+  forward_to = [loki.write.default.receiver]
+}
+```
 
+```yaml
+# lab/playbooks/templates/loki.yaml.j2
+# {{ ansible_managed }}
+auth_enabled: false
+server:
+  http_listen_port: 3100
+common:
+  path_prefix: /loki
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+schema_config:
+  configs:
+    - from: "2024-01-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+limits_config:
+  retention_period: {{ logging_retention }}
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+```
 
-class AuditLogAnalyzer:
+```yaml
+# lab/playbooks/23-logging-audit.yml
+---
+# Audit & logging stack:
+#   * auditd rules on every Spark (who changed sudoers, sshd, netplan, docker, k3s, slurm, vault…)
+#   * Loki on the monitoring host + Grafana Alloy on every Spark shipping the journal
+#   * Loki datasource in the Volume 09 Grafana
+#   * ARA API server recording every ansible-playbook run
+- name: Auditd on every Spark
+  hosts: spark
+  become: true
+  tasks:
+    - name: Install auditd
+      ansible.builtin.apt:
+        name: [auditd, audispd-plugins]
+        state: present
 
-    def __init__(self, events: List[AnsibleEvent]):
-        self.events = events
+    - name: Spark audit rules
+      ansible.builtin.template:
+        src: spark-audit.rules.j2
+        dest: /etc/audit/rules.d/60-spark.rules
+        mode: "0640"
+      notify: Load audit rules
 
-    # ── Latency analysis ──────────────────────────────────────────────────────
+    - name: Load rules now so the check below sees them
+      ansible.builtin.meta: flush_handlers
 
-    def task_latency_percentiles(self) -> Dict[str, Dict[str, float]]:
-        """Compute p50/p95/p99 per task name."""
-        task_durations: Dict[str, List[float]] = {}
-        for e in self.events:
-            task_durations.setdefault(e.task, []).append(e.duration_ms)
+    - name: Confirm rules are active
+      ansible.builtin.command: auditctl -l
+      register: logging_auditctl
+      changed_when: false
+      check_mode: false
+      failed_when: "'-k network' not in logging_auditctl.stdout and 'key=network' not in logging_auditctl.stdout"
+  handlers:
+    - name: Load audit rules
+      ansible.builtin.command: augenrules --load     # merges /etc/audit/rules.d/*.rules
+      changed_when: true
 
-        result = {}
-        for task, durations in task_durations.items():
-            s = sorted(durations)
-            n = len(s)
-            result[task] = {
-                "p50": self._percentile(s, 50),
-                "p95": self._percentile(s, 95),
-                "p99": self._percentile(s, 99),
-                "count": n,
-            }
-        return result
+- name: Loki + Grafana datasource (monitoring host)
+  hosts: monitoring
+  become: true
+  vars:
+    logging_retention: 720h
+    logging_loki_image: grafana/loki:3.5.1
+    logging_dir: /opt/spark-logging
+  tasks:
+    - name: Directories
+      ansible.builtin.file:
+        path: "{{ logging_dir }}/{{ item }}"
+        state: directory
+        owner: "10001"          # loki image runs as uid 10001
+        group: "10001"
+        mode: "0755"
+      loop: [config, data]
 
-    @staticmethod
-    def _percentile(sorted_data: List[float], p: int) -> float:
-        if not sorted_data:
-            return 0.0
-        idx = max(0, int(math.floor((p / 100) * len(sorted_data))) - 1)
-        return sorted_data[min(idx, len(sorted_data) - 1)]
+    - name: Loki config
+      ansible.builtin.template:
+        src: loki.yaml.j2
+        dest: "{{ logging_dir }}/config/loki.yaml"
+        mode: "0644"
+      register: logging_loki_cfg
 
-    def latency_tail_tasks(self, ratio: float = 3.0) -> List[str]:
-        """Return tasks where p99 > ratio * p50 (latency tail)."""
-        result = []
-        for task, stats in self.task_latency_percentiles().items():
-            if stats["p50"] > 0 and stats["p99"] > ratio * stats["p50"]:
-                result.append(task)
-        return result
+    - name: Loki container
+      community.docker.docker_container:
+        name: loki
+        image: "{{ logging_loki_image }}"
+        command: [-config.file=/etc/loki/loki.yaml]
+        network_mode: host
+        restart_policy: unless-stopped
+        volumes:
+          - "{{ logging_dir }}/config:/etc/loki:ro"
+          - "{{ logging_dir }}/data:/loki"
+        restart: "{{ logging_loki_cfg is changed }}"
 
-    # ── Audit summary ─────────────────────────────────────────────────────────
+    - name: Wait for Loki ready
+      ansible.builtin.uri:
+        url: http://127.0.0.1:3100/ready
+      register: logging_loki_ready
+      until: logging_loki_ready.status == 200
+      retries: 30
+      delay: 3
 
-    def audit_summary(self) -> AuditSummary:
-        s = AuditSummary()
-        for e in self.events:
-            s.total_events += 1
-            s.unique_playbooks.add(e.playbook)
-            s.unique_hosts.add(e.host)
-            s.users.add(e.user)
-            if e.status == "changed":
-                s.total_changed += 1
-                if e.sensitive:
-                    s.total_sensitive_changed += 1
-            elif e.status in ("failed", "unreachable"):
-                s.total_failed += 1
-        return s
+    - name: Loki datasource for Grafana (Volume 09 stack)
+      ansible.builtin.copy:
+        dest: /opt/spark-monitoring/grafana/provisioning/datasources/loki.yml
+        mode: "0644"
+        content: |
+          # {{ ansible_managed }}
+          apiVersion: 1
+          datasources:
+            - name: Loki
+              type: loki
+              access: proxy
+              url: http://127.0.0.1:3100
+      notify: Restart Grafana
+  handlers:
+    - name: Restart Grafana
+      community.docker.docker_container:
+        name: spark-monitoring-grafana-1     # compose project "spark-monitoring", service "grafana"
+        state: started
+        restart: true
 
-    # ── Prometheus export ─────────────────────────────────────────────────────
+- name: Grafana Alloy journal shipper (every Spark)
+  hosts: spark
+  become: true
+  vars:
+    logging_alloy_image: grafana/alloy:v1.9.1
+  tasks:
+    - name: Alloy config dir
+      ansible.builtin.file:
+        path: /etc/alloy
+        state: directory
+        mode: "0755"
 
-    def prometheus_metrics(self) -> str:
-        s = self.audit_summary()
-        lines = [
-            "# HELP ansible_audit_events_total Total Ansible audit events",
-            "# TYPE ansible_audit_events_total counter",
-            f"ansible_audit_events_total {s.total_events}",
-            "",
-            "# HELP ansible_audit_changed_total Total changed tasks",
-            "# TYPE ansible_audit_changed_total counter",
-            f"ansible_audit_changed_total {s.total_changed}",
-            "",
-            "# HELP ansible_audit_failed_total Total failed tasks",
-            "# TYPE ansible_audit_failed_total counter",
-            f"ansible_audit_failed_total {s.total_failed}",
-            "",
-            "# HELP ansible_audit_sensitive_changed_total Sensitive tasks that changed",
-            "# TYPE ansible_audit_sensitive_changed_total counter",
-            f"ansible_audit_sensitive_changed_total {s.total_sensitive_changed}",
-        ]
-        # Per-task latency histograms (simplified as gauge)
-        lines += [
-            "",
-            "# HELP ansible_task_latency_p99_ms Task p99 latency in milliseconds",
-            "# TYPE ansible_task_latency_p99_ms gauge",
-        ]
-        for task, stats in self.task_latency_percentiles().items():
-            safe_task = task.replace('"', "'").replace("\n", " ")[:80]
-            lines.append(
-                f'ansible_task_latency_p99_ms{{task="{safe_task}"}} '
-                f'{stats["p99"]:.2f}'
-            )
-        return "\n".join(lines)
+    - name: Alloy config
+      ansible.builtin.template:
+        src: alloy.river.j2
+        dest: /etc/alloy/config.alloy
+        mode: "0644"
+      register: logging_alloy_cfg
 
-    def print_report(self):
-        W = 72
-        s = self.audit_summary()
-        print("=" * W)
-        print("ANSIBLE AUDIT COMPLIANCE REPORT")
-        print("=" * W)
-        print(f"  Total events:           {s.total_events}")
-        print(f"  Unique playbooks:       {len(s.unique_playbooks)}")
-        print(f"  Unique hosts affected:  {len(s.unique_hosts)}")
-        print(f"  Users (runners):        {', '.join(s.users)}")
-        print(f"  Changed tasks:          {s.total_changed}")
-        print(f"  Failed/unreachable:     {s.total_failed}")
-        print(f"  Sensitive task changes: {s.total_sensitive_changed}")
-        print("-" * W)
+    - name: Alloy container (reads the host journal)
+      community.docker.docker_container:
+        name: alloy
+        image: "{{ logging_alloy_image }}"
+        command: [run, --storage.path=/var/lib/alloy/data, /etc/alloy/config.alloy]
+        network_mode: host
+        restart_policy: unless-stopped
+        user: root
+        volumes:
+          - /etc/alloy:/etc/alloy:ro
+          - /var/log/journal:/var/log/journal:ro
+          - /run/log/journal:/run/log/journal:ro
+          - /etc/machine-id:/etc/machine-id:ro
+          - /var/log/audit:/var/log/audit:ro
+          - alloy-data:/var/lib/alloy/data
+        restart: "{{ logging_alloy_cfg is changed }}"
 
-        # Latency tail
-        tails = self.latency_tail_tasks()
-        if tails:
-            print(f"\n  ⚠  LATENCY TAIL TASKS (p99 > 3×p50):")
-            for t in tails:
-                stats = self.task_latency_percentiles()[t]
-                print(f"     {t[:50]:50s}  "
-                      f"p50={stats['p50']:.0f}ms  p99={stats['p99']:.0f}ms")
+- name: ARA API server (records every playbook run)
+  hosts: monitoring
+  become: true
+  vars:
+    ara_dir: /opt/ara
+    ara_port: 8000
+  tasks:
+    - name: Python venv with ARA server
+      ansible.builtin.pip:
+        name: ["ara[server]>=1.7"]
+        virtualenv: "{{ ara_dir }}/venv"
+        virtualenv_command: python3 -m venv
 
-        if s.total_sensitive_changed > 0:
-            print(f"\n  ⚠  COMPLIANCE ALERT: {s.total_sensitive_changed} "
-                  f"sensitive task(s) changed — review immediately!")
+    - name: ARA settings
+      ansible.builtin.copy:
+        dest: "{{ ara_dir }}/settings.yaml"
+        mode: "0644"
+        content: |
+          default:
+            ALLOWED_HOSTS: ["*"]
+            BASE_DIR: {{ ara_dir }}/data
+            DATABASE_ENGINE: django.db.backends.sqlite3
+            DATABASE_NAME: {{ ara_dir }}/data/ansible.sqlite
+            TIME_ZONE: {{ lab_timezone | default('UTC') }}
+            READ_LOGIN_REQUIRED: false
+            WRITE_LOGIN_REQUIRED: false
 
-        print("=" * W)
+    - name: ARA service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ara.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=ARA Records Ansible API server
+          After=network-online.target
+          [Service]
+          Environment=ARA_SETTINGS={{ ara_dir }}/settings.yaml
+          Environment=ARA_BASE_DIR={{ ara_dir }}/data
+          ExecStartPre={{ ara_dir }}/venv/bin/ara-manage migrate
+          ExecStart={{ ara_dir }}/venv/bin/ara-manage runserver 0.0.0.0:{{ ara_port }}
+          Restart=on-failure
+          [Install]
+          WantedBy=multi-user.target
+      register: ara_unit
 
-
-# ── Verification tests ────────────────────────────────────────────────────────
-
-def _sample_events():
-    return [
-        AnsibleEvent("ok", "2025-01-01T03:47:00Z", "deploy.yml", "Setup",
-                     "Copy config", "node-01", 120.0, "ok"),
-        AnsibleEvent("changed", "2025-01-01T03:47:01Z", "deploy.yml", "Setup",
-                     "Copy config", "node-02", 118.0, "changed"),
-        AnsibleEvent("changed", "2025-01-01T03:47:02Z", "deploy.yml", "Vault",
-                     "Rotate secret", "node-01", 980.0, "changed",
-                     sensitive=True),
-        AnsibleEvent("failed", "2025-01-01T03:47:03Z", "deploy.yml", "NV",
-                     "Load nvidia-fs.ko", "node-03", 50.0, "failed"),
-        AnsibleEvent("ok", "2025-01-01T03:47:04Z", "deploy.yml", "Setup",
-                     "Copy config", "node-03", 5000.0, "ok"),  # latency tail
-    ]
-
-def test_audit_summary_counts():
-    da = AuditLogAnalyzer(_sample_events())
-    s = da.audit_summary()
-    assert s.total_events == 5
-    assert s.total_changed == 2
-    assert s.total_failed == 1
-    assert s.total_sensitive_changed == 1
-
-def test_unique_hosts():
-    da = AuditLogAnalyzer(_sample_events())
-    s = da.audit_summary()
-    assert len(s.unique_hosts) == 3
-
-def test_percentile_p50():
-    da = AuditLogAnalyzer(_sample_events())
-    percs = da.task_latency_percentiles()
-    # "Copy config" durations: [120, 118, 5000] sorted → [118, 120, 5000]
-    assert percs["Copy config"]["p50"] == 120.0
-
-def test_latency_tail_detection():
-    da = AuditLogAnalyzer(_sample_events())
-    tails = da.latency_tail_tasks(ratio=3.0)
-    # "Copy config": p99=5000, p50=120 → 5000 > 360 → tail
-    assert "Copy config" in tails
-
-def test_no_tail_uniform():
-    events = [
-        AnsibleEvent("ok","t","p.yml","P","T","h1",100.0,"ok"),
-        AnsibleEvent("ok","t","p.yml","P","T","h2",105.0,"ok"),
-        AnsibleEvent("ok","t","p.yml","P","T","h3",110.0,"ok"),
-    ]
-    da = AuditLogAnalyzer(events)
-    tails = da.latency_tail_tasks(ratio=3.0)
-    assert "T" not in tails
-
-def test_prometheus_contains_sensitive():
-    da = AuditLogAnalyzer(_sample_events())
-    m = da.prometheus_metrics()
-    assert "ansible_audit_sensitive_changed_total 1" in m
-
-def test_log_volume_formula():
-    runs, nodes, tasks, line_bytes = 10, 1000, 200, 800
-    vol = runs * nodes * tasks * line_bytes
-    assert vol == 1_600_000_000  # 1.6 GB
-
-def test_percentile_formula_single():
-    da = AuditLogAnalyzer([])
-    assert da._percentile([42.0], 99) == 42.0
-
-def test_percentile_formula_empty():
-    da = AuditLogAnalyzer([])
-    assert da._percentile([], 50) == 0.0
-
-def run_tests():
-    tests = [
-        test_audit_summary_counts,
-        test_unique_hosts,
-        test_percentile_p50,
-        test_latency_tail_detection,
-        test_no_tail_uniform,
-        test_prometheus_contains_sensitive,
-        test_log_volume_formula,
-        test_percentile_formula_single,
-        test_percentile_formula_empty,
-    ]
-    passed = 0
-    for t in tests:
-        try:
-            t()
-            print(f"  [PASS] {t.__name__}")
-            passed += 1
-        except AssertionError as e:
-            print(f"  [FAIL] {t.__name__}: {e}")
-    print(f"\n{passed}/{len(tests)} tests passed.")
-    return passed == len(tests)
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--log", help="Path to JSONL audit log file")
-    args = parser.parse_args()
-
-    if args.log:
-        events = []
-        with open(args.log) as f:
-            for line in f:
-                raw = json.loads(line)
-                events.append(AnsibleEvent(
-                    event_type=raw.get("event", ""),
-                    timestamp=raw.get("timestamp", ""),
-                    playbook=raw.get("playbook", ""),
-                    play=raw.get("play", {}).get("name", ""),
-                    task=raw.get("task", {}).get("name", ""),
-                    host=raw.get("host", ""),
-                    duration_ms=float(raw.get("duration", 0)) * 1000,
-                    status=raw.get("event_data", {}).get("res", {}).get("changed", False)
-                          and "changed" or "ok",
-                    user=raw.get("runner_ident", "ansible"),
-                    sensitive=raw.get("task_args", {}).get("no_log", False),
-                ))
-        da = AuditLogAnalyzer(events)
-        da.print_report()
-        prom_out = "/tmp/ansible_audit_metrics.prom"
-        with open(prom_out, "w") as f:
-            f.write(da.prometheus_metrics())
-        print(f"Prometheus metrics → {prom_out}")
-    else:
-        print("── Demonstration with sample events ──")
-        da = AuditLogAnalyzer(_sample_events())
-        da.print_report()
-        print()
-        print("── Running verification tests ──")
-        ok = run_tests()
-        sys.exit(0 if ok else 1)
+    - name: Enable ARA
+      ansible.builtin.systemd_service:
+        name: ara
+        state: "{{ 'restarted' if ara_unit is changed else 'started' }}"
+        enabled: true
+        daemon_reload: true
 ```
 
 ---
 
-## 6. Comparative Matrix — Audit & Logging Backends
+## 4. Hands-on
 
-| Backend | Retention | Query Speed | Compliance | Cost |
-|---|---|---|---|---|
-| ARA + SQLite | Days (disk limit) | Seconds | Dev/test only | \$0 |
-| ARA + PostgreSQL | 90+ days | Seconds | SOC 2 capable | Infra cost only |
-| Elasticsearch + Kibana | 365 days (ILM) | Sub-second | SOC 2, PCI-DSS | \$\$/mo |
-| Splunk Enterprise | Unlimited | Sub-second | SOC 2, PCI-DSS, FedRAMP | \$\$\$\$/mo |
-| OpenTelemetry → Tempo | 30 days typical | Seconds | Trace-level | \$/mo |
-| Loki (log aggregation) | Configurable | Seconds (LogQL) | Limited | \$/mo |
+### 4.1 Deploy
+
+```bash
+cd "01 Ansible/lab"
+ansible-playbook playbooks/23-logging-audit.yml -K
+curl -s http://10.10.10.11:3100/ready                        # ready
+curl -s http://10.10.10.11:8000/api/v1/ | jq 'keys'           # ARA API
+```
+
+### 4.2 Record every playbook run in ARA
+
+```bash
+pip install "ara>=1.7"                                       # client side, on the control node
+export ANSIBLE_CALLBACK_PLUGINS=$(python3 -m ara.setup.callback_plugins)
+export ARA_API_CLIENT=http ARA_API_SERVER=http://10.10.10.11:8000
+ansible-playbook playbooks/01-baseline.yml -K
+ara playbook list --limit 5
+ara result list --playbook <id> --changed      # every changed task, with the diff
+```
+
+To make it permanent, put the three variables in your shell profile or in the AWX job template environment (Volume 20). For AWX, install `ara` into the EE (Volume 05).
+
+### 4.3 Queries worth saving in Grafana (Explore → Loki)
+
+| Question | LogQL |
+|---|---|
+| GPU Xid events, all nodes | `{job="systemd-journal", transport="kernel"} \|= "NVRM: Xid"` |
+| CX-7 link flaps | `{transport="kernel"} \|~ "mlx5_core.*(link down\|Link up\|module)"` |
+| sudo commands on spark-02 | `{host="spark-02", ident="sudo"}` |
+| Config file watches that fired (auditd log file) | `{job="auditd"} \|~ "key=\"(network\|sshd\|priv\|container-runtime)\""` |
+| SSH logins using Vault certificates | `{unit="ssh.service"} \|= "CA ED25519"` |
+| k3s errors | `{unit=~"k3s.*", level="err"}` |
+| Rate of Xids per host (graph) | `sum by (host) (count_over_time({transport="kernel"} \|= "NVRM: Xid" [5m]))` |
+
+### 4.4 auditd: prove it catches a manual change
+
+```bash
+ssh nvidia@10.10.10.12 'sudo sed -i "s/mtu: 9000/mtu: 1500/" /etc/netplan/40-cx7.yaml'
+ssh nvidia@10.10.10.12 'sudo ausearch -k network -i --start recent | tail -20'
+# → type=SYSCALL ... comm="sed" ... auid=nvidia ... key="network"
+tools/drift-cycle.sh      # drift reports the fabric template (and doesn't auto-heal it)
+ansible-playbook playbooks/02-fabric.yml -K -l spark-02    # a human puts it back
+```
 
 ---
 
-## 7. SRE Diagnostics Playbook
+## 5. Retention, volume and "high cardinality"
 
-| Symptom | Root Cause | Diagnostic | Remediation |
-|---|---|---|---|
-| ARA database full | SQLite size limit hit at ~140 GB | `du -sh ~/.ara/server/ansible.sqlite` | Switch to PostgreSQL; run `ara-manage expire_reports --days 90` |
-| Missing audit events | Callback plugin not loaded | `ansible --version` — check `callback_plugins` path | Add `callback_plugins = /usr/lib/python3/dist-packages/ara/plugins/callback` to `ansible.cfg` |
-| Latency tail on SSH connection tasks | Slow DNS reverse lookup in SSH | `time ssh -o ConnectTimeout=5 node-01 hostname` | Add `UseDNS no` to `/etc/ssh/sshd_config`; enable SSH multiplexing |
-| Sensitive tasks logged in plaintext | `no_log: false` on vault-writing tasks | `grep -r 'vault_password' /var/log/ansible/` | Set `no_log: true` on all tasks writing secrets; enforce with ansible-lint `no-log-password` rule |
-| Elasticsearch index size explodes | json_callback logs full task arguments | Kibana index management → ILM policy | Add `display_args_to_stdout: false` in `ansible.cfg` |
+| Stream | Volume driver | Control |
+|---|---|---|
+| Kernel/NVRM | Bursts during faults | Keep. It's the evidence |
+| auditd `root-cmd` (every root execve) | Automation runs generate many | Keep in Loki with 30d retention; exclude noisy automation users with `-F auid!=<ansible uid>` if you must |
+| Container stdout (Docker) | Model servers can be chatty | Not shipped by default (journald only). Add a `loki.source.docker` block selectively |
+| Labels | `host`, `unit`, `ident`, `level`, `transport` only | **Never** use request IDs, PIDs or pod UIDs as labels. That's how you get a high-cardinality Loki meltdown; filter those in queries with `\|=` instead |
 
----
+## 6. Integrations
 
-## 8. Verification Checklist
+| System | Hook |
+|---|---|
+| Alerting (Volume 09) | Loki ruler or Grafana alert on the Xid-rate query, complementing the Prometheus `SparkGPUXid` alert |
+| Drift (Volume 22) | The auditd `key` explains *who/what* caused the drift the playbook found |
+| Drain (Volume 24) | The incident bundle captures local logs; Loki keeps them after the node is re-imaged |
+| AWX (Volume 20) | External logging → Loki (`Settings → Logging`), so job events sit next to host logs |
 
-- [ ] `ANSIBLE_CALLBACK_PLUGINS` includes ARA callback path in `ansible.cfg`
-- [ ] ARA API server running at `http://localhost:8000` with PostgreSQL backend
-- [ ] `ara playbook list` returns last 10 runs within 2 seconds
-- [ ] All tasks with `no_log: true` are absent from ARA task results
-- [ ] Elasticsearch receives ≥ 1 event/run via Filebeat/Fluentd
-- [ ] Prometheus scrapes `ansible_audit_events_total` from ARA exporter
-- [ ] Latency p99 alert fires when `p99 > 3 × p50` for any critical task
-- [ ] `python3 ansible_audit_log_analyzer.py` prints `9/9 tests passed`
-- [ ] 90-day retention policy configured in Elasticsearch ILM or ARA expiry cron
+## 7. Troubleshooting & diagnostics
+
+| Symptom | Diagnose | Fix |
+|---|---|---|
+| No logs in Loki | `docker logs alloy` on the Spark; `curl -s localhost:12345/-/ready` (Alloy UI) | Loki URL/port; journal mounts (`/var/log/journal` exists only with persistent journald — set by `spark_baseline`) |
+| Loki `permission denied` on `/loki` | `docker logs loki` | Directory owner must be uid 10001 (the play sets it) |
+| Loki `entry too far behind` | Alloy pushing old journal on first start | Expected once; `max_age = "12h"` bounds it |
+| `augenrules --load` fails: `rule exists` / syntax | `auditctl -R /etc/audit/rules.d/60-spark.rules` | Fix the rule line; a `-e 2` (immutable) rules file elsewhere blocks reloads until reboot |
+| ARA shows nothing | `echo $ANSIBLE_CALLBACK_PLUGINS`; `curl $ARA_API_SERVER/api/v1/` | Callback path not exported in *this* shell/EE; the API is unreachable from the EE pod |
+| Grafana has no Loki datasource | `/opt/spark-monitoring/grafana/provisioning/datasources/` | Re-run; the handler restarts Grafana |
+
+## 8. Validation
+
+- [ ] Grafana Explore shows journal logs from every Spark, filterable by `host`/`unit`.
+- [ ] The Xid query returns results after a test (or at least runs clean).
+- [ ] `ara playbook list` shows your last runs, with per-task changed results.
+- [ ] A manual netplan edit is visible in `ausearch -k network` **and** in the drift report.

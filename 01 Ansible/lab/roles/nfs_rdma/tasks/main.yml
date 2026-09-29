@@ -1,0 +1,117 @@
+---
+# ------------------------------------------------------------ server
+- name: Server side
+  when: inventory_hostname in groups[nfs_rdma_server_group] | default([])
+  block:
+    - name: Install NFS server
+      ansible.builtin.apt:
+        name: nfs-kernel-server
+        state: present
+
+    - name: Export directory
+      ansible.builtin.file:
+        path: "{{ nfs_rdma_export_path }}"
+        state: directory
+        owner: "{{ spark_admin_user | default('nvidia') }}"
+        group: "{{ spark_admin_user | default('nvidia') }}"
+        mode: "0775"
+
+    - name: Enable RDMA listener + thread count in /etc/nfs.conf
+      community.general.ini_file:
+        path: /etc/nfs.conf
+        section: nfsd
+        option: "{{ item.k }}"
+        value: "{{ item.v }}"
+        mode: "0644"
+      loop:
+        - { k: rdma, v: "y" }
+        - { k: rdma-port, v: "{{ nfs_rdma_port }}" }
+        - { k: threads, v: "{{ nfs_rdma_threads }}" }
+        - { k: vers3, v: "n" }
+      loop_control:
+        label: "{{ item.k }}={{ item.v }}"
+      notify: Restart nfs-server
+
+    - name: Exports
+      ansible.builtin.copy:
+        dest: /etc/exports.d/spark-models.exports
+        content: |
+          # {{ ansible_managed }}
+          {{ nfs_rdma_export_path }} {% for c in nfs_rdma_export_cidrs %}{{ c }}(rw,async,no_subtree_check,no_root_squash) {% endfor %}
+
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Re-export
+
+    - name: Start NFS server
+      ansible.builtin.service:
+        name: nfs-server
+        state: started
+        enabled: true
+
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+
+    - name: Confirm RDMA listener is registered
+      ansible.builtin.command: cat /proc/fs/nfsd/portlist
+      register: nfs_rdma_portlist
+      changed_when: false
+      check_mode: false        # read-only probe: must also run under --check (drift detection)
+      failed_when: ("rdma " ~ nfs_rdma_port) not in nfs_rdma_portlist.stdout
+
+# ------------------------------------------------------------ client
+- name: Client side
+  when: inventory_hostname in groups[nfs_rdma_client_group] | default([])
+  block:
+    - name: Install NFS client
+      ansible.builtin.apt:
+        name: nfs-common
+        state: present
+
+    - name: Load rpcrdma now (also persisted by spark_baseline)
+      community.general.modprobe:
+        name: rpcrdma
+        state: present
+
+    - name: Pick the server's fabric IP that shares my subnet
+      ansible.builtin.set_fact:
+        nfs_rdma_server_ip: >-
+          {{ hostvars[groups[nfs_rdma_server_group][0]].cx7_interfaces
+             | map(attribute='address')
+             | select('match', (cx7_interfaces[0].address.split('.')[:3] | join('.')) ~ '\.')
+             | map('regex_replace', '/\d+$', '')
+             | first }}
+
+    - name: Mount over RDMA
+      ansible.posix.mount:
+        src: "{{ nfs_rdma_server_ip }}:{{ nfs_rdma_export_path }}"
+        path: "{{ nfs_rdma_mount_path }}"
+        fstype: nfs4
+        opts: "{{ nfs_rdma_mount_opts }}"
+        state: mounted
+      register: nfs_rdma_mount
+      ignore_errors: "{{ nfs_rdma_tcp_fallback }}"
+
+    - name: Fallback to TCP when RDMA mount failed
+      ansible.posix.mount:
+        src: "{{ nfs_rdma_server_ip }}:{{ nfs_rdma_export_path }}"
+        path: "{{ nfs_rdma_mount_path }}"
+        fstype: nfs4
+        opts: "{{ nfs_rdma_mount_opts | regex_replace('proto=rdma,port=\\d+', 'proto=tcp') }}"
+        state: mounted
+      when: nfs_rdma_mount is failed
+
+    - name: Verify transport actually in use
+      ansible.builtin.shell: |
+        set -o pipefail
+        grep " {{ nfs_rdma_mount_path }} " /proc/mounts | grep -o 'proto=[a-z]*'
+      args:
+        executable: /bin/bash
+      register: nfs_rdma_proto
+      changed_when: false
+      check_mode: false        # read-only probe: must also run under --check (drift detection)
+
+    - name: Report transport
+      ansible.builtin.debug:
+        msg: "{{ nfs_rdma_mount_path }} mounted with {{ nfs_rdma_proto.stdout }}"

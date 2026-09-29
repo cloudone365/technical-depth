@@ -1,0 +1,125 @@
+---
+- name: Install controller packages
+  ansible.builtin.apt:
+    name: "{{ slurm_cluster_packages_controller }}"
+    state: present
+  when: inventory_hostname in groups[slurm_cluster_controller_group]
+
+- name: Install compute packages
+  ansible.builtin.apt:
+    name: "{{ slurm_cluster_packages_compute }}"
+    state: present
+  when: inventory_hostname in groups[slurm_cluster_compute_group]
+
+# ---- MUNGE: one shared key, generated once on the control node
+- name: Generate cluster munge key on the control node (once)
+  ansible.builtin.shell: |
+    set -o pipefail
+    umask 077
+    dd if=/dev/urandom bs=1 count=1024 2>/dev/null > "{{ slurm_cluster_munge_key_local }}"
+  args:
+    creates: "{{ slurm_cluster_munge_key_local }}"
+    executable: /bin/bash
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Distribute munge key
+  ansible.builtin.copy:
+    src: "{{ slurm_cluster_munge_key_local }}"
+    dest: /etc/munge/munge.key
+    owner: munge
+    group: munge
+    mode: "0400"
+  notify: Restart munge
+
+- name: Directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: slurm
+    group: slurm
+    mode: "0755"
+  loop:
+    - { path: /var/log/slurm }
+    - { path: /var/spool/slurmctld }
+    - { path: /var/spool/slurmd }
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Health check script
+  ansible.builtin.copy:
+    src: spark-slurm-healthcheck.sh
+    dest: /usr/local/sbin/spark-slurm-healthcheck.sh
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render Slurm configuration (identical on every node)
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/slurm/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: [slurm.conf, gres.conf, cgroup.conf]
+  notify:
+    - Restart slurmctld
+    - Restart slurmd
+
+- name: Flush handlers
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable daemons
+  ansible.builtin.service:
+    name: "{{ item.name }}"
+    state: started
+    enabled: true
+  loop:
+    - { name: munge, when: true }
+    - { name: slurmctld, when: "{{ inventory_hostname in groups[slurm_cluster_controller_group] }}" }
+    - { name: slurmd, when: "{{ inventory_hostname in groups[slurm_cluster_compute_group] }}" }
+  when: item.when | bool
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Verify munge round-trip to controller
+  ansible.builtin.shell: |
+    set -o pipefail
+    munge -n | ssh -o BatchMode=yes {{ hostvars[groups[slurm_cluster_controller_group][0]].ansible_host }} unmunge
+  args:
+    executable: /bin/bash
+  become: false
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  failed_when: false
+  register: slurm_cluster_munge_check
+
+- name: Resume nodes DOWN/DRAINED by (re)configuration — never ones drained on purpose
+  ansible.builtin.shell: |
+    set -o pipefail
+    sinfo -h -N -t down,drain -o '%N|%E' | sort -u | while IFS='|' read -r n r; do
+      case "$r" in
+        healthcheck:*|maint:*|*"Kill task failed"*) echo "keep $n ($r)";;
+        *) scontrol update NodeName="$n" State=RESUME && echo "resumed $n ($r)";;
+      esac
+    done
+  args:
+    executable: /bin/bash
+  run_once: true
+  delegate_to: "{{ groups[slurm_cluster_controller_group][0] }}"
+  register: slurm_cluster_resume
+  changed_when: "'resumed' in slurm_cluster_resume.stdout"
+
+- name: Show cluster state
+  ansible.builtin.command: sinfo -N -o "%N %T %G %m %E"
+  run_once: true
+  delegate_to: "{{ groups[slurm_cluster_controller_group][0] }}"
+  register: slurm_cluster_sinfo
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+
+- name: Print sinfo
+  ansible.builtin.debug:
+    var: slurm_cluster_sinfo.stdout_lines
+  run_once: true

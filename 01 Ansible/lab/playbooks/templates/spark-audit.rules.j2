@@ -1,0 +1,23 @@
+## {{ ansible_managed }}
+## Who changed what on a DGX Spark. Keys make searching easy: ausearch -k <key>
+-w /etc/sudoers -p wa -k priv
+-w /etc/sudoers.d/ -p wa -k priv
+-w /etc/ssh/sshd_config -p wa -k sshd
+-w /etc/ssh/sshd_config.d/ -p wa -k sshd
+-w /etc/ssh/trusted-user-ca-keys.pem -p wa -k sshd
+-w /etc/netplan/ -p wa -k network
+-w /etc/docker/daemon.json -p wa -k container-runtime
+-w /etc/cdi/ -p wa -k container-runtime
+-w /etc/nvidia-container-runtime/ -p wa -k container-runtime
+-w /etc/rancher/k3s/ -p wa -k k3s
+-w /etc/slurm/ -p wa -k slurm
+-w /etc/munge/munge.key -p rwa -k slurm-secret
+-w /etc/vault.d/ -p wa -k vault
+-w /etc/sysctl.d/ -p wa -k kernel-tuning
+-w /etc/modprobe.d/ -p wa -k kernel-tuning
+-w /etc/default/grub.d/ -p wa -k boot
+## package database changes (apt/dpkg) and apt-mark holds
+-w /var/lib/dpkg/status -p wa -k packages
+-w /usr/bin/apt-mark -p x -k packages
+## every command run as root through sudo
+-a always,exit -F arch=b64 -S execve -F euid=0 -F auid>=1000 -F auid!=4294967295 -k root-cmd

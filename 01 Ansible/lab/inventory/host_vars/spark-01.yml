@@ -1,0 +1,15 @@
+---
+spark_node_index: 1
+
+# CX-7 fabric. Each physical QSFP port shows up as TWO logical netdevs
+# (one per PCIe root: enp1s0f1np1 and enP2p1s0f1np1 are the SAME cage).
+# Assign both to get the full 200 Gb/s. Confirm names with `ibdev2netdev`.
+cx7_interfaces:
+  - name: enp1s0f1np1
+    rdma_dev: rocep1s0f1
+    address: 192.168.100.11/24
+    mtu: 9000
+  - name: enP2p1s0f1np1
+    rdma_dev: roceP2p1s0f1
+    address: 192.168.101.11/24
+    mtu: 9000

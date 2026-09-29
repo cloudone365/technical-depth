@@ -1,0 +1,25 @@
+---
+- name: Apply sysctl tuning (persisted to /etc/sysctl.d/90-spark.conf)
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/90-spark.conf
+    reload: true
+    state: present
+  loop: "{{ spark_baseline_sysctls | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}={{ item.value }}"
+  when: not spark_baseline_container_mode
+
+- name: Load RDMA kernel modules at boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/spark-rdma.conf
+    content: |
+      # managed by ansible (spark_baseline)
+      ib_uverbs
+      rdma_ucm
+      rpcrdma
+    owner: root
+    group: root
+    mode: "0644"
+  when: not spark_baseline_container_mode

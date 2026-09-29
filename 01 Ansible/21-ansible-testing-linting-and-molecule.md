@@ -1,485 +1,297 @@
-# Volume 21 — Ansible Testing, Linting & Molecule CI/CD Gating
+# Volume 21 — Testing the Lab Like Production: Lint, Syntax, Fixture Tests, Molecule on arm64, and CI with a Spark Runner
 
-> **AI Supercomputing Ansible Masterclass · 01 Ansible · Volume 21 of 25**
+> **Module 01 · Part V — Production SRE** · Prev: [20 AWX in production](20-awx-tower-production-cluster-and-receptor.md) · Next: [22 Drift detection & self-healing](22-configuration-drift-detection-and-self-healing.md)
 
----
-
-## 1. Executive Intuition
-
-An untested Ansible role in a GPU cluster is a latent disaster. A single
-misconfigured `sysctl` pushed to 800 nodes during a maintenance window can
-lock out SSH across the entire fabric in under 3 minutes. The **Molecule +
-Testinfra** testing stack brings software-engineering discipline to
-infrastructure: you write a scenario, spin an ephemeral container or VM,
-run the role, then *assert* the state with Python test functions — the same
-way a developer asserts unit tests before merging code.
-
-This volume covers the full testing pyramid for Ansible: `yamllint` → 
-`ansible-lint` → `Molecule scenario` → `Testinfra assertions` → `CI/CD
-gating` in GitHub Actions and GitLab CI, culminating in a complete Python lab
-that generates Molecule scenario boilerplate for any role.
+| | |
+|---|---|
+| **You will build** | A test pyramid for the lab: `yamllint` + `ansible-lint` (production profile), syntax checks, **fixture tests** for the parsers and plugins, **Molecule** for a role in an arm64 container on the Spark, and a GitHub Actions workflow that runs the cheap layers on every PR and Molecule on demand on a **self-hosted Spark runner** |
+| **Hardware** | Control node; 1× Spark for Molecule and as a CI runner |
+| **Time** | 90 min |
+| **Risk** | None |
 
 ---
 
-## 2. Lineage & Evolution
+## 1. The pyramid, and what each layer catches
 
-```
-2014 ──► ansible-lint 1.x (basic YAML hygiene checks)
-2016 ──► Molecule 1.x (Vagrant-backed role testing)
-2018 ──► Molecule 2.x: Docker driver; Testinfra integration
-2019 ──► Molecule 3.x: driver plugins (podman, delegated, EC2)
-2020 ──► ansible-lint 5.x: profile system (min, basic, production)
-2021 ──► Molecule 3.4: scenario matrix, parallel testing
-2022 ──► ansible-lint 6.x: FQCN enforcement rules
-2023 ──► Molecule 6.x: native pytest integration; auto-discovery
-2024 ──► ansible-lint 24.x: yamllint plugin merger; --fix mode
-2025 ──► Molecule 7.x: OCI-first driver, Podman 5.x pods
+```mermaid
+flowchart TB
+  L4["4 · Real hardware<br/>30-validate.yml, 18-cuda-smoke, 10-nccl-test<br/>(on the Sparks — minutes)"]
+  L3["3 · Molecule<br/>role converge + idempotence + verify in arm64 Ubuntu 24.04 container<br/>(on the Spark — ~3 min)"]
+  L2["2 · Fixture tests<br/>Jinja katas · mDNS plugin on captured avahi output · drift reporter exit codes<br/>(anywhere — seconds)"]
+  L1["1 · Static<br/>yamllint · ansible-lint (production) · syntax-check · py_compile · bash -n<br/>(anywhere — seconds)"]
+  L1 --> L2 --> L3 --> L4
 ```
 
----
-
-## 3. First-Principles Mathematics
-
-### 3.1 Testing Pyramid — Cost vs Coverage
-
-Define 4 testing layers with cost $c_i$ and defect-catch rate $d_i$:
-
-| Layer | $c_i$ (s per run) | $d_i$ |
+| Layer | Catches | Real examples from building this lab |
 |---|---|---|
-| yamllint | 0.5 | 0.20 |
-| ansible-lint | 2.0 | 0.35 |
-| Molecule (container) | 45 | 0.35 |
-| Molecule (VM/metal) | 300 | 0.10 |
-
-Expected defects caught with budget $B$ seconds:
-
-$$
-D(B) = \sum_{i : c_i \le B} d_i
-$$
-
-For $B = 60\;\text{s}$ (fast CI gate): $D = 0.20 + 0.35 + 0.35 = 0.90$.
-Only 10% of defects escape the 60-second gate.
-
-### 3.2 Idempotency Score
-
-A role's idempotency score $\mathcal{I}$ measures drift between two
-consecutive runs on an unchanged system:
-
-$$
-\mathcal{I} = 1 - \frac{\text{changed tasks}_{\text{run2}}}{\text{total tasks}}
-$$
-
-**Perfect idempotency:** $\mathcal{I} = 1.0$.
-**Molecule's idempotency check** asserts $\text{changed tasks}_{\text{run2}} = 0$,
-i.e., $\mathcal{I} = 1.0$ is a hard gate.
-
-### 3.3 Lint Rule Density
-
-$$
-\text{LRD} = \frac{\text{violations}}{\text{KLOC}}
-$$
-
-Target: $\text{LRD} < 5$ for production roles (< 5 violations per 1000 lines).
-A new role averaging 30 YAML lines per task with 200 tasks = 6 000 lines →
-fewer than 30 violations allowed.
+| Static | Style, deprecated syntax, risky shell, missing `changed_when`, `become_user` without `become`, relative `src:` paths | `partial-become` in the NCCL build; `no-relative-paths` for `uma_probe.cu`; `risky-shell-pipe` in the drain capture |
+| Fixture | Logic bugs in parsing and templating | Tuples breaking JMESPath; case-insensitive `sort`; `\\d` in a folded scalar; JSON callback output followed by timer text breaking the drift parser |
+| Molecule | Non-idempotent tasks, packaging and handler ordering, platform assumptions | Container-mode switches (`spark_baseline_container_mode`) that skip sysctl/timezone where they can't work |
+| Hardware | Driver, fabric, GPU reality | Only the Sparks can tell you that the link negotiated 200G |
 
 ---
 
-## 4. Deep Architecture
+## 2. Static and fixture layers: one script
 
-```
-Developer workstation
-        │
-        ▼
-┌──────────────────────────────────────────────────────────────────┐
-│  molecule test --scenario-name default                           │
-│                                                                  │
-│  Phase 1: create         → docker/podman spin ephemeral instance │
-│  Phase 2: prepare        → install prerequisites                 │
-│  Phase 3: converge       → apply the role under test             │
-│  Phase 4: idempotency    → re-run; assert 0 changed tasks        │
-│  Phase 5: verify         → pytest + Testinfra assertions         │
-│  Phase 6: side_effect    → (optional) inject failure             │
-│  Phase 7: cleanup        → destroy container                     │
-└──────────────────────────────────────────────────────────────────┘
-        │
-        ▼  CI/CD Pipeline (GitHub Actions / GitLab CI)
-┌────────────────────┐   ┌──────────────┐   ┌──────────────────────┐
-│ yamllint           │──►│ ansible-lint │──►│ molecule test (matrix│
-│ 0.5s / always      │   │ 2s / always  │   │ scenarios)           │
-│ gate: exit 0       │   │ gate: exit 0 │   │ gate: all tests pass │
-└────────────────────┘   └──────────────┘   └──────────────────────┘
-        │                                            │
-        ▼                                            ▼
-   PR Blocked                                  Merge allowed
-   (red check)                                 (green check)
+```bash
+# lab/tests/run-local-checks.sh
+#!/usr/bin/env bash
+# Everything CI runs that doesn't need a Spark. Run from lab/:  tests/run-local-checks.sh
+set -euo pipefail
+cd "$(dirname "$0")/.."
+export ANSIBLE_CONFIG=$PWD/ansible.cfg
+echo "== yamllint";      yamllint -s .
+echo "== ansible-lint";  ansible-lint
+echo "== syntax-check";  for p in playbooks/*.yml; do ansible-playbook --syntax-check "$p" >/dev/null; done
+echo "== jinja katas";   kata=$(ansible-playbook playbooks/15-jinja-lab.yml); grep -q '7/7 Jinja katas passed' <<<"$kata"
+echo "== mdns plugin";   out=$(ANSIBLE_INVENTORY_ENABLED=spark_mdns ansible-inventory -i tests/fixtures/spark.mdns.yml --list)
+                         echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert sorted(d["spark"]["hosts"])==["spark-01","spark-02"], d'
+echo "== drift report";  set +e; python3 tools/spark_drift_report.py tests/fixtures/drift-sample.json >/dev/null; rc=$?; set -e
+                         [ "$rc" -eq 2 ] || { echo "expected exit 2 (drift), got $rc"; exit 1; }
+echo "== python tools";  python3 -m py_compile tools/*.py roles/spark_facts/files/spark.fact inventory_plugins/*.py
+echo "== shell";         bash -n roles/gpu_telemetry/files/*.sh roles/slurm_cluster/files/*.sh tools/*.sh
+echo "ALL LOCAL CHECKS PASSED"
 ```
 
-**Molecule Scenario Directory Layout:**
+```bash
+cd "01 Ansible/lab"
+tests/run-local-checks.sh
 ```
-roles/
-  nvidia_driver/
-    tasks/main.yml
-    defaults/main.yml
-    molecule/
-      default/
-        molecule.yml        ← driver, platforms, provisioner config
-        converge.yml        ← playbook that calls the role
-        verify.yml          ← pytest/Testinfra assertions
-        prepare.yml         ← pre-role setup (optional)
+
+### 2.1 Lint configuration
+
+```yaml
+# lab/.ansible-lint
+---
+profile: production
+exclude_paths:
+  - .cache/
+  - collections/
+  - roles/*/molecule/
+skip_list:
+  - var-naming[no-role-prefix]   # inventory-level vars (cx7_interfaces, spark_expected) are shared on purpose
+warn_list:
+  - experimental
 ```
+
+```yaml
+# lab/.yamllint
+---
+extends: default
+rules:
+  line-length: {max: 160, level: warning}
+  truthy: {allowed-values: ["true", "false", "yes", "no"], check-keys: false}
+  comments: {min-spaces-from-content: 1}
+  comments-indentation: disable
+  braces: {max-spaces-inside: 1}
+  octal-values: {forbid-implicit-octal: true, forbid-explicit-octal: true}
+ignore: |
+  .cache/
+  collections/
+```
+
+The `production` profile is the strictest built-in profile. Every exception in the lab is a targeted `# noqa: <rule> (reason)` on a single task, never a blanket skip. Examples: `no-handler` where validation must run *before* apply in the same play, and `command-instead-of-module` for `apt-get -s`, which no module can do.
+
+### 2.2 Fixture tests: capture once, test forever
+
+The trick for hardware-dependent code: **capture real command output once from the Spark, commit it as a fixture, and test the parser against it** in CI.
+
+```bash
+# on a Spark
+avahi-browse -p -r -t _ssh._tcp > tests/fixtures/avahi-browse.txt
+ibdev2netdev > tests/fixtures/ibdev2netdev.txt
+nvidia-smi --query-gpu=index,name,temperature.gpu,power.draw,utilization.gpu,memory.used --format=csv > tests/fixtures/smi.csv
+ANSIBLE_STDOUT_CALLBACK=ansible.posix.json ansible-playbook playbooks/20-drift-check.yml > tests/fixtures/drift-real.json
+```
+
+Then add a case to `run-local-checks.sh`. The Jinja katas (Volume 04) are this pattern taken to its conclusion.
 
 ---
 
-## 5. Concrete Production Lab
+## 3. Molecule on the Spark (arm64)
 
-```python
-#!/usr/bin/env python3
-"""
-molecule_boilerplate_generator.py
-Generates a complete Molecule testing scaffold for any Ansible role.
-
-Usage: python3 molecule_boilerplate_generator.py --role nvidia_driver
-       python3 molecule_boilerplate_generator.py  (runs self-tests)
-"""
-
-import os, sys, textwrap, argparse
-from pathlib import Path
-
-# ── Template library ──────────────────────────────────────────────────────────
-
-def molecule_yml(role_name: str, image: str = "ubuntu:22.04") -> str:
-    return textwrap.dedent(f"""\
-        ---
-        dependency:
-          name: galaxy
-
-        driver:
-          name: podman
-
-        platforms:
-          - name: instance-{role_name}
-            image: {image}
-            pre_build_image: true
-            privileged: false
-            cgroupns_mode: host
-            volumes:
-              - /sys/fs/cgroup:/sys/fs/cgroup:rw
-            command: /sbin/init
-
-        provisioner:
-          name: ansible
-          config_options:
-            defaults:
-              interpreter_python: auto_silent
-              callback_whitelist: profile_tasks
-          env:
-            ANSIBLE_FORCE_COLOR: "1"
-
-        verifier:
-          name: ansible
-
-        lint: |
-          set -e
-          yamllint .
-          ansible-lint
-    """)
-
-
-def converge_yml(role_name: str) -> str:
-    return textwrap.dedent(f"""\
-        ---
-        - name: Converge
-          hosts: all
-          gather_facts: true
-          become: true
-
-          roles:
-            - role: {role_name}
-    """)
-
-
-def verify_yml(role_name: str, checks: list) -> str:
-    """Generate a Testinfra-style verify playbook using ansible.builtin.assert."""
-    task_list = ""
-    for check in checks:
-        task_list += textwrap.dedent(f"""\
-            - name: "{check['name']}"
-              ansible.builtin.{check['module']}:
-                {check['args']}
-              {check.get('extra', '')}
-
-        """)
-    return textwrap.dedent(f"""\
-        ---
-        - name: Verify {role_name}
-          hosts: all
-          gather_facts: true
-
-          tasks:
-            {task_list.strip()}
-    """)
-
-
-def yamllint_config() -> str:
-    return textwrap.dedent("""\
-        ---
-        extends: default
-        rules:
-          line-length:
-            max: 160
-            level: warning
-          truthy:
-            allowed-values: ['true', 'false']
-        ignore: |
-          .tox/
-          .cache/
-    """)
-
-
-def ansible_lint_config() -> str:
-    return textwrap.dedent("""\
-        ---
-        profile: production
-        warn_list:
-          - yaml[line-length]
-        skip_list: []
-        use_default_rules: true
-        offline: false
-        verbosity: 1
-    """)
-
-
-def github_ci_workflow(role_name: str) -> str:
-    return textwrap.dedent(f"""\
-        name: CI — {role_name}
-
-        on:
-          push:
-            branches: [main, dev]
-          pull_request:
-
-        jobs:
-          lint:
-            runs-on: ubuntu-latest
-            steps:
-              - uses: actions/checkout@v4
-              - uses: actions/setup-python@v5
-                with:
-                  python-version: "3.11"
-              - run: pip install yamllint ansible-lint
-              - run: yamllint .
-              - run: ansible-lint
-
-          molecule:
-            runs-on: ubuntu-latest
-            needs: lint
-            strategy:
-              matrix:
-                image:
-                  - ubuntu:22.04
-                  - rockylinux:9
-            steps:
-              - uses: actions/checkout@v4
-              - uses: actions/setup-python@v5
-                with:
-                  python-version: "3.11"
-              - run: pip install molecule molecule-plugins[podman] ansible pytest testinfra
-              - run: molecule test
-                env:
-                  MOLECULE_IMAGE: ${{{{ matrix.image }}}}
-    """)
-
-
-# ── Scaffold writer ───────────────────────────────────────────────────────────
-
-NVIDIA_DRIVER_CHECKS = [
-    {
-        "name": "NVIDIA driver module is loaded",
-        "module": "command",
-        "args": "cmd: lsmod",
-        "extra": "register: lsmod_out\n  failed_when: \"'nvidia' not in lsmod_out.stdout\"",
-    },
-    {
-        "name": "nvidia-smi returns exit 0",
-        "module": "command",
-        "args": "cmd: nvidia-smi",
-        "extra": "",
-    },
-    {
-        "name": "DCGM exporter port 9400 is listening",
-        "module": "wait_for",
-        "args": "port: 9400\n                timeout: 5",
-        "extra": "",
-    },
-]
-
-
-def scaffold_role(role_name: str, output_dir: str, checks: list = None):
-    if checks is None:
-        checks = [
-            {
-                "name": f"Service {role_name} is running",
-                "module": "service",
-                "args": f"name: {role_name}\n                state: started",
-                "extra": "",
-            }
-        ]
-
-    base = Path(output_dir) / "molecule" / "default"
-    base.mkdir(parents=True, exist_ok=True)
-
-    (base / "molecule.yml").write_text(molecule_yml(role_name))
-    (base / "converge.yml").write_text(converge_yml(role_name))
-    (base / "verify.yml").write_text(verify_yml(role_name, checks))
-
-    # yamllint + ansible-lint configs at role root
-    role_root = Path(output_dir)
-    (role_root / ".yamllint.yml").write_text(yamllint_config())
-    (role_root / ".ansible-lint").write_text(ansible_lint_config())
-
-    # GitHub Actions workflow
-    gha_dir = role_root / ".github" / "workflows"
-    gha_dir.mkdir(parents=True, exist_ok=True)
-    (gha_dir / f"ci-{role_name}.yml").write_text(github_ci_workflow(role_name))
-
-    print(f"[OK] Molecule scaffold generated at: {output_dir}")
-    print(f"     molecule/default/molecule.yml")
-    print(f"     molecule/default/converge.yml")
-    print(f"     molecule/default/verify.yml")
-    print(f"     .yamllint.yml")
-    print(f"     .ansible-lint")
-    print(f"     .github/workflows/ci-{role_name}.yml")
-
-
-# ── Verification tests ────────────────────────────────────────────────────────
-
-def test_molecule_yml_contains_driver():
-    yml = molecule_yml("test_role")
-    assert "driver:" in yml
-    assert "podman" in yml
-
-def test_converge_yml_references_role():
-    yml = converge_yml("my_role")
-    assert "my_role" in yml
-    assert "become: true" in yml
-
-def test_verify_yml_generates_tasks():
-    checks = [{"name": "check x", "module": "command",
-               "args": "cmd: echo ok", "extra": ""}]
-    yml = verify_yml("r", checks)
-    assert "check x" in yml
-    assert "ansible.builtin.command" in yml
-
-def test_yamllint_config_max_line():
-    cfg = yamllint_config()
-    assert "max: 160" in cfg
-
-def test_ansible_lint_profile_production():
-    cfg = ansible_lint_config()
-    assert "production" in cfg
-
-def test_github_ci_matrix_images():
-    wf = github_ci_workflow("myrole")
-    assert "ubuntu:22.04" in wf
-    assert "rockylinux:9" in wf
-
-def test_idempotency_score_formula():
-    total_tasks = 20
-    changed_run2 = 0
-    score = 1 - changed_run2 / total_tasks
-    assert score == 1.0
-
-def test_lint_rule_density():
-    violations = 20
-    kloc = 6.0  # 6000 lines / 1000
-    lrd = violations / kloc
-    assert lrd < 5.0, f"LRD={lrd} exceeds threshold"
-
-def test_scaffold_creates_files(tmp_path):
-    scaffold_role("test_role", str(tmp_path),
-                  checks=[{"name": "ping", "module": "ping",
-                           "args": "", "extra": ""}])
-    assert (tmp_path / "molecule" / "default" / "molecule.yml").exists()
-    assert (tmp_path / ".yamllint.yml").exists()
-    assert (tmp_path / ".ansible-lint").exists()
-
-def run_tests():
-    import tempfile
-    tests = [
-        test_molecule_yml_contains_driver,
-        test_converge_yml_references_role,
-        test_verify_yml_generates_tasks,
-        test_yamllint_config_max_line,
-        test_ansible_lint_profile_production,
-        test_github_ci_matrix_images,
-        test_idempotency_score_formula,
-        test_lint_rule_density,
-        lambda: test_scaffold_creates_files(Path(tempfile.mkdtemp())),
-    ]
-    passed = 0
-    for t in tests:
-        name = getattr(t, "__name__", "test_scaffold_creates_files")
-        try:
-            t()
-            print(f"  [PASS] {name}")
-            passed += 1
-        except AssertionError as e:
-            print(f"  [FAIL] {name}: {e}")
-    print(f"\n{passed}/{len(tests)} tests passed.")
-    return passed == len(tests)
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Molecule boilerplate generator")
-    parser.add_argument("--role", help="Role name to scaffold (skip=run tests only)")
-    parser.add_argument("--out",  help="Output directory", default=".")
-    args = parser.parse_args()
-
-    if args.role:
-        checks = NVIDIA_DRIVER_CHECKS if "nvidia" in args.role else None
-        scaffold_role(args.role, args.out, checks=checks)
-    else:
-        print("── Running verification tests ──")
-        ok = run_tests()
-        sys.exit(0 if ok else 1)
+```yaml
+# lab/roles/spark_baseline/molecule/default/molecule.yml
+---
+# molecule test -s default   (run from roles/spark_baseline)
+# Uses an arm64 Ubuntu 24.04 container — run it ON the Spark to test the
+# same architecture you deploy to. Hardware tasks are skipped via
+# spark_baseline_container_mode.
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ../../requirements.yml
+driver:
+  name: docker
+platforms:
+  - name: noble-arm64
+    image: ubuntu:24.04
+    platform: linux/arm64
+    pre_build_image: false
+    command: /lib/systemd/systemd
+    privileged: true
+    cgroupns_mode: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+provisioner:
+  name: ansible
+  inventory:
+    host_vars:
+      noble-arm64:
+        spark_baseline_container_mode: true
+        spark_baseline_hold_nvidia: false
+        spark_baseline_packages: [chrony, jq, ethtool, openssh-server]
+        spark_baseline_admin_user: root
+        spark_baseline_admin_pubkeys: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMoleculeTestKeyOnlyNotRealxxxxxxxxxxxxxxx molecule"]
+verifier:
+  name: ansible
+scenario:
+  test_sequence: [dependency, destroy, create, prepare, converge, idempotence, verify, destroy]
 ```
 
+```yaml
+# lab/roles/spark_baseline/molecule/default/converge.yml
+---
+- name: Converge
+  hosts: all
+  become: true
+  roles:
+    - role: spark_baseline
+```
+
+```yaml
+# lab/roles/spark_baseline/molecule/default/verify.yml
+---
+- name: Verify
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Sshd config validates
+      ansible.builtin.command: sshd -t
+      changed_when: false
+    - name: Root login disabled
+      ansible.builtin.command: grep -q '^PermitRootLogin no' /etc/ssh/sshd_config.d/60-spark-hardening.conf
+      changed_when: false
+    - name: Journald is persistent
+      ansible.builtin.command: grep -q 'Storage=persistent' /etc/systemd/journald.conf.d/60-spark.conf
+      changed_when: false
+    - name: Chrony is configured
+      ansible.builtin.command: grep -q '^pool ' /etc/chrony/chrony.conf
+      changed_when: false
+```
+
+```bash
+# on spark-01 (native arm64 container; no emulation)
+cd "01 Ansible/lab/roles/spark_baseline"
+python3 -m venv ~/.venvs/molecule && . ~/.venvs/molecule/bin/activate
+pip install -r ../../requirements.txt
+molecule test              # destroy → create → prepare → converge → idempotence → verify → destroy
+molecule converge && molecule login   # iterate interactively
+```
+
+**The idempotence step is the most valuable one.** Molecule runs converge twice and fails if the second run reports any `changed`. That catches `command`/`shell` tasks without `changed_when`/`creates`.
+
+### 3.1 Designing roles for testability
+
+| Pattern | In the lab |
+|---|---|
+| A container-mode flag to skip kernel/hardware tasks | `spark_baseline_container_mode` |
+| Hardware assertions in a separate role | `spark_validate`, which runs only on real nodes |
+| Pure functions (parsers) moved to filter plugins or fixture-tested Jinja | `ibdev2netdev` filter (Volume 04 §2.3) |
+| Side-effect tasks guarded by `when: not ansible_check_mode` where check mode can't simulate them | Drift checks stay clean |
+
 ---
 
-## 6. Comparative Matrix — Testing Tools
+## 4. CI
 
-| Tool | Speed | Scope | Auto-fix | GPU/HW aware |
-|---|---|---|---|---|
-| yamllint | < 1 s | Syntax & style | `--fix` (v1.35) | N/A |
-| ansible-lint | 2–5 s | Best practices, FQCN | `--fix` | Partial (custom rules) |
-| Molecule (Docker) | 30–90 s | Full role execution | No | No (mocked) |
-| Molecule (bare-metal delegated) | 5–15 min | Real hardware | No | ✅ |
-| Testinfra (Python) | < 5 s | OS state assertions | No | Via ssh/paramiko |
-| pytest-ansible | < 10 s | Module unit tests | No | Yes |
+```yaml
+# .github/workflows/ansible-lab-ci.yml
+# CI for "01 Ansible/lab" — see 01 Ansible/21-ansible-testing-linting-and-molecule.md
+name: ansible-lab
+
+on:
+  pull_request:
+    paths: ["01 Ansible/lab/**", ".github/workflows/ansible-lab-ci.yml"]
+  push:
+    branches: [main]
+    paths: ["01 Ansible/lab/**"]
+  workflow_dispatch:
+    inputs:
+      molecule:
+        description: "Run Molecule on the self-hosted DGX Spark runner (arm64)"
+        type: boolean
+        default: false
+
+defaults:
+  run:
+    working-directory: "01 Ansible/lab"
+
+jobs:
+  static:
+    name: lint · syntax · katas · tool tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: "01 Ansible/lab/requirements.txt"
+      - name: Install control-node deps
+        run: |
+          pip install "ansible-core~=2.18.0" "ansible-lint>=24" "yamllint>=1.35" jmespath netaddr
+          ansible-galaxy collection install -r requirements.yml -p ./collections
+      - name: Run all local checks
+        run: tests/run-local-checks.sh
+
+  molecule-arm64:
+    name: molecule (spark_baseline) on DGX Spark
+    if: github.event_name == 'workflow_dispatch' && inputs.molecule
+    needs: static
+    runs-on: [self-hosted, linux, ARM64, spark]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Molecule test
+        working-directory: "01 Ansible/lab/roles/spark_baseline"
+        run: |
+          python3 -m venv .venv && . .venv/bin/activate
+          pip install -r ../../requirements.txt
+          molecule test
+```
+
+### 4.1 Register the Spark as a self-hosted runner
+
+```bash
+# on spark-01, as a non-root user in the docker group
+mkdir ~/actions-runner && cd ~/actions-runner
+# download the linux-arm64 runner from: GitHub repo → Settings → Actions → Runners → New self-hosted runner
+./config.sh --url https://github.com/cloudone365/technical-depth --token <TOKEN> --labels spark --unattended
+sudo ./svc.sh install && sudo ./svc.sh start
+```
+
+**Security:** a self-hosted runner executes code from workflows. Restrict it to `workflow_dispatch` (as above) and never run it for PRs from forks. On a public repo, disable fork-PR workflows on self-hosted runners entirely.
+
+### 4.2 Gating merges
+
+In the repo's branch protection, require the `ansible-lab / static` check. Molecule stays manual (it needs the Spark to be online), and hardware validation is part of the release checklist (Volume 25).
 
 ---
 
-## 7. SRE Diagnostics Playbook
+## 5. Troubleshooting & diagnostics
 
-| Symptom | Root Cause | Diagnostic | Remediation |
-|---|---|---|---|
-| Molecule `converge` hangs | PID 1 is not systemd in container | `molecule --debug converge` | Use `command: /sbin/init` and `privileged: true` |
-| ansible-lint FQCN violation | Role uses short module names (`copy` not `ansible.builtin.copy`) | `ansible-lint --list-rules | grep fqcn` | Auto-fix: `ansible-lint --fix fqcn` |
-| Idempotency check fails | Task always reports `changed` | `molecule idempotency` output | Add `changed_when: false` or fix module logic |
-| yamllint `truthy` warning | `yes`/`no` instead of `true`/`false` | `yamllint -d .yamllint.yml .` | Replace `yes`/`no` in all YAML files |
-| Molecule image pull timeout | Registry unreachable in CI | `podman pull <image>` manually | Mirror image to internal registry; set `REGISTRY_URL` |
+| Symptom | Diagnose | Fix |
+|---|---|---|
+| ansible-lint passes locally, fails in CI | Versions: `ansible-lint --version` in both places | Pin `ansible-lint` and `ansible-core`; run CI's exact command locally |
+| `couldn't resolve module/action` in lint | Collections not installed where lint looks | `ansible-galaxy collection install -r requirements.yml -p ./collections`; `collections_path` in `ansible.cfg` |
+| Molecule: `exec format error` | Image arch | `platform: linux/arm64` + run on the Spark |
+| Molecule create hangs on systemd image | cgroup mounts | `privileged: true`, `cgroupns_mode: host`, `/sys/fs/cgroup` rw (as in the config) |
+| Idempotence fails on `apt` with `update_cache` | `cache_valid_time` missing | Add `cache_valid_time: 3600` |
+| Self-hosted job stays queued | Runner offline, or the labels don't match | `sudo ./svc.sh status`; labels must include `self-hosted, linux, ARM64, spark` |
 
----
+## 6. Validation
 
-## 8. Verification Checklist
-
-- [ ] `yamllint .` exits 0 with no `[error]` lines across all role YAML
-- [ ] `ansible-lint` exits 0 with `profile: production` enabled
-- [ ] `molecule test` completes all 7 phases (create → cleanup) in < 5 min
-- [ ] Idempotency phase reports `0 changed tasks` on second converge run
-- [ ] Verify phase has ≥ 3 Testinfra assertions per role
-- [ ] GitHub Actions workflow triggers on both push and pull_request events
-- [ ] Matrix tests cover ≥ 2 OS platforms (Ubuntu 22.04 + Rocky 9 minimum)
-- [ ] `python3 molecule_boilerplate_generator.py` prints `9/9 tests passed`
-- [ ] `.ansible-lint` committed to the role repository root
+- [ ] `tests/run-local-checks.sh` passes locally and in GitHub Actions.
+- [ ] `molecule test` passes on the Spark, including idempotence.
+- [ ] Branch protection requires the static job.
+- [ ] You added one new fixture captured from your own Spark.

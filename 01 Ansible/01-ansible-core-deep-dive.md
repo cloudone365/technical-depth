@@ -1,1406 +1,725 @@
-# Deep Dive: Ansible Core — Complete Learning Material
+# Volume 01A — Ansible Core on DGX Spark: Control Node, Inventory & First Contact
 
-A comprehensive reference covering every major Ansible concept from fundamentals through advanced patterns, with theory, architecture, worked examples, exercises, and troubleshooting.
+> **Module 01 · Part I — Foundations** · Lab code: [`lab/`](lab/) · Next: [01B Execution internals & debugging](01-ansible-core-engine-and-execution-internals.md)
 
----
-
-## 📑 Table of Contents
-
-1. [Architecture & How Ansible Works Under the Hood](#1-architecture--how-ansible-works-under-the-hood)
-2. [Installation & Environment Setup](#2-installation--environment-setup)
-3. [Configuration: `ansible.cfg` Deep Dive](#3-configuration-ansiblecfg-deep-dive)
-4. [Inventory: Static, Dynamic & Patterns](#4-inventory-static-dynamic--patterns)
-5. [Modules: The Building Blocks](#5-modules-the-building-blocks)
-6. [Ad-Hoc Commands](#6-ad-hoc-commands)
-7. [Playbooks: Structure, Plays & Tasks](#7-playbooks-structure-plays--tasks)
-8. [Variables: Scope, Precedence & Best Practices](#8-variables-scope-precedence--best-practices)
-9. [Facts & Magic Variables](#9-facts--magic-variables)
-10. [Conditionals (`when`)](#10-conditionals-when)
-11. [Loops](#11-loops)
-12. [Handlers & Notifications](#12-handlers--notifications)
-13. [Jinja2 Templating](#13-jinja2-templating)
-14. [Error Handling & Debugging](#14-error-handling--debugging)
-15. [Roles](#15-roles)
-16. [Ansible Galaxy & Collections](#16-ansible-galaxy--collections)
-17. [Tags](#17-tags)
-18. [Privilege Escalation (`become`)](#18-privilege-escalation-become)
-19. [Delegation, Serial & Rolling Updates](#19-delegation-serial--rolling-updates)
-20. [Native Ansible Vault (Encryption)](#20-native-ansible-vault-encryption)
-21. [Performance Tuning](#21-performance-tuning)
-22. [Testing & Linting](#22-testing--linting)
-23. [Lab Exercises](#23-lab-exercises)
-24. [Learning Resources](#24-learning-resources)
+| | |
+|---|---|
+| **You will build** | A reproducible Ansible control node, an inventory that describes your Spark(s), and the first three playbooks: connectivity, custom GPU facts, OS baseline |
+| **Hardware** | 1× DGX Spark (2× optional) + a control node (laptop, VM, WSL, or the Spark itself) |
+| **Time** | 60–90 min |
+| **Risk** | Low — read-only until `01-baseline.yml`, which only adds packages/config drop-ins |
 
 ---
 
-## 1. Architecture & How Ansible Works Under the Hood
+## 1. Why Ansible on a single desktop box?
 
-### Core Execution Flow
+A DGX Spark looks like a workstation, but you'll treat it like a data-centre node: it runs DGX OS (Ubuntu 24.04 based, aarch64), a GB10 Grace Blackwell superchip (20 Arm cores + Blackwell GPU sharing **128 GB of coherent unified LPDDR5x memory**), a ConnectX-7 NIC with two 200 Gb/s QSFP cages, and eventually k3s, Slurm, Vault and a monitoring stack. Ansible gives you:
+
+- **Rebuild in minutes after a re-image or a bad DGX OS update.** The playbooks describe the machine, so recovery doesn't depend on remembering what you changed.
+- **Moving from one Spark to two (or four) is a one-line inventory change.** You don't have to repeat every manual step on the new node.
+- **Drift detection:** `--check --diff` shows what changed behind your back (Volume 22).
+- **The same muscle memory you'll use on DGX/HGX clusters.** Only the inventory gets bigger.
+
+---
+
+## 2. Architecture
+
+### 2.1 High-level design (HLD)
 
 ```mermaid
-sequenceDiagram
-    participant C as Control Node (Your Mac)
-    participant S as Managed Node (DGX Spark)
-
-    C->>C: 1. Parse inventory, playbook, variables
-    C->>C: 2. Compile Python module + arguments into a payload
-    C->>S: 3. Open SSH connection
-    C->>S: 4. Create temp directory (/tmp/.ansible-xxx/)
-    C->>S: 5. Copy compiled module to temp directory
-    C->>S: 6. Execute module with Python interpreter
-    S->>C: 7. Return JSON result (stdout, changed, failed, etc.)
-    C->>S: 8. Delete temp directory
-    C->>C: 9. Parse JSON, display output, continue to next task
+flowchart LR
+  subgraph CN["Control node"]
+    direction TB
+    CFG["ansible.cfg<br/>(pipelining, ControlPersist,<br/>fact cache, log_path)"]
+    INV["inventory/<br/>hosts.yml · group_vars · host_vars"]
+    PB["playbooks/ + roles/"]
+    VENV["Python venv<br/>ansible-core 2.18 + collections"]
+  end
+  subgraph SP["DGX Spark (managed node)"]
+    direction TB
+    SSHD["sshd :22"]
+    PY["/usr/bin/python3 (3.12)"]
+    FACTS["/etc/ansible/facts.d/spark.fact"]
+    OS["DGX OS 7 · apt · systemd · netplan"]
+  end
+  PB -->|"SSH (key auth)<br/>+ sudo"| SSHD --> PY --> OS
+  PY --> FACTS
 ```
 
-### Key Terminology
+Ansible is **agentless**. Nothing runs on the Spark between plays. Each task is a small Python program that is shipped over SSH, run by `/usr/bin/python3`, and returns JSON.
 
-| Term | Definition |
-| :--- | :--- |
-| **Control Node** | The machine where Ansible is installed and commands are executed (your Mac, a CI runner, Tower). Must be Linux/macOS — Windows is NOT supported as a control node. |
-| **Managed Node** | Any remote machine Ansible manages. Requires only SSH and Python 3. No Ansible installation needed. |
-| **Inventory** | A file (INI/YAML/script) listing managed nodes, grouped logically. |
-| **Module** | A unit of code Ansible executes on the managed node (e.g., `apt`, `copy`, `file`, `command`). |
-| **Task** | A single call to a module with specific arguments. |
-| **Play** | A mapping of a host group to a list of tasks. |
-| **Playbook** | A YAML file containing one or more plays. |
-| **Role** | A standardized directory structure packaging related tasks, handlers, variables, templates, and files. |
-| **Collection** | A distribution format for Ansible content (roles, modules, plugins) published via Ansible Galaxy. |
-| **Facts** | System information automatically gathered from managed nodes (OS, IPs, RAM, CPUs). |
-| **Handler** | A special task that runs only when triggered by a `notify` directive from another task. |
-| **Idempotency** | Running the same task multiple times produces the same result — Ansible checks desired state before acting. |
+### 2.2 Low-level design (LLD)
 
-### Why Agentless Matters
+| Item | Value in this lab | Why |
+|---|---|---|
+| Managed-node user | `nvidia` (same on every Spark) | NVIDIA's multi-Spark playbooks and MPI assume identical usernames |
+| Privilege | `become: true` via `sudo` (group_vars/spark.yml) | Everything we configure is root-owned |
+| Python on target | `/usr/bin/python3` pinned in `ansible.cfg` | Avoids interpreter discovery warnings; DGX OS ships 3.12 |
+| Mgmt network | `enP7s7` 10GbE, `10.10.10.0/24` | Ansible/SSH traffic never rides the CX-7 fabric |
+| Fabric | CX-7 `enp1s0f1np1` / `enP2p1s0f1np1`, `192.168.100/101.0/24` | Workload traffic only (NCCL, NFS/RDMA, flannel) |
+| Fact cache | `jsonfile` in `lab/.cache/facts`, 2 h | Ad-hoc runs and drift reports reuse facts |
+| Run log | `lab/.cache/ansible.log` | Free audit trail (Volume 23) |
 
-| Feature | Ansible (Agentless) | Puppet/Chef (Agent-based) |
-| :--- | :--- | :--- |
-| Software on managed node | None (SSH + Python) | Agent daemon required |
-| Communication | SSH push on demand | Agent pulls from server |
-| State management | Stateless — checks each run | Persistent state catalog |
-| Startup overhead | Zero — works immediately | Agent install + certificate signing |
-| Firewall complexity | Standard SSH (port 22) | Custom ports (8140, 443) |
+**Inventory model:** one *hardware* group (`spark`) plus *functional* groups (`k3s_server`, `slurm_compute`, `vault`, `monitoring`…). A host can belong to several. Roles target functional groups, so moving Vault to another box is an inventory edit, not a code change.
+
+```mermaid
+flowchart TB
+  all --> spark
+  all --> k3s_server & k3s_agent & slurm_controller & slurm_compute & vault & monitoring & nfs_server & nfs_client
+  spark --> s1[spark-01] & s2[spark-02]
+  k3s_server --> s1
+  k3s_agent --> s2
+  slurm_compute --> spark
+  vault --> s1
+  monitoring --> s1
+  nfs_server --> s1
+  nfs_client --> s2
+```
+
+**Variable precedence you'll actually use** (low → high):
+`role defaults` → `inventory group_vars/all` → `group_vars/<group>` → `host_vars/<host>` → play `vars` → `-e extra vars`.
+Rule of thumb: **hardware facts in `group_vars/spark.yml`, per-box addressing in `host_vars`, knobs in role `defaults`, one-off overrides with `-e`.**
 
 ---
 
-## 2. Installation & Environment Setup
+## 3. Hands-on lab
 
-### Recommended Setup (Python Virtual Environment)
+### Step 1 — Build the control node
 
 ```bash
-# Create a dedicated virtual environment
-python3 -m venv ~/.ansible-env
-
-# Activate it
-source ~/.ansible-env/bin/activate
-
-# Upgrade pip
-pip install --upgrade pip
-
-# Install Ansible Core + useful extras
-pip install ansible ansible-lint yamllint jmespath
-
-# Verify
-ansible --version
-ansible-lint --version
+# Any Linux/macOS/WSL box with Python ≥ 3.11 (or spark-01 itself)
+git clone https://github.com/cloudone365/technical-depth.git
+cd "technical-depth/01 Ansible/lab"
+python3 -m venv ~/.venvs/spark-ansible
+source ~/.venvs/spark-ansible/bin/activate
+pip install -r requirements.txt
+ansible-galaxy collection install -r requirements.yml -p ./collections
+ansible --version        # expect: core 2.18.x, config file = .../lab/ansible.cfg
 ```
 
-### What Gets Installed
-
-- **`ansible-core`**: The engine — includes `ansible-playbook`, `ansible-galaxy`, `ansible-vault`, `ansible-doc`, and ~70 built-in modules.
-- **`ansible`**: The full package — includes `ansible-core` plus the community collection bundle (~5,000 modules).
-- **`ansible-lint`**: Static analysis tool that checks playbooks for best practices.
-- **`yamllint`**: Validates YAML syntax before Ansible even parses it.
-- **`jmespath`**: Required for the `json_query` Jinja2 filter (querying JSON data structures).
-
-### Directory Structure Convention
-
-```text
-dgx-ansible/
-├── ansible.cfg              # Project-level config (auto-detected)
-├── inventory.ini            # Host inventory
-├── group_vars/              # Variables applied to host groups
-│   ├── all.yml              # Variables for ALL hosts
-│   └── dgx_spark.yml        # Variables for the dgx_spark group
-├── host_vars/               # Variables applied to individual hosts
-│   └── dgx-spark-1.yml      # Variables for dgx-spark-1 only
-├── roles/                   # Reusable automation units
-│   └── gpu_monitoring/
-│       ├── tasks/main.yml
-│       ├── handlers/main.yml
-│       ├── templates/
-│       ├── files/
-│       ├── vars/main.yml
-│       └── defaults/main.yml
-├── playbooks/               # Playbook files
-│   ├── site.yml             # Master playbook
-│   ├── gpu-monitor.yml
-│   └── spark-health.yml
-├── templates/               # Jinja2 template files (if not using roles)
-└── files/                   # Static files to copy to targets
-```
-
----
-
-## 3. Configuration: `ansible.cfg` Deep Dive
-
-Ansible searches for configuration in this priority order:
-
-1. `ANSIBLE_CONFIG` environment variable
-2. `./ansible.cfg` (current directory — **most common for projects**)
-3. `~/.ansible.cfg` (home directory)
-4. `/etc/ansible/ansible.cfg` (system-wide default)
-
-### Recommended Project Configuration
+> **Using the Spark as its own control node?** That works. In `hosts.yml` set `ansible_connection: local` for `spark-01`. You lose nothing except the "rebuild from outside" property, so keep a copy of the repo elsewhere.
 
 ```ini
+# lab/ansible.cfg
+# ansible.cfg — DGX Spark lab control-node configuration
+# Every setting here is explained in Volume 01 (core) and Volume 02 (performance).
 [defaults]
-# Inventory source
-inventory = inventory.ini
+inventory               = ./inventory
+inventory_plugins       = ./inventory_plugins
+roles_path              = ./roles
+collections_path        = ./collections:~/.ansible/collections
+remote_user             = nvidia
+forks                   = 10
+interpreter_python      = /usr/bin/python3
+host_key_checking       = True
+retry_files_enabled     = False
+stdout_callback         = ansible.builtin.default
+callback_result_format  = yaml
+callbacks_enabled       = ansible.posix.profile_tasks, ansible.posix.timer
+# Fact cache: lets ad-hoc runs and drift reports reuse facts without re-gathering
+gathering               = smart
+fact_caching            = jsonfile
+fact_caching_connection = ./.cache/facts
+fact_caching_timeout    = 7200
+# Log every run to a file — the cheapest audit trail you will ever build (Volume 23)
+log_path                = ./.cache/ansible.log
+# Vault password comes from a script so it never sits in plain text (Volume 19)
+# vault_password_file   = ./tools/vault-pass.sh
+nocows                  = True
 
-# SSH user
-remote_user = dgxadmin
-
-# SSH key
-private_key_file = ~/.ssh/dgx_spark_key
-
-# Skip SSH host key verification prompts for new hosts
-host_key_checking = False
-
-# Output formatting
-stdout_callback = yaml
-# Display changed/failed/unreachable count at the end
-callback_whitelist = profile_tasks
-
-# Facts caching (speeds up re-runs dramatically)
-gathering = smart
-fact_caching = jsonfile
-fact_caching_connection = /tmp/ansible_facts_cache
-fact_caching_timeout = 86400
-
-# Performance
-forks = 10                  # Run on 10 hosts simultaneously (default: 5)
-pipelining = True           # Reduces SSH operations per task
-
-# Retry files
-retry_files_enabled = False # Don't litter the project with .retry files
-
-# Roles path
-roles_path = ./roles
+[inventory]
+enable_plugins          = ansible.builtin.yaml, ansible.builtin.ini, spark_mdns, ansible.builtin.constructed, ansible.builtin.auto
 
 [privilege_escalation]
-become = True               # Default to sudo
-become_method = sudo
-become_user = root
-become_ask_pass = False      # Don't prompt for sudo password
+become                  = False
+become_method           = sudo
 
 [ssh_connection]
-ssh_args = -o ControlMaster=auto -o ControlPersist=60s
-pipelining = True
+# ControlPersist keeps one TCP+SSH session per host alive for 10 minutes.
+ssh_args                = -o ControlMaster=auto -o ControlPersist=600s -o ServerAliveInterval=30
+control_path_dir        = ~/.ansible/cp
+# Pipelining removes the "copy module to /tmp then execute" round trips.
+# Requires 'Defaults !requiretty' in sudoers (the Ubuntu default).
+pipelining              = True
+
+[diff]
+always                  = False
+context                 = 3
 ```
 
-### Key Settings Explained
+### Step 2 — SSH trust
 
-| Setting | What It Does | Why It Matters |
-| :--- | :--- | :--- |
-| `forks = 10` | Process 10 hosts in parallel | Default of 5 is slow for clusters |
-| `pipelining = True` | Executes module over existing SSH connection instead of copying files | Massive speed improvement (2-4x faster) |
-| `gathering = smart` | Only gathers facts if not already cached | Saves 5-15 seconds per play |
-| `stdout_callback = yaml` | Formats output as readable YAML instead of raw JSON | Much easier to debug |
-| `host_key_checking = False` | Skips SSH fingerprint verification prompt | Required for automation (but adds security risk if not in a trusted network) |
-
----
-
-## 4. Inventory: Static, Dynamic & Patterns
-
-### Static Inventory (INI Format)
-
-```ini
-# Ungrouped hosts
-bastion ansible_host=10.0.0.1
-
-[dgx_spark]
-dgx-spark-1 ansible_host=192.168.1.100
-dgx-spark-2 ansible_host=192.168.1.101 gpu_type=A100
-
-[nfs_servers]
-nas-01 ansible_host=192.168.1.200
-
-# Meta-group: group of groups
-[infrastructure:children]
-dgx_spark
-nfs_servers
-
-# Variables for all hosts in dgx_spark
-[dgx_spark:vars]
-ansible_user=dgxadmin
-ansible_python_interpreter=/usr/bin/python3
-
-# Variables for ALL hosts in the inventory
-[all:vars]
-ansible_ssh_private_key_file=~/.ssh/ansible_id_ed25519
+```bash
+ssh-keygen -t ed25519 -C "ansible@control"          # if you don't have a key
+ssh-copy-id nvidia@10.10.10.11
+ssh-copy-id nvidia@10.10.10.12                        # second Spark, if any
+ssh nvidia@10.10.10.11 'hostname; uname -m; cat /etc/dgx-release | head -3'
 ```
 
-### Static Inventory (YAML Format)
+Expected: `aarch64` and a `DGX_*` release line. If `/etc/dgx-release` is missing, you're not on DGX OS. The lab still runs, but the version checks in `spark_validate` will warn.
+
+### Step 3 — Describe your hardware (inventory)
+
+Find the real CX-7 interface names **on each Spark** before editing host_vars:
+
+```bash
+ssh nvidia@10.10.10.11 ibdev2netdev
+# rocep1s0f0 port 1 ==> enp1s0f0np0 (Down)
+# rocep1s0f1 port 1 ==> enp1s0f1np1 (Up)       <- cable is in this cage
+# roceP2p1s0f0 port 1 ==> enP2p1s0f0np0 (Down)
+# roceP2p1s0f1 port 1 ==> enP2p1s0f1np1 (Up)   <- same cage, second PCIe root
+```
+
+Each physical QSFP cage shows up as **two** netdevs (`enp1s0f1np1` and `enP2p1s0f1np1`) because the CX-7 is attached through two PCIe roots. Address both to get the full 200 Gb/s.
 
 ```yaml
+# lab/inventory/hosts.yml
+---
+# Static inventory for the DGX Spark lab.
+#
+#   Single-Spark mode: delete spark-02 (or leave it commented) — every playbook
+#   works on one node; 2-node sections are skipped automatically.
+#
+#   Management network (10GbE RJ-45, enP7s7) : 10.10.10.0/24
+#   CX-7 fabric (QSFP, direct cable)          : 192.168.100.0/24 + 192.168.101.0/24
 all:
-  vars:
-    ansible_ssh_private_key_file: ~/.ssh/ansible_id_ed25519
   children:
-    dgx_spark:
-      vars:
-        ansible_user: dgxadmin
-        ansible_python_interpreter: /usr/bin/python3
+    # The control node itself, declared explicitly so `--limit localhost` works
+    # and it gets a sane Python (implicit localhost can't be targeted by --limit).
+    control:
       hosts:
-        dgx-spark-1:
-          ansible_host: 192.168.1.100
-        dgx-spark-2:
-          ansible_host: 192.168.1.101
-          gpu_type: A100
-    nfs_servers:
+        localhost:
+          ansible_connection: local
+          ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    spark:
       hosts:
-        nas-01:
-          ansible_host: 192.168.1.200
-    infrastructure:
+        spark-01:
+          ansible_host: 10.10.10.11
+        spark-02:
+          ansible_host: 10.10.10.12
+
+    # ---- functional groups (a host can be in several) -------------------
+    k3s_server:
+      hosts:
+        spark-01:
+    k3s_agent:
+      hosts:
+        spark-02:
+    slurm_controller:
+      hosts:
+        spark-01:
+    slurm_compute:
       children:
-        dgx_spark:
-        nfs_servers:
+        spark:
+    vault:
+      hosts:
+        spark-01:
+    monitoring:
+      hosts:
+        spark-01:
+    nfs_server:
+      hosts:
+        spark-01:
+    nfs_client:
+      hosts:
+        spark-02:
 ```
-
-### Inventory Inspection Commands
-
-```bash
-# List all hosts
-ansible-inventory -i inventory.ini --list
-
-# Show group hierarchy graph
-ansible-inventory -i inventory.ini --graph
-
-# Show a specific host's variables
-ansible-inventory -i inventory.ini --host dgx-spark-1
-```
-
-### Host Patterns (Targeting)
-
-| Pattern | Meaning |
-| :--- | :--- |
-| `all` | Every host in inventory |
-| `dgx_spark` | All hosts in the `dgx_spark` group |
-| `dgx-spark-1` | Single specific host |
-| `dgx_spark:nfs_servers` | Union of two groups (OR) |
-| `dgx_spark:&infrastructure` | Intersection of two groups (AND) |
-| `dgx_spark:!dgx-spark-2` | All in group EXCEPT `dgx-spark-2` |
-| `~web-\d+` | Regex matching hostnames |
-
-### Dynamic Inventory (Concept)
-
-For cloud environments (AWS, GCP, Azure), inventory can be generated dynamically by a script or plugin that queries the cloud API:
-
-```bash
-# AWS EC2 dynamic inventory plugin
-ansible-inventory -i aws_ec2.yml --graph
-
-# Google Compute Engine
-ansible-inventory -i gcp_compute.yml --graph
-```
-
-Dynamic inventory plugins return JSON in the same format as `ansible-inventory --list`.
-
----
-
-## 5. Modules: The Building Blocks
-
-Modules are the units of work Ansible executes. Each module is idempotent and returns JSON.
-
-### Most Important Modules to Learn First
-
-| Module | Purpose | Example |
-| :--- | :--- | :--- |
-| `ansible.builtin.ping` | Test connectivity (SSH + Python) | `-m ping` |
-| `ansible.builtin.command` | Run a command (no shell features) | `-a "uptime"` |
-| `ansible.builtin.shell` | Run via `/bin/sh` (pipes, redirects work) | `-a "ps aux \| grep python"` |
-| `ansible.builtin.apt` | Manage Debian/Ubuntu packages | `name: htop state: present` |
-| `ansible.builtin.yum` | Manage RHEL/CentOS packages | `name: httpd state: latest` |
-| `ansible.builtin.copy` | Copy files from control to managed node | `src: ./file dest: /tmp/file` |
-| `ansible.builtin.template` | Render Jinja2 template and copy | `src: app.conf.j2 dest: /etc/app.conf` |
-| `ansible.builtin.file` | Manage files/directories/links/permissions | `path: /opt/app state: directory` |
-| `ansible.builtin.lineinfile` | Ensure a specific line exists in a file | `path: /etc/hosts line: "10.0.0.1 vault"` |
-| `ansible.builtin.service` / `systemd` | Start/stop/restart services | `name: nginx state: restarted` |
-| `ansible.builtin.user` | Manage user accounts | `name: deploy state: present` |
-| `ansible.builtin.cron` | Manage cron jobs | `name: "backup" minute: "0" hour: "2"` |
-| `ansible.builtin.debug` | Print messages or variable values | `msg: "Value is {{ my_var }}"` |
-| `ansible.builtin.set_fact` | Define new variables dynamically | `my_var: "computed_value"` |
-| `ansible.builtin.uri` | Make HTTP requests | `url: https://api.example.com` |
-| `ansible.builtin.git` | Clone/update Git repositories | `repo: https://... dest: /opt/app` |
-| `ansible.builtin.stat` | Get file/directory statistics | `path: /etc/config.yml` |
-| `ansible.builtin.wait_for` | Wait for a port/file/condition | `port: 8080 timeout: 30` |
-| `ansible.builtin.assert` | Validate conditions, fail if false | `that: gpu_temp < 85` |
-
-### Exploring Module Documentation
-
-```bash
-# List all available modules
-ansible-doc -l | head -50
-
-# Read full documentation for a specific module
-ansible-doc ansible.builtin.apt
-
-# Show only the EXAMPLES section
-ansible-doc -s ansible.builtin.copy
-```
-
----
-
-## 6. Ad-Hoc Commands
-
-### Syntax
-
-```text
-ansible <host-pattern> [-i inventory] -m <module> [-a "arguments"] [options]
-```
-
-### Essential Practice Commands
-
-```bash
-# 1. Ping all hosts
-ansible all -m ping
-
-# 2. Run a command on a group
-ansible dgx_spark -m command -a "nvidia-smi"
-
-# 3. Use shell module for pipes and redirects
-ansible dgx_spark -m shell -a "free -h | head -2"
-
-# 4. Copy a file to all hosts
-ansible dgx_spark -m copy -a "src=./motd.txt dest=/etc/motd" --become
-
-# 5. Install a package
-ansible dgx_spark -m apt -a "name=htop state=present update_cache=yes" --become
-
-# 6. Create a directory
-ansible dgx_spark -m file -a "path=/opt/monitoring state=directory mode=0755" --become
-
-# 7. Restart a service
-ansible dgx_spark -m systemd -a "name=docker state=restarted" --become
-
-# 8. Gather a specific fact
-ansible dgx_spark -m setup -a "filter=ansible_memtotal_mb"
-
-# 9. Check disk space (one-liner report)
-ansible dgx_spark -m command -a "df -h /"
-
-# 10. Reboot all hosts (with caution!)
-ansible dgx_spark -m reboot -a "reboot_timeout=300" --become
-```
-
-### When to Use Ad-Hoc vs Playbooks
-
-| Use Ad-Hoc When... | Use Playbooks When... |
-| :--- | :--- |
-| Quick one-off checks (`uptime`, `df -h`) | Multi-step workflows |
-| Testing connectivity | Repeatable automation |
-| Emergency fixes | Version-controlled configuration |
-| Gathering information | Complex logic (conditionals, loops) |
-
----
-
-## 7. Playbooks: Structure, Plays & Tasks
-
-### Anatomy of a Playbook
 
 ```yaml
+# lab/inventory/group_vars/spark.yml
 ---
-# A playbook is a list of PLAYS
-- name: Play 1 — Configure DGX nodes          # Human-readable description
-  hosts: dgx_spark                              # Target host/group pattern
-  become: true                                  # Escalate privileges (sudo)
-  gather_facts: true                            # Collect system info (default: true)
+# ------------------------------------------------------------------------
+# Hardware invariants for every DGX Spark (GB10 Grace Blackwell).
+# These are the "golden values" the validate + drift playbooks enforce.
+# ------------------------------------------------------------------------
+ansible_become: true
 
-  vars:                                         # Play-level variables
-    monitoring_dir: /opt/monitoring
+spark_expected:
+  arch: aarch64
+  cpu_cores: 20                  # 10x Cortex-X925 + 10x Cortex-A725
+  gpu_name_regex: "GB10"
+  cuda_major: 13                 # DGX OS 7.x ships CUDA 13.x
+  driver_major_min: 580
+  compute_capability: "12.1"     # sm_121 — use this in NVCC_GENCODE
+  mem_total_gib_min: 110         # 128 GB LPDDR5x, some reserved by firmware
+  os_family: Debian
+  os_major: "24"                 # DGX OS 7 is Ubuntu 24.04 based
 
-  pre_tasks:                                    # Run BEFORE roles
-    - name: Update package cache
-      ansible.builtin.apt:
-        update_cache: true
-        cache_valid_time: 3600
+# Packages every node gets (Volume 06/07)
+spark_base_packages:
+  - chrony
+  - jq
+  - htop
+  - nvtop
+  - tmux
+  - ethtool
+  - pciutils
+  - rdma-core
+  - ibverbs-utils
+  - infiniband-diags
+  - perftest
+  - python3-pip
+  - python3-venv
+  - acl                      # needed for become_user to unprivileged users
 
-  roles:                                        # Include roles
-    - common_setup
+# NVIDIA packages we never let a random 'apt upgrade' move (Volume 07)
+spark_hold_nvidia_packages: true
+spark_nvidia_hold_regex: '^(nvidia-driver-|nvidia-dkms-|nvidia-kernel-|libnvidia-|nvidia-firmware-|cuda-drivers)'
 
-  tasks:                                        # Main task list
-    - name: Ensure monitoring directory exists
-      ansible.builtin.file:
-        path: "{{ monitoring_dir }}"
-        state: directory
-        mode: '0755'
+# Kernel / sysctl tuning (Volume 06, 12)
+spark_sysctls:
+  vm.swappiness: 10
+  vm.max_map_count: 1048576          # large mmap'ed model weights
+  fs.inotify.max_user_watches: 1048576
+  fs.inotify.max_user_instances: 8192 # k3s + many containers
+  net.core.rmem_max: 268435456
+  net.core.wmem_max: 268435456
+  net.ipv4.tcp_rmem: "4096 87380 268435456"
+  net.ipv4.tcp_wmem: "4096 65536 268435456"
+  net.core.netdev_max_backlog: 250000
+  net.ipv4.tcp_mtu_probing: 1
+```
 
-    - name: Check GPU status
-      ansible.builtin.command: nvidia-smi
-      register: gpu_output                      # Store the result
-      changed_when: false                       # Mark as "no change" (informational only)
+```yaml
+# lab/inventory/host_vars/spark-01.yml
+---
+spark_node_index: 1
 
-    - name: Display GPU info
-      ansible.builtin.debug:
-        var: gpu_output.stdout_lines
+# CX-7 fabric. Each physical QSFP port shows up as TWO logical netdevs
+# (one per PCIe root: enp1s0f1np1 and enP2p1s0f1np1 are the SAME cage).
+# Assign both to get the full 200 Gb/s. Confirm names with `ibdev2netdev`.
+cx7_interfaces:
+  - name: enp1s0f1np1
+    rdma_dev: rocep1s0f1
+    address: 192.168.100.11/24
+    mtu: 9000
+  - name: enP2p1s0f1np1
+    rdma_dev: roceP2p1s0f1
+    address: 192.168.101.11/24
+    mtu: 9000
+```
 
-  post_tasks:                                   # Run AFTER tasks
-    - name: Send notification
-      ansible.builtin.debug:
-        msg: "Play 1 completed successfully"
+Check that Ansible sees what you meant:
 
-  handlers:                                     # Triggered by 'notify'
-    - name: Restart monitoring agent
-      ansible.builtin.systemd:
-        name: node-exporter
-        state: restarted
+```bash
+ansible-inventory --graph
+ansible-inventory --host spark-01 --yaml | head -40     # merged vars for one host
+ansible -m debug -a "var=cx7_interfaces" spark           # per-host value
+```
 
-# Second play targeting different hosts
-- name: Play 2 — Configure NFS server
-  hosts: nfs_servers
+### Step 4 — First contact
+
+```yaml
+# lab/playbooks/00-ping.yml
+---
+# Day-0 connectivity: SSH works, sudo works, Python works, it IS a Spark.
+- name: Connectivity and identity check
+  hosts: spark
+  gather_facts: true
   become: true
   tasks:
-    - name: Ensure NFS is installed
-      ansible.builtin.apt:
-        name: nfs-kernel-server
-        state: present
+    - name: Ping (tests SSH + Python, not ICMP)
+      ansible.builtin.ping:
+
+    - name: Show what we are talking to
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} {{ ansible_facts.architecture }}
+          {{ ansible_facts.processor_nproc }} cores
+          {{ (ansible_facts.memtotal_mb / 1024) | round(1) }} GiB
+          {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}
+          kernel {{ ansible_facts.kernel }}
 ```
-
-### Execution Order Within a Play
-
-```mermaid
-flowchart TD
-    A[1. Gather Facts] --> B[2. pre_tasks]
-    B --> C[3. pre_tasks handlers flush]
-    C --> D[4. roles]
-    D --> E[5. tasks]
-    E --> F[6. post_tasks]
-    F --> G[7. ALL pending handlers run]
-```
-
-### Running Playbooks
 
 ```bash
-# Basic execution
-ansible-playbook playbooks/site.yml
-
-# With a specific inventory
-ansible-playbook -i inventory.ini playbooks/site.yml
-
-# Dry run — simulate without changes
-ansible-playbook playbooks/site.yml --check
-
-# Show what changes WOULD be made (diff)
-ansible-playbook playbooks/site.yml --check --diff
-
-# Limit to specific hosts
-ansible-playbook playbooks/site.yml --limit dgx-spark-1
-
-# Run only tasks with specific tags
-ansible-playbook playbooks/site.yml --tags "install,configure"
-
-# Skip specific tags
-ansible-playbook playbooks/site.yml --skip-tags "reboot"
-
-# Verbose output (-v, -vv, -vvv, or -vvvv for max debug)
-ansible-playbook playbooks/site.yml -vvv
-
-# Start at a specific task (resume after failure)
-ansible-playbook playbooks/site.yml --start-at-task="Check GPU status"
-
-# Step through tasks one at a time (interactive)
-ansible-playbook playbooks/site.yml --step
-
-# Pass extra variables from command line
-ansible-playbook playbooks/site.yml -e "http_port=8080 env=production"
+ansible-playbook playbooks/00-ping.yml -K     # -K prompts for the sudo password
 ```
 
----
+Expected output (trimmed; your exact numbers and kernel will differ):
 
-## 8. Variables: Scope, Precedence & Best Practices
-
-### Where to Define Variables
-
-| Location | Scope | Use When |
-| :--- | :--- | :--- |
-| `group_vars/all.yml` | Every host | Global defaults (NTP servers, DNS) |
-| `group_vars/<group>.yml` | All hosts in `<group>` | Group-specific settings |
-| `host_vars/<host>.yml` | Single host | Host-specific overrides |
-| Play-level `vars:` | Current play | Play-specific parameters |
-| Task-level `vars:` | Single task | Task-specific parameters |
-| `register:` | Current play | Capture task output |
-| `set_fact:` | Current host for remainder of playbook | Computed values |
-| `-e` / `--extra-vars` | Entire run, **highest** priority | CLI overrides |
-| Role `defaults/main.yml` | Hosts using the role, **lowest** priority | Sane defaults users can override |
-| Role `vars/main.yml` | Hosts using the role, **high** priority | Internal role constants |
-
-### Variable Precedence (Lowest → Highest)
-
-Ansible has 22 levels of variable precedence. The most important ones to remember:
-
-```text
-1.  Role defaults (defaults/main.yml)         ← Lowest
-2.  Inventory file group vars
-3.  Inventory group_vars/all
-4.  Inventory group_vars/<group>
-5.  Inventory host_vars/<host>
-6.  Play vars
-7.  Play vars_files
-8.  Role vars (vars/main.yml)
-9.  Task vars
-10. set_fact / registered vars
-11. Extra vars (-e "key=value")                ← HIGHEST — always wins
+```
+ok: [spark-01] => msg: spark-01 aarch64 20 cores 119.6 GiB Ubuntu 24.04 kernel 6.x-…-nvidia
 ```
 
-> **Rule of thumb**: Put defaults in `defaults/main.yml` (easily overridable). Put constants in `vars/main.yml`. Use `group_vars/` for environment-specific values.
+> The reported memory is slightly under 128 GB: firmware and carve-outs take some. The `spark_expected.mem_total_gib_min: 110` guard allows for that.
 
-### Data Types
-
-```yaml
-vars:
-  # String
-  app_name: "gpu-monitor"
-
-  # Integer
-  max_retries: 5
-
-  # Boolean
-  enable_monitoring: true
-
-  # List
-  packages:
-    - htop
-    - curl
-    - git
-
-  # Dictionary
-  gpu_thresholds:
-    temperature: 85
-    memory_pct: 90
-    utilization: 95
-```
-
-### Accessing Variables
-
-```yaml
-# Simple variable
-msg: "App is {{ app_name }}"
-
-# List item by index
-msg: "First package: {{ packages[0] }}"
-
-# Dictionary value (dot notation)
-msg: "Temp threshold: {{ gpu_thresholds.temperature }}"
-
-# Dictionary value (bracket notation — safer with special chars)
-msg: "Temp threshold: {{ gpu_thresholds['temperature'] }}"
-
-# Default value if undefined
-msg: "Port: {{ http_port | default(8080) }}"
-```
-
----
-
-## 9. Facts & Magic Variables
-
-### Facts
-
-Facts are automatically gathered system information. Disable with `gather_facts: false` to save time when not needed.
+Ad-hoc commands are how you poke a box without writing a playbook:
 
 ```bash
-# View ALL facts for a host
-ansible dgx-spark-1 -m setup
-
-# Filter specific facts
-ansible dgx-spark-1 -m setup -a "filter=ansible_distribution*"
-ansible dgx-spark-1 -m setup -a "filter=ansible_memtotal_mb"
-ansible dgx-spark-1 -m setup -a "filter=ansible_default_ipv4"
+ansible spark -m command -a "nvidia-smi --query-gpu=name,driver_version --format=csv"
+ansible spark -m shell   -a "free -g | head -2"
+ansible spark -m setup   -a "filter=ansible_processor*"
+ansible spark -b -m apt  -a "name=nvtop state=present"        # -b = become
 ```
 
-### Most Useful Facts
+### Step 5 — Teach Ansible about the GPU: custom facts
 
-| Fact | Example Value |
-| :--- | :--- |
-| `ansible_hostname` | `dgx-spark-1` |
-| `ansible_fqdn` | `dgx-spark-1.lab.local` |
-| `ansible_default_ipv4.address` | `192.168.1.100` |
-| `ansible_distribution` | `Ubuntu` |
-| `ansible_distribution_version` | `22.04` |
-| `ansible_os_family` | `Debian` |
-| `ansible_memtotal_mb` | `131072` |
-| `ansible_processor_vcpus` | `16` |
-| `ansible_architecture` | `aarch64` |
-| `ansible_date_time.iso8601` | `2026-09-27T12:00:00Z` |
+Built-in facts know the CPU and OS but nothing about the GB10, CUDA or the CX-7. A **local fact** is an executable in `/etc/ansible/facts.d/*.fact` that prints JSON. Ansible runs it during fact gathering and exposes the result as `ansible_local.<name>`.
 
-### Magic Variables
+```python
+# lab/roles/spark_facts/files/spark.fact
+#!/usr/bin/env python3
+"""
+/etc/ansible/facts.d/spark.fact — Ansible local fact for DGX Spark.
 
-| Variable | Description |
-| :--- | :--- |
-| `inventory_hostname` | Name of the current host as defined in inventory |
-| `ansible_host` | Connection address for the current host |
-| `groups` | Dictionary of all groups and their host lists |
-| `group_names` | List of groups the current host belongs to |
-| `hostvars` | Dictionary containing all hosts' variables |
-| `play_hosts` | List of active hosts in the current play |
-| `ansible_play_name` | Name of the current play |
-| `role_name` | Name of the current role |
+Ansible executes every executable *.fact file during fact gathering and puts
+the JSON it prints under ansible_local.<name>. This one exposes GPU, CUDA,
+ConnectX-7 and DGX OS state so playbooks can branch on real hardware state
+instead of re-running shell commands in every role.
 
-### Accessing Other Hosts' Variables
+Design rules:
+  * never fail — a broken fact script breaks *every* play on the host
+  * hard timeout on every subprocess (a wedged GPU makes nvidia-smi hang)
+  * report 'error' fields instead of raising
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+
+TIMEOUT = 8
+
+
+def run(cmd):
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
+        return out.returncode, out.stdout.strip(), out.stderr.strip()
+    except FileNotFoundError:
+        return 127, "", "not found"
+    except subprocess.TimeoutExpired:
+        return 124, "", "timeout"
+
+
+def gpu():
+    info = {"present": False}
+    if not shutil.which("nvidia-smi"):
+        info["error"] = "nvidia-smi not installed"
+        return info
+    fields = "name,driver_version,compute_cap,temperature.gpu,power.draw,utilization.gpu,pstate"
+    rc, out, err = run(["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader,nounits"])
+    if rc != 0:
+        info["error"] = err or f"nvidia-smi rc={rc}"
+        return info
+    first = out.splitlines()[0]
+    vals = [v.strip() for v in first.split(",")]
+    keys = ["name", "driver_version", "compute_cap", "temp_c", "power_w", "util_pct", "pstate"]
+    info.update(dict(zip(keys, vals)))
+    info["present"] = True
+    info["count"] = len(out.splitlines())
+    # CUDA version the *driver* supports comes from the nvidia-smi banner
+    rc, banner, _ = run(["nvidia-smi"])
+    m = re.search(r"CUDA Version:\s*([\d.]+)", banner)
+    info["cuda_driver_api"] = m.group(1) if m else None
+    return info
+
+
+def cuda_toolkit():
+    nvcc = shutil.which("nvcc") or "/usr/local/cuda/bin/nvcc"
+    rc, out, _ = run([nvcc, "--version"])
+    m = re.search(r"release ([\d.]+)", out)
+    return {"nvcc_path": nvcc if rc == 0 else None, "version": m.group(1) if m else None}
+
+
+def cx7():
+    """Parse `ibdev2netdev` → {netdev: {rdma_dev, state, speed_mbps, mtu}}."""
+    ports = {}
+    rc, out, err = run(["ibdev2netdev"])
+    if rc != 0:
+        return {"error": err or "ibdev2netdev unavailable", "ports": ports}
+    for line in out.splitlines():
+        m = re.match(r"(\S+) port (\d+) ==> (\S+) \((\w+)\)", line)
+        if not m:
+            continue
+        rdma, _port, netdev, state = m.groups()
+        entry = {"rdma_dev": rdma, "state": state}
+        base = f"/sys/class/net/{netdev}"
+        for key, fname in (("speed_mbps", "speed"), ("mtu", "mtu")):
+            try:
+                with open(f"{base}/{fname}") as fh:
+                    entry[key] = int(fh.read().strip())
+            except (OSError, ValueError):
+                entry[key] = None
+        ports[netdev] = entry
+    up = [n for n, p in ports.items() if p["state"] == "Up"]
+    return {"ports": ports, "up": sorted(up)}
+
+
+def memory():
+    mem = {}
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                k, v = line.split(":", 1)
+                if k in ("MemTotal", "MemAvailable", "Cached", "SwapTotal", "HugePages_Total"):
+                    mem[k] = int(v.split()[0])
+    except OSError:
+        pass
+    gib = lambda kb: round(kb / 1048576, 1)
+    return {
+        "total_gib": gib(mem.get("MemTotal", 0)),
+        "available_gib": gib(mem.get("MemAvailable", 0)),
+        "page_cache_gib": gib(mem.get("Cached", 0)),
+        "swap_gib": gib(mem.get("SwapTotal", 0)),
+        # On a UMA machine the GPU allocates from this same pool:
+        "note": "unified memory: GPU allocations consume MemAvailable",
+    }
+
+
+def dgx_release():
+    rel = {}
+    try:
+        with open("/etc/dgx-release") as fh:
+            for line in fh:
+                if "=" in line:
+                    k, v = line.strip().split("=", 1)
+                    rel[k] = v.strip('"')
+    except OSError:
+        return {"present": False}
+    rel["present"] = True
+    return rel
+
+
+def container_runtime():
+    rc, out, _ = run(["nvidia-ctk", "--version"])
+    return {
+        "nvidia_ctk": out.splitlines()[0] if rc == 0 and out else None,
+        "cdi_spec": os.path.exists("/etc/cdi/nvidia.yaml") or os.path.exists("/var/run/cdi/nvidia.yaml"),
+        "docker": shutil.which("docker") is not None,
+    }
+
+
+print(json.dumps({
+    "schema": 1,
+    "gpu": gpu(),
+    "cuda": cuda_toolkit(),
+    "cx7": cx7(),
+    "memory": memory(),
+    "dgx_release": dgx_release(),
+    "runtime": container_runtime(),
+}))
+```
 
 ```yaml
-# Get the IP of another host in the same play
-msg: "NAS IP is {{ hostvars['nas-01']['ansible_host'] }}"
-```
-
+# lab/roles/spark_facts/tasks/main.yml
 ---
-
-## 10. Conditionals (`when`)
-
-```yaml
-tasks:
-  # String comparison
-  - name: Install on Debian-family only
-    ansible.builtin.apt:
-      name: htop
-    when: ansible_os_family == "Debian"
-
-  # Numeric comparison
-  - name: Alert if memory is critically low
-    ansible.builtin.debug:
-      msg: "WARNING: Only {{ ansible_memfree_mb }}MB free!"
-    when: ansible_memfree_mb < 1024
-
-  # Boolean variable
-  - name: Enable monitoring
-    ansible.builtin.systemd:
-      name: node-exporter
-      state: started
-      enabled: true
-    when: enable_monitoring | bool
-
-  # Check if variable is defined
-  - name: Use custom port if set
-    ansible.builtin.debug:
-      msg: "Using port {{ custom_port }}"
-    when: custom_port is defined
-
-  # AND condition
-  - name: Only on Ubuntu 22.04
-    ansible.builtin.debug:
-      msg: "Running on Ubuntu 22.04"
-    when:
-      - ansible_distribution == "Ubuntu"
-      - ansible_distribution_version == "22.04"
-
-  # OR condition
-  - name: On any Debian or Ubuntu
-    ansible.builtin.debug:
-      msg: "Debian-family detected"
-    when: ansible_distribution == "Debian" or ansible_distribution == "Ubuntu"
-
-  # Based on registered output
-  - name: Check if Docker is running
-    ansible.builtin.command: systemctl is-active docker
-    register: docker_status
-    failed_when: false
-    changed_when: false
-
-  - name: Start Docker if not running
-    ansible.builtin.systemd:
-      name: docker
-      state: started
-    when: docker_status.rc != 0
-```
-
----
-
-## 11. Loops
-
-### Simple List Loop
-
-```yaml
-- name: Install multiple packages
-  ansible.builtin.apt:
-    name: "{{ item }}"
-    state: present
-  loop:
-    - htop
-    - curl
-    - git
-    - jq
-
-# More efficient — apt module accepts a list directly:
-- name: Install multiple packages (optimized)
-  ansible.builtin.apt:
-    name:
-      - htop
-      - curl
-      - git
-      - jq
-    state: present
-```
-
-### Loop Over Dictionaries
-
-```yaml
-- name: Create multiple users
-  ansible.builtin.user:
-    name: "{{ item.name }}"
-    groups: "{{ item.groups }}"
-    shell: "{{ item.shell }}"
-  loop:
-    - { name: "deploy", groups: "sudo", shell: "/bin/bash" }
-    - { name: "monitor", groups: "docker", shell: "/bin/sh" }
-```
-
-### Loop with Index
-
-```yaml
-- name: Display numbered items
-  ansible.builtin.debug:
-    msg: "{{ idx + 1 }}. {{ item }}"
-  loop:
-    - "Check GPU"
-    - "Check Memory"
-    - "Check Disk"
-  loop_control:
-    index_var: idx
-```
-
-### Loop with `when` Filter
-
-```yaml
-- name: Start only enabled services
-  ansible.builtin.systemd:
-    name: "{{ item.name }}"
-    state: started
-  loop:
-    - { name: "docker", enabled: true }
-    - { name: "nginx", enabled: false }
-    - { name: "node-exporter", enabled: true }
-  when: item.enabled
-```
-
----
-
-## 12. Handlers & Notifications
-
-Handlers run **once** at the end of all tasks (or at a `meta: flush_handlers`), and **only if triggered by a `notify`**.
-
-```yaml
-tasks:
-  - name: Update NGINX configuration
-    ansible.builtin.template:
-      src: nginx.conf.j2
-      dest: /etc/nginx/nginx.conf
-    notify:
-      - Validate NGINX config
-      - Restart NGINX
-
-  - name: Update application config
-    ansible.builtin.template:
-      src: app.conf.j2
-      dest: /etc/app/app.conf
-    notify: Restart application
-
-handlers:
-  - name: Validate NGINX config
-    ansible.builtin.command: nginx -t
-    listen: "Validate NGINX config"
-
-  - name: Restart NGINX
-    ansible.builtin.systemd:
-      name: nginx
-      state: restarted
-
-  - name: Restart application
-    ansible.builtin.systemd:
-      name: app-service
-      state: restarted
-```
-
-### Force Immediate Handler Execution
-
-```yaml
-tasks:
-  - name: Update critical config
-    ansible.builtin.template:
-      src: critical.conf.j2
-      dest: /etc/critical.conf
-    notify: Restart critical service
-
-  # Force all pending handlers to run NOW (before next task)
-  - name: Flush handlers immediately
-    ansible.builtin.meta: flush_handlers
-
-  - name: Verify service is running with new config
-    ansible.builtin.uri:
-      url: "http://localhost:8080/health"
-      status_code: 200
-```
-
----
-
-## 13. Jinja2 Templating
-
-### Template File Example (`templates/gpu-monitor.conf.j2`)
-
-```jinja2
-# GPU Monitoring Configuration
-# Generated by Ansible on {{ ansible_date_time.iso8601 }}
-# Host: {{ inventory_hostname }}
-
-[monitoring]
-hostname = {{ ansible_hostname }}
-ip_address = {{ ansible_default_ipv4.address }}
-gpu_name = {{ gpu_name | default("unknown") }}
-
-[thresholds]
-temperature_celsius = {{ temp_threshold_c }}
-memory_percent = {{ mem_threshold_pct }}
-
-[logging]
-log_file = {{ log_file }}
-log_level = {{ log_level | default("INFO") | upper }}
-
-[alerting]
-{% if alerting_enabled | default(false) %}
-enabled = true
-webhook_url = {{ alert_webhook }}
-{% else %}
-enabled = false
-{% endif %}
-
-[monitored_gpus]
-{% for gpu in gpu_list | default([]) %}
-gpu_{{ loop.index0 }} = {{ gpu }}
-{% endfor %}
-```
-
-### Common Jinja2 Filters
-
-```yaml
-# String manipulation
-"{{ hostname | upper }}"                      # UPPERCASE
-"{{ hostname | lower }}"                      # lowercase
-"{{ hostname | capitalize }}"                 # Capitalize
-"{{ path | basename }}"                       # filename.txt from /a/b/filename.txt
-"{{ path | dirname }}"                        # /a/b from /a/b/filename.txt
-"{{ password | hash('sha512') }}"             # SHA-512 hash
-
-# List manipulation
-"{{ packages | join(', ') }}"                 # "htop, curl, git"
-"{{ packages | length }}"                     # 3
-"{{ packages | first }}"                      # "htop"
-"{{ packages | last }}"                       # "git"
-"{{ packages | sort }}"                       # Sorted list
-"{{ packages | unique }}"                     # Deduplicated list
-
-# Math
-"{{ (mem_used / mem_total * 100) | round(1) }}" # Percentage with 1 decimal
-"{{ value | int }}"                           # Cast to integer
-"{{ value | float }}"                         # Cast to float
-
-# Default values
-"{{ optional_var | default('fallback') }}"    # Use fallback if undefined
-"{{ optional_var | default(omit) }}"          # Skip the parameter entirely
-
-# Type conversion
-"{{ my_list | to_json }}"                     # Convert to JSON string
-"{{ my_dict | to_yaml }}"                     # Convert to YAML string
-"{{ json_string | from_json }}"               # Parse JSON string
-
-# Conditional
-"{{ 'yes' if enable_feature else 'no' }}"     # Ternary expression
-```
-
-### Using Templates in a Task
-
-```yaml
-- name: Deploy GPU monitor configuration
-  ansible.builtin.template:
-    src: gpu-monitor.conf.j2
-    dest: /etc/gpu-monitor/config.conf
+# Installs the spark.fact local fact and re-reads facts so that
+# ansible_local.spark is available to every role that runs afterwards.
+- name: Ensure facts.d directory exists
+  ansible.builtin.file:
+    path: /etc/ansible/facts.d
+    state: directory
     owner: root
     group: root
-    mode: '0644'
-    backup: true         # Keep a backup of the previous version
-    validate: '/usr/bin/gpu-monitor --validate %s'  # Validate before replacing
-  notify: Restart GPU monitor
-```
+    mode: "0755"
 
----
+- name: Install DGX Spark local fact script
+  ansible.builtin.copy:
+    src: spark.fact
+    dest: /etc/ansible/facts.d/spark.fact
+    owner: root
+    group: root
+    mode: "0755"
+  register: spark_fact_script
 
-## 14. Error Handling & Debugging
+- name: Re-read local facts after install/update
+  ansible.builtin.setup:
+    filter: ansible_local
+  when: spark_fact_script is changed or ansible_local.spark is not defined
 
-### Ignoring Errors
-
-```yaml
-- name: Check if optional service exists
-  ansible.builtin.command: systemctl status optional-service
-  register: result
-  ignore_errors: true    # Continue even if this task fails
-
-- name: Act on result
+- name: Summarise hardware (visible with -v)
   ansible.builtin.debug:
-    msg: "Service {{ 'is' if result.rc == 0 else 'is NOT' }} running"
+    msg: >-
+      {{ inventory_hostname }}:
+      GPU={{ ansible_local.spark.gpu.name | default('n/a') }}
+      driver={{ ansible_local.spark.gpu.driver_version | default('n/a') }}
+      cuda(driver)={{ ansible_local.spark.gpu.cuda_driver_api | default('n/a') }}
+      cx7_up={{ ansible_local.spark.cx7.up | default([]) | join(',') }}
+      mem={{ ansible_local.spark.memory.total_gib | default('?') }}GiB
+    verbosity: 1
 ```
-
-### Custom Failure Conditions
-
-```yaml
-- name: Check GPU temperature
-  ansible.builtin.command: nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits
-  register: gpu_temp
-  changed_when: false
-  failed_when: gpu_temp.stdout | int > 95    # Fail if temp > 95°C
-```
-
-### Block / Rescue / Always (Try-Catch-Finally)
-
-```yaml
-- name: Safely deploy application
-  block:
-    - name: Stop the service
-      ansible.builtin.systemd:
-        name: myapp
-        state: stopped
-
-    - name: Deploy new binary
-      ansible.builtin.copy:
-        src: myapp-v2
-        dest: /usr/local/bin/myapp
-        mode: '0755'
-
-    - name: Start the service
-      ansible.builtin.systemd:
-        name: myapp
-        state: started
-
-  rescue:
-    - name: ROLLBACK — restore previous binary
-      ansible.builtin.copy:
-        src: myapp-v1
-        dest: /usr/local/bin/myapp
-        mode: '0755'
-
-    - name: ROLLBACK — start previous version
-      ansible.builtin.systemd:
-        name: myapp
-        state: started
-
-    - name: Alert on failure
-      ansible.builtin.debug:
-        msg: "⚠️  Deployment FAILED — rolled back to v1"
-
-  always:
-    - name: Verify service is running
-      ansible.builtin.command: systemctl is-active myapp
-      changed_when: false
-```
-
-### Debugging Techniques
 
 ```bash
-# Verbose levels
-ansible-playbook site.yml -v        # Task results
-ansible-playbook site.yml -vv       # Task input parameters
-ansible-playbook site.yml -vvv      # SSH connection details
-ansible-playbook site.yml -vvvv     # Full debug including script transfer
+ansible-playbook playbooks/01-baseline.yml -K --tags facts -v
+ansible spark -m setup -a "filter=ansible_local" | less
+```
 
-# Interactive step-through
-ansible-playbook site.yml --step
+Expected (excerpt, example values):
+
+```json
+"ansible_local": { "spark": {
+   "gpu":  {"present": true, "name": "NVIDIA GB10", "driver_version": "580.82.09",
+            "compute_cap": "12.1", "cuda_driver_api": "13.0", ...},
+   "cx7":  {"up": ["enP2p1s0f1np1", "enp1s0f1np1"], "ports": {...}},
+   "memory": {"total_gib": 119.6, "available_gib": 112.3, ...},
+   "dgx_release": {"present": true, ...}}}
+```
+
+Every later role reads these instead of re-running `nvidia-smi`. A typical use in a play:
+
+```yaml
+- name: Only on nodes whose fabric is cabled
+  ansible.builtin.include_role: { name: cx7_fabric }
+  when: ansible_local.spark.cx7.up | length > 0
+```
+
+### Step 6 — OS baseline
+
+The `spark_baseline` role installs the tooling you'll need in every later volume, pins the NVIDIA driver stack against accidental upgrades, and applies sysctl, SSH and time settings.
+
+```yaml
+# lab/roles/spark_baseline/tasks/main.yml
+---
+- name: Assert we are on a supported platform
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.os_family == 'Debian'
+      - ansible_facts.distribution_major_version is version('24', '>=')
+    fail_msg: "spark_baseline targets DGX OS 7 / Ubuntu 24.04+, got {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+    quiet: true
+
+- name: Packages
+  ansible.builtin.import_tasks: packages.yml
+  tags: [baseline, packages]
+
+- name: Users and SSH
+  ansible.builtin.import_tasks: users_ssh.yml
+  tags: [baseline, ssh]
+
+- name: Kernel and sysctl
+  ansible.builtin.import_tasks: kernel.yml
+  tags: [baseline, sysctl]
+
+- name: Time and logging
+  ansible.builtin.import_tasks: time_logging.yml
+  tags: [baseline, time]
 ```
 
 ```yaml
-# Inline debugging
-- name: Inspect a variable
-  ansible.builtin.debug:
-    var: my_complex_variable
-
-- name: Inspect with message
-  ansible.builtin.debug:
-    msg: "Type is {{ my_var | type_debug }}, value is {{ my_var }}"
-
-# Pause for inspection
-- name: Pause to inspect
-  ansible.builtin.pause:
-    prompt: "Press Enter to continue or Ctrl+C to abort"
-```
-
+# lab/roles/spark_baseline/tasks/packages.yml
 ---
-
-## 15. Roles
-
-### Creating a Role
-
-```bash
-ansible-galaxy role init roles/gpu_monitoring
-```
-
-### Role Directory Structure
-
-```text
-roles/gpu_monitoring/
-├── defaults/
-│   └── main.yml       # Default variables (lowest precedence, easily overridden)
-├── vars/
-│   └── main.yml       # Role variables (high precedence, internal constants)
-├── tasks/
-│   └── main.yml       # Main task list
-├── handlers/
-│   └── main.yml       # Handler definitions
-├── templates/         # Jinja2 template files (.j2)
-├── files/             # Static files to copy
-├── meta/
-│   └── main.yml       # Role metadata, dependencies, supported platforms
-└── README.md          # Documentation
-```
-
-### Example Role Tasks (`roles/gpu_monitoring/tasks/main.yml`)
-
-```yaml
----
-- name: Install monitoring prerequisites
+- name: Install baseline packages
   ansible.builtin.apt:
-    name: "{{ gpu_mon_packages }}"
+    name: "{{ spark_baseline_packages }}"
     state: present
-  tags: [install]
+    update_cache: true
+    cache_valid_time: 3600
+  register: spark_baseline_apt
+  retries: 3
+  delay: 10
+  until: spark_baseline_apt is succeeded   # apt lock held by unattended-upgrades → retry
 
-- name: Deploy monitoring script
-  ansible.builtin.template:
-    src: gpu-monitor.sh.j2
-    dest: /usr/local/bin/gpu-monitor.sh
-    mode: '0755'
-  notify: Restart GPU monitor cron
-  tags: [configure]
+- name: Gather installed package list
+  ansible.builtin.package_facts:
+    manager: apt
+  when: spark_baseline_hold_nvidia | bool
 
-- name: Schedule monitoring cron job
-  ansible.builtin.cron:
-    name: "GPU monitoring"
-    minute: "*/{{ gpu_mon_interval_minutes }}"
-    job: /usr/local/bin/gpu-monitor.sh
-    user: "{{ gpu_mon_user }}"
-  tags: [configure]
-```
+- name: Compute NVIDIA packages to hold
+  ansible.builtin.set_fact:
+    spark_baseline_nvidia_pkgs: >-
+      {{ ansible_facts.packages.keys()
+         | select('match', spark_baseline_hold_regex)
+         | list | sort }}
+  when: spark_baseline_hold_nvidia | bool
 
-### Example Role Defaults (`roles/gpu_monitoring/defaults/main.yml`)
+- name: Read current apt holds
+  ansible.builtin.command: apt-mark showhold
+  register: spark_baseline_holds
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  when: spark_baseline_hold_nvidia | bool
 
-```yaml
----
-gpu_mon_packages:
-  - bc
-  - jq
-gpu_mon_interval_minutes: 5
-gpu_mon_user: dgxadmin
-gpu_mon_log_file: /var/log/gpu-monitor.log
-gpu_mon_temp_threshold: 85
-gpu_mon_mem_threshold: 90
-```
+- name: Hold NVIDIA driver stack (DGX Dashboard / planned upgrades only)
+  ansible.builtin.command: "apt-mark hold {{ item }}"
+  loop: "{{ spark_baseline_nvidia_pkgs | difference(spark_baseline_holds.stdout_lines) }}"
+  changed_when: true
+  when: spark_baseline_hold_nvidia | bool
 
-### Using Roles in Playbooks
-
-```yaml
----
-- name: Full cluster setup
-  hosts: dgx_spark
-  become: true
-  roles:
-    # Simple inclusion
-    - common_setup
-
-    # With variable overrides
-    - role: gpu_monitoring
-      vars:
-        gpu_mon_temp_threshold: 80
-        gpu_mon_interval_minutes: 2
-
-    # Conditional role inclusion
-    - role: nvidia_driver_update
-      when: update_drivers | default(false) | bool
-```
-
----
-
-## 16. Ansible Galaxy & Collections
-
-### What is a Collection?
-
-A collection is a packaging format that bundles:
-- Modules
-- Roles
-- Plugins (lookup, filter, callback)
-- Playbooks
-
-### Installing Collections
-
-```bash
-# Install from Galaxy
-ansible-galaxy collection install community.general
-ansible-galaxy collection install community.hashi_vault
-
-# Install from a requirements file
-cat requirements.yml
-# ---
-# collections:
-#   - name: community.general
-#     version: ">=8.0.0"
-#   - name: community.hashi_vault
-#     version: ">=6.0.0"
-
-ansible-galaxy collection install -r requirements.yml
-
-# List installed collections
-ansible-galaxy collection list
-```
-
----
-
-## 17. Tags
-
-Tags let you selectively run or skip tasks:
-
-```yaml
-tasks:
-  - name: Update apt cache
-    ansible.builtin.apt:
-      update_cache: true
-    tags: [always]           # ALWAYS runs, even when filtering by tags
-
-  - name: Install packages
-    ansible.builtin.apt:
-      name: htop
-    tags: [install, packages]
-
-  - name: Configure monitoring
-    ansible.builtin.template:
-      src: monitor.conf.j2
-      dest: /etc/monitor.conf
-    tags: [configure]
-
-  - name: Restart services
-    ansible.builtin.systemd:
-      name: monitor
-      state: restarted
-    tags: [restart, never]   # NEVER runs unless explicitly requested
+# `command` tasks are SKIPPED (not "changed") under --check, so without this a
+# missing hold would be invisible to drift detection (Volume 22).
+- name: Report missing holds as drift in check mode
+  ansible.builtin.debug:
+    msg: "Would hold: {{ spark_baseline_nvidia_pkgs | difference(spark_baseline_holds.stdout_lines) }}"
+  changed_when: true
+  when:
+    - ansible_check_mode
+    - spark_baseline_hold_nvidia | bool
+    - spark_baseline_nvidia_pkgs | difference(spark_baseline_holds.stdout_lines) | length > 0
 ```
 
 ```bash
-# Run only "install" tasks
-ansible-playbook site.yml --tags install
-
-# Run install AND configure
-ansible-playbook site.yml --tags "install,configure"
-
-# Skip restart tasks
-ansible-playbook site.yml --skip-tags restart
-
-# List all available tags in a playbook
-ansible-playbook site.yml --list-tags
+ansible-playbook playbooks/01-baseline.yml -K --check --diff   # preview
+ansible-playbook playbooks/01-baseline.yml -K                  # apply
+ansible-playbook playbooks/01-baseline.yml -K                  # again → changed=0
 ```
+
+**The second run must report `changed=0`.** If it doesn't, a task isn't idempotent. Fix it before moving on, or drift detection (Volume 22) will cry wolf forever.
 
 ---
 
-## 18. Privilege Escalation (`become`)
+## 4. Integrations introduced here
 
-```yaml
-# Play-level (applies to all tasks in the play)
-- name: Configure system
-  hosts: dgx_spark
-  become: true                 # Enable sudo
-  become_user: root            # Target user (default: root)
-  become_method: sudo          # Method (sudo, su, pbrun, pfexec, doas, etc.)
-
-  tasks:
-    # Task-level override
-    - name: Run as specific application user
-      ansible.builtin.command: whoami
-      become_user: app_user
-
-    # Disable become for a specific task
-    - name: Check user's own files
-      ansible.builtin.command: ls ~/
-      become: false
-```
+| Integration | How | Used again in |
+|---|---|---|
+| DGX OS release metadata | `/etc/dgx-release` → `ansible_local.spark.dgx_release` | 07 (upgrade gating), 22 (drift) |
+| NVIDIA driver/CUDA | `nvidia-smi` → `ansible_local.spark.gpu` | 08, 17, 25 |
+| CX-7 / RDMA | `ibdev2netdev` + sysfs → `ansible_local.spark.cx7` | 11, 12, 15 |
+| apt holds | `package_facts` + `apt-mark hold` | 07, 10 |
+| DGX Dashboard | untouched; `AllowTcpForwarding yes` keeps SSH tunnels to `localhost:11000` working | 09 |
 
 ---
 
-## 19. Delegation, Serial & Rolling Updates
+## 5. Production hardening checklist
 
-### Delegation
-
-Run a task on a different host than the play target:
-
-```yaml
-- name: Remove host from load balancer before updating
-  ansible.builtin.uri:
-    url: "https://lb.example.com/api/deregister/{{ inventory_hostname }}"
-    method: POST
-  delegate_to: localhost     # Run this on the control node, not the target
-```
-
-### Serial (Rolling Updates)
-
-Update hosts in batches to avoid full downtime:
-
-```yaml
-- name: Rolling update of application servers
-  hosts: dgx_spark
-  serial: 1                  # Update one host at a time
-  # serial: "30%"            # Or as a percentage
-  # serial: [1, 3, 5]        # First 1, then 3, then 5 at a time
-  become: true
-
-  tasks:
-    - name: Deploy new version
-      ansible.builtin.copy:
-        src: app-v2
-        dest: /opt/app/bin/app
-
-    - name: Restart service
-      ansible.builtin.systemd:
-        name: app
-        state: restarted
-
-    - name: Wait for service to be healthy
-      ansible.builtin.uri:
-        url: "http://{{ ansible_host }}:8080/health"
-        status_code: 200
-      retries: 10
-      delay: 5
-```
+- [ ] `host_key_checking = True`. Pre-seed `known_hosts` with `ssh-keyscan` rather than turning checking off.
+- [ ] Keys only: flip `spark_baseline_ssh_disable_passwords: true` **after** you've confirmed key login works from two places.
+- [ ] Put the lab directory in git and never commit `.cache/` (it holds keys, the kubeconfig, and the munge key).
+- [ ] Pin `ansible-core` and collection versions (`requirements.*`). An unpinned `community.general` bump is the most common source of "it worked yesterday".
+- [ ] Use a dedicated automation user with `NOPASSWD` sudo **only** once Vault-signed SSH certificates are in place (Volume 19).
 
 ---
 
-## 20. Native Ansible Vault (Encryption)
+## 6. Troubleshooting & diagnostics
 
-### Encrypt / Decrypt Files
+| Symptom | Likely cause | Diagnose | Fix |
+|---|---|---|---|
+| `UNREACHABLE! ... Permission denied (publickey)` | Key not on the Spark, or the wrong user | `ssh -v nvidia@10.10.10.11` | `ssh-copy-id`; check `remote_user` in `ansible.cfg` |
+| `Missing sudo password` | `become` without `-K` | — | Add `-K`, or configure `NOPASSWD` for the automation user |
+| `Timeout (12s) waiting for privilege escalation prompt` | sudo is slow because of a DNS lookup of the hostname | `time sudo true` on the Spark | Add the hostname to `/etc/hosts` |
+| `/usr/bin/python3: not found` | Minimal image, or a container target | `ansible host -m raw -a 'which python3'` | Bootstrap with the `raw` module (see the Molecule `prepare.yml`) |
+| `ansible_local` is empty | Fact file not executable, or it printed non-JSON | `sudo /etc/ansible/facts.d/spark.fact \| jq .` | `chmod 755`; the script must print a single JSON object |
+| Fact gathering hangs for ~10 s | `nvidia-smi` blocked on a wedged GPU | `timeout 5 nvidia-smi; echo $?` | The fact script time-boxes itself; go to Volume 24, Runbook A |
+| `E: Could not get lock /var/lib/dpkg/lock-frontend` | unattended-upgrades or the DGX Dashboard updater is running | `ps aux \| grep -E 'apt\|dpkg'` | The role retries 3× with a 10 s delay. Otherwise wait for it to finish |
+| Second run is not `changed=0` | Non-idempotent task (`command`/`shell` without `changed_when`) | `ansible-playbook ... --diff -v` | Add `creates:`, `changed_when:` or a real module |
+
+A diagnostic sequence worth memorising:
 
 ```bash
-# Encrypt an existing file
-ansible-vault encrypt group_vars/production.yml
-
-# Decrypt a file
-ansible-vault decrypt group_vars/production.yml
-
-# View encrypted file without decrypting
-ansible-vault view group_vars/production.yml
-
-# Edit encrypted file (opens in $EDITOR)
-ansible-vault edit group_vars/production.yml
-
-# Change the encryption password
-ansible-vault rekey group_vars/production.yml
+ansible spark -m ping -vvv 2>&1 | grep -E 'ESTABLISH|EXEC|SSH:'   # is it SSH, sudo or Python?
+ansible-config dump --only-changed                                # which config is actually in effect
+ansible-inventory --host spark-02 --yaml                          # which vars will be used
+ansible-playbook playbooks/01-baseline.yml --list-tasks --list-tags
+ansible-playbook playbooks/01-baseline.yml --start-at-task "Harden sshd (drop-in, validated before reload)" -K
 ```
 
-### Encrypt Individual Strings
+---
+
+## 7. Validation
 
 ```bash
-# Encrypt a single value to embed in a YAML file
-ansible-vault encrypt_string 'SuperSecretPassword!' --name 'db_password'
+ansible spark -m command -a "test -x /etc/ansible/facts.d/spark.fact"
+ansible spark -m command -a "apt-mark showhold" -b | grep -c nvidia     # > 0
+ansible spark -m command -a "sysctl -n vm.max_map_count" -b             # 1048576
+ansible spark -m command -a "sshd -T" -b | grep -E 'permitrootlogin|allowtcpforwarding'
 ```
 
-Output (paste into your variable file):
-```yaml
-db_password: !vault |
-  $ANSIBLE_VAULT;1.1;AES256
-  6562626561...
-```
+- [ ] `00-ping.yml` reports aarch64 / 20 cores / Ubuntu 24.04 for every Spark
+- [ ] `ansible_local.spark.gpu.present == true` and `compute_cap == "12.1"`
+- [ ] `01-baseline.yml` second run: `changed=0`
+- [ ] `ansible.log` contains both runs
 
-### Using Vault in Playbook Runs
+## 8. Break-it exercises
 
-```bash
-# Prompt for password
-ansible-playbook site.yml --ask-vault-pass
-
-# Use a password file
-echo "MyVaultPassword" > ~/.vault_pass
-chmod 600 ~/.vault_pass
-ansible-playbook site.yml --vault-password-file ~/.vault_pass
-
-# Set in ansible.cfg (for convenience)
-# vault_password_file = ~/.vault_pass
-```
-
----
-
-## 21. Performance Tuning
-
-| Technique | Setting | Impact |
-| :--- | :--- | :--- |
-| Increase parallelism | `forks = 20` | Process 20 hosts simultaneously |
-| Enable pipelining | `pipelining = True` | Reduces SSH operations per task (2-4x faster) |
-| Cache facts | `fact_caching = jsonfile` | Skip fact gathering on subsequent runs |
-| Disable fact gathering | `gather_facts: false` | Save ~5s per play if facts aren't needed |
-| Use `free` strategy | `strategy: free` | Fast hosts don't wait for slow ones |
-| Use `async` for long tasks | `async: 300` / `poll: 5` | Run long tasks without blocking SSH |
-| Minimize `command`/`shell` | Use dedicated modules | Modules are idempotent and faster |
-| Use `ansible.builtin.package` | Platform-agnostic package management | Avoids conditional `apt`/`yum` blocks |
-
----
-
-## 22. Testing & Linting
-
-```bash
-# Syntax check
-ansible-playbook site.yml --syntax-check
-
-# Lint playbooks (checks for best practices)
-ansible-lint playbooks/
-
-# YAML syntax validation
-yamllint playbooks/
-
-# Dry run (check mode)
-ansible-playbook site.yml --check --diff
-```
-
----
-
-## 23. Lab Exercises
-
-### Exercise 1: Basic Connectivity
-Write an ad-hoc command to ping all DGX Spark nodes and verify connectivity.
-
-### Exercise 2: System Info Playbook
-Write a playbook that gathers and displays: hostname, OS, total RAM, CPU count, GPU name, and disk usage for each DGX Spark node.
-
-### Exercise 3: Package Management
-Write a playbook that installs `htop`, `curl`, `tree`, and `jq` on all nodes. Run it twice and observe the idempotency (second run should show 0 changed).
-
-### Exercise 4: Template a Config
-Create a Jinja2 template for a monitoring config file that dynamically inserts the hostname, IP address, and threshold variables. Deploy it with the `template` module.
-
-### Exercise 5: Create a Role
-Package the GPU monitoring logic into a role with proper `defaults/`, `tasks/`, `handlers/`, and `templates/` directories. Use it in a playbook.
-
-### Exercise 6: Encrypt Secrets
-Create a `secrets.yml` file with database credentials. Encrypt it with `ansible-vault`. Write a playbook that uses the encrypted variables.
-
-### Exercise 7: Rolling Update
-Write a playbook that deploys a script to hosts one at a time (`serial: 1`), waits for health confirmation between each host.
-
----
-
-## 24. Learning Resources
-
-### Books
-- **"Ansible for DevOps"** by Jeff Geerling — The industry standard practical guide
-- **"Ansible: Up & Running"** by Bas Meijer, Lorin Hochstein — O'Reilly comprehensive reference
-
-### Video Courses
-- **Jeff Geerling's "Ansible 101"** (YouTube, Free) — Multi-part series from beginner to advanced
-- **LearnLinuxTV Ansible Series** (YouTube, Free) — Excellent visual walkthrough
-
-### Interactive Labs
-- **[Killercoda Ansible Playground](https://killercoda.com/playgrounds/scenario/ansible)** — Browser-based Linux environment
-- **[Red Hat Interactive Labs](https://www.redhat.com/en/interactive-walkthroughs/ansible)** — Guided hands-on scenarios
-
-### Official Documentation
-- **[Getting Started Guide](https://docs.ansible.com/ansible/latest/getting_started/index.html)**
-- **[Module Index](https://docs.ansible.com/ansible/latest/collections/ansible/builtin/index.html)**
-- **[Playbook Best Practices](https://docs.ansible.com/ansible/latest/tips_tricks/ansible_tips_tricks.html)**
-- **[Variable Precedence](https://docs.ansible.com/ansible/latest/playbook_guide/playbooks_variables.html#understanding-variable-precedence)**
-
-### Certification
-- **Red Hat EX294** — Certified Specialist in Ansible Automation
+1. Make the fact script print `hello` before the JSON. What error do you get, and at which task?
+2. Remove `pipelining = True` and time `01-baseline.yml` with `profile_tasks`. How many seconds does it add? (Volume 02 explains why.)
+3. Hold a non-NVIDIA package by hand (`apt-mark hold jq`). Does the role release it? Should it?

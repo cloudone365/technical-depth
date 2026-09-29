@@ -1,0 +1,65 @@
+---
+# Runbook C — unified-memory pressure on a DGX Spark.
+# Diagnose first (always), relieve second (opt-in flags).
+#   ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K                       # diagnose only
+#   ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K -e uma_drop_caches=true
+#   ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K -e uma_stop_label=spark.lab/idle=true
+- name: UMA pressure diagnosis and relief
+  hosts: spark
+  become: true
+  gather_facts: false
+  vars:
+    uma_drop_caches: false
+    uma_stop_label: ""          # stop running containers carrying this label (key=value)
+  tasks:
+    - name: Memory picture
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "== meminfo (GiB)"
+        awk '/MemTotal|MemAvailable|^Cached|Shmem:|AnonPages|Mlocked/{printf "%-14s %6.1f\n",$1,$2/1048576}' /proc/meminfo
+        echo "== top processes by RSS"
+        ps -eo pid,user,rss,comm --sort=-rss | head -8 | awk 'NR==1{print;next}{printf "%-8s %-10s %6.1fG %s\n",$1,$2,$3/1048576,$4}'
+        echo "== GPU compute processes (memory column is N/A on UMA)"
+        timeout 10 nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader || echo "nvidia-smi unavailable"
+        echo "== containers by memory"
+        docker stats --no-stream --format '{{ "{{" }}.MemUsage{{ "}}" }}\t{{ "{{" }}.Name{{ "}}" }}' 2>/dev/null | sort -h -r | head -8
+      args: { executable: /bin/bash }
+      register: uma_diag
+      changed_when: false
+      check_mode: false
+
+    - name: Show diagnosis
+      ansible.builtin.debug:
+        msg: "{{ uma_diag.stdout_lines }}"
+
+    - name: Record MemAvailable before
+      ansible.builtin.shell: awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo
+      register: uma_before
+      changed_when: false
+      check_mode: false
+
+    - name: Stop labelled containers
+      ansible.builtin.shell: |
+        set -o pipefail
+        ids=$(docker ps -q --filter "label={{ uma_stop_label }}")
+        [ -z "$ids" ] && exit 0
+        docker stop -t 30 $ids && echo "stopped: $ids"
+      args: { executable: /bin/bash }
+      register: uma_stopped
+      changed_when: "'stopped' in uma_stopped.stdout"
+      when: uma_stop_label | length > 0
+
+    - name: Drop page cache (safe; next model load will be cold)
+      ansible.builtin.shell: sync && echo 3 > /proc/sys/vm/drop_caches
+      changed_when: true
+      when: uma_drop_caches | bool
+
+    - name: Record MemAvailable after
+      ansible.builtin.shell: awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo
+      register: uma_after
+      changed_when: false
+      check_mode: false
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: "MemAvailable {{ uma_before.stdout }} GiB → {{ uma_after.stdout }} GiB"

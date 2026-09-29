@@ -1,0 +1,18 @@
+---
+# Set true when running inside Molecule/containers — skips hardware-only tasks.
+spark_baseline_container_mode: false
+
+spark_baseline_packages: "{{ spark_base_packages | default(['chrony', 'jq']) }}"
+spark_baseline_sysctls: "{{ spark_sysctls | default({}) }}"
+spark_baseline_timezone: "{{ lab_timezone | default('UTC') }}"
+spark_baseline_ntp_servers: "{{ ntp_servers | default(['pool.ntp.org']) }}"
+
+spark_baseline_admin_user: "{{ spark_admin_user | default('nvidia') }}"
+spark_baseline_admin_pubkeys: "{{ spark_admin_pubkeys | default([]) }}"
+
+# SSH hardening (keys only). Leave false until you've proven key login works!
+spark_baseline_ssh_disable_passwords: false
+
+spark_baseline_journald_max_use: 4G
+spark_baseline_hold_nvidia: "{{ spark_hold_nvidia_packages | default(true) }}"
+spark_baseline_hold_regex: "{{ spark_nvidia_hold_regex | default('^(nvidia-driver-|libnvidia-)') }}"

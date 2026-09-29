@@ -1,298 +1,287 @@
-# Volume 05: Enterprise Role Architecture, Collections & Execution Environments
+# Volume 05 — Role Architecture, Collections & Execution Environments for the Spark Lab
 
-```
-====================================================================================================
-MODULE 01: ANSIBLE & BARE-METAL AI INFRASTRUCTURE AUTOMATION
-VOLUME 05: Modular Roles, Ansible Galaxy Collections, Dependency DAGs & Containerized EEs
-====================================================================================================
-```
+> **Module 01 · Part I — Foundations** · Prev: [04 Jinja2](04-advanced-jinja2-filters-and-data-transforms.md) · Next: [06 Provisioning & Redfish](06-bare-metal-os-provisioning-pxe-and-redfish.md)
 
----
-
-## 1. Executive Intuition: The Monolithic Playbook Collapse
-
-When operations teams begin automating GPU clusters, they often write monolithic playbooks: a single 4,000-line `deploy_cluster.yml` file containing bare-metal BIOS settings, kernel sysctl flags, NVIDIA driver installs, InfiniBand network setup, Slurm daemons, and Prometheus exporters.
-
-As the cluster scales, the monolithic playbook collapses:
-1. **Zero Reusability:** Code written for a DGX H100 cluster cannot be reused on a Grace Hopper GH200 cluster without copying and pasting hundreds of lines.
-2. **Untestable Code Paths:** You cannot test the InfiniBand configuration in isolation without running the entire 4,000-line playbook.
-3. **Dependency Version Drift:** A change to an OS kernel parameter silently breaks an assumption in the Slurm GPU configuration 2,000 lines later.
-
-```
-+-----------------------------------------------------------------------------------------+
-|                  MONOLITHIC PLAYBOOK VS. ENTERPRISE COLLECTIONS                         |
-+------------------------------------+----------------------------------------------------+
-| Monolithic Playbook (Anti-Pattern) | Enterprise Collections & Roles (Standard)          |
-+------------------------------------+----------------------------------------------------+
-| 4,000 lines in single site.yml     | Decentralized namespaces: `nvidia.cluster_infra`   |
-| No semantic versioning             | Strict SemVer 2.0.0 (e.g. `1.4.2`)                 |
-| Global variable namespace collision| Encapsulated role `defaults/` and `vars/` scopes   |
-| Unversioned Python packages        | Isolated Execution Environments (EE containers)    |
-| Testing requires full cluster      | Isolated unit & integration testing via Molecule   |
-+------------------------------------+----------------------------------------------------+
-```
-
-The enterprise standard decomposes infrastructure into **Modular Roles** packaged into **Ansible Collections** and executed within containerized **Execution Environments (EE)**.
+| | |
+|---|---|
+| **You will build** | Roles with typed input contracts (`argument_specs`), the lab packaged as a versioned collection (`cloudone.spark`), and an arm64 Execution Environment that runs it anywhere (CLI, AWX, CI) |
+| **Hardware** | Control node; 1× Spark to build the arm64 EE natively |
+| **Time** | 90 min |
+| **Risk** | None |
 
 ---
 
-## 2. Lineage & Evolution of Ansible Packaging
+## 1. Architecture: from playbooks to a shippable product
 
+```mermaid
+flowchart LR
+  subgraph DEV["lab/ (source)"]
+    R["roles/*<br/>defaults · tasks · handlers ·<br/>templates · files · meta/argument_specs"]
+    P["playbooks/*.yml"]
+    IP["inventory_plugins/spark_mdns.py"]
+  end
+  subgraph PKG["Collection cloudone.spark (versioned tarball)"]
+    CR["roles/"] & CP["plugins/inventory/"] & CPB["playbooks/"]
+    G["galaxy.yml · meta/runtime.yml"]
+  end
+  subgraph EE["Execution Environment (OCI image, linux/arm64 + amd64)"]
+    AC["ansible-core 2.18 + runner"]
+    COL["collections: cloudone.spark,<br/>community.*, kubernetes.core"]
+    PY["python: hvac, kubernetes, jmespath, netaddr"]
+    BIN["helm, ssh, git"]
+  end
+  DEV -- tools/build-collection.sh --> PKG -- ansible-builder --> EE
+  EE --> CLI["ansible-navigator run"] & AWX["AWX job pods"] & CI["CI runner"]
 ```
-   [2012: Flat Playbook Files]
-                 |
-           (Single large YAML files with sequential task lists)
-                 |
-   [2013: Classic Role Directory Standard]
-                 |
-           (roles/<role_name> with standardized tasks, handlers, vars, defaults, meta)
-                 |
-   [2016: Ansible Galaxy Community Hub]
-                 |
-           (Public repository for downloading community roles via requirements.yml)
-                 |
-   [2019: Ansible Collections (Ansible 2.9+)]
-                 |
-           (Unified packaging of roles, modules, action plugins, and lookup plugins)
-                 |
-   [2021: Execution Environments & ansible-builder]
-                 |
-           (OCI container images packaging Python, OS dependencies, and Collections)
-```
+
+**Why three layers?** Roles are the unit of **logic**. Collections are the unit of **versioning and distribution**. EEs are the unit of **runtime**, which ends "works on my laptop" because the Python, collection and binary versions are frozen together in one image.
 
 ---
 
-## 3. First-Principles Mathematics: Role Dependency Resolution DAG
-
-When roles declare dependencies in `meta/main.yml`, Ansible constructs a **Directed Acyclic Graph (DAG)** of execution.
-
-Let $G = (V, E)$ be the dependency graph where:
-- $V = \{R_1, R_2, \dots, R_k\}$ is the set of roles.
-- $E = \{(R_i, R_j)\}$ denotes that role $R_i$ depends on role $R_j$ (i.e. $R_j$ must execute before $R_i$).
+## 2. Role anatomy: conventions this lab follows
 
 ```
-                +----------------------------+
-                | R_base: Base OS & Hugepages|
-                +--------------+-------------+
-                               |
-                +--------------v-------------+
-                | R_mellanox: OFED & RoCEv2  |
-                +--------------+-------------+
-                               |
-                +--------------v-------------+
-                | R_nvidia: Drivers & Fabric |
-                +--------------+-------------+
-                               |
-                +--------------v-------------+
-                | R_gds: GPUDirect Storage   |
-                +----------------------------+
+roles/cx7_fabric/
+├── defaults/main.yml          # every knob, documented, prefixed with the role name
+├── meta/main.yml              # galaxy_info, platforms, dependencies (kept empty on purpose)
+├── meta/argument_specs.yml    # typed input contract — validated before tasks run
+├── tasks/main.yml             # pre-flight → configure → verify → publish facts
+├── templates/40-cx7.yaml.j2   # {{ ansible_managed }} header in every template
+└── handlers/main.yml
 ```
 
-### 3.1 Topological Sort & Cycle Detection Math
-Ansible evaluates role dependencies using **Kahn's Algorithm** (topological sort):
-1. Compute the in-degree for all vertices: $\text{in-degree}(R_i) = \text{number of incoming edges}$.
-2. Enqueue all roles with $\text{in-degree} = 0$.
-3. While queue is non-empty:
-   - Dequeue $R_u$, append to execution order.
-   - For each neighbor $R_v$ of $R_u$: decrement $\text{in-degree}(R_v)$. If 0, enqueue.
-4. If total executed roles $< |V|$, a **Circular Dependency Cycle** exists (e.g. $A \to B \to A$), and Ansible immediately halts execution.
+| Convention | Why |
+|---|---|
+| **Prefix every variable with the role name** (`cx7_fabric_*`) | No collisions when 13 roles share one play. ansible-lint's `var-naming[no-role-prefix]` enforces it; this lab skips it only for *inventory-level* shared facts like `cx7_interfaces` |
+| **Defaults read inventory, never the reverse** (`cx7_fabric_interfaces: "{{ cx7_interfaces \| default([]) }}"`) | The role works standalone *and* inside the lab |
+| **Structure: pre-flight → configure → verify → publish** | Each role proves its own result; `set_fact` exports (e.g. `cx7_fabric_hca_list`) feed later roles |
+| **No `meta` dependencies** | Hidden ordering is a debugging nightmare, so ordering lives in playbooks |
+| **Split `tasks/` by concern** once it passes ~80 lines (`spark_baseline/tasks/{packages,users_ssh,kernel,time_logging}.yml`) | Readable diffs; tags per file |
 
-$$\text{Time Complexity} = O(|V| + |E|)$$
-
----
-
-## 4. Deep Architecture: Standardized Role Layout
-
-Every role in the AI automation fabric adheres to the standardized directory structure:
-
-```
-roles/nvidia_driver_provision/
-├── defaults/
-│   └── main.yml        # Lowest precedence default variables (overridable by user)
-├── vars/
-│   └── main.yml        # High precedence internal variables (OS package URLs, etc.)
-├── tasks/
-│   ├── main.yml        # Master task entrypoint
-│   ├── install.yml     # Package repository and driver compilation tasks
-│   └── verify.yml      # Post-install verification and NVML health asserts
-├── handlers/
-│   └── main.yml        # Service restart triggers (e.g., restart nvidia-fabricmanager)
-├── templates/
-│   ├── fabricmanager.conf.j2  # Jinja2 template for Fabric Manager
-│   └── nvidia.rules.j2        # Udev rules template for device nodes
-├── files/
-│   └── 99-nvidia.conf  # Static configuration files
-├── meta/
-│   └── main.yml        # Role dependencies and metadata
-└── molecule/
-    └── default/        # Molecule automated testing scenario
-        ├── molecule.yml
-        └── converge.yml
-```
-
----
-
-## 5. Concrete Production Lab: The `nvidia_driver_provision` Role
-
-### 5.1 Role Defaults (`defaults/main.yml`)
-```yaml
----
-# Default configurations for NVIDIA Open Kernel Driver installation
-nvidia_driver_branch: "550"
-nvidia_driver_version: "550.54.15"
-nvidia_open_kernel_modules: true
-nvidia_install_fabric_manager: true
-nvidia_enable_persistence_mode: true
-```
-
-### 5.2 Role Tasks (`tasks/main.yml`)
-```yaml
----
-- name: 1. Ensure kernel headers match running kernel
-  ansible.builtin.apt:
-    name: "linux-headers-{{ ansible_kernel }}"
-    state: present
-    update_cache: true
-
-- name: 2. Install NVIDIA Driver packages
-  ansible.builtin.apt:
-    name:
-      - "cuda-drivers-{{ nvidia_driver_branch }}"
-      - "nvidia-driver-{{ nvidia_driver_branch }}{{ '-open' if nvidia_open_kernel_modules else '' }}"
-    state: present
-  notify: Reload NVIDIA Kernel Modules
-
-- name: 3. Configure NVIDIA Persistence Daemon
-  ansible.builtin.systemd:
-    name: nvidia-persistenced
-    state: started
-    enabled: true
-
-- name: 4. Install and configure NVIDIA Fabric Manager (HGX/NVSwitch systems)
-  when: nvidia_install_fabric_manager | bool
-  block:
-    - name: Install fabric-manager package
-      ansible.builtin.apt:
-        name: "nvidia-fabricmanager-{{ nvidia_driver_branch }}"
-        state: present
-
-    - name: Enable and start fabric-manager service
-      ansible.builtin.systemd:
-        name: nvidia-fabricmanager
-        state: started
-        enabled: true
-      notify: Restart Fabric Manager
-
-- name: 5. Verify Driver and GPU Communication
-  ansible.builtin.command: nvidia-smi --query-gpu=driver_version,count --format=csv,noheader
-  register: nvidia_smi_out
-  changed_when: false
-  failed_when: nvidia_driver_version not in nvidia_smi_out.stdout
-```
-
-### 5.3 Role Handlers (`handlers/main.yml`)
-```yaml
----
-- name: Restart Fabric Manager
-  ansible.builtin.systemd:
-    name: nvidia-fabricmanager
-    state: restarted
-
-- name: Reload NVIDIA Kernel Modules
-  ansible.builtin.debug:
-    msg: "NVIDIA driver updated; node scheduled for graceful reboot."
-```
-
----
-
-## 6. Execution Environments (EE) with `ansible-builder`
-
-To guarantee that playbooks run identically across different engineer laptops, CI/CD pipelines, and AWX clusters without Python dependency hell, execution is packaged into an OCI container image.
-
-### 6.1 Execution Environment Definition (`execution-environment.yml`)
+### 2.1 Typed inputs with `argument_specs`
 
 ```yaml
+# lab/roles/cx7_fabric/meta/argument_specs.yml
+---
+# Validated automatically before the role's tasks run (ansible-core >= 2.11).
+# A typo in host_vars now fails in <1 s with a clear message instead of
+# half-configuring a 200G link.
+argument_specs:
+  main:
+    short_description: Configure and verify ConnectX-7 fabric interfaces on DGX Spark
+    options:
+      cx7_fabric_interfaces:
+        type: list
+        elements: dict
+        required: true
+        description: CX-7 logical interfaces to address (see `ibdev2netdev`).
+        options:
+          name:
+            type: str
+            required: true
+            description: netdev name, e.g. enp1s0f1np1
+          rdma_dev:
+            type: str
+            required: true
+            description: RDMA device, e.g. rocep1s0f1
+          address:
+            type: str
+            required: true
+            description: IPv4 CIDR, e.g. 192.168.100.11/24
+          mtu:
+            type: int
+            default: 9000
+            choices: [1500, 4200, 9000]
+      cx7_fabric_expected_speed_mbps:
+        type: int
+        default: 200000
+      cx7_fabric_strict:
+        type: bool
+        default: true
+      cx7_fabric_verify_peers:
+        type: bool
+        default: true
+      cx7_fabric_netplan_file:
+        type: path
+        default: /etc/netplan/40-cx7.yaml
+      cx7_fabric_gid_index:
+        type: str
+        default: ""
+```
+
+A typo in `host_vars` (`adress:` instead of `address:`) now fails immediately:
+
+```
+TASK [cx7_fabric : Validating arguments against arg spec 'main' ...]
+fatal: [spark-01]: FAILED! => argument_errors:
+  - 'missing required arguments: address found in cx7_fabric_interfaces'
+```
+
+`ansible-doc -t role -r roles cx7_fabric` renders the same spec as documentation.
+
+### 2.2 `import_role` vs `include_role` vs `roles:`
+
+| Form | Parsed | Tags/when apply to | Use for |
+|---|---|---|---|
+| `roles:` | static, at play load | every task in the role | The normal case (all lab playbooks) |
+| `import_role` | static | every task | Static reuse inside `tasks:`, where `--list-tasks` should show it |
+| `include_role` | **dynamic**, at runtime | the include itself only | Conditional/looped roles (`spark_validate` inside `node_drain`), loops over roles |
+
+---
+
+## 3. Hands-on
+
+### 3.1 Package the lab as a collection
+
+```bash
+# lab/tools/build-collection.sh
+#!/usr/bin/env bash
+# Package the lab roles as an Ansible collection: cloudone.spark
+#   tools/build-collection.sh 1.2.0        → .cache/dist/cloudone-spark-1.2.0.tar.gz
+set -euo pipefail
+VERSION=${1:-0.1.0}
+LAB=$(cd "$(dirname "$0")/.." && pwd)
+OUT="$LAB/.cache/build/ansible_collections/cloudone/spark"
+rm -rf "$OUT" && mkdir -p "$OUT"/{roles,plugins/inventory,playbooks,meta}
+cp -r "$LAB"/roles/* "$OUT/roles/"
+find "$OUT/roles" -type d -name molecule -prune -exec rm -rf {} +
+cp "$LAB"/inventory_plugins/spark_mdns.py "$OUT/plugins/inventory/"
+cp "$LAB"/playbooks/{01-baseline,02-fabric,03-containers,20-drift-check,21-emergency-drain,30-validate}.yml "$OUT/playbooks/"
+# roles referenced by short name inside playbooks resolve inside the collection namespace
+sed -i 's/- role: \([a-z_]*\)/- role: cloudone.spark.\1/' "$OUT"/playbooks/*.yml
+cat > "$OUT/galaxy.yml" <<YML
+namespace: cloudone
+name: spark
+version: $VERSION
+readme: README.md
+authors: [cloudone365]
+description: DGX Spark automation — baseline, CX-7 fabric, containers, telemetry, k3s, Slurm, Vault, drain, validation
+license: [MIT]
+tags: [nvidia, dgx, gpu, rdma, infrastructure]
+dependencies:
+  ansible.posix: ">=1.5.4"
+  community.general: ">=9.0.0"
+  community.docker: ">=3.10.0"
+  community.crypto: ">=2.20.0"
+  kubernetes.core: ">=5.0.0"
+repository: https://github.com/cloudone365/technical-depth
+build_ignore: ['*.retry', '.cache']
+YML
+printf 'requires_ansible: ">=2.17.0"\n' > "$OUT/meta/runtime.yml"
+cp "$LAB/README.md" "$OUT/README.md"
+mkdir -p "$LAB/.cache/dist"
+ansible-galaxy collection build "$OUT" --output-path "$LAB/.cache/dist" --force
+```
+
+```bash
+cd "01 Ansible/lab"
+tools/build-collection.sh 0.1.0
+ansible-galaxy collection install .cache/dist/cloudone-spark-0.1.0.tar.gz -p /tmp/colltest
+ANSIBLE_COLLECTIONS_PATH=/tmp/colltest ansible-doc -t role -l cloudone.spark
+ANSIBLE_COLLECTIONS_PATH=/tmp/colltest ansible-playbook cloudone.spark.30-validate -i inventory -K
+```
+
+**Versioning:** follow SemVer. Adding a role is a minor bump. Renaming a variable or changing a default that alters behaviour on existing nodes (say, MTU) is **major**. Consumers pin versions:
+
+```yaml
+# someone else's requirements.yml
+collections:
+  - name: https://github.com/cloudone365/technical-depth/releases/download/spark-v1.2.0/cloudone-spark-1.2.0.tar.gz
+    type: url
+```
+
+### 3.2 Build an arm64 Execution Environment on the Spark
+
+```yaml
+# lab/ee/execution-environment.yml
+---
+# ansible-builder build -t spark-ee:1.0 -f ee/execution-environment.yml --container-runtime docker
+# Build ON the Spark to get a native linux/arm64 image (or use buildx for multi-arch).
 version: 3
 images:
   base_image:
-    name: registry.access.redhat.com/ubi9/ubi-minimal:latest
-
+    name: quay.io/fedora/python-312:latest
 dependencies:
   ansible_core:
-    package_pip: ansible-core==2.16.4
+    package_pip: ansible-core~=2.18.0
   ansible_runner:
-    package_pip: ansible-runner==2.3.4
-  galaxy:
-    collections:
-      - name: community.general
-        version: "8.4.0"
-      - name: ansible.posix
-        version: "1.5.4"
-      - name: netbox.netbox
-        version: "3.17.1"
-      - name: community.hashi_vault
-        version: "6.1.0"
+    package_pip: ansible-runner
+  galaxy: ../requirements.yml
   python:
-    - pynvml>=11.5.0
-    - jmespath>=1.0.1
-    - hvac>=2.1.0
-    - netaddr>=1.0.0
+    - jmespath
+    - netaddr
+    - hvac
+    - kubernetes
   system:
-    - openssh-clients
-    - iproute
-    - git
+    - openssh-clients [platform:rpm]
+    - sshpass [platform:rpm]
+    - rsync [platform:rpm]
+    - git-core [platform:rpm]
+additional_build_steps:
+  append_final:
+    - RUN curl -fsSL -o /usr/local/bin/helm.tgz https://get.helm.sh/helm-v3.18.3-linux-$(uname -m | sed 's/aarch64/arm64/;s/x86_64/amd64/').tar.gz
+        && tar -xzf /usr/local/bin/helm.tgz -C /tmp && mv /tmp/linux-*/helm /usr/local/bin/helm && rm -rf /usr/local/bin/helm.tgz /tmp/linux-*
+    - LABEL org.opencontainers.image.description="Ansible EE for the DGX Spark lab"
 ```
 
-### 6.2 Building the Execution Environment
 ```bash
-# Build the production container image
-ansible-builder build --tag ai-infra-execution-env:1.0.0 --container-runtime docker
+# on spark-01 (native arm64 build; no emulation)
+pip install ansible-builder ansible-navigator
+cd "01 Ansible/lab"
+ansible-builder build -t spark-ee:1.0 -f ee/execution-environment.yml --container-runtime docker -v 3
+docker image inspect spark-ee:1.0 --format '{{.Architecture}}'      # arm64
+docker run --rm spark-ee:1.0 ansible --version
+docker run --rm spark-ee:1.0 ansible-galaxy collection list | grep -cE 'community|kubernetes|hashi'
 ```
+
+Multi-arch (so AWX on x86 and the Spark can both pull it):
+
+```bash
+ansible-builder create -f ee/execution-environment.yml --output-filename Containerfile
+docker buildx build --platform linux/arm64,linux/amd64 -t ghcr.io/cloudone365/spark-ee:1.0 \
+  -f context/Containerfile context --push
+```
+
+Run playbooks through the EE, exactly as AWX will:
+
+```bash
+ansible-navigator run playbooks/30-validate.yml --eei spark-ee:1.0 --mode stdout \
+  --pae false -i inventory --become-password-file <(echo "$SUDO_PW")
+```
+
+### 3.3 Dependency hygiene
+
+| File | Pins | Consumed by |
+|---|---|---|
+| `requirements.txt` | ansible-core, lint, molecule, python libs | control-node venv |
+| `requirements.yml` | collections (min versions) | `ansible-galaxy`, ansible-builder |
+| `ee/execution-environment.yml` | base image, core, runner, system pkgs | ansible-builder |
+| collection `galaxy.yml` | collection dependencies | consumers of `cloudone.spark` |
+
+Freeze what actually ran: `pip freeze > .cache/pip.lock` and `ansible-galaxy collection list --format yaml > .cache/collections.lock`. Commit these to the release tag.
 
 ---
 
-## 7. Comparative Packaging Matrix
+## 4. Integrations
 
-| Packaging Paradigm | Scope | Versioning | Dependency Management | Isolation |
-| :--- | :--- | :--- | :--- | :--- |
-| **Flat Playbooks** | Single File | Git commit hash | None (Ad-hoc pip/apt) | Zero (Host Python) |
-| **Classic Roles** | Modular task set | Git tag | `meta/main.yml` dependencies| Host filesystem |
-| **Ansible Collections**| Multi-role + Plugins| SemVer (`galaxy.yml`) | `requirements.yml` resolution| Namespaced |
-| **Execution Environment**| Complete Runtime | OCI Container Tag | Hermetic container manifest | **100% Hermetic Isolation** |
+- **AWX (Volumes 02B, 20):** set `spark-ee:1.0` as the org's default EE. The job pods then have every collection the lab needs.
+- **CI (Volume 21):** the same EE image runs lint, syntax-check and Molecule, so CI and prod can't drift.
+- **Release flow:** tag → build the collection → build the EE with that collection → AWX points at the EE digest.
 
----
+## 5. Troubleshooting & diagnostics
 
-## 8. SRE Diagnostics & Troubleshooting Playbook
+| Symptom | Diagnose | Fix |
+|---|---|---|
+| `the role 'x' was not found` | `ansible-config dump \| grep ROLES_PATH`; which `ansible.cfg` loaded? | Run from `lab/`, or use FQCN `cloudone.spark.x` from a collection |
+| `couldn't resolve module/action` | `ansible-galaxy collection list` in the **same** environment/EE | Install into `collections_path`; for an EE, rebuild with the collection |
+| Collection installed but an old version is used | Several `collections_path` entries | `ansible-galaxy collection list -p ./collections`; the first match wins |
+| `exec format error` running the EE | `docker image inspect ... Architecture` | You built amd64 and ran it on the Spark: rebuild natively or with buildx |
+| ansible-builder fails on `bindep` | Build log | Add `[platform:rpm]`/`[platform:dpkg]` markers correctly for the base image's distro |
+| Argument spec error on a var you *did* set | `ansible-inventory --host <h>` | Wrong precedence level, or `default` vs `required`. Specs validate the **merged** value |
 
-```
-+---------------------------------------------------------------------------------------------------+
-|                        ROLES & COLLECTIONS SRE DIAGNOSTIC MATRIX                                  |
-+------------------------------------+--------------------------+-----------------------------------+
-| Symptom / Failure Mode             | Root Cause Hypothesis    | Triage & Remediation Command      |
-+------------------------------------+--------------------------+-----------------------------------+
-| `ERROR! the role 'x' was not       | Role not in search path; | Check roles_path in config:       |
-| found in ...`.                     | directory name mismatch. | `ansible-config dump | grep ROLES`|
-|                                    |                          | Verify folder spelling.           |
-+------------------------------------+--------------------------+-----------------------------------+
-| Circular dependency error:         | Role A requires B, and B | Inspect `meta/main.yml` across    |
-| `Dependency cycle detected`.       | requires A.              | both roles; refactor common tasks |
-|                                    |                          | into a third base role.           |
-+------------------------------------+--------------------------+-----------------------------------+
-| Collection module missing in       | Python dependencies      | Rebuild EE container with missing |
-| Execution Environment (EE).        | missing in container.    | pip package declared in manifest. |
-+------------------------------------+--------------------------+-----------------------------------+
-| Variable collision: Role A         | Both roles use identical | Prefix all role variables with    |
-| overwrites variable in Role B.     | variable name without    | role name: `nvidia_driver_version`|
-|                                    | role prefix.             | instead of `version`.             |
-+------------------------------------+--------------------------+-----------------------------------+
-```
+## 6. Validation
 
----
-
-## 9. Verification & Architectural Synthesis Checklist
-
-- [ ] **Modular Role Architecture:** Infrastructure decomposed into independent roles (`nvidia_driver`, `mellanox_ofed`, etc.).
-- [ ] **SemVer Dependency Constraints:** All external collection requirements pinned to explicit minor versions in `requirements.yml`.
-- [ ] **Variable Scoping Enforced:** Role defaults placed in `defaults/main.yml` with strict role-name prefixes.
-- [ ] **Topological DAG Validated:** Role dependencies in `meta/main.yml` free of circular cycles.
-- [ ] **Hermetic Container EE:** Execution Environment container image built and validated with `ansible-builder`.
+- [ ] `ansible-doc -t role -r roles cx7_fabric` shows the spec.
+- [ ] A misspelled key in host_vars fails at the arg-spec task.
+- [ ] `cloudone-spark-0.1.0.tar.gz` installs and `cloudone.spark.30-validate` runs.
+- [ ] `spark-ee:1.0` is arm64 and `ansible-navigator run` works with it.
