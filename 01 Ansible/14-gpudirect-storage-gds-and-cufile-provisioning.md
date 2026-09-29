@@ -1,224 +1,235 @@
-# Volume 14: GPUDirect Storage (GDS) Provisioning: nvidia-fs.ko & cufile.json
+# Volume 14 — GPUDirect Storage & cuFile on a Unified-Memory Machine: Detect, Configure, Measure
 
-```
-====================================================================================================
-MODULE 01: ANSIBLE & BARE-METAL AI INFRASTRUCTURE AUTOMATION
-VOLUME 14: nvidia-fs Kernel Module, libcufile, cufile.json Tuning & gdscheck Platform Audit
-====================================================================================================
-```
+> **Module 01 · Part III — High-Speed Fabric & Storage** · Prev: [13 Multus & RDMA pods](13-multus-cni-and-secondary-rdma-networking.md) · Next: [15 Shared model cache over NFS/RDMA](15-parallel-file-system-client-orchestration.md)
 
----
-
-## 1. Executive Intuition: Bypassing the CPU Bounce-Buffer Trap
-
-In traditional Linux I/O architectures, reading training data from an NVMe drive or remote parallel file system into GPU memory requires a tortuous, multi-copy journey:
-
-```
-[Traditional I/O Path]:
-Storage Device -> NVMe Driver -> OS Page Cache (Host DRAM) -> CPU Memory Copy -> 
-Host Pinned Memory -> PCIe Bus -> GPU High Bandwidth Memory (HBM)
-```
-
-This journey destroys foundation model training performance:
-1. **CPU Saturation:** The host CPU cores burn 100% of their cycles copying bytes across memory buffers rather than preprocessing data or executing cluster orchestration.
-2. **Page Cache Thrashing:** Multi-gigabyte checkpoints evict all other cached pages, stalling subsequent system processes.
-3. **Bandwidth Ceiling:** Throughput is capped at $\sim 20 - 24\text{ GB/s}$ due to the round-trip traversal of host memory buses.
-
-**NVIDIA GPUDirect Storage (GDS)** eliminates the CPU and OS Page Cache entirely. It establishes a direct DMA (Direct Memory Access) pipeline between local NVMe controllers (or remote NVMe-oF / RDMA storage fabrics) and GPU High Bandwidth Memory (HBM3e).
-
-```
-[GPUDirect Storage (GDS) Path]:
-Storage Device (NVMe / NVMe-oF) ===[ Direct Hardware DMA (PCIe Switch) ]===> GPU HBM3e
-```
-
-Automating GDS at scale requires Ansible to compile and load the **`nvidia-fs.ko`** kernel driver, configure **`/etc/cufile.json`**, and execute **`gdscheck`** hardware topology verifications.
+| | |
+|---|---|
+| **You will build** | A data-driven answer to "does GDS help on my Spark?": platform detection (`gdscheck`), a managed `/etc/cufile.json`, and a three-way `gdsio` benchmark (GPU-direct vs CPU-only vs bounce) against the local NVMe, plus a model-loading comparison |
+| **Hardware** | 1× DGX Spark |
+| **Time** | 45 min |
+| **Risk** | Low. Writes an 8 GiB test file and drops page caches during the benchmark |
 
 ---
 
-## 2. Lineage & Evolution of Direct GPU Memory Pipelines
+## 1. First principles, applied to GB10
 
-```
-   [2012: GPUDirect P2P]
-                 |
-           (Direct memory access between GPUs across PCIe / NVLink)
-                 |
-   [2014: GPUDirect RDMA]
-                 |
-           (Direct DMA between Mellanox InfiniBand HCAs and GPU memory via nvidia-peermem)
-                 |
-   [2020: GPUDirect Storage (GDS v1.0)]
-                 |
-           (cuFile API and nvidia-fs.ko module for direct NVMe flash-to-HBM transfers)
-                 |
-   [2024: Native GDS in Parallel File Systems]
-                 |
-           (WekaFS, VAST Data, and Lustre integrate native GDS client drivers)
-```
+**What GDS solves on a discrete-GPU server (DGX H100/B200):** NVMe or a NIC DMAs **directly into GPU HBM** through PCIe peer-to-peer (via `nvidia-fs.ko`), skipping the "bounce buffer" in CPU RAM. That saves a memory copy and CPU cycles, and matters at 10s of GB/s.
+
+**What's different on DGX Spark:** there's **no separate HBM**. The Blackwell GPU and Grace CPU share one coherent LPDDR5x pool over NVLink-C2C. When NVMe DMAs a file into memory, that memory is already GPU-addressable. So:
+
+| Question | Discrete GPU (HBM) | GB10 (UMA) |
+|---|---|---|
+| Is there a bounce copy without GDS? | Yes (host RAM → HBM) | Only if your loader copies explicitly (e.g. `.to('cuda')` on a pageable tensor may still copy within the same pool) |
+| What does `nvidia-fs` add? | P2P DMA to HBM | Little or nothing. Expect cuFile to run in **compatibility mode** (POSIX I/O under the cuFile API) |
+| Where's the bottleneck? | PCIe/NVMe vs HBM bandwidth | **NVMe read speed** and the page cache (which competes for the same unified pool) |
+| What should you optimise? | Enable GDS end to end | Avoid double copies and double buffering: `mmap`/safetensors zero-copy, `O_DIRECT` reads so the page cache doesn't eat GPU-usable memory |
+
+The cuFile **API** is still worth knowing. Libraries like KvikIO and some loaders use it, and the same code gets real GDS when it runs on a data-centre DGX.
 
 ---
 
-## 3. First-Principles Mathematics: GDS Throughput & PCIe Topology
+## 2. Architecture
 
-### 3.1 Bus Efficiency Math: GDS vs. Bounce Buffer
+```mermaid
+flowchart LR
+  subgraph APP["Loader (PyTorch / KvikIO / gdsio)"]
+    CF["cuFileRead()"]
+    POSIX["read()/mmap"]
+  end
+  subgraph LIB["libcufile.so"]
+    DEC{"nvidia-fs available<br/>and FS supported?"}
+  end
+  CF --> DEC
+  DEC -- yes --> P2P["P2P DMA → GPU memory<br/>(discrete GPUs)"]
+  DEC -- "no / allow_compat_mode" --> COMPAT["Compat mode:<br/>POSIX pread into a buffer → cudaMemcpy<br/>(same pool on GB10)"]
+  POSIX --> PC["Page cache (unified pool!)"] --> MEM[("128 GB LPDDR5x<br/>CPU + GPU")]
+  P2P --> MEM
+  COMPAT --> MEM
+  NVME[("Internal NVMe")] --> DEC
+  NVME --> PC
+```
 
-Let:
-- $B_{\text{pcie}}$ = PCIe Gen5 x16 unidirectional line rate ($63.0\text{ GB/s}$)
-- $B_{\text{nvme}}$ = Aggregate 4x NVMe drive read throughput ($4 \times 14\text{ GB/s} = 56.0\text{ GB/s}$)
-- $B_{\text{dram}}$ = Host CPU DRAM memory copy bandwidth ($\sim 80\text{ GB/s}$)
-
-#### Traditional Double-Buffering Path:
-Data must traverse the PCIe bus twice (NVMe $\to$ Host RAM, then Host RAM $\to$ GPU):
-
-$$\frac{1}{B_{\text{eff}}} = \frac{1}{B_{\text{nvme}}} + \frac{1}{B_{\text{dram}}} + \frac{1}{B_{\text{pcie}}}$$
-
-$$\frac{1}{B_{\text{eff}}} = \frac{1}{56} + \frac{1}{80} + \frac{1}{63} = 0.0178 + 0.0125 + 0.0158 = 0.0461 \implies B_{\text{eff}} \approx \mathbf{21.69\text{ GB/s}}$$
-
-#### GPUDirect Storage Direct DMA Path:
-Data traverses the PCIe switch directly from NVMe to GPU without entering host memory:
-
-$$B_{\text{GDS}} = \min(B_{\text{nvme}}, B_{\text{pcie}}) \times \text{DMA Efficiency} = 56.0 \times 0.94 \approx \mathbf{52.64\text{ GB/s}}$$
-
-$$\text{Throughput Improvement} = \frac{52.64}{21.69} \approx \mathbf{2.43\times}\quad (\text{with } 0\%\text{ Host CPU overhead!})$$
+| File | Purpose |
+|---|---|
+| `/etc/cufile.json` | cuFile config: `allow_compat_mode`, logging, I/O sizes (managed by the play; a backup is kept) |
+| `/usr/local/cuda/gds/tools/gdscheck[-p]` | Platform capability report |
+| `/usr/local/cuda/gds/tools/gdsio` | Benchmark tool with transfer types (`-x 0` GPU direct, `-x 1` CPU only, `-x 2` CPU→GPU) |
 
 ---
 
-## 4. Deep Architecture: GDS Components & `/etc/cufile.json` Tuning
-
-```
-+-----------------------------------------------------------------------------+
-|                          GDS SOFTWARE & HARDWARE STACK                      |
-+-----------------------------------------------------------------------------+
-| User Space Application (PyTorch DataLoader / C++ cuFile API)                |
-|   |                                                                         |
-|   v                                                                         |
-| libcufile.so (User-space library configuring batching & memory registration)|
-|   |-- Reads Configuration: /etc/cufile.json                                 |
-|   v (IOCTL system calls)                                                    |
-| Kernel Space: nvidia-fs.ko (NVIDIA Filesystem Peer-to-Peer Driver)          |
-|   |-- Maps physical storage block DMA addresses directly into GPU BAR space |
-|   v                                                                         |
-| Hardware: PCIe Switch (Broadcom PEX 89000) / NVMe Controller                |
-|   |===> Direct DMA transfer to GPU HBM without CPU interaction              |
-+-----------------------------------------------------------------------------+
-```
-
----
-
-## 5. Concrete Production Lab: Automated GDS Provisioning Playbook
+## 3. Hands-on
 
 ```yaml
+# lab/playbooks/14-gds-check.yml
 ---
-# playbook: deploy_gpudirect_storage.yml
-# Compiles and loads nvidia-fs, configures cufile.json, and runs gdscheck
-- name: Orchestrate NVIDIA GPUDirect Storage (GDS) Stack
-  hosts: gpu_nodes
+# GPUDirect Storage / cuFile on DGX Spark: detect, configure, measure.
+# On GB10 the "GPU memory" IS system memory (coherent UMA), so the question is
+# not "can NVMe DMA into the GPU BAR" but "what path does cuFile take, and is it
+# faster than plain POSIX reads for your loader?" This play answers that with data.
+- name: GDS / cuFile assessment
+  hosts: spark
   become: true
-  gather_facts: true
+  gather_facts: false
   vars:
-    gds_max_direct_io_size_kb: 16384  # 16 MB max direct I/O
-    gds_poll_mode: 0                  # Interrupt-driven (or 1 for hybrid poll)
-
+    gds_test_dir: /srv/models
+    gds_test_size: 8G
+    gds_io_size: 1M
+    gds_threads: 8
   tasks:
-    - name: 1. Install GDS and cuFile Development Packages
+    - name: Find GDS tools shipped with the CUDA toolkit
+      ansible.builtin.find:
+        paths: [/usr/local/cuda/gds/tools]
+        patterns: [gdscheck, gdscheck.py, gdsio]
+      register: gds_tools
+
+    - name: Offer the package if tools are missing
+      ansible.builtin.shell: set -o pipefail; apt-cache search --names-only '^(nvidia-gds|gds-tools)' | awk '{print $1}'
+      args: { executable: /bin/bash }
+      register: gds_pkgs
+      changed_when: false
+      when: gds_tools.matched < 2
+
+    - name: Install GDS userspace (if the repo offers it)
       ansible.builtin.apt:
-        name:
-          - nvidia-gds
-          - nvidia-fs-dkms
+        name: "{{ gds_pkgs.stdout_lines | select('match', '^gds-tools') | list | last }}"
         state: present
-        update_cache: true
+      when:
+        - gds_tools.matched < 2
+        - gds_pkgs.stdout_lines | select('match', '^gds-tools') | list | length > 0
 
-    - name: 2. Ensure nvidia-fs Kernel Module is Loaded
-      community.general.modprobe:
-        name: nvidia-fs
-        state: present
+    - name: Platform check
+      ansible.builtin.shell: |
+        set -o pipefail
+        T=/usr/local/cuda/gds/tools
+        if [ -x $T/gdscheck ]; then $T/gdscheck -p; elif [ -f $T/gdscheck.py ]; then python3 $T/gdscheck.py -p; else echo "gdscheck not found"; fi
+      args: { executable: /bin/bash }
+      register: gds_check
+      changed_when: false
+      failed_when: false
 
-    - name: Ensure nvidia-fs loads on boot
-      ansible.builtin.lineinfile:
-        path: /etc/modules
-        line: nvidia-fs
-        state: present
+    - name: Is nvidia-fs loaded?
+      ansible.builtin.command: lsmod
+      register: gds_lsmod
+      changed_when: false
 
-    - name: 3. Deploy Production-Tuned /etc/cufile.json
+    - name: Summarise platform
+      ansible.builtin.set_fact:
+        gds_summary:
+          nvidia_fs_loaded: "{{ 'nvidia_fs' in gds_lsmod.stdout }}"
+          nvme_supported: "{{ gds_check.stdout is search('NVMe\\s*:\\s*Supported') }}"
+          compat_mode: "{{ gds_check.stdout is search('(?i)compat') }}"
+          raw_lines: "{{ gds_check.stdout_lines | select('search', '(?i)nvme|compat|iommu|platform|driver') | list }}"
+
+    - name: Configure /etc/cufile.json (allow compat mode, file logging)
       ansible.builtin.copy:
         dest: /etc/cufile.json
-        mode: '0644'
-        content: |
-          {
-            "logging": {
-              "level": "WARN"
-            },
-            "profile": {
-              "nvfs": {
-                "max_direct_io_size_kb": {{ gds_max_direct_io_size_kb }},
-                "force_compat_mode": false,
-                "poll_mode": {{ gds_poll_mode }}
-              },
-              "posix": {
-                "min_direct_io_size_kb": 4
-              },
-              "properties": {
-                "use_poll_mode": false,
-                "allow_compat_mode": true
-              }
-            },
-            "denylist": {
-              "drivers": []
-            }
-          }
+        backup: true
+        mode: "0644"
+        content: "{{ gds_cufile | to_nice_json }}"
+      vars:
+        gds_cufile:
+          logging: { dir: /var/log/cufile, level: ERROR }
+          properties:
+            allow_compat_mode: true
+            max_direct_io_size_kb: 16384
+            max_device_cache_size_kb: 131072
+            use_poll_mode: false
+          fs: { generic: { posix_unaligned_writes: false } }
 
-    - name: 4. Execute GDS Hardware Platform Audit (gdscheck)
-      ansible.builtin.command: /usr/local/cuda/gds/tools/gdscheck -p
-      register: gds_audit
-      changed_when: false
-      failed_when: "'Platform verification SUCCESS' not in gds_audit.stdout"
+    - name: Benchmark (only if gdsio exists)
+      when: gds_tools.files | map(attribute='path') | select('search', 'gdsio$') | list | length > 0
+      block:
+        - name: Test file directory
+          ansible.builtin.file:
+            path: "{{ gds_test_dir }}"
+            state: directory
+            mode: "0775"
 
-    - name: 5. Display GDS Verification Output
+        - name: Write the test file once (-I 1 = write)
+          ansible.builtin.command: >-
+            /usr/local/cuda/gds/tools/gdsio -f {{ gds_test_dir }}/gdsio.bin -d 0 -w {{ gds_threads }}
+            -s {{ gds_test_size }} -i {{ gds_io_size }} -x 1 -I 1
+          args:
+            creates: "{{ gds_test_dir }}/gdsio.bin"
+
+        - name: Read tests — 0=GPU_DIRECT, 1=CPU_ONLY, 2=CPU_GPU (bounce)
+          ansible.builtin.shell: |
+            set -o pipefail
+            sync; echo 3 > /proc/sys/vm/drop_caches
+            /usr/local/cuda/gds/tools/gdsio -f {{ gds_test_dir }}/gdsio.bin -d 0 -w {{ gds_threads }} \
+              -s {{ gds_test_size }} -i {{ gds_io_size }} -x {{ item }} -I 0 -T 15 | grep -E 'Throughput'
+          args: { executable: /bin/bash }
+          loop: [0, 1, 2]
+          register: gds_bench
+          changed_when: false
+          failed_when: false
+
+        - name: Add results
+          ansible.builtin.set_fact:
+            gds_summary: >-
+              {{ gds_summary | combine({'bench': dict(['gpu_direct', 'cpu_only', 'cpu_gpu_bounce']
+                 | zip(gds_bench.results | map(attribute='stdout') | map('regex_search', 'Throughput: ([\d.]+ \w+/s)', '\1')
+                 | map('default', ['n/a'], true) | map('first')))}) }}
+
+    - name: Report
       ansible.builtin.debug:
-        msg: "{{ gds_audit.stdout_lines }}"
+        var: gds_summary
 ```
+
+```bash
+cd "01 Ansible/lab"
+ansible-playbook playbooks/14-gds-check.yml -K
+```
+
+Read the result:
+
+| Outcome | Interpretation |
+|---|---|
+| `nvidia_fs_loaded: false`, `compat_mode: true`, GPU-direct ≈ CPU-only | Expected on UMA. cuFile works, but there's no true P2P path. Your loader's efficiency is what matters |
+| GPU-direct noticeably slower than CPU-only | Compat-mode overhead. Use plain `O_DIRECT`/mmap loaders on the Spark |
+| Everything ≈ your NVMe's rated sequential read | You're storage-bound. Faster models-per-minute means fewer bytes (quantised weights) or a cache (Volume 15) |
+| `gdscheck not found` and no package | This DGX OS image has no GDS tools. Skip; the cuFile API isn't needed on this box |
+
+### 3.1 The comparison that actually matters: model load time
+
+```bash
+# inside an NGC PyTorch container on the Spark, with /srv/models mounted
+docker run --rm --gpus all -v /srv/models:/models nvcr.io/nvidia/pytorch:25.11-py3 python - <<'PY'
+import time, torch, os, glob
+from safetensors.torch import load_file
+f = sorted(glob.glob("/models/**/*.safetensors", recursive=True))[0]
+os.system("sync")  # (drop caches from the host between runs: echo 3 > /proc/sys/vm/drop_caches)
+t=time.time(); sd = load_file(f, device="cuda"); torch.cuda.synchronize(); dt=time.time()-t
+gb = sum(v.numel()*v.element_size() for v in sd.values())/1e9
+print(f"{f}: {gb:.2f} GB in {dt:.2f}s -> {gb/dt:.2f} GB/s")
+PY
+```
+
+Run it cold (after dropping caches) and warm. On a UMA machine the warm run is fast because the page cache already holds the weights, **but that cache is now occupying memory the model also needs**. That trade-off is the operational lesson of this volume.
 
 ---
 
-## 6. Comparative I/O Architecture Matrix
+## 4. Integrations
 
-| Metric | Standard POSIX (`read/write`) | Direct I/O (`O_DIRECT`) | GPUDirect Storage (GDS) |
-| :--- | :--- | :--- | :--- |
-| **Data Path** | NVMe $\to$ Host RAM $\to$ GPU | NVMe $\to$ Host Pinned $\to$ GPU | **NVMe $\to$ GPU HBM (Direct)**|
-| **Linux Page Cache** | Polluted with checkpoints | Bypassed | **Bypassed completely** |
-| **CPU Utilization** | High (100% of multiple cores)| Moderate (Pinned memory copy)| **Zero (<0.1% CPU)** |
-| **Max Throughput** | ~18 GB/s (Bus bound) | ~24 GB/s | **~56 GB/s (NAND Saturated)** |
-| **4KB Tail Latency** | 450 microseconds | 180 microseconds | **12 microseconds** |
+| System | Relevance |
+|---|---|
+| Telemetry (Volume 09) | `spark_uma_page_cache_bytes` shows how much of the unified pool the file cache holds after loads |
+| Emergency runbook (Volume 24) | "UMA pressure" remediation drops caches, which is safe but makes the next load cold |
+| NFS/RDMA cache (Volume 15) | For a second Spark, a shared model store avoids downloading twice; cuFile over NFS runs in compat mode too |
+| Data-centre DGX | The same `14-gds-check.yml` on an H100/B200 node should show `nvidia_fs_loaded: true`, NVMe supported, and GPU-direct > bounce. Keep the playbook for that day |
 
----
+## 5. Troubleshooting & diagnostics
 
-## 7. SRE Diagnostics & Troubleshooting Playbook
+| Symptom | Diagnose | Fix |
+|---|---|---|
+| `cuFileDriverOpen` fails in an app | `/var/log/cufile/cufile.log`; `gdscheck -p` | Set `allow_compat_mode: true` (the play does this) |
+| `gdsio` error `-5` / `EIO` on `-x 0` | cufile log | FS/device not GDS-capable, which is expected here; use `-x 1/2` for baselines |
+| Benchmarks vary wildly run to run | Page cache | The play drops caches before each read test; don't benchmark while other containers load models |
+| Model loads fast, then CUDA OOM at "half-full" | `free -g` → `buff/cache` high | UMA: the page cache holds the weights. `echo 3 > /proc/sys/vm/drop_caches` after loading, or use `O_DIRECT` loaders |
+| `apt` has no gds package | `apt-cache search gds` | Not shipped for this platform/release. Nothing to fix |
 
-```
-+---------------------------------------------------------------------------------------------------+
-|                        GPUDIRECT STORAGE SRE DIAGNOSTIC MATRIX                                    |
-+------------------------------------+--------------------------+-----------------------------------+
-| Symptom / Failure Mode             | Root Cause Hypothesis    | Triage & Remediation Command      |
-+------------------------------------+--------------------------+-----------------------------------+
-| `gdscheck -p` fails:               | Linux kernel booted      | Verify GRUB cmdline:              |
-| "IOMMU not in passthrough mode".   | without `iommu=pt`.      | Ensure `intel_iommu=on iommu=pt`  |
-|                                    |                          | is active in `/proc/cmdline`.     |
-+------------------------------------+--------------------------+-----------------------------------+
-| Application falls back to slow     | `nvidia-fs.ko` module    | Check module status:              |
-| compatibility mode (COMPAT_MODE).  | not loaded in kernel.    | `lsmod | grep nvidia_fs`          |
-|                                    |                          | Load via `modprobe nvidia-fs`.    |
-+------------------------------------+--------------------------+-----------------------------------+
-| `cuFileHandleRegister` fails with  | Target file not opened   | Verify application open flags:    |
-| error code `CU_FILE_INVALID_VALUE`.| with `O_DIRECT` or block | File must be opened with          |
-|                                    | size unaligned to 4KB.   | `O_DIRECT | O_RDONLY`.            |
-+------------------------------------+--------------------------+-----------------------------------+
-```
+## 6. Validation
 
----
-
-## 8. Verification & Architectural Synthesis Checklist
-
-- [ ] **Kernel Module Loaded:** `lsmod | grep nvidia_fs` confirms `nvidia-fs` resident in kernel memory.
-- [ ] **Platform Audit Passed:** `gdscheck -p` asserts `Platform verification SUCCESS`.
-- [ ] **Configuration Active:** `/etc/cufile.json` configured with `max_direct_io_size_kb = 16384`.
-- [ ] **IOMMU Passthrough Confirmed:** System validates zero IOMMU translation faults during direct DMA.
-- [ ] **Zero-Copy Throughput Verified:** Synthetic GDS read benchmark sustains $>50\text{ GB/s}$ directly to GPU.
+- [ ] `gds_summary` recorded for your Spark (flags + the three throughputs).
+- [ ] Cold and warm safetensors load times recorded, with page-cache size before and after.
+- [ ] You can explain to a colleague why GDS helps an H100 box and does little on a GB10.

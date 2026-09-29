@@ -97,7 +97,7 @@ CMD ["/usr/sbin/sshd", "-D", "-e"]
 
     - name: Copy Dockerfile
       ansible.builtin.copy:
-        src: ../tools/fleet-sim/Dockerfile
+        src: "{{ playbook_dir }}/../tools/fleet-sim/Dockerfile"
         dest: "{{ fleet_dir }}/Dockerfile"
         mode: "0644"
       when: fleet_state == 'present'

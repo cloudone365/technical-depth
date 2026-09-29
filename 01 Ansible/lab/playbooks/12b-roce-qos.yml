@@ -1,0 +1,100 @@
+---
+# Host-side RoCEv2 QoS for CX-7 — needed when Sparks share a SWITCH with other
+# traffic (4+ node topology). On a direct cable it is optional (no congestion point).
+#
+# Conventional RoCE marking (keep identical on hosts AND switch):
+#   RoCE data  : DSCP 26 → priority 3 → PFC enabled on prio 3 (lossless class)
+#   CNP (DCQCN): DSCP 48 → priority 6
+#   ECN        : marked by the switch, reacted to by the NIC (DCQCN)
+#
+#   ansible-playbook playbooks/12b-roce-qos.yml -K [-e roce_qos_pfc=false]   # ECN-only ("lossy RoCE")
+- name: RoCEv2 QoS on CX-7 ports
+  hosts: spark
+  become: true
+  gather_facts: false
+  vars:
+    roce_qos_prio: 3
+    roce_qos_dscp: 26
+    roce_qos_pfc: true
+    roce_qos_tos: "{{ (roce_qos_dscp * 4) + 2 }}"       # DSCP<<2 | ECT(0) = 106
+    # "0,0,0,1,0,0,0,0" — PFC on the RoCE priority only
+    roce_qos_pfc_vector: >-
+      {%- for p in range(8) -%}{{ '1' if (p == roce_qos_prio | int and roce_qos_pfc | bool) else '0' }}{{ '' if loop.last else ',' }}{%- endfor -%}
+  tasks:
+    - name: Check for mlnx_qos (DOCA / MLNX tools)
+      ansible.builtin.command: which mlnx_qos
+      register: roce_qos_tool
+      changed_when: false
+      failed_when: false
+
+    - name: Stop with guidance when the tool is missing
+      ansible.builtin.meta: end_host
+      when: roce_qos_tool.rc != 0
+
+    - name: Read current QoS state
+      ansible.builtin.command: "mlnx_qos -i {{ item.name }}"
+      loop: "{{ cx7_interfaces }}"
+      loop_control: { label: "{{ item.name }}" }
+      register: roce_qos_before
+      changed_when: false
+
+    - name: Trust DSCP and set PFC vector
+      ansible.builtin.command: >-
+        mlnx_qos -i {{ item.item.name }} --trust dscp --pfc {{ roce_qos_pfc_vector }}
+      loop: "{{ roce_qos_before.results }}"
+      loop_control: { label: "{{ item.item.name }}" }
+      when: >-
+        ('Priority trust state: dscp' not in item.stdout)
+        or (roce_qos_pfc and not (item.stdout is search('enabled\s+(\d\s+){' ~ roce_qos_prio ~ '}1')))
+      changed_when: true
+
+    - name: Enable ECN reaction point + notification point for the RoCE priority (DCQCN)
+      ansible.builtin.shell: |
+        set -e
+        changed=0
+        for role in roce_rp roce_np; do
+          f=/sys/class/net/{{ item.name }}/ecn/$role/enable/{{ roce_qos_prio }}
+          [ -e "$f" ] || { echo "missing $f"; exit 3; }
+          if [ "$(cat $f)" != "1" ]; then echo 1 > $f; changed=1; fi
+        done
+        echo "changed=$changed"
+      args: { executable: /bin/bash }
+      loop: "{{ cx7_interfaces }}"
+      loop_control: { label: "{{ item.name }}" }
+      register: roce_qos_ecn
+      changed_when: "'changed=1' in roce_qos_ecn.stdout"
+      failed_when: roce_qos_ecn.rc not in [0, 3]
+
+    - name: Default ToS for RDMA-CM connections (NCCL, NFS/RDMA use RDMA-CM)
+      ansible.builtin.shell: |
+        set -e
+        d=/sys/kernel/config/rdma_cm/{{ item.rdma_dev }}
+        mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
+        modprobe rdma_cm
+        [ -d "$d" ] || mkdir "$d"
+        cur=$(cat $d/ports/1/default_roce_tos)
+        if [ "$cur" != "{{ roce_qos_tos }}" ]; then echo {{ roce_qos_tos }} > $d/ports/1/default_roce_tos; echo changed; fi
+      args: { executable: /bin/bash }
+      loop: "{{ cx7_interfaces }}"
+      loop_control: { label: "{{ item.rdma_dev }}" }
+      register: roce_qos_cm
+      changed_when: "'changed' in roce_qos_cm.stdout"
+
+    - name: Read back
+      ansible.builtin.command: "mlnx_qos -i {{ item.name }}"
+      loop: "{{ cx7_interfaces }}"
+      loop_control: { label: "{{ item.name }}" }
+      register: roce_qos_after
+      changed_when: false
+
+    - name: Show trust + PFC lines
+      ansible.builtin.debug:
+        msg: "{{ item.item.name }}: {{ item.stdout_lines | select('search', 'trust|enabled|buffer') | list }}"
+      loop: "{{ roce_qos_after.results }}"
+      loop_control: { label: "{{ item.item.name }}" }
+
+    - name: Note on persistence
+      ansible.builtin.debug:
+        msg: >-
+          mlnx_qos / sysfs / configfs settings do not survive reboot. Re-run this play from a
+          systemd unit or AWX schedule at boot, or bake it into a oneshot service (exercise in Volume 12).

@@ -1,0 +1,51 @@
+# {{ ansible_managed }}
+# k8s-rdma-shared-dev-plugin: exposes the host RDMA devices behind the listed
+# netdevs as an extended resource (rdma/{{ multus_rdma_resource }}) that pods request.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rdma-devices
+  namespace: kube-system
+data:
+  config.json: |
+    {
+      "periodicUpdateInterval": 300,
+      "configList": [
+        {
+          "resourceName": "{{ multus_rdma_resource }}",
+          "rdmaHcaMax": 64,
+          "selectors": { "ifNames": {{ multus_rdma_ifnames | to_json }} }
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: rdma-shared-dp-ds
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels: { name: rdma-shared-dp-ds }
+  template:
+    metadata:
+      labels: { name: rdma-shared-dp-ds }
+    spec:
+      hostNetwork: true
+      priorityClassName: system-node-critical
+      containers:
+        - name: k8s-rdma-shared-dp-ds
+          image: {{ multus_rdma_dp_image }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - { name: device-plugin, mountPath: /var/lib/kubelet/device-plugins }
+            - { name: plugins-registry, mountPath: /var/lib/kubelet/plugins_registry }
+            - { name: config, mountPath: /k8s-rdma-shared-dev-plugin }
+            - { name: devs, mountPath: /dev/ }
+      volumes:
+        - { name: device-plugin, hostPath: { path: /var/lib/kubelet/device-plugins } }
+        - { name: plugins-registry, hostPath: { path: /var/lib/kubelet/plugins_registry } }
+        - { name: config, configMap: { name: rdma-devices, items: [{ key: config.json, path: config.json }] } }
+        - { name: devs, hostPath: { path: /dev/ } }

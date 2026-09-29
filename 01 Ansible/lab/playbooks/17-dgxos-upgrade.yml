@@ -1,0 +1,106 @@
+---
+# Controlled DGX OS update, one Spark at a time:
+#   drain → unhold → apt full-upgrade → reboot → audit + validate → re-hold → return to service
+# This is what the DGX Dashboard "Update" button does, wrapped in the safety
+# steps a shared/multi-node lab needs.
+#
+#   ansible-playbook playbooks/17-dgxos-upgrade.yml -l spark-02 -K
+#   ansible-playbook playbooks/17-dgxos-upgrade.yml -K -e upgrade_dry_run=true   # show what would change
+- name: Rolling DGX OS upgrade
+  hosts: spark
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    upgrade_dry_run: false
+    upgrade_reboot: true
+    upgrade_firmware: false          # fwupd capsules (UEFI/EC/SoC/PD/VBIOS) — see Volume 10
+  pre_tasks:
+    - name: What would be upgraded  # noqa: command-instead-of-module (apt module has no simulate-output mode)
+      ansible.builtin.command: apt-get -s full-upgrade
+      register: upgrade_sim
+      changed_when: false
+
+    - name: Summarise pending upgrades (NVIDIA lines first)
+      ansible.builtin.set_fact:
+        upgrade_pending: "{{ upgrade_sim.stdout_lines | select('match', '^Inst ') | list }}"
+        upgrade_pending_nvidia: "{{ upgrade_sim.stdout_lines | select('match', '^Inst (nvidia|libnvidia|cuda|linux-)') | list }}"
+
+    - name: Report
+      ansible.builtin.debug:
+        msg:
+          - "{{ upgrade_pending | length }} packages pending, {{ upgrade_pending_nvidia | length }} driver/CUDA/kernel"
+          - "{{ upgrade_pending_nvidia }}"
+
+    - name: Stop here in dry-run mode
+      ansible.builtin.meta: end_host
+      when: upgrade_dry_run | bool or upgrade_pending | length == 0
+
+  tasks:
+    - name: Drain the node (no forensics, no reboot yet)
+      ansible.builtin.include_role:
+        name: node_drain
+      vars:
+        node_drain_collect: false
+        node_drain_reboot: false
+        node_drain_undrain_after: false
+        node_drain_reason: "maint: dgxos upgrade"
+
+    - name: Release NVIDIA holds for this upgrade
+      ansible.builtin.shell: >-
+        set -o pipefail; apt-mark showhold | grep -E '{{ spark_nvidia_hold_regex }}' | xargs -r apt-mark unhold
+      args: { executable: /bin/bash }
+      changed_when: true
+
+    - name: Full upgrade (async — kernel/driver postinst can take a while)
+      ansible.builtin.apt:
+        upgrade: full
+        update_cache: true
+        autoremove: false
+      async: 3600
+      poll: 15
+
+    - name: Stage firmware capsules (applied during the next reboot)
+      when: upgrade_firmware | bool
+      block:
+        - name: Refresh LVFS metadata
+          ansible.builtin.command: fwupdmgr refresh --force
+          register: upgrade_fw_refresh
+          changed_when: false
+          failed_when: upgrade_fw_refresh.rc not in [0, 2]
+        - name: Apply firmware without letting fwupd reboot on its own
+          ansible.builtin.command: fwupdmgr update -y --no-reboot-check
+          register: upgrade_fw
+          changed_when: upgrade_fw.rc == 0
+          failed_when: upgrade_fw.rc not in [0, 2]      # 2 = nothing to update
+
+    - name: Reboot and wait for the GPU (capsule flashing can take ~10 min — do NOT cut power)
+      ansible.builtin.reboot:
+        reboot_timeout: 1800
+        post_reboot_delay: 30
+        test_command: nvidia-smi -L
+      when: upgrade_reboot | bool
+
+    - name: Re-apply holds and baseline (idempotent)
+      ansible.builtin.include_role:
+        name: spark_baseline
+        tasks_from: packages.yml
+
+    - name: Refresh facts
+      ansible.builtin.include_role:
+        name: spark_facts
+
+    - name: Regenerate CDI spec for the new driver
+      ansible.builtin.include_role:
+        name: container_runtime
+      vars:
+        container_runtime_smoke_test: true
+
+    - name: Validate and return to service
+      ansible.builtin.include_role:
+        name: node_drain
+      vars:
+        node_drain_k8s: "{{ inventory_hostname in (groups['k3s_server'] | default([])) + (groups['k3s_agent'] | default([])) }}"
+        node_drain_collect: false
+        node_drain_stop_containers: false
+        node_drain_undrain_after: true

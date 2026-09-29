@@ -1,0 +1,80 @@
+---
+# CUDA end-to-end on the host AND in a container:
+#   1. nvcc compiles for sm_121 and the binary runs (host toolkit OK)
+#   2. an NGC PyTorch container sees the GPU and runs a bf16 matmul (runtime + toolkit + CDI OK)
+- name: CUDA toolchain and container smoke tests
+  hosts: spark
+  become: true
+  vars:
+    cuda_smoke_dir: /opt/spark-lab/cuda-smoke
+    cuda_smoke_pytorch_image: nvcr.io/nvidia/pytorch:25.11-py3
+    cuda_smoke_run_pytorch: true
+  tasks:
+    - name: Work directory
+      ansible.builtin.file:
+        path: "{{ cuda_smoke_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Copy UMA probe source
+      ansible.builtin.copy:
+        src: uma_probe.cu      # resolved from playbooks/files/
+        dest: "{{ cuda_smoke_dir }}/uma_probe.cu"
+        mode: "0644"
+      register: cuda_smoke_src
+
+    - name: Is the binary already built?
+      ansible.builtin.stat:
+        path: "{{ cuda_smoke_dir }}/uma_probe"
+      register: cuda_smoke_bin
+
+    - name: Compile for Blackwell GB10 (sm_121)
+      ansible.builtin.command: >-
+        /usr/local/cuda/bin/nvcc -O2 -gencode arch=compute_121,code=sm_121
+        -o {{ cuda_smoke_dir }}/uma_probe {{ cuda_smoke_dir }}/uma_probe.cu
+      changed_when: true
+      when: cuda_smoke_src is changed or not cuda_smoke_bin.stat.exists
+
+    - name: Confirm the binary contains sm_121 SASS
+      ansible.builtin.shell: set -o pipefail; /usr/local/cuda/bin/cuobjdump --list-elf {{ cuda_smoke_dir }}/uma_probe | grep -o 'sm_[0-9]*' | sort -u
+      args: { executable: /bin/bash }
+      register: cuda_smoke_sass
+      changed_when: false
+      failed_when: "'sm_121' not in cuda_smoke_sass.stdout"
+
+    - name: Run the probe
+      ansible.builtin.command: "{{ cuda_smoke_dir }}/uma_probe"
+      register: cuda_smoke_run
+      changed_when: false
+
+    - name: PyTorch in NGC container (bf16 matmul on GPU)
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --gpus=all
+          - --ipc=host
+          - "{{ cuda_smoke_pytorch_image }}"
+          - python
+          - -c
+          - |
+            import torch, time
+            assert torch.cuda.is_available(), "CUDA not visible in container"
+            d = torch.cuda.get_device_properties(0)
+            a = torch.randn(8192, 8192, device="cuda", dtype=torch.bfloat16)
+            torch.cuda.synchronize(); t = time.time()
+            for _ in range(20): c = a @ a
+            torch.cuda.synchronize(); dt = time.time() - t
+            print(f"torch={torch.__version__} cuda={torch.version.cuda} dev={d.name} cc={d.major}.{d.minor} "
+                  f"bf16_tflops={20*2*8192**3/dt/1e12:.1f}")
+      register: cuda_smoke_torch
+      changed_when: false
+      when: cuda_smoke_run_pytorch | bool
+
+    - name: Results
+      ansible.builtin.debug:
+        msg:
+          - "SASS     : {{ cuda_smoke_sass.stdout_lines | join(' ') }}"
+          - "{{ cuda_smoke_run.stdout_lines }}"
+          - "{{ cuda_smoke_torch.stdout | default('pytorch test skipped') }}"

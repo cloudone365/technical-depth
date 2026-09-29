@@ -6,7 +6,7 @@
     owner: root
     group: root
     mode: "0755"
-  loop: [prometheus, alertmanager, grafana/provisioning/datasources]
+  loop: [prometheus, alertmanager, grafana/provisioning/datasources, grafana/provisioning/dashboards]
 
 - name: Render stack configuration
   ansible.builtin.template:
@@ -21,9 +21,18 @@
     - { src: spark-alerts.yml.j2, dest: prometheus/spark-alerts.yml }
     - { src: alertmanager.yml.j2, dest: alertmanager/alertmanager.yml }
     - { src: grafana-datasource.yml.j2, dest: grafana/provisioning/datasources/prometheus.yml }
+    - { src: grafana-dashboards.yml.j2, dest: grafana/provisioning/dashboards/spark-lab.yml }
   loop_control:
     label: "{{ item.dest }}"
   register: gpu_telemetry_cfg
+
+- name: Provision the Spark overview dashboard
+  ansible.builtin.copy:
+    src: spark-overview.json
+    dest: "{{ gpu_telemetry_stack_dir }}/grafana/provisioning/dashboards/spark-overview.json"
+    owner: root
+    group: root
+    mode: "0644"
 
 - name: Validate Prometheus config + rules with promtool (in the image)  # noqa: no-handler (gate before compose up)
   ansible.builtin.command: >-

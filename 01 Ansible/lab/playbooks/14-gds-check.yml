@@ -1,0 +1,113 @@
+---
+# GPUDirect Storage / cuFile on DGX Spark: detect, configure, measure.
+# On GB10 the "GPU memory" IS system memory (coherent UMA), so the question is
+# not "can NVMe DMA into the GPU BAR" but "what path does cuFile take, and is it
+# faster than plain POSIX reads for your loader?" This play answers that with data.
+- name: GDS / cuFile assessment
+  hosts: spark
+  become: true
+  gather_facts: false
+  vars:
+    gds_test_dir: /srv/models
+    gds_test_size: 8G
+    gds_io_size: 1M
+    gds_threads: 8
+  tasks:
+    - name: Find GDS tools shipped with the CUDA toolkit
+      ansible.builtin.find:
+        paths: [/usr/local/cuda/gds/tools]
+        patterns: [gdscheck, gdscheck.py, gdsio]
+      register: gds_tools
+
+    - name: Offer the package if tools are missing
+      ansible.builtin.shell: set -o pipefail; apt-cache search --names-only '^(nvidia-gds|gds-tools)' | awk '{print $1}'
+      args: { executable: /bin/bash }
+      register: gds_pkgs
+      changed_when: false
+      when: gds_tools.matched < 2
+
+    - name: Install GDS userspace (if the repo offers it)
+      ansible.builtin.apt:
+        name: "{{ gds_pkgs.stdout_lines | select('match', '^gds-tools') | list | last }}"
+        state: present
+      when:
+        - gds_tools.matched < 2
+        - gds_pkgs.stdout_lines | select('match', '^gds-tools') | list | length > 0
+
+    - name: Platform check
+      ansible.builtin.shell: |
+        set -o pipefail
+        T=/usr/local/cuda/gds/tools
+        if [ -x $T/gdscheck ]; then $T/gdscheck -p; elif [ -f $T/gdscheck.py ]; then python3 $T/gdscheck.py -p; else echo "gdscheck not found"; fi
+      args: { executable: /bin/bash }
+      register: gds_check
+      changed_when: false
+      failed_when: false
+
+    - name: Is nvidia-fs loaded?
+      ansible.builtin.command: lsmod
+      register: gds_lsmod
+      changed_when: false
+
+    - name: Summarise platform
+      ansible.builtin.set_fact:
+        gds_summary:
+          nvidia_fs_loaded: "{{ 'nvidia_fs' in gds_lsmod.stdout }}"
+          nvme_supported: "{{ gds_check.stdout is search('NVMe\\s*:\\s*Supported') }}"
+          compat_mode: "{{ gds_check.stdout is search('(?i)compat') }}"
+          raw_lines: "{{ gds_check.stdout_lines | select('search', '(?i)nvme|compat|iommu|platform|driver') | list }}"
+
+    - name: Configure /etc/cufile.json (allow compat mode, file logging)
+      ansible.builtin.copy:
+        dest: /etc/cufile.json
+        backup: true
+        mode: "0644"
+        content: "{{ gds_cufile | to_nice_json }}"
+      vars:
+        gds_cufile:
+          logging: { dir: /var/log/cufile, level: ERROR }
+          properties:
+            allow_compat_mode: true
+            max_direct_io_size_kb: 16384
+            max_device_cache_size_kb: 131072
+            use_poll_mode: false
+          fs: { generic: { posix_unaligned_writes: false } }
+
+    - name: Benchmark (only if gdsio exists)
+      when: gds_tools.files | map(attribute='path') | select('search', 'gdsio$') | list | length > 0
+      block:
+        - name: Test file directory
+          ansible.builtin.file:
+            path: "{{ gds_test_dir }}"
+            state: directory
+            mode: "0775"
+
+        - name: Write the test file once (-I 1 = write)
+          ansible.builtin.command: >-
+            /usr/local/cuda/gds/tools/gdsio -f {{ gds_test_dir }}/gdsio.bin -d 0 -w {{ gds_threads }}
+            -s {{ gds_test_size }} -i {{ gds_io_size }} -x 1 -I 1
+          args:
+            creates: "{{ gds_test_dir }}/gdsio.bin"
+
+        - name: Read tests — 0=GPU_DIRECT, 1=CPU_ONLY, 2=CPU_GPU (bounce)
+          ansible.builtin.shell: |
+            set -o pipefail
+            sync; echo 3 > /proc/sys/vm/drop_caches
+            /usr/local/cuda/gds/tools/gdsio -f {{ gds_test_dir }}/gdsio.bin -d 0 -w {{ gds_threads }} \
+              -s {{ gds_test_size }} -i {{ gds_io_size }} -x {{ item }} -I 0 -T 15 | grep -E 'Throughput'
+          args: { executable: /bin/bash }
+          loop: [0, 1, 2]
+          register: gds_bench
+          changed_when: false
+          failed_when: false
+
+        - name: Add results
+          ansible.builtin.set_fact:
+            gds_summary: >-
+              {{ gds_summary | combine({'bench': dict(['gpu_direct', 'cpu_only', 'cpu_gpu_bounce']
+                 | zip(gds_bench.results | map(attribute='stdout') | map('regex_search', 'Throughput: ([\d.]+ \w+/s)', '\1')
+                 | map('default', ['n/a'], true) | map('first')))}) }}
+
+    - name: Report
+      ansible.builtin.debug:
+        var: gds_summary

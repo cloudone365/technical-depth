@@ -1,0 +1,147 @@
+---
+# Secondary CX-7 networks for pods on k3s: Multus + macvlan (static IPAM) + RDMA shared device plugin.
+# Result: a pod gets eth0 (flannel) AND net1 on the 200G fabric with RDMA verbs access.
+#
+#   ansible-playbook playbooks/13-multus-rdma.yml
+- name: Multus + RDMA on k3s
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    kubeconfig: "{{ playbook_dir }}/../.cache/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
+    multus_chart_version: ""                 # pin after `helm search repo rke2-charts/rke2-multus -l`
+    multus_rdma_resource: rdma_shared_cx7
+    multus_rdma_ifnames: [enp1s0f1np1, enP2p1s0f1np1]
+    multus_rdma_dp_image: ghcr.io/mellanox/k8s-rdma-shared-dev-plugin:latest   # pin a release tag
+    multus_test_image: ubuntu:24.04          # perftest + verbs utils installed at start (readiness waits for it)
+    multus_nads:
+      - { name: cx7-a, master: enp1s0f1np1, subnet: 192.168.100.0/24 }
+      - { name: cx7-b, master: enP2p1s0f1np1, subnet: 192.168.101.0/24 }
+  tasks:
+    # ---------------------------------------------------------------- Multus via k3s HelmChart CRD
+    - name: Multus (rke2-multus chart, paths adjusted for k3s)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: helm.cattle.io/v1
+          kind: HelmChart
+          metadata:
+            name: multus
+            namespace: kube-system
+          spec:
+            repo: https://rke2-charts.rancher.io
+            chart: rke2-multus
+            version: "{{ multus_chart_version | default(omit, true) }}"
+            targetNamespace: kube-system
+            valuesContent: |-
+              config:
+                fullnameOverride: multus
+                cni_conf:
+                  confDir: /var/lib/rancher/k3s/agent/etc/cni/net.d
+                  binDir: /var/lib/rancher/k3s/data/cni/
+                  kubeconfig: /var/lib/rancher/k3s/agent/etc/cni/net.d/multus.d/multus.kubeconfig
+              manifests:
+                dhcpDaemonSet: false
+
+    - name: Wait for Multus DaemonSet
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: DaemonSet
+        namespace: kube-system
+        name: multus
+      register: multus_ds
+      until: >-
+        multus_ds.resources | length > 0 and
+        multus_ds.resources[0].status.numberReady | default(0) == multus_ds.resources[0].status.desiredNumberScheduled | default(-1)
+      retries: 30
+      delay: 10
+
+    # ---------------------------------------------------------------- RDMA shared device plugin
+    - name: RDMA shared device plugin
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        template: rdma-shared-dp.yaml.j2
+
+    # ---------------------------------------------------------------- NetworkAttachmentDefinitions
+    - name: Macvlan NADs on the CX-7 netdevs (static IPAM — IP chosen per pod)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        definition:
+          apiVersion: k8s.cni.cncf.io/v1
+          kind: NetworkAttachmentDefinition
+          metadata:
+            name: "{{ item.name }}"
+            namespace: default
+          spec:
+            config: >-
+              {{ {'cniVersion': '0.3.1', 'type': 'macvlan', 'master': item.master, 'mode': 'bridge',
+                  'mtu': 9000, 'capabilities': {'ips': true}, 'ipam': {'type': 'static'}} | to_json }}
+      loop: "{{ multus_nads }}"
+      loop_control: { label: "{{ item.name }} -> {{ item.master }}" }
+
+    - name: Wait until every node advertises the RDMA resource
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Node
+      register: multus_nodes
+      until: >-
+        multus_nodes.resources
+        | map(attribute='status.allocatable')
+        | selectattr('rdma/' ~ multus_rdma_resource, 'defined')
+        | list | length == multus_nodes.resources | length
+      retries: 18
+      delay: 10
+
+    # ---------------------------------------------------------------- test pods, one per node
+    - name: RDMA test pods
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        wait: true
+        wait_timeout: 600
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: "rdma-test-{{ item.node }}"
+            namespace: default
+            annotations:
+              k8s.v1.cni.cncf.io/networks: >-
+                [{"name": "cx7-a", "ips": ["{{ item.ip }}/24"]}]
+          spec:
+            nodeName: "{{ item.node }}"
+            restartPolicy: Never
+            containers:
+              - name: t
+                image: "{{ multus_test_image }}"
+                command:
+                  - sh
+                  - -c
+                  - apt-get update -qq && apt-get install -y -qq perftest ibverbs-utils iproute2 >/dev/null && sleep infinity
+                readinessProbe:
+                  exec: { command: [sh, -c, "command -v ib_write_bw"] }
+                  periodSeconds: 5
+                securityContext:
+                  capabilities: { add: [IPC_LOCK] }
+                resources:
+                  limits:
+                    "rdma/{{ multus_rdma_resource }}": 1
+      loop:
+        - { node: "{{ groups['spark'][0] }}", ip: 192.168.100.201 }
+        - { node: "{{ groups['spark'][1] | default(groups['spark'][0]) }}", ip: 192.168.100.202 }
+      loop_control: { label: "{{ item.node }} {{ item.ip }}" }
+
+    - name: Show net1 inside each pod
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: default
+        pod: "rdma-test-{{ item }}"
+        command: sh -c "ip -br addr show net1; ls /dev/infiniband"
+      loop: "{{ groups['spark'] }}"
+      register: multus_exec
+      changed_when: false
+      failed_when: false
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: "{{ multus_exec.results | map(attribute='stdout') | list }}"
