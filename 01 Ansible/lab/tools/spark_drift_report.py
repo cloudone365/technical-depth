@@ -99,6 +99,7 @@ def main():
     ap.add_argument("json_file")
     ap.add_argument("--markdown")
     ap.add_argument("--prom", help="write node_exporter textfile metrics here")
+    ap.add_argument("--drifted-hosts", help="write a comma-separated list of drifted hosts (for --limit)")
     a = ap.parse_args()
 
     drift, failed, stats = analyse(load(a.json_file))
@@ -108,6 +109,8 @@ def main():
         open(a.markdown, "w").write(md)
     if a.prom:
         open(a.prom, "w").write(to_prom(drift, failed, stats))
+    if a.drifted_hosts:
+        open(a.drifted_hosts, "w").write(",".join(sorted(h for h, v in drift.items() if v)))
 
     if any(failed.values()):
         sys.exit(3)

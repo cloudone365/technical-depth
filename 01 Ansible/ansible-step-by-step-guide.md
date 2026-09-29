@@ -1,386 +1,216 @@
-# Complete Step-by-Step Ansible Beginner's Guide & Learning Curriculum
+# Step-by-Step: From an Unboxed DGX Spark to a Fully Automated Lab
 
-Welcome to Ansible! This guide takes you from zero knowledge to confident automation engineer. It walks through every step in detail with practical explanations, commands, examples, and curated learning resources.
+> **Module 01 companion guide.** The shortest correct path through the lab, in the order that avoids rework. Each step lists the command, what "done" looks like, and the volume that explains it. New to Ansible? Read [01A](01-ansible-core-deep-dive.md) first, then follow this page.
 
----
+```mermaid
+flowchart LR
+  subgraph W1["Week 1 · Foundations"]
+    A0[0 Control node] --> A1[1 Bootstrap] --> A2[2 Baseline + facts] --> A3[3 Containers + CUDA] --> A4[4 Telemetry]
+  end
+  subgraph W2["Week 2 · Fabric & secrets"]
+    B1[5 CX-7 fabric] --> B2[6 RDMA + NCCL] --> B3[7 NFS/RDMA] --> B4[8 Vault]
+  end
+  subgraph W3["Week 3 · Platforms"]
+    C1[9 k3s] --> C2[10 GPU Operator] --> C3[11 Multus/RDMA] --> C4[12 Slurm] --> C5[13 AWX]
+  end
+  subgraph W4["Week 4 · Operate"]
+    D1[14 CI] --> D2[15 Drift] --> D3[16 Logging/audit] --> D4[17 Upgrades + firmware] --> D5[18 Incidents] --> D6[19 Capstone]
+  end
+  W1 --> W2 --> W3 --> W4
+```
 
-## 📑 Table of Contents
-1. [Core Mental Model: How Ansible Actually Works](#1-core-mental-model-how-ansible-actually-works)
-2. [Step 1: Setting Up the Control Machine](#step-1-setting-up-the-control-machine)
-3. [Step 2: SSH Setup & Passwordless Authentication](#step-2-ssh-setup--passwordless-authentication)
-4. [Step 3: Creating and Understanding Inventories](#step-3-creating-and-understanding-inventories)
-5. [Step 4: Running Ad-Hoc Commands](#step-4-running-ad-hoc-commands)
-6. [Step 5: Writing and Running Your First Playbook](#step-5-writing-and-running-your-first-playbook)
-7. [Step 6: Mastering Essential Playbook Concepts](#step-6-mastering-essential-playbook-concepts)
-8. [Step 7: Modular Code with Roles and Collections](#step-7-modular-code-with-roles-and-collections)
-9. [Step 8: Secrets with Native Ansible Vault](#step-8-secrets-with-native-ansible-vault)
-10. [Curated Learning Materials, Books & Labs](#curated-learning-materials-books--labs)
-
----
-
-## 1. Core Mental Model: How Ansible Actually Works
-
-Before typing commands, understand three foundational principles:
-
-1. **Agentless Architecture**:
-   - Unlike tools like Puppet, Chef, or Datadog, Ansible requires **no agent daemon** installed on managed nodes.
-   - It connects from your **Control Node** (Mac/Linux workstation) to **Managed Nodes** (servers, DGX systems, VMs) over standard **SSH**, copies small Python execution modules to `/tmp`, runs them, returns JSON results, and removes the temporary files.
-
-2. **Idempotency**:
-   - An Ansible task defines the **desired end state**, not the procedural steps.
-   - If a package is already installed or a file already has the right content, Ansible reports `ok` (green) and does nothing. If changes are needed, it executes them and reports `changed` (yellow). Running a playbook 10 times in a row should produce 0 changes on runs 2 through 10.
-
-3. **Declarative YAML**:
-   - Playbooks are written in YAML (`.yml`), making automation human-readable and version-controllable.
+**One Spark or two?** Steps 5–7 and the multi-node parts of 11–12 need two Sparks and a QSFP cable. Everything else works on one; remove `spark-02` from the inventory.
 
 ---
 
-## Step 1: Setting Up the Control Machine
-
-### What is the Control Node?
-The machine where you install Ansible and run commands from (e.g., your Mac). *Note: Managed nodes only need Python 3 and an SSH daemon.*
-
-### Step-by-Step Procedure:
-Always use a Python virtual environment to avoid dependency conflicts with your operating system:
+## Step 0 · Control node (30 min) → [01A](01-ansible-core-deep-dive.md)
 
 ```bash
-# 1. Create a dedicated directory for your Ansible virtual environment
-python3 -m venv ~/.ansible-env
-
-# 2. Activate the virtual environment
-source ~/.ansible-env/bin/activate
-
-# 3. Upgrade pip
-pip install --upgrade pip
-
-# 4. Install Ansible Core and linting tools
-pip install ansible ansible-lint
-
-# 5. Verify the installation
-ansible --version
+git clone https://github.com/cloudone365/technical-depth.git && cd "technical-depth/01 Ansible/lab"
+python3 -m venv ~/.venvs/spark-ansible && source ~/.venvs/spark-ansible/bin/activate
+pip install -r requirements.txt
+ansible-galaxy collection install -r requirements.yml -p ./collections
+tests/run-local-checks.sh              # proves your toolchain before touching hardware
 ```
 
-> **Tip**: Add `source ~/.ansible-env/bin/activate` to your `~/.zshrc` or activate it whenever working on Ansible projects.
+✅ Done when `ALL LOCAL CHECKS PASSED`.
 
----
+## Step 1 · Bootstrap the Spark (45 min) → [06](06-bare-metal-os-provisioning-pxe-and-redfish.md)
 
-## Step 2: SSH Setup & Passwordless Authentication
-
-Ansible relies on passwordless SSH key authentication for seamless automation.
-
-### Step-by-Step Procedure:
-
-1. **Generate an SSH key pair on your Control Node** (if you don't already have one):
-   ```bash
-   ssh-keygen -t ed25519 -C "ansible-admin" -f ~/.ssh/ansible_id_ed25519
-   ```
-
-2. **Copy the public key to each managed host**:
-   ```bash
-   ssh-copy-id -i ~/.ssh/ansible_id_ed25519.pub dgxadmin@<TARGET_HOST_IP>
-   ```
-
-3. **Verify manual SSH login without password**:
-   ```bash
-   ssh -i ~/.ssh/ansible_id_ed25519 dgxadmin@<TARGET_HOST_IP>
-   ```
-
-4. **Configure Passwordless Sudo on Managed Nodes (Optional but recommended)**:
-   On the managed machine, run `sudo visudo` and add:
-   ```text
-   dgxadmin ALL=(ALL) NOPASSWD:ALL
-   ```
-
----
-
-## Step 3: Creating and Understanding Inventories
-
-The inventory tells Ansible **which machines to manage**, **what groups they belong to**, and **how to reach them**.
-
-### Step-by-Step Procedure:
-
-Create an `inventory.ini` file:
-
-```ini
-# Individual hosts and their specific connection IP/FQDN
-[dgx_spark]
-spark-node-01 ansible_host=192.168.1.50
-spark-node-02 ansible_host=192.168.1.51
-
-[web_servers]
-web-01 ansible_host=192.168.1.60
-
-# Group of groups (Meta-group)
-[production:children]
-dgx_spark
-web_servers
-
-# Variables applicable to an entire group
-[dgx_spark:vars]
-ansible_user=dgxadmin
-ansible_ssh_private_key_file=~/.ssh/ansible_id_ed25519
-ansible_python_interpreter=/usr/bin/python3
-```
-
-### Inspect Your Inventory:
-Ansible provides built-in tools to inspect and graph your inventory:
-```bash
-# View all parsed hosts and variables in JSON
-ansible-inventory -i inventory.ini --list
-
-# View a clean visual graph of your groups
-ansible-inventory -i inventory.ini --graph
-```
-
----
-
-## Step 4: Running Ad-Hoc Commands
-
-Ad-hoc commands are one-liner Ansible commands used for quick inspection, testing, or one-off operations without writing a full playbook.
-
-### Syntax Pattern:
-```bash
-ansible <target-pattern> -i <inventory> -m <module-name> -a "<module-arguments>"
-```
-
-### Essential Ad-Hoc Commands to Practice:
-
-1. **Test Connectivity (`ping` module)**:
-   *Note: This is an Ansible Python ping, not an ICMP network ping.*
-   ```bash
-   ansible dgx_spark -i inventory.ini -m ping
-   ```
-
-2. **Run a Shell Command (`command` module)**:
-   ```bash
-   ansible dgx_spark -i inventory.ini -m command -a "uptime"
-   ```
-
-3. **Check Disk Space**:
-   ```bash
-   ansible dgx_spark -i inventory.ini -m command -a "df -h /"
-   ```
-
-4. **Check NVIDIA GPU Status (on DGX)**:
-   ```bash
-   ansible dgx_spark -i inventory.ini -m command -a "nvidia-smi"
-   ```
-
-5. **Gather Host Facts (`setup` module)**:
-   Ansible collects detailed system information (OS, RAM, CPU cores, IPs):
-   ```bash
-   ansible dgx_spark -i inventory.ini -m setup -a "filter=ansible_distribution*"
-   ```
-
----
-
-## Step 5: Writing and Running Your First Playbook
-
-A **Playbook** maps a group of hosts to a series of tasks.
-
-### Step-by-Step Walkthrough:
-
-Create a file named `site-init.yml`:
-
-```yaml
----
-- name: Initial DGX node configuration & validation
-  hosts: dgx_spark
-  become: true  # Run tasks with sudo elevation
-
-  vars:
-    required_packages:
-      - curl
-      - htop
-      - git
-      - bc
-
-  tasks:
-    - name: Update apt cache (Debian/Ubuntu)
-      ansible.builtin.apt:
-        update_cache: true
-        cache_valid_time: 3600
-
-    - name: Ensure baseline system utilities are installed
-      ansible.builtin.apt:
-        name: "{{ required_packages }}"
-        state: present
-
-    - name: Check GPU driver and hardware status
-      ansible.builtin.command: nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
-      register: gpu_info
-      changed_when: false
-
-    - name: Display detected GPU model
-      ansible.builtin.debug:
-        msg: "GPU Hardware: {{ gpu_info.stdout }}"
-```
-
-### Running the Playbook:
-
-1. **Check Syntax**:
-   ```bash
-   ansible-playbook -i inventory.ini site-init.yml --syntax-check
-   ```
-
-2. **Run in Dry-Run / Check Mode** (Simulates changes without applying):
-   ```bash
-   ansible-playbook -i inventory.ini site-init.yml --check
-   ```
-
-3. **Execute the Playbook**:
-   ```bash
-   ansible-playbook -i inventory.ini site-init.yml
-   ```
-
----
-
-## Step 6: Mastering Essential Playbook Concepts
-
-To become proficient, master these core building blocks:
-
-### 1. Variables & Fact Gathering
-```yaml
-vars:
-  http_port: 8080
-
-tasks:
-  - name: Print custom variable and system fact
-    ansible.builtin.debug:
-      msg: "Host {{ inventory_hostname }} has {{ ansible_processor_vcpus }} CPUs and listens on port {{ http_port }}"
-```
-
-### 2. Conditionals (`when`)
-Execute tasks only when specific conditions are met:
-```yaml
-- name: Install Debian package
-  ansible.builtin.apt:
-    name: htop
-    state: present
-  when: ansible_os_family == "Debian"
-```
-
-### 3. Loops (`loop`)
-Iterate over lists or dictionaries:
-```yaml
-- name: Create required monitoring directories
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: directory
-    mode: '0755'
-  loop:
-    - /opt/monitoring
-    - /opt/monitoring/logs
-    - /opt/monitoring/scripts
-```
-
-### 4. Handlers & Notifiers
-Handlers run **only once at the end of the play**, and **only if a task triggered a change**:
-```yaml
-tasks:
-  - name: Update configuration file
-    ansible.builtin.template:
-      src: templates/app.conf.j2
-      dest: /etc/app/app.conf
-    notify: Restart application service
-
-handlers:
-  - name: Restart application service
-    ansible.builtin.systemd:
-      name: app-service
-      state: restarted
-```
-
-### 5. Jinja2 Templating (`template` module)
-Dynamically generate config files from template files (`.j2`):
-```jinja2
-# templates/app.conf.j2
-server_name = {{ inventory_hostname }}
-listen_port = {{ http_port }}
-max_memory = {{ (ansible_memtotal_mb * 0.8) | round | int }}MB
-```
-
----
-
-## Step 7: Modular Code with Roles and Collections
-
-As your automation grows, keep playbooks clean by organizing code into **Roles**.
-
-### Role Directory Structure
-Generate a standard role template:
-```bash
-ansible-galaxy role init roles/gpu_monitoring
-```
-
-This creates:
-```text
-roles/gpu_monitoring/
-├── defaults/     # Lowest priority default variables
-│   └── main.yml
-├── vars/         # Higher priority role variables
-│   └── main.yml
-├── tasks/        # Main list of tasks to execute
-│   └── main.yml
-├── handlers/     # Handlers (service restarts)
-│   └── main.yml
-├── templates/    # Jinja2 template files (.j2)
-├── files/        # Static files copied to target
-└── meta/         # Role metadata and dependencies
-```
-
-### Using Roles in a Playbook:
-```yaml
----
-- name: Deploy complete cluster stack
-  hosts: dgx_spark
-  become: true
-  roles:
-    - role: common_setup
-    - role: gpu_monitoring
-```
-
----
-
-## Step 8: Secrets with Native Ansible Vault
-
-Before moving to HashiCorp Vault, learn native **`ansible-vault`** to understand basic encryption:
+1. First-boot wizard (display or headless hotspot). Same username (`nvidia`) on every Spark. Let updates finish.
+2. Edit `inventory/hosts.yml` (IPs) and `inventory/host_vars/spark-0N.yml`.
 
 ```bash
-# 1. Encrypt an existing file
-ansible-vault encrypt secrets.yml
+ansible-playbook playbooks/00-bootstrap.yml -l spark-01 -k -K -e bootstrap_current_ip=<dhcp-ip>
+ansible-playbook playbooks/00-bootstrap.yml -l spark-01 -K -e bootstrap_current_ip=<dhcp-ip> -e bootstrap_static_ip=true
+ansible-playbook playbooks/00-ping.yml
+```
 
-# 2. View an encrypted file
-ansible-vault view secrets.yml
+✅ Done when `00-ping` reports aarch64 / 20 cores / Ubuntu 24.04 on the static IP.
 
-# 3. Edit an encrypted file
-ansible-vault edit secrets.yml
+## Step 2 · Baseline and custom facts (20 min) → [01A](01-ansible-core-deep-dive.md), [07](07-nvidia-driver-and-fabric-manager-automation.md)
 
-# 4. Encrypt a single string to paste inside a playbook
-ansible-vault encrypt_string 'MySuperPassword' --name 'db_password'
+```bash
+ansible-playbook playbooks/01-baseline.yml -K          # twice: second run changed=0
+ansible-playbook playbooks/16-driver-audit.yml -K
+```
 
-# 5. Run playbook prompting for vault password
-ansible-playbook -i inventory.ini site.yml --ask-vault-pass
+✅ `ansible_local.spark.gpu.compute_cap == "12.1"`; driver audit green; NVIDIA packages held.
+
+## Step 3 · Containers and CUDA (40 min) → [08](08-cuda-toolkit-cudnn-and-container-runtime.md)
+
+```bash
+ansible-playbook playbooks/03-containers.yml -K
+ansible-playbook playbooks/18-cuda-smoke.yml -K
+```
+
+✅ `uma_probe ... cc=12.1 integrated=1 check=PASS`; PyTorch bf16 TFLOPS recorded.
+
+## Step 4 · Telemetry (30 min) → [09](09-dcgm-telemetry-and-exporter-orchestration.md)
+
+```bash
+ansible-playbook playbooks/04-telemetry.yml -K
+```
+
+✅ Grafana `http://<spark-01>:3000` → *Spark Lab / Overview* shows GPU, UMA and CX-7 panels.
+
+## Step 5 · CX-7 fabric (45 min, 2 Sparks) → [11](11-infiniband-fabric-automation-and-opensm.md)
+
+```bash
+ssh nvidia@10.10.10.11 ibdev2netdev           # confirm names → host_vars
+ansible-playbook playbooks/02-fabric.yml -K
+```
+
+✅ All link asserts pass at 200000 Mb/s, MTU 9000, `PORT_ACTIVE`; jumbo pings OK.
+
+## Step 6 · RDMA and NCCL (60 min) → [11](11-infiniband-fabric-automation-and-opensm.md), [12](12-lossless-rocev2-and-pfc-switch-host-tuning.md)
+
+```bash
+ansible-playbook playbooks/11-rdma-perftest.yml -K
+ansible-playbook playbooks/10-nccl-test.yml -K
+```
+
+✅ NCCL log says `via NET/IB`; busbw recorded next to the perftest numbers.
+
+## Step 7 · Shared model cache (20 min) → [15](15-parallel-file-system-client-orchestration.md)
+
+```bash
+ansible-playbook playbooks/09-nfs-rdma.yml -K
+```
+
+✅ spark-02 `/proc/mounts` shows `proto=rdma,port=20049`.
+
+## Step 8 · Vault (60 min) → [03B](03-hashicorp-vault-deep-dive.md), [19](19-hashicorp-vault-approle-and-dynamic-secrets.md)
+
+```bash
+ansible-playbook playbooks/08-vault.yml -K
+export VAULT_ADDR=https://10.10.10.11:8200 VAULT_CACERT=$PWD/.cache/spark-lab-ca.crt
+export VAULT_TOKEN=$(jq -r .root_token .cache/vault-init.json)
+vault kv put kv/spark-lab/ngc api_key=nvapi-...
+ansible-playbook playbooks/19-vault-integration.yml -e vault_issue_secret_id=true -l localhost
+unset VAULT_TOKEN; source .cache/approle.env
+ansible-playbook playbooks/19-vault-integration.yml -K
+```
+
+✅ NGC login works from an AppRole token; SSH certificate issued.
+
+## Step 9 · k3s (30 min) → [16](16-kubernetes-bare-metal-bootstrap-kubespray.md)
+
+```bash
+ansible-playbook playbooks/05-k3s.yml -K
+export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml; kubectl get nodes -o wide
+```
+
+## Step 10 · GPU Operator (30 min) → [17](17-nvidia-gpu-operator-helm-automation.md)
+
+```bash
+ansible-playbook playbooks/06-gpu-operator.yml
+```
+
+✅ Each node advertises `nvidia.com/gpu: 4`; `cuda-smoke` pod prints the GB10.
+
+## Step 11 · Multus + RDMA pods (45 min) → [13](13-multus-cni-and-secondary-rdma-networking.md)
+
+```bash
+ansible-playbook playbooks/13-multus-rdma.yml
+```
+
+## Step 12 · Slurm (45 min) → [18](18-slurm-cluster-orchestration-and-cgroup-gpus.md)
+
+> Drain the node in k3s first (`kubectl cordon`) or dedicate nodes: Slurm and Kubernetes don't know about each other's GPU use.
+
+```bash
+ansible-playbook playbooks/07-slurm.yml -K
+```
+
+## Step 13 · AWX (2 h) → [02B](02-ansible-tower-awx-deep-dive.md), [20](20-awx-tower-production-cluster-and-receptor.md)
+
+Install per 02B (arm64 pre-flight first), then configure as code and add the drift workflow.
+
+## Step 14 · CI (45 min) → [21](21-ansible-testing-linting-and-molecule.md)
+
+Push a branch → `ansible-lab` workflow green. Register the Spark as a self-hosted runner and run Molecule.
+
+## Step 15 · Drift (30 min) → [22](22-configuration-drift-detection-and-self-healing.md)
+
+```bash
+tools/drift-cycle.sh; AUTO_HEAL=1 tools/drift-cycle.sh
+```
+
+## Step 16 · Logging and audit (45 min) → [23](23-high-cardinality-logging-and-audit-compliance.md)
+
+```bash
+ansible-playbook playbooks/23-logging-audit.yml -K
+```
+
+## Step 17 · Upgrades and firmware (per maintenance window) → [07](07-nvidia-driver-and-fabric-manager-automation.md), [10](10-firmware-lifecycle-and-gpu-vulnerability-patch.md)
+
+```bash
+ansible-playbook playbooks/19-firmware-inventory.yml -K
+ansible-playbook playbooks/17-dgxos-upgrade.yml -K -e upgrade_dry_run=true
+ansible-playbook playbooks/17-dgxos-upgrade.yml -K -l spark-02 -e upgrade_firmware=true
+```
+
+## Step 18 · Incidents (90 min of drills) → [24](24-cluster-wide-emergency-drain-and-remediation.md)
+
+```bash
+ansible-playbook playbooks/21-emergency-drain.yml -l spark-02 -K -e node_drain_reboot=true -e node_drain_undrain_after=true
+ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K
+```
+
+## Step 19 · Capstone → [25](25-hands-on-ansible-mastery-lab-and-test-harness.md)
+
+```bash
+ansible-playbook playbooks/25-chaos.yml -l spark-02 -K -e chaos_fault=random
+python3 tools/capstone_scorecard.py
 ```
 
 ---
 
-## 📚 Curated Learning Materials, Books & Labs
+## Playbook quick reference
 
-### 1. The Gold Standard Book
-- **"Ansible for DevOps" by Jeff Geerling**: The definitive practical guide used across the industry. Free companion code repository available on GitHub.
-
-### 2. Free Hands-on Interactive Labs (No setup required)
-- **[Killercoda Ansible Scenarios](https://killercoda.com/playgrounds/scenario/ansible)**: Interactive, browser-based Linux environments pre-loaded with Ansible.
-- **[Red Hat Interactive Learning](https://www.redhat.com/en/interactive-walkthroughs/ansible)**: Guided hands-on walkthroughs covering playbooks and automation concepts.
-
-### 3. Official Documentation (Bookmark these!)
-- **[Ansible Getting Started Guide](https://docs.ansible.com/ansible/latest/getting_started/index.html)**: Clear conceptual and tutorial documentation.
-- **[Ansible Built-in Module Index](https://docs.ansible.com/ansible/latest/collections/ansible/builtin/index.html)**: Reference for modules like `copy`, `file`, `template`, `apt`, `systemd`.
-- **[Ansible Community Galaxy](https://galaxy.ansible.com/)**: Repository of community-developed roles and collections (e.g. `community.hashi_vault`, `nvidia.nvidia_driver`).
-
-### 4. High-Quality Video Courses
-- **Jeff Geerling's "Ansible 101" (YouTube)**: Comprehensive, free multi-part video series by the author of Ansible for DevOps.
-- **NetworkChuck & LearnLinuxTV**: Great visual overviews for beginners covering SSH keys, inventory files, and basic modules.
-
-### 5. Certification Pathway (For Career Growth)
-- **Red Hat Certified Specialist in Ansible Automation (EX294)**: The premier industry credential validating real-world enterprise Ansible proficiency.
+| Playbook | Purpose | Volume |
+|---|---|---|
+| `00-bootstrap.yml` | Hostname, keys, static IP with dead-man rollback | 06 |
+| `00-ping.yml` | Connectivity + identity | 01A |
+| `01-baseline.yml` | Facts + OS baseline | 01A |
+| `02-fabric.yml` | CX-7 addressing + verification | 11 |
+| `03-containers.yml` | Docker, toolkit, CDI, NGC | 08 |
+| `04-telemetry.yml` | node_exporter, collector, Prometheus/Grafana/Alertmanager | 09 |
+| `05-k3s.yml` · `06-gpu-operator.yml` | Kubernetes + GPU Operator | 16–17 |
+| `07-slurm.yml` | Slurm | 18 |
+| `08-vault.yml` · `19-vault-integration.yml` | Vault server + Ansible integration | 03B, 19 |
+| `09-nfs-rdma.yml` | Shared model cache | 15 |
+| `10-nccl-test.yml` · `11-rdma-perftest.yml` · `12b-roce-qos.yml` | Fabric performance and QoS | 11–12 |
+| `12-redfish-practice.yml` | Redfish mockup BMC | 06 |
+| `13-fleet-sim.yml` · `14-fleet-bench.yml` | Performance lab | 02A |
+| `13-multus-rdma.yml` | Secondary RDMA networks for pods | 13 |
+| `14-gds-check.yml` | GDS / cuFile assessment | 14 |
+| `15-jinja-lab.yml` | Jinja katas | 04 |
+| `16-driver-audit.yml` · `17-dgxos-upgrade.yml` | Driver consistency + rolling upgrade | 07 |
+| `18-cuda-smoke.yml` | sm_121 + PyTorch smoke | 08 |
+| `19-firmware-inventory.yml` | Firmware + security floor | 10 |
+| `20-drift-check.yml` | Check-mode drift | 22 |
+| `21-emergency-drain.yml` · `24-uma-relief.yml` | Incident response | 24 |
+| `23-logging-audit.yml` | auditd, Loki, Alloy, ARA | 23 |
+| `25-chaos.yml` · `30-validate.yml` · `site.yml` | Capstone, validation, full build | 25 |

@@ -1,0 +1,51 @@
+# CI for "01 Ansible/lab" — see 01 Ansible/21-ansible-testing-linting-and-molecule.md
+name: ansible-lab
+
+on:
+  pull_request:
+    paths: ["01 Ansible/lab/**", ".github/workflows/ansible-lab-ci.yml"]
+  push:
+    branches: [main]
+    paths: ["01 Ansible/lab/**"]
+  workflow_dispatch:
+    inputs:
+      molecule:
+        description: "Run Molecule on the self-hosted DGX Spark runner (arm64)"
+        type: boolean
+        default: false
+
+defaults:
+  run:
+    working-directory: "01 Ansible/lab"
+
+jobs:
+  static:
+    name: lint · syntax · katas · tool tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: "01 Ansible/lab/requirements.txt"
+      - name: Install control-node deps
+        run: |
+          pip install "ansible-core~=2.18.0" "ansible-lint>=24" "yamllint>=1.35" jmespath netaddr
+          ansible-galaxy collection install -r requirements.yml -p ./collections
+      - name: Run all local checks
+        run: tests/run-local-checks.sh
+
+  molecule-arm64:
+    name: molecule (spark_baseline) on DGX Spark
+    if: github.event_name == 'workflow_dispatch' && inputs.molecule
+    needs: static
+    runs-on: [self-hosted, linux, ARM64, spark]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Molecule test
+        working-directory: "01 Ansible/lab/roles/spark_baseline"
+        run: |
+          python3 -m venv .venv && . .venv/bin/activate
+          pip install -r ../../requirements.txt
+          molecule test

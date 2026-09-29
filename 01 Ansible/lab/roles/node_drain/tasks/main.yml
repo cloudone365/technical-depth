@@ -37,6 +37,7 @@
         timeout 30 nvidia-smi -q                > nvidia-smi-q.txt 2>&1
         timeout 30 nvidia-smi                   > nvidia-smi.txt 2>&1
         journalctl -k --since "-2h" --no-pager  > kernel.log 2>&1
+        journalctl -k -b -1 --no-pager          > kernel-prev-boot.log 2>&1 || true   # after a hard power-cycle
         journalctl -k --no-pager | grep -E 'NVRM|Xid|mlx5' > nvrm-xid.log 2>&1 || true
         journalctl -u docker -u k3s -u k3s-agent -u slurmd --since "-2h" --no-pager > services.log 2>&1
         cat /proc/meminfo > meminfo.txt
@@ -52,6 +53,7 @@
       args:
         executable: /bin/bash
       changed_when: false
+      check_mode: false        # read-only probe: must also run under --check (drift detection)
 
     - name: Pull bundle to the control node
       ansible.builtin.fetch:

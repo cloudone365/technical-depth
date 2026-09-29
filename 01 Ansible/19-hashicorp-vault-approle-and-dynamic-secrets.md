@@ -1,213 +1,381 @@
-# Volume 19: HashiCorp Vault Integration: AppRole, Dynamic Secrets & Auto-Unseal
+# Volume 19 — Vault ↔ Ansible in Production Style: AppRole, Short-Lived Tokens, KV Secrets, SSH Certificates, ansible-vault Keys
 
-```
-====================================================================================================
-MODULE 01: ANSIBLE & BARE-METAL AI INFRASTRUCTURE AUTOMATION
-VOLUME 19: Centralized Secrets, AppRole Machine Auth, Dynamic DB Credentials & Vault Lookups
-====================================================================================================
-```
+> **Module 01 · Part IV — Platforms & Security** · Prev: [18 Slurm](18-slurm-cluster-orchestration-and-cgroup-gpus.md) · Next: [20 AWX in production](20-awx-tower-production-cluster-and-receptor.md) · Server setup: [03B](03-hashicorp-vault-deep-dive.md)
 
----
-
-## 1. Executive Intuition: The Secrets Sprawl Hazard
-
-In large-scale AI infrastructure automation, playbooks must authenticate to dozens of sensitive physical endpoints:
-- Baseboard Management Controllers (BMC / IPMI root passwords).
-- Storage cluster admin APIs (WekaFS tokens, VAST Data S3 keys).
-- Docker and NGC enterprise container registries.
-- Infrastructure database credentials (SlurmDBD, etcd certificates).
-
-Storing these secrets in plaintext files, environment variables, or even git-committed `ansible-vault` encrypted files presents catastrophic security risks:
-1. **Zero Lifecycle Rotation:** Static passwords remain unchanged for years. If an engineer leaves the organization, rotating hardcoded passwords across 2,000 servers requires manual intervention.
-2. **Key Sprawl on Laptops:** Native `ansible-vault` requires distributing a shared master decryption password to every operator's personal machine.
-3. **No Centralized Audit Trail:** There is no mechanism to determine which operator or automation task queried which credential.
-
-```
-+-----------------------------------------------------------------------------------------+
-|                  PLAINTEXT SECRETS VS. HASHICORP VAULT ARCHITECTURE                    |
-+------------------------------------+----------------------------------------------------+
-| Static Files / Ansible-Vault       | HashiCorp Vault Integration (Enterprise Standard)  |
-+------------------------------------+----------------------------------------------------+
-| Passwords hardcoded in group_vars  | Single central source of truth over TLS 1.3        |
-| Static credentials never expire    | Ephemeral, dynamic credentials with strict TTLs    |
-| Shared master password sprawl      | Machine-to-machine AppRole authentication (CIDRs)  |
-| No audit logging of access         | Cryptographic audit log: Who, What, When recorded  |
-| Manual rotation across cluster     | Automated dynamic revocation and leasing           |
-+------------------------------------+----------------------------------------------------+
-```
-
-The enterprise standard integrates Ansible directly with **HashiCorp Vault** using the **AppRole Authentication Engine** and **`community.hashi_vault`** lookup plugins.
+| | |
+|---|---|
+| **You will build** | A playbook run that holds **no long-lived secrets**: AppRole login, then a 20-minute token, then the NGC key read from KV v2, then a 30-minute SSH certificate signed for the run, then the key used to log in to nvcr.io on every Spark. Plus an ansible-vault password sourced from Vault |
+| **Hardware** | Vault from Volume 03B; control node |
+| **Time** | 60 min |
+| **Risk** | Low. Flipping sshd to certificate-only is the step to rehearse carefully (§3.4) |
 
 ---
 
-## 2. Lineage & Evolution of Enterprise Secrets Management
+## 1. Threat model → design
 
-```
-   [1990s: Plaintext Configuration Files]
-                 |
-           (Passwords stored directly in /etc/shadow, configs, and shell scripts)
-                 |
-   [2014: Ansible Vault (.vault files)]
-                 |
-           (AES-256-CBC file-level encryption; required shared password or vault-id)
-                 |
-   [2015: HashiCorp Vault Project]
-                 |
-           (Shamir's secret sharing, centralized HTTP REST API, dynamic secret engines)
-                 |
-   [2018: AppRole Authentication Specification]
-                 |
-           (Machine-to-machine role authentication decoupling RoleID from SecretID)
-                 |
-   [2023: Cloud KMS Auto-Unseal & Vault Agent]
-                 |
-           (Hardware-backed cloud KMS unsealing; automated secret renewal sidecars)
-```
+| Risk in a typical lab repo | Control in this volume |
+|---|---|
+| API keys in `group_vars` / git history | Secrets live in Vault KV. The repo only holds *paths* |
+| One SSH key that works forever, everywhere | SSH **certificates** from Vault's SSH CA, valid 30 min, principal-restricted |
+| Automation credentials that never expire | AppRole `secret_id` TTL 24 h, token TTL 20 min, max 1 h |
+| Secrets in logs (CLI, AWX, ARA) | `no_log: true` on every task that touches values; only lengths and booleans are printed |
+| "Who read what?" | Vault audit log (Volume 03B) records each read with the AppRole identity |
 
----
+## 2. Architecture
 
-## 3. First-Principles Mathematics: Shamir's Secret Sharing $(k, n)$ Threshold
+### 2.1 Flow of a run
 
-HashiCorp Vault secures its root Master Encryption Key using **Adi Shamir's Secret Sharing Scheme (1979)** based on polynomial interpolation over finite fields.
-
-### 3.1 Mathematical Formulation
-To divide a master secret $S$ into $n$ unseal shares such that any $k$ shares can reconstruct $S$, but any $k - 1$ shares reveal zero information:
-1. Choose a random polynomial of degree $k - 1$ over a prime Galois Field $\mathbb{F}_p$ ($p > S$):
-   $$f(x) = S + a_1 x + a_2 x^2 + \dots + a_{k-1} x^{k-1} \pmod p$$
-   Where $f(0) = S$ (the secret is the $y$-intercept).
-2. Generate $n$ distinct points (shares): $(x_1, f(x_1)), (x_2, f(x_2)), \dots, (x_n, f(x_n))$.
-3. Given any $k$ shares, reconstruct $S$ using **Lagrange Interpolating Polynomials**:
-
-$$f(0) = \sum_{j=1}^{k} y_j \prod_{m \ne j} \frac{0 - x_m}{x_j - x_m} \pmod p$$
-
-#### Security Guarantee:
-If an attacker intercepts $k - 1$ keys, there exist infinite polynomials of degree $k - 1$ passing through those points. Every possible candidate secret in $\mathbb{F}_p$ is equally probable!
-
----
-
-## 4. Deep Architecture: AppRole Machine-to-Machine Authentication
-
-Ansible control nodes authenticate to Vault using the **AppRole Method**:
-
-```
-+-----------------------------------------------------------------------------+
-|                          APPROLE AUTHENTICATION FLOW                        |
-+-----------------------------------------------------------------------------+
-|  Ansible Control Node / CI Runner                                           |
-|    |                                                                        |
-|    |-- Possesses static RoleID: "ai-cluster-provisioner"                    |
-|    |-- Ingests dynamic SecretID (from environment or wrapped token)         |
-|    v                                                                        |
-|  POST https://vault.internal:8200/v1/auth/approle/login                     |
-|    Payload: { "role_id": "...", "secret_id": "..." }                        |
-|    v                                                                        |
-|  HashiCorp Vault Engine:                                                    |
-|    |-- Validates SecretID and checks CIDR bind restrictions                 |
-|    |-- Issues short-lived Client Token (TTL: 1 Hour)                        |
-|    v                                                                        |
-|  Ansible Execution:                                                         |
-|    |-- Queries KV v2 secrets: secret/data/dgx/bmc_credentials               |
-|    |-- Injects passwords directly into task memory buffers                  |
-|    +-- Token automatically expires upon playbook completion                 |
-+-----------------------------------------------------------------------------+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant ADM as Admin / AWX (privileged)
+  participant CN as Control node (ansible-playbook)
+  participant V as Vault (spark-01:8200)
+  participant SP as Sparks (sshd trusts Vault SSH CA)
+  ADM->>V: read role-id, write secret-id (TTL 24h)
+  V-->>ADM: role_id, secret_id → .cache/approle.env (0600)
+  CN->>V: POST auth/approle/login {role_id, secret_id}
+  V-->>CN: token (TTL 20m, policy ansible-automation)
+  CN->>V: GET kv/data/spark-lab/ngc   (X-Vault-Token)
+  V-->>CN: api_key (held in memory, no_log)
+  CN->>V: POST ssh-client-signer/sign/ansible {public_key, principals=nvidia}
+  V-->>CN: signed cert (valid 30m) → ~/.ssh/id_ed25519-cert.pub
+  CN->>SP: SSH with key + cert (sshd: TrustedUserCAKeys)
+  CN->>SP: docker login nvcr.io with api_key (no_log)
 ```
 
----
-
-## 5. Concrete Production Lab: Automated Vault Secrets Integration Playbook
-
-Below is an enterprise Ansible playbook demonstrating secure secret retrieval via HashiCorp Vault AppRole and `community.hashi_vault` lookup plugins.
+### 2.2 LLD: Vault objects (created by the `vault_config` role)
 
 ```yaml
+# lab/roles/vault_config/defaults/main.yml
 ---
-# playbook: secure_provision_vault.yml
-# Authenticates to Vault via AppRole, retrieves BMC credentials, and applies configurations
-- name: Retrieve Credentials and Configure AI Infrastructure
+vault_config_addr: "https://{{ hostvars[groups['vault'][0]].ansible_host }}:8200"
+vault_config_cacert: "{{ playbook_dir }}/../.cache/spark-lab-ca.crt"
+# LAB: bootstrap with the root token from init; production: a short-lived admin token.
+vault_config_token: "{{ (lookup('ansible.builtin.file', playbook_dir ~ '/../.cache/vault-init.json') | from_json).root_token }}"
+
+vault_config_secret_engines:
+  - { path: kv, type: kv, options: { version: "2" } }
+  - { path: ssh-client-signer, type: ssh }
+
+vault_config_auth_methods:
+  - { path: approle, type: approle }
+
+vault_config_policies:
+  ansible-automation: |
+    # Read lab secrets
+    path "kv/data/spark-lab/*"     { capabilities = ["read"] }
+    path "kv/metadata/spark-lab/*" { capabilities = ["list", "read"] }
+    # Get SSH certificates signed for the automation user
+    path "ssh-client-signer/sign/ansible" { capabilities = ["create", "update"] }
+    # Let the token look itself up / renew (hvac does this)
+    path "auth/token/lookup-self" { capabilities = ["read"] }
+    path "auth/token/renew-self"  { capabilities = ["update"] }
+  spark-admin: |
+    path "kv/data/spark-lab/*"     { capabilities = ["create", "read", "update", "delete"] }
+    path "kv/metadata/spark-lab/*" { capabilities = ["list", "read", "delete"] }
+
+vault_config_approles:
+  - name: ansible
+    token_policies: [ansible-automation]
+    token_ttl: 20m
+    token_max_ttl: 1h
+    secret_id_ttl: 24h        # AWX/cron must refresh; stolen secret_ids expire
+    secret_id_num_uses: 0
+    token_bound_cidrs: ""     # e.g. "10.10.10.0/24" to pin to the mgmt network
+
+vault_config_ssh_role:
+  name: ansible
+  allowed_users: "{{ spark_admin_user | default('nvidia') }}"
+  default_user: "{{ spark_admin_user | default('nvidia') }}"
+  ttl: 30m
+```
+
+| Object | Path | Purpose |
+|---|---|---|
+| KV v2 engine | `kv/` | Lab secrets under `kv/spark-lab/*` |
+| SSH engine | `ssh-client-signer/` | CA key generated inside Vault; role `ansible` |
+| AppRole | `auth/approle/role/ansible` | Machine identity for automation |
+| Policy | `ansible-automation` | read `kv/data/spark-lab/*`, sign `ssh-client-signer/sign/ansible`, token self-lookup/renew |
+| Audit | `file` → `/var/log/vault/audit.log` | Every request logged |
+
+> **KV v2 path gotcha:** the API path for *reading* is `kv/data/<path>`, and for *listing* it's `kv/metadata/<path>`. Policies must use those exact prefixes; the CLI (`vault kv get kv/spark-lab/ngc`) hides the `data/` segment from you.
+
+---
+
+## 3. Hands-on
+
+### 3.1 The integration playbook
+
+```yaml
+# lab/playbooks/19-vault-integration.yml
+---
+# HashiCorp Vault ↔ Ansible, the production pattern:
+#   1. (admin, once per day/run) issue a short-lived AppRole secret_id
+#   2. Ansible logs in with role_id + secret_id → short-lived token (20 min)
+#   3. secrets read with the token (never stored in the repo, never logged)
+#   4. an SSH certificate valid 30 min is signed for this run
+#
+#   export VAULT_ADDR=https://10.10.10.11:8200 VAULT_CACERT=$PWD/.cache/spark-lab-ca.crt
+#   ansible-playbook playbooks/19-vault-integration.yml -e vault_issue_secret_id=true   # admin step (root/admin token in VAULT_TOKEN)
+#   source .cache/approle.env && ansible-playbook playbooks/19-vault-integration.yml -K
+- name: Issue AppRole credentials (admin step, optional)
   hosts: localhost
+  connection: local
   gather_facts: false
   vars:
-    vault_url: "https://vault.datacenter.internal:8200"
-    vault_role_id: "{{ lookup('ansible.builtin.env', 'VAULT_ROLE_ID') }}"
-    vault_secret_id: "{{ lookup('ansible.builtin.env', 'VAULT_SECRET_ID') }}"
-
+    vault_issue_secret_id: false
+    vault_addr: "{{ lookup('env', 'VAULT_ADDR') }}"
+    vault_cacert: "{{ lookup('env', 'VAULT_CACERT') | default(omit, true) }}"
   tasks:
-    - name: 1. Authenticate to Vault via AppRole to obtain temporary Client Token
-      community.hashi_vault.vault_login_approle:
-        url: "{{ vault_url }}"
-        role_id: "{{ vault_role_id }}"
-        secret_id: "{{ vault_secret_id }}"
-      register: vault_auth
+    - name: Admin block
+      when: vault_issue_secret_id | bool
+      block:
+        - name: Read role_id
+          community.hashi_vault.vault_read:
+            url: "{{ vault_addr }}"
+            ca_cert: "{{ vault_cacert }}"
+            auth_method: token
+            token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+            path: auth/approle/role/ansible/role-id
+          register: vault_role_id
+          no_log: true
 
-    - name: Set Vault Token Fact
-      ansible.builtin.set_fact:
-        vault_token: "{{ vault_auth.client_token }}"
+        - name: Generate a fresh secret_id (TTL set on the role — 24h in this lab)
+          community.hashi_vault.vault_write:
+            url: "{{ vault_addr }}"
+            ca_cert: "{{ vault_cacert }}"
+            auth_method: token
+            token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+            path: auth/approle/role/ansible/secret-id
+            data:
+              metadata: '{"issued_by": "19-vault-integration", "purpose": "spark-lab"}'
+          register: vault_secret_id
+          no_log: true
 
-    - name: 2. Securely Retrieve BMC Admin Credentials from KV v2 Engine
-      ansible.builtin.set_fact:
-        bmc_creds: "{{ lookup('community.hashi_vault.hashi_vault', 'secret=secret/data/dgx/bmc_admin token=' + vault_token + ' url=' + vault_url) }}"
-      no_log: true  # Prevents secrets from leaking into Ansible terminal logs
+        - name: Write env file for the automation run (0600, git-ignored)
+          ansible.builtin.copy:
+            dest: "{{ playbook_dir }}/../.cache/approle.env"
+            mode: "0600"
+            content: |
+              export ANSIBLE_HASHI_VAULT_ROLE_ID={{ vault_role_id.data.data.role_id }}
+              export ANSIBLE_HASHI_VAULT_SECRET_ID={{ vault_secret_id.data.data.secret_id }}
+          no_log: true
 
-    - name: 3. Verify Secret Retrieval without Exposing Passwords
+- name: Log in with AppRole and fetch run-time secrets
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    vault_conn: &vault_conn
+      url: "{{ lookup('env', 'VAULT_ADDR') }}"
+      ca_cert: "{{ lookup('env', 'VAULT_CACERT') | default(omit, true) }}"
+  tasks:
+    - name: The admin run stops after issuing credentials
+      ansible.builtin.meta: end_play
+      when: vault_issue_secret_id | default(false) | bool
+
+    - name: AppRole credentials must be in the environment
       ansible.builtin.assert:
         that:
-          - "bmc_creds.username is defined"
-          - "bmc_creds.password is defined"
-          - "bmc_creds.password | length > 8"
-        fail_msg: "Vault secret retrieval failed or password format invalid!"
-        success_msg: "Securely retrieved credentials for user: {{ bmc_creds.username }}"
+          - lookup('env', 'ANSIBLE_HASHI_VAULT_ROLE_ID') | length > 0
+          - lookup('env', 'ANSIBLE_HASHI_VAULT_SECRET_ID') | length > 0
+          - lookup('env', 'VAULT_ADDR') | length > 0
+        fail_msg: >-
+          Missing VAULT_ADDR / ANSIBLE_HASHI_VAULT_ROLE_ID / ANSIBLE_HASHI_VAULT_SECRET_ID.
+          Run the admin step (-e vault_issue_secret_id=true) then: source .cache/approle.env
+        quiet: true
 
-    - name: 4. Example Dynamic Database Credential Retrieval
-      ansible.builtin.set_fact:
-        slurmdb_creds: "{{ lookup('community.hashi_vault.hashi_vault', 'secret=database/creds/slurm-role token=' + vault_token + ' url=' + vault_url) }}"
+    - name: AppRole login → token
+      community.hashi_vault.vault_login:
+        <<: *vault_conn
+        auth_method: approle
+        role_id: "{{ lookup('env', 'ANSIBLE_HASHI_VAULT_ROLE_ID') }}"
+        secret_id: "{{ lookup('env', 'ANSIBLE_HASHI_VAULT_SECRET_ID') }}"
+      register: vault_login
       no_log: true
 
-    - name: Display Dynamic Lease Information
+    - name: Keep only the token
+      ansible.builtin.set_fact:
+        vault_token: "{{ vault_login | community.hashi_vault.vault_login_token }}"
+        vault_token_ttl: "{{ vault_login.login.auth.lease_duration }}"
+        vault_token_policies: "{{ vault_login.login.auth.policies }}"
+      no_log: true
+
+    - name: Read the NGC key (KV v2)
+      ansible.builtin.set_fact:
+        vault_ngc_api_key: >-
+          {{ lookup('community.hashi_vault.vault_kv2_get', 'spark-lab/ngc', engine_mount_point='kv',
+                    url=vault_conn.url, ca_cert=vault_conn.ca_cert | default(omit),
+                    auth_method='token', token=vault_token).secret.api_key }}
+      no_log: true
+
+    - name: Sign an SSH certificate for this run
+      community.hashi_vault.vault_write:
+        <<: *vault_conn
+        auth_method: token
+        token: "{{ vault_token }}"
+        path: ssh-client-signer/sign/ansible
+        data:
+          public_key: "{{ lookup('ansible.builtin.file', '~/.ssh/id_ed25519.pub') }}"
+          valid_principals: "{{ spark_admin_user | default('nvidia') }}"
+      register: vault_ssh
+      no_log: true
+
+    - name: Write certificate next to the key (OpenSSH picks it up automatically)
+      ansible.builtin.copy:
+        dest: "{{ lookup('env', 'HOME') }}/.ssh/id_ed25519-cert.pub"
+        content: "{{ vault_ssh.data.data.signed_key }}"
+        mode: "0644"
+
+    - name: What we got (no secret values)
       ansible.builtin.debug:
-        msg: "Retrieved ephemeral database user '{{ slurmdb_creds.username }}' (Lease duration: {{ slurmdb_creds.lease_duration }} seconds)"
+        msg:
+          - "token TTL {{ vault_token_ttl }}s, policies {{ vault_token_policies }}"
+          - "NGC key present: {{ vault_ngc_api_key | length > 0 }} (length {{ vault_ngc_api_key | length }})"
+          - "SSH cert written; inspect with: ssh-keygen -L -f ~/.ssh/id_ed25519-cert.pub"
+
+- name: Use the secrets on the Sparks
+  hosts: spark
+  become: true
+  gather_facts: false
+  vars:
+    container_runtime_ngc_login: true
+    container_runtime_ngc_api_key: "{{ hostvars['localhost'].vault_ngc_api_key }}"
+    container_runtime_smoke_test: false
+  roles:
+    - role: container_runtime
 ```
+
+```bash
+cd "01 Ansible/lab"
+export VAULT_ADDR=https://10.10.10.11:8200 VAULT_CACERT=$PWD/.cache/spark-lab-ca.crt
+
+# admin step (uses an admin/root token in VAULT_TOKEN — lab only)
+export VAULT_TOKEN=$(jq -r .root_token .cache/vault-init.json)
+vault kv put kv/spark-lab/ngc api_key=nvapi-XXXXXXXXXXXXXXXX
+ansible-playbook playbooks/19-vault-integration.yml -e vault_issue_secret_id=true -l localhost   # stops after writing approle.env
+unset VAULT_TOKEN                       # the automation run must NOT have the admin token
+
+# automation run
+source .cache/approle.env
+ansible-playbook playbooks/19-vault-integration.yml -K
+```
+
+What was verified while building this lab (against a stand-in that implements the Vault HTTP API for AppRole login, KV v2 and SSH signing, with token checks on every protected path):
+
+```
+POST /v1/auth/approle/login                 tok=None
+GET  /v1/kv/data/spark-lab/ngc              tok=<approle token>
+POST /v1/ssh-client-signer/sign/ansible     tok=<approle token>
+→ token TTL 1200s, policies ['default', 'ansible-automation']
+→ NGC key present: True
+```
+
+> `-l localhost` works because the lab inventory declares `localhost` explicitly in a `control` group. Ansible's *implicit* localhost can't be selected with `--limit`, which is a classic reason an "admin-only" play silently does nothing.
+
+### 3.2 Everyday lookup patterns
+
+```yaml
+# 1. Inline lookup with env-provided AppRole (ANSIBLE_HASHI_VAULT_* vars)
+grafana_admin_password: >-
+  {{ lookup('community.hashi_vault.vault_kv2_get', 'spark-lab/grafana', engine_mount_point='kv').secret.admin_password }}
+
+# 2. Token from an earlier vault_login (fastest: one login per run, as in 19-vault-integration.yml)
+hf_token: >-
+  {{ lookup('community.hashi_vault.vault_kv2_get', 'spark-lab/huggingface', engine_mount_point='kv',
+            auth_method='token', token=hostvars.localhost.vault_token).secret.token }}
+```
+
+```bash
+# env wiring for pattern 1
+export ANSIBLE_HASHI_VAULT_URL=$VAULT_ADDR
+export ANSIBLE_HASHI_VAULT_CA_CERT=$VAULT_CACERT
+export ANSIBLE_HASHI_VAULT_AUTH_METHOD=approle
+source .cache/approle.env
+```
+
+> Lookups run **on the control node**, once per host that templates them. With 50 hosts, pattern 1 logs in 50 times. Log in once (`vault_login`), keep the token in `hostvars['localhost']`, and pass it as in pattern 2.
+
+### 3.3 ansible-vault keys from HashiCorp Vault
+
+For the few values that must live in git encrypted (e.g. a bootstrap sudo password for `-K`-less runs):
+
+```bash
+# lab/tools/vault-pass.sh
+#!/usr/bin/env bash
+# ansible-vault password source backed by HashiCorp Vault.
+#   ansible.cfg:  vault_password_file = ./tools/vault-pass.sh
+# Needs VAULT_ADDR, VAULT_CACERT and a token (VAULT_TOKEN or ~/.vault-token) that can
+# read kv/data/spark-lab/ansible-vault. Nothing is ever written to disk.
+set -euo pipefail
+: "${VAULT_ADDR:?set VAULT_ADDR}"
+exec vault kv get -field=password kv/spark-lab/ansible-vault
+```
+
+```bash
+vault kv put kv/spark-lab/ansible-vault password="$(openssl rand -base64 32)"
+ansible-vault encrypt_string --vault-password-file tools/vault-pass.sh 'S3cr3t!' --name ansible_become_password \
+  >> inventory/group_vars/spark.vault.yml
+ansible-playbook playbooks/01-baseline.yml --vault-password-file tools/vault-pass.sh
+```
+
+### 3.4 SSH certificates: move sshd to trust the CA, then retire static keys
+
+`08-vault.yml` (play 3) already installed `TrustedUserCAKeys` on every Spark. Test it before removing anything:
+
+```bash
+# lab/tools/vault-ssh-cert.sh
+#!/usr/bin/env bash
+# Get a short-lived SSH user certificate from Vault's SSH CA for the lab user.
+# OpenSSH (and therefore Ansible) automatically presents <key>-cert.pub next to <key>.
+#   tools/vault-ssh-cert.sh [~/.ssh/id_ed25519] [nvidia]
+set -euo pipefail
+KEY=${1:-$HOME/.ssh/id_ed25519}
+PRINCIPAL=${2:-nvidia}
+: "${VAULT_ADDR:?set VAULT_ADDR}"
+vault write -field=signed_key ssh-client-signer/sign/ansible \
+  public_key=@"${KEY}.pub" valid_principals="$PRINCIPAL" > "${KEY}-cert.pub"
+chmod 0644 "${KEY}-cert.pub"
+ssh-keygen -L -f "${KEY}-cert.pub" | sed -n '1,12p'
+```
+
+```bash
+tools/vault-ssh-cert.sh ~/.ssh/id_ed25519 nvidia
+ssh-keygen -L -f ~/.ssh/id_ed25519-cert.pub | grep -E 'Valid|Principals'
+ssh -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519 nvidia@10.10.10.12 'echo cert login OK'
+# Only after cert login works from TWO places: remove the static key from authorized_keys
+```
+
+Break-glass: keep console access (monitor and keyboard) and one static key in a sealed envelope. If Vault is down, certificate logins stop once the current certs expire.
 
 ---
 
-## 6. Comparative Secrets Management Matrix
+## 4. Integrations
 
-| Feature | Plaintext Variables | Native `ansible-vault` | HashiCorp Vault AppRole |
-| :--- | :--- | :--- | :--- |
-| **Storage Location** | Git / Hostvars | Encrypted Git files | **Centralized Vault Cluster** |
-| **Decryption Key** | None (Exposed) | Shared passphrase | **Ephemeral AppRole Token** |
-| **Secret Rotation** | Manual edits | Manual re-encryption | **Automated Dynamic Rotation** |
-| **Access Auditing** | None | Git commit log only | **Full cryptographic audit log** |
-| **Dynamic Secrets** | Impossible | Impossible | **Native (DB/Cloud short-lived)**|
+| Consumer | Pattern |
+|---|---|
+| AWX (Volume 20) | Credential type **HashiCorp Vault Secret Lookup** (AppRole) + **HashiCorp Vault Signed SSH**, so AWX never stores the NGC key or a private SSH key |
+| k3s pods (Volume 17) | Vault Agent Injector or External Secrets; a Kubernetes auth method replaces AppRole for pods |
+| Grafana / Prometheus (Volume 09) | `gpu_telemetry_grafana_admin_password` via lookup |
+| CI (Volume 21) | A CI-specific AppRole with a *read-only, lint-only* policy, or no Vault access at all |
 
----
+## 5. Troubleshooting & diagnostics
 
-## 7. SRE Diagnostics & Troubleshooting Playbook
+| Symptom | Diagnose | Fix |
+|---|---|---|
+| `invalid role or secret ID` | `vault read auth/approle/role/ansible` (TTL, num_uses) | secret_id expired (24 h); re-issue |
+| `permission denied` reading a KV path | `vault token capabilities <token> kv/data/spark-lab/ngc`; audit log | Policy uses `kv/spark-lab/*` instead of `kv/data/spark-lab/*` |
+| `The 'hvac' python library is required` | `python -c 'import hvac'` in the **same** env (or EE) | `pip install hvac`; rebuild the EE (Volume 05) |
+| `certificate verify failed` | `VAULT_CACERT` / `ANSIBLE_HASHI_VAULT_CA_CERT` set? | Point at `.cache/spark-lab-ca.crt` |
+| Lookups slow / Vault audit log flooded | Count login lines in the audit log per run | Log in once (§3.2 pattern 2) |
+| SSH cert rejected: `Certificate invalid: name is not a listed principal` | `ssh-keygen -L` → Principals | `valid_principals` must equal the login user |
+| SSH cert rejected: `no matching CA` | `sshd -T \| grep trustedusercakeys`; `ssh-keygen -lf /etc/ssh/trusted-user-ca-keys.pem` | Re-run `08-vault.yml` play 3; the CA was regenerated? |
+| Secret appears in `ansible.log` | `grep -n nvapi .cache/ansible.log` | A task without `no_log`. Fix it and rotate the secret (treat it as leaked) |
 
-```
-+---------------------------------------------------------------------------------------------------+
-|                        HASHICORP VAULT SRE DIAGNOSTIC MATRIX                                      |
-+------------------------------------+--------------------------+-----------------------------------+
-| Symptom / Failure Mode             | Root Cause Hypothesis    | Triage & Remediation Command      |
-+------------------------------------+--------------------------+-----------------------------------+
-| Vault returns HTTP 503:            | Vault cluster is sealed; | Check Vault status:               |
-| "Vault is sealed".                 | unseal keys not applied. | `vault status`                    |
-|                                    |                          | Apply 3 unseal keys or check KMS. |
-+------------------------------------+--------------------------+-----------------------------------+
-| `permission denied`: AppRole login | SecretID expired or      | Generate new SecretID in Vault:   |
-| rejected.                          | client IP outside CIDR.  | `vault write -f auth/approle/     |
-|                                    |                          |  role/ai-provisioner/secret-id`   |
-+------------------------------------+--------------------------+-----------------------------------+
-| Secrets leak in Ansible logs:      | Task lacked `no_log: true`| Add `no_log: true` to every task  |
-| password displayed in stdout.      | directive.               | that registers or sets sensitive  |
-|                                    |                          | variables.                        |
-+------------------------------------+--------------------------+-----------------------------------+
-```
+## 6. Validation
 
----
-
-## 8. Verification & Architectural Synthesis Checklist
-
-- [ ] **AppRole Authentication Active:** Control node authenticates using decoupled RoleID/SecretID.
-- [ ] **`no_log: true` Enforced:** All secret registration tasks strictly suppressed from console logs.
-- [ ] **Dynamic Credentials Leveraged:** Ephemeral short-lived credentials used for database operations.
-- [ ] **Vault Cluster Unsealed:** HA Vault cluster confirmed operational with Cloud KMS auto-unseal.
-- [ ] **Audit Trail Validated:** Every credential retrieval recorded in Vault's structured audit log.
+- [ ] `grep -R "nvapi-" 01\ Ansible/` finds nothing; `.cache/` is git-ignored.
+- [ ] An automation run succeeds with only `approle.env` sourced, and **fails** after the secret_id TTL.
+- [ ] SSH login with a Vault certificate works; the cert expires after 30 min.
+- [ ] The Vault audit log shows the AppRole identity reading `kv/data/spark-lab/ngc`.

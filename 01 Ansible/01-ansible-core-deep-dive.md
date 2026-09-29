@@ -184,6 +184,13 @@ Each physical QSFP cage shows up as **two** netdevs (`enp1s0f1np1` and `enP2p1s0
 #   CX-7 fabric (QSFP, direct cable)          : 192.168.100.0/24 + 192.168.101.0/24
 all:
   children:
+    # The control node itself, declared explicitly so `--limit localhost` works
+    # and it gets a sane Python (implicit localhost can't be targeted by --limit).
+    control:
+      hosts:
+        localhost:
+          ansible_connection: local
+          ansible_python_interpreter: "{{ ansible_playbook_python }}"
     spark:
       hosts:
         spark-01:
@@ -619,6 +626,7 @@ The `spark_baseline` role installs the tooling you'll need in every later volume
   ansible.builtin.command: apt-mark showhold
   register: spark_baseline_holds
   changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
   when: spark_baseline_hold_nvidia | bool
 
 - name: Hold NVIDIA driver stack (DGX Dashboard / planned upgrades only)
@@ -626,6 +634,17 @@ The `spark_baseline` role installs the tooling you'll need in every later volume
   loop: "{{ spark_baseline_nvidia_pkgs | difference(spark_baseline_holds.stdout_lines) }}"
   changed_when: true
   when: spark_baseline_hold_nvidia | bool
+
+# `command` tasks are SKIPPED (not "changed") under --check, so without this a
+# missing hold would be invisible to drift detection (Volume 22).
+- name: Report missing holds as drift in check mode
+  ansible.builtin.debug:
+    msg: "Would hold: {{ spark_baseline_nvidia_pkgs | difference(spark_baseline_holds.stdout_lines) }}"
+  changed_when: true
+  when:
+    - ansible_check_mode
+    - spark_baseline_hold_nvidia | bool
+    - spark_baseline_nvidia_pkgs | difference(spark_baseline_holds.stdout_lines) | length > 0
 ```
 
 ```bash

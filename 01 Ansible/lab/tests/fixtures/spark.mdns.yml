@@ -1,0 +1,4 @@
+---
+plugin: spark_mdns
+from_file: tests/fixtures/avahi-browse.txt
+interface: enp0s31f6

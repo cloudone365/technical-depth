@@ -30,6 +30,7 @@
   ansible.builtin.command: k3s --version
   register: k3s_cluster_installed
   changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
   failed_when: false
 
 - name: Download installer
@@ -66,6 +67,7 @@
   retries: 30
   delay: 5
   changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
   when: k3s_cluster_role == 'server'
 
 - name: Read join token
@@ -102,6 +104,7 @@
   ansible.builtin.command: >-
     k3s kubectl wait --for=condition=Ready node --all --timeout=180s
   changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
   run_once: true
   delegate_to: "{{ groups[k3s_cluster_server_group][0] }}"
 
@@ -110,6 +113,7 @@
     grep -A2 'runtimes."nvidia"' /var/lib/rancher/k3s/agent/etc/containerd/config.toml
   register: k3s_cluster_rt
   changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
   failed_when: k3s_cluster_rt.rc != 0
 
 - name: Fetch kubeconfig to the control node

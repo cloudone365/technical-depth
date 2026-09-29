@@ -99,6 +99,7 @@ Use the **same cage number** on both Sparks. It keeps the config symmetric, and 
   ansible.builtin.command: ibdev2netdev
   register: cx7_fabric_ibdev
   changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
 
 # "rocep1s0f1 port 1 ==> enp1s0f1np1 (Up)"  ->  {"enp1s0f1np1": {"rdma_dev": "rocep1s0f1", "state": "Up"}}
 - name: Parse ibdev2netdev into a dict keyed by netdev
@@ -137,6 +138,7 @@ Use the **same cage number** on both Sparks. It keeps the config symmetric, and 
 - name: Validate netplan syntax before applying  # noqa: no-handler (must run before apply, in order)
   ansible.builtin.command: netplan generate
   changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
   when: cx7_fabric_netplan is changed
 
 - name: Apply netplan  # noqa: no-handler (later verify tasks need the links up in this run)
@@ -151,10 +153,49 @@ Use the **same cage number** on both Sparks. It keeps the config symmetric, and 
   retries: 15
   delay: 2
   changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
   failed_when: false
   loop: "{{ cx7_fabric_interfaces }}"
   loop_control:
     label: "{{ item.name }}"
+
+# ---------------------------------------------------------------- runtime reconciliation
+# The netplan FILE can be perfect while the RUNNING state is not (someone ran
+# `ip link set ... mtu 1500`). Compare live MTU with desired and re-apply.
+- name: Read live MTU per interface
+  ansible.builtin.command: "cat /sys/class/net/{{ item.name }}/mtu"
+  register: cx7_fabric_live_mtu
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  loop: "{{ cx7_fabric_interfaces }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Interfaces whose runtime MTU differs from desired
+  ansible.builtin.set_fact:
+    cx7_fabric_runtime_drift: >-
+      {%- set bad = [] -%}
+      {%- for r in cx7_fabric_live_mtu.results -%}
+        {%- if (r.stdout | int) != (r.item.mtu | default(9000) | int) -%}
+          {%- set _ = bad.append(r.item.name) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ bad }}
+
+- name: Re-apply netplan to fix runtime drift
+  ansible.builtin.command: netplan apply
+  changed_when: true
+  when:
+    - cx7_fabric_runtime_drift | length > 0
+    - not ansible_check_mode
+
+- name: Report runtime drift in check mode
+  ansible.builtin.debug:
+    msg: "Runtime MTU drift on {{ cx7_fabric_runtime_drift }} — netplan apply would fix it"
+  changed_when: true
+  when:
+    - cx7_fabric_runtime_drift | length > 0
+    - ansible_check_mode
 
 # ---------------------------------------------------------------- verify
 - name: Read link speed / MTU / RDMA port state
@@ -169,6 +210,7 @@ Use the **same cage number** on both Sparks. It keeps the config symmetric, and 
     executable: /bin/bash
   register: cx7_fabric_link
   changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
   loop: "{{ cx7_fabric_interfaces }}"
   loop_control:
     label: "{{ item.name }}"
@@ -214,6 +256,7 @@ Use the **same cage number** on both Sparks. It keeps the config symmetric, and 
     executable: /bin/bash
   register: cx7_fabric_gid
   changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
   failed_when: false
   loop: "{{ cx7_fabric_interfaces }}"
   loop_control:
@@ -249,6 +292,7 @@ Use the **same cage number** on both Sparks. It keeps the config symmetric, and 
   loop_control:
     label: "{{ item.dev }} -> {{ item.peer }} ({{ item.ip }})"
   changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
   when: cx7_fabric_verify_peers | bool
 ```
 

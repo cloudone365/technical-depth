@@ -1,226 +1,279 @@
-# Volume 17: NVIDIA GPU Operator & Network Operator Helm Automation
+# Volume 17 — NVIDIA GPU Operator on k3s/DGX Spark: Host-Driver Mode, Time-Slicing, Validation & Secrets for Pods
 
-```
-====================================================================================================
-MODULE 01: ANSIBLE & BARE-METAL AI INFRASTRUCTURE AUTOMATION
-VOLUME 17: GPU Operator Helm Values, Driver DaemonSets, GFD Node Labeling & Network Operator
-====================================================================================================
-```
+> **Module 01 · Part IV — Platforms** · Prev: [16 k3s](16-kubernetes-bare-metal-bootstrap-kubespray.md) · Next: [18 Slurm](18-slurm-cluster-orchestration-and-cgroup-gpus.md)
 
----
-
-## 1. Executive Intuition: The Containerized Driver Architecture
-
-In enterprise Kubernetes clusters, manually managing GPU drivers, CUDA libraries, and monitoring daemons across worker nodes creates configuration drift. The **NVIDIA GPU Operator** automates the entire GPU lifecycle declaratively using Kubernetes Custom Resources and Helm:
-
-Instead of installing packages directly into the host OS, the GPU Operator deploys a coordinated set of DaemonSets:
-1. **NVIDIA Driver Container:** Compiles or loads pre-compiled kernel modules (`nvidia.ko`, `nvidia-uvm.ko`) into the host kernel from inside a privileged container.
-2. **NVIDIA Container Toolkit Container:** Injects `nvidia-ctk` and configures the host container runtime.
-3. **NVIDIA Device Plugin:** Advertises `nvidia.com/gpu` allocatable resources to the Kube-API server.
-4. **NVIDIA GPU Feature Discovery (GFD):** Auto-discovers GPU architecture and applies labels (e.g., `nvidia.com/gpu.family: hopper`, `nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3`).
-5. **NVIDIA DCGM Exporter:** Exposes Prometheus metrics on port 9400.
-6. **NVIDIA Fabric Manager DaemonSet:** Configures NVSwitch crossbars for SXM nodes.
-
-```
-+-----------------------------------------------------------------------------------------+
-|                        NVIDIA GPU OPERATOR ARCHITECTURE                                 |
-+-----------------------------------------------------------------------------------------+
-| Ansible Control Node                                                                    |
-|   |-- Deploys Helm Chart: nvidia/gpu-operator                                           |
-|   +-- Generates Values File: custom-gpu-operator-values.yaml                            |
-|                                                                                         |
-| Kubernetes Cluster Target                                                               |
-|   |-- ClusterPolicy CRD: gpu-cluster-policy                                             |
-|   |     |-- daemonset/nvidia-driver-daemonset (Loads kmods into Linux kernel)           |
-|   |     |-- daemonset/nvidia-container-toolkit-daemonset (Configures containerd CDI)    |
-|   |     |-- daemonset/nvidia-device-plugin-daemonset (Exposes nvidia.com/gpu: 8)        |
-|   |     |-- daemonset/gpu-feature-discovery (Applies node labels for scheduling)        |
-|   |     +-- daemonset/nvidia-dcgm-exporter (Prometheus port 9400)                       |
-+-----------------------------------------------------------------------------------------+
-```
-
-Automating the GPU Operator via Ansible guarantees reproducible, zero-touch deployment across thousands of nodes.
+| | |
+|---|---|
+| **You will build** | The GPU Operator deployed by Ansible with Helm in **host-driver mode** (DGX OS owns the driver and toolkit), NFD/GFD labels, a time-sliced GB10 advertised as N `nvidia.com/gpu`, an automated validator gate, and a GPU smoke pod |
+| **Hardware** | k3s from Volume 16 |
+| **Time** | 45 min |
+| **Risk** | Low. `atomic: true` rolls back a failed Helm upgrade |
 
 ---
 
-## 2. Lineage & Evolution of Kubernetes GPU Provisioning
+## 1. What the operator does, and what we switch off
 
+| Operator component | Default job | On DGX Spark |
+|---|---|---|
+| `driver` DaemonSet | Builds and loads the NVIDIA driver in a container | **Disabled.** DGX OS ships and updates the driver; two owners would fight |
+| `toolkit` DaemonSet | Installs nvidia-container-toolkit and edits containerd config | **Disabled.** The host toolkit exists and k3s already registered the `nvidia` runtime |
+| `devicePlugin` | Advertises `nvidia.com/gpu` to kubelet | **On**, with a time-slicing config |
+| `gfd` + `nfd` | Labels nodes (`nvidia.com/gpu.product`, `.memory`, `.compute.major/minor`, …) | On |
+| `dcgmExporter` | Metrics | Optional (Volume 09 §4.2 — check GB10 support) |
+| `migManager` | MIG partitioning | **Off.** GB10 has no MIG |
+| `validator` | Proves driver + toolkit + CUDA workloads function | On, and our Ansible gate waits for it |
+
+```mermaid
+flowchart LR
+  subgraph HOST["DGX OS (owned by Volumes 07–08)"]
+    DRV[driver 580.x] --- TK[nvidia-container-toolkit] --- RT["k3s containerd<br/>runtime 'nvidia'"]
+  end
+  subgraph OP["namespace gpu-operator (owned by this volume)"]
+    NFD[node-feature-discovery] --> GFD[gpu-feature-discovery]
+    DP["device-plugin<br/>time-slicing: 4 replicas"]
+    VAL["operator-validator"]
+  end
+  RT --> DP
+  DRV --> VAL
+  DP -->|"allocatable nvidia.com/gpu: 4"| K["kubelet / scheduler"]
+  GFD -->|labels| K
 ```
-   [2017: Static Kubernetes Device Plugin]
-                 |
-           (Single DaemonSet registering GPUs; required manual host driver pre-installation)
-                 |
-   [2019: NVIDIA GPU Operator v1.0]
-                 |
-           (Helm-driven operator automating drivers, toolkit, and device plugin)
-                 |
-   [2021: NVIDIA Network Operator]
-                 |
-           (Automates MOFED, SR-IOV device plugin, and Multus CNI for RDMA fabrics)
-                 |
-   [2024: Dynamic Resource Allocation (DRA) & CDI Standard]
-                 |
-           (K8s DRA replacing static integer counting with fine-grained GPU capability claims)
-```
+
+## 2. Time-slicing on a UMA GPU: what you get and what you don't
+
+| | Time-slicing (this lab) | MIG (not on GB10) | MPS |
+|---|---|---|---|
+| Isolation of compute | None (context switching) | Hardware | Partial |
+| Isolation of memory | **None.** All pods share the unified pool with the OS | Hardware | Limit per client (`CUDA_MPS_PINNED_DEVICE_MEM_LIMIT`) |
+| Fault isolation | None: one bad kernel/Xid can affect all | Yes | No |
+| Good for | Dev notebooks, small inference services, CI jobs | — | Many small inference processes |
+
+`failRequestsGreaterThanOne: true` makes a pod asking for `nvidia.com/gpu: 2` fail rather than silently receive two slices of the same GPU.
 
 ---
 
-## 3. First-Principles Mathematics: Host Driver vs. Containerized Driver
-
-When deploying the GPU Operator, infrastructure architects must choose between two distinct execution models:
-
-```
-+-----------------------------------------------------------------------------------------+
-|                  HOST-INSTALLED DRIVER VS. CONTAINERIZED DRIVER                         |
-+-----------------------+----------------------------------+------------------------------+
-| Attribute             | Host-Installed Driver            | Operator Driver Container    |
-+-----------------------+----------------------------------+------------------------------+
-| Driver Source         | OS Package Manager (apt / dnf)   | Privileged Docker Container  |
-| Node Reboot Required  | Yes (on driver upgrade)          | No (Kmod unloaded/reloaded)  |
-| Boot Time             | Instantaneous (~5 seconds)       | Delayed (pulls 2GB image)    |
-| Hermetic Upgrades     | Node-by-node maintenance drain   | Declarative Helm values patch|
-| Secure Boot Support   | Standard MOK signing             | Requires custom secret certs |
-| Production Fit        | **Mission-Critical Pre-Training**| **Cloud-Native / Dynamic**   |
-+-----------------------+----------------------------------+------------------------------+
-```
-
-> **Production Recommendation:** For foundation model pre-training clusters running tightly coupled InfiniBand/NVSwitch fabrics, deploy **Host-Installed Drivers** (configured via Volume 07) and configure the GPU Operator with `driver.enabled=false`. This eliminates container startup delays and ensures 100% deterministic kernel module loading at system boot.
-
----
-
-## 4. Concrete Production Lab: Automated GPU Operator Helm Deployment Playbook
+## 3. The role
 
 ```yaml
+# lab/roles/gpu_operator/defaults/main.yml
 ---
-# playbook: deploy_gpu_operator.yml
-# Provisions NVIDIA GPU Operator via Helm with customized cluster policy
-- name: Orchestrate NVIDIA GPU Operator via Helm
-  hosts: kube_control_plane[0]
-  become: true
-  gather_facts: false
-  tasks:
-    - name: 1. Add NVIDIA Official Helm Repository
-      kubernetes.core.helm_repository:
-        name: nvidia
-        repo_url: "https://helm.ngc.nvidia.com/nvidia"
+gpu_operator_chart_version: v25.3.0        # pin; check `helm search repo nvidia/gpu-operator -l`
+gpu_operator_namespace: gpu-operator
+gpu_operator_kubeconfig: "{{ k3s_cluster_kubeconfig_local | default(playbook_dir ~ '/../.cache/kubeconfig-spark-lab.yaml') }}"
 
-    - name: 2. Deploy Tuned GPU Operator Values Template
-      ansible.builtin.copy:
-        dest: /tmp/gpu-operator-values.yaml
-        content: |
-          # Production GPU Operator Values for DGX/HGX SuperPOD
-          operator:
-            defaultRuntime: containerd
+# DGX OS already provides the driver and container toolkit — the operator must
+# NOT try to install them (it would fight DGX OS updates).
+gpu_operator_values:
+  driver:
+    enabled: false
+  toolkit:
+    enabled: false
+  operator:
+    defaultRuntime: containerd
+  # k3s keeps containerd config/socket in non-standard paths
+  cdi:
+    enabled: false
+  devicePlugin:
+    config:
+      name: time-slicing-config
+      default: any
+  dcgmExporter:
+    enabled: "{{ gpu_operator_dcgm_exporter | default(false) }}"
+  migManager:
+    enabled: false        # GB10 has no MIG
+  nfd:
+    enabled: true
 
-          # Disable driver container if host driver pre-installed (Recommended for SXM)
-          driver:
-            enabled: false
+# Time-slicing: advertise N logical GPUs per physical GB10 (no memory isolation!)
+gpu_operator_timeslice_replicas: 4
+```
 
-          toolkit:
-            enabled: true
+```yaml
+# lab/roles/gpu_operator/tasks/main.yml
+---
+# Runs on the control node (localhost) against the k3s API.
+- name: Add NVIDIA Helm repo
+  kubernetes.core.helm_repository:
+    name: nvidia
+    repo_url: https://helm.ngc.nvidia.com/nvidia
 
-          devicePlugin:
-            enabled: true
-            arguments:
-              - "--pass-device-specs=true"
+- name: Create namespace (privileged PSA — operator pods need host access)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ gpu_operator_kubeconfig }}"
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ gpu_operator_namespace }}"
+        labels:
+          pod-security.kubernetes.io/enforce: privileged
 
-          dcgmExporter:
-            enabled: true
-            serviceMonitor:
-              enabled: true
+- name: Time-slicing ConfigMap
+  kubernetes.core.k8s:
+    kubeconfig: "{{ gpu_operator_kubeconfig }}"
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: time-slicing-config
+        namespace: "{{ gpu_operator_namespace }}"
+      data:
+        any: |-
+          version: v1
+          flags:
+            migStrategy: none
+          sharing:
+            timeSlicing:
+              renameByDefault: false
+              failRequestsGreaterThanOne: true
+              resources:
+                - name: nvidia.com/gpu
+                  replicas: {{ gpu_operator_timeslice_replicas }}
 
-          gfd:
-            enabled: true
+- name: Install / upgrade GPU Operator
+  kubernetes.core.helm:
+    kubeconfig: "{{ gpu_operator_kubeconfig }}"
+    name: gpu-operator
+    chart_ref: nvidia/gpu-operator
+    chart_version: "{{ gpu_operator_chart_version }}"
+    release_namespace: "{{ gpu_operator_namespace }}"
+    values: "{{ gpu_operator_values }}"
+    wait: true
+    wait_timeout: 15m
+    atomic: true            # roll back automatically if pods never go Ready
 
-          # Enable Fabric Manager for SXM NVSwitches
-          fabricManager:
-            enabled: false  # Pre-installed on host via Volume 07
+- name: Wait for validator to succeed
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ gpu_operator_kubeconfig }}"
+    kind: Pod
+    namespace: "{{ gpu_operator_namespace }}"
+    label_selectors: [app=nvidia-operator-validator]
+  register: gpu_operator_validator
+  until: >-
+    gpu_operator_validator.resources | length > 0 and
+    gpu_operator_validator.resources | map(attribute='status.phase') | unique == ['Running']
+  retries: 40
+  delay: 15
 
-          # Enable GPUDirect Storage (GDS) Driver
-          gds:
-            enabled: true
+- name: Read allocatable GPUs per node
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ gpu_operator_kubeconfig }}"
+    kind: Node
+  register: gpu_operator_nodes
 
-          node-feature-discovery:
-            worker:
-              tolerations:
-                - key: "node-role.kubernetes.io/master"
-                  operator: "Exists"
-                  effect: "NoSchedule"
+- name: Assert every node advertises time-sliced GPUs
+  ansible.builtin.assert:
+    that: (item.status.allocatable['nvidia.com/gpu'] | default('0') | int) == gpu_operator_timeslice_replicas
+    fail_msg: "{{ item.metadata.name }} allocatable nvidia.com/gpu={{ item.status.allocatable['nvidia.com/gpu'] | default('0') }}"
+    success_msg: "{{ item.metadata.name }} advertises {{ gpu_operator_timeslice_replicas }} GPU slices"
+  loop: "{{ gpu_operator_nodes.resources }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+```
 
-    - name: 3. Install or Upgrade NVIDIA GPU Operator via Helm
-      kubernetes.core.helm:
-        name: gpu-operator
-        chart_ref: nvidia/gpu-operator
-        release_namespace: gpu-operator
-        create_namespace: true
-        values_files:
-          - /tmp/gpu-operator-values.yaml
-        state: present
-        wait: true
-        timeout: 10m
+Key automation moves:
 
-    - name: 4. Wait for Node GPU Capacity Registration
-      kubernetes.core.k8s_info:
-        kind: Node
-      register: node_info
-      retries: 20
-      delay: 15
-      until: >
-        node_info.resources |
-        selectattr('status.allocatable', 'defined') |
-        selectattr('status.allocatable["nvidia.com/gpu"]', 'defined') |
-        list | length > 0
+- **`atomic: true` + `wait: true`.** A broken values change rolls back instead of leaving half a DaemonSet set.
+- **Validator gate.** The play doesn't finish until `nvidia-operator-validator` pods are Running, so "Helm said deployed" isn't mistaken for "GPUs work".
+- **Allocatable assertion.** Every node must advertise exactly `gpu_operator_timeslice_replicas` GPUs, which catches the time-slicing ConfigMap not being picked up.
 
-    - name: 5. Display Cluster Allocatable GPU Inventory
-      ansible.builtin.debug:
-        msg: "Node {{ item.metadata.name }} has {{ item.status.allocatable['nvidia.com/gpu'] }} allocatable GPUs"
-      loop: "{{ node_info.resources }}"
-      when: item.status.allocatable['nvidia.com/gpu'] is defined
+---
+
+## 4. Hands-on
+
+```bash
+cd "01 Ansible/lab"
+ansible-playbook playbooks/06-gpu-operator.yml
+export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
+kubectl -n gpu-operator get pods
+kubectl get node spark-01 -o json | jq '.status.allocatable["nvidia.com/gpu"], (.metadata.labels | with_entries(select(.key|startswith("nvidia.com/gpu"))))'
+kubectl logs cuda-smoke     # → GPU 0: NVIDIA GB10 (UUID: GPU-…)
+```
+
+### 4.1 Four pods, one GPU
+
+```yaml
+# ts-demo.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: ts-demo }
+spec:
+  replicas: 4
+  selector: { matchLabels: { app: ts-demo } }
+  template:
+    metadata: { labels: { app: ts-demo } }
+    spec:
+      nodeSelector: { kubernetes.io/hostname: spark-01 }
+      containers:
+        - name: burn
+          image: nvcr.io/nvidia/pytorch:25.11-py3
+          command: [python, -c, "import torch,time;a=torch.randn(4096,4096,device='cuda');\nwhile True: a=a@a; a=a/a.norm(); torch.cuda.synchronize()"]
+          resources:
+            limits: { nvidia.com/gpu: 1, memory: 8Gi }     # memory limit matters on UMA!
+```
+
+```bash
+kubectl apply -f ts-demo.yaml && kubectl get pods -l app=ts-demo -o wide
+kubectl scale deploy ts-demo --replicas=5     # 5th pod stays Pending: only 4 slices per node
+ssh nvidia@10.10.10.11 nvidia-smi              # 4 processes sharing one GPU
+```
+
+> **Always set a `memory` limit on GPU pods on a Spark.** Kubernetes can't account for GPU memory on a time-sliced UMA GPU, but the container memory limit plus the kubelet reserve from Volume 16 bound how much of the shared pool a pod's host-side allocations take. Whether CUDA allocations count against the pod's cgroup is something to verify on your node with the probe from Volume 08. Treat it as an experiment, not an assumption.
+
+### 4.2 Secrets for GPU workloads (NGC, Hugging Face) from Vault
+
+Two production-grade options (details in Volume 19):
+
+```yaml
+# Option A — Vault Agent Injector annotations on the pod
+metadata:
+  annotations:
+    vault.hashicorp.com/agent-inject: "true"
+    vault.hashicorp.com/role: "gpu-workloads"
+    vault.hashicorp.com/agent-inject-secret-hf: "kv/data/spark-lab/huggingface"
+    vault.hashicorp.com/agent-inject-template-hf: |
+      {{- with secret "kv/data/spark-lab/huggingface" -}}export HF_TOKEN={{ .Data.data.token }}{{- end }}
+```
+
+```yaml
+# Option B — External Secrets Operator → a normal k8s Secret
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata: { name: hf-token }
+spec:
+  secretStoreRef: { name: vault-spark, kind: ClusterSecretStore }
+  target: { name: hf-token }
+  data:
+    - secretKey: HF_TOKEN
+      remoteRef: { key: kv/spark-lab/huggingface, property: token }
 ```
 
 ---
 
-## 5. Comparative Orchestration Matrix
+## 5. Integrations
 
-| Capability | Bare-Metal Scripting | Standalone DaemonSets | NVIDIA GPU Operator |
-| :--- | :--- | :--- | :--- |
-| **Lifecycle Management** | Manual upgrades | Manual YAML edits | **Automated Helm Rollout** |
-| **Hardware Labeling** | Manual `kubectl label`| None | **Automated GFD Discovery** |
-| **MIG Dynamic Slicing** | Manual CLI slicing | Not supported | **Automated MIG Config CRD** |
-| **Prometheus Exporter** | Separate daemon | Separate DaemonSet | **Integrated ServiceMonitor**|
-| **Multi-Cluster Uniformity**| Low | Moderate | **100% Declarative Policy** |
+| System | Note |
+|---|---|
+| DGX OS upgrades (Volume 07) | After a driver update, restart the device-plugin and validator pods (or reboot); the upgrade playbook's drain/uncordon covers it |
+| Telemetry (Volume 09) | Choose either host dcgm-exporter **or** the operator's, not both |
+| Multus/RDMA (Volume 13) | Same pod requests `nvidia.com/gpu` + `rdma/rdma_shared_cx7` |
+| AWX | Can run the Helm role from a job template (the EE includes `kubernetes.core` + helm) |
 
----
+## 6. Troubleshooting & diagnostics
 
-## 6. SRE Diagnostics & Troubleshooting Playbook
+| Symptom | Diagnose | Fix |
+|---|---|---|
+| Validator stuck `Init` | `kubectl -n gpu-operator logs <validator> -c driver-validation` | Host driver not found: make sure `driver.enabled=false` (operator expects the host driver) and `nvidia-smi` works on the host |
+| `toolkit-validation` fails | Container logs | k3s containerd has no `nvidia` runtime → restart k3s after installing the toolkit (Volume 16) |
+| Allocatable `nvidia.com/gpu` = 1, not 4 | `kubectl -n gpu-operator get cm time-slicing-config -o yaml`; device-plugin logs | ConfigMap name/key must match `devicePlugin.config.name/default`; restart the device-plugin DS |
+| Pods `Pending: Insufficient nvidia.com/gpu` | `kubectl describe node` | All slices in use; or `failRequestsGreaterThanOne` rejected a request for > 1 |
+| `ImagePullBackOff` on operator pods | `describe pod` | Check the chart version supports arm64 for every component; pin a release that does |
+| Helm upgrade rolled back (`atomic`) | `helm -n gpu-operator history gpu-operator` | Read `helm status`; fix values; re-run |
+| CUDA OOM in one pod when others run | `free -g` on the host | Time-slicing shares memory. Size models to fit **together**, or run fewer replicas |
 
-```
-+---------------------------------------------------------------------------------------------------+
-|                        GPU OPERATOR SRE DIAGNOSTIC MATRIX                                         |
-+------------------------------------+--------------------------+-----------------------------------+
-| Symptom / Failure Mode             | Root Cause Hypothesis    | Triage & Remediation Command      |
-+------------------------------------+--------------------------+-----------------------------------+
-| Driver DaemonSet in CrashLoopBackOff| Driver container trying  | Inspect pod logs:                 |
-| with "kernel module already loaded"| to load kmod when host   | `kubectl logs -n gpu-operator     |
-|                                    | driver already active.   |  -l app=nvidia-driver-daemonset`  |
-|                                    |                          | Set `driver.enabled=false`.       |
-+------------------------------------+--------------------------+-----------------------------------+
-| Nodes report 0 allocatable GPUs in | Device Plugin pod hung   | Restart Device Plugin DaemonSet:  |
-| `kubectl describe node`.           | or cannot access CDI.    | `kubectl rollout restart ds       |
-|                                    |                          |  -n gpu-operator nvidia-device-..`|
-+------------------------------------+--------------------------+-----------------------------------+
-| GFD fails to label nodes:          | Node Feature Discovery   | Check NFD worker daemonset:       |
-| `nvidia.com/gpu.product` missing.  | (NFD) worker not running.| `kubectl get ds -n gpu-operator   |
-|                                    |                          |  -l app.kubernetes.io/name=node-..`|
-+------------------------------------+--------------------------+-----------------------------------+
-```
+## 7. Validation
 
----
-
-## 7. Verification & Architectural Synthesis Checklist
-
-- [ ] **Helm Release Succeeded:** `helm status -n gpu-operator gpu-operator` reports `STATUS: deployed`.
-- [ ] **All DaemonSets Ready:** Device plugin, GFD, and DCGM exporter report 100% desired/ready pods.
-- [ ] **Node Allocatable Validated:** `kubectl get nodes -o json` confirms `nvidia.com/gpu: 8` on every GPU worker.
-- [ ] **GFD Labels Applied:** Nodes labeled with exact GPU architecture (`nvidia.com/gpu.family: hopper`).
-- [ ] **Prometheus Scraping Active:** ServiceMonitor scrapes GPU metrics into cluster Prometheus.
+- [ ] `06-gpu-operator.yml` finishes with the validator Running and the allocatable assertion green.
+- [ ] 4 pods share one GB10; the 5th stays Pending.
+- [ ] NFD/GFD labels present (`nvidia.com/gpu.product`, `nvidia.com/gpu.compute.major=12`).
+- [ ] A pod receives `HF_TOKEN` from Vault by one of the §4.2 routes.

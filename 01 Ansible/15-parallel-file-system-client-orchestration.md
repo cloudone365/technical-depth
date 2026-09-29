@@ -134,6 +134,7 @@ nfs_rdma_tcp_fallback: true
       ansible.builtin.command: cat /proc/fs/nfsd/portlist
       register: nfs_rdma_portlist
       changed_when: false
+      check_mode: false        # read-only probe: must also run under --check (drift detection)
       failed_when: ("rdma " ~ nfs_rdma_port) not in nfs_rdma_portlist.stdout
 
 # ------------------------------------------------------------ client
@@ -186,6 +187,7 @@ nfs_rdma_tcp_fallback: true
         executable: /bin/bash
       register: nfs_rdma_proto
       changed_when: false
+      check_mode: false        # read-only probe: must also run under --check (drift detection)
 
     - name: Report transport
       ansible.builtin.debug:

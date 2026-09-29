@@ -1,232 +1,95 @@
-# Learning Roadmap: Ansible, Ansible Tower (AWX), and HashiCorp Vault Integration
+# Learning Roadmap: Ansible → Vault → AWX, Practised on DGX Spark
 
-This guide provides a structured learning pathway, architecture overview, hands-on lab setup commands, and sample code for integrating **Ansible**, **Ansible Tower / AWX**, and **HashiCorp Vault**.
-
----
-
-## 🗺️ Learning Roadmap
+> **Module 01 companion.** A skills roadmap with checkpoints. The [step-by-step guide](ansible-step-by-step-guide.md) is the *build order*; this page is the *learning order*, with what to be able to do (not just read) at each level.
 
 ```mermaid
-flowchart TD
-    subgraph Phase 1: Ansible Core
-        A1[Ad-hoc & Inventory] --> A2[Playbooks & Tasks]
-        A2 --> A3[Roles & Collections]
-        A3 --> A4[ansible-vault native encryption]
-    end
-
-    subgraph Phase 2: HashiCorp Vault Core
-        V1[Vault Architecture & Engines] --> V2[KV v2 Secrets Engine]
-        V2 --> V3[Policies & ACLs]
-        V3 --> V4[Authentication: AppRole & Tokens]
-    end
-
-    subgraph Phase 3: Ansible + Vault
-        AV1[Install community.hashi_vault & hvac] --> AV2[Lookup Plugin hashi_vault]
-        AV2 --> AV3[Module: vault_kv2_get]
-        AV3 --> AV4[AppRole Auth in Playbooks]
-    end
-
-    subgraph Phase 4: Ansible Tower / AWX
-        T1[AWX Architecture & RBAC] --> T2[Inventories & Projects]
-        T2 --> T3[Credentials & Credential Types]
-        T3 --> T4[Job Templates & Workflows]
-    end
-
-    subgraph Phase 5: Tower + Vault Enterprise Pattern
-        TV1[HashiCorp Vault Credential in Tower] --> TV2[Credential Linking]
-        TV2 --> TV3[Dynamic SSH / Secret Injection]
-        TV3 --> TV4[Production RBAC & Zero-Trust]
-    end
-
-    Phase 1 --> Phase 3
-    Phase 2 --> Phase 3
-    Phase 3 --> Phase 4
-    Phase 4 --> Phase 5
+flowchart TB
+  L1["Level 1 · Operator<br/>run & read playbooks"] --> L2["Level 2 · Author<br/>roles, facts, Jinja, inventory"]
+  L2 --> L3["Level 3 · Secure<br/>Vault, AppRole, SSH certs, no_log"]
+  L3 --> L4["Level 4 · Platform<br/>AWX as code, EEs, execution nodes"]
+  L4 --> L5["Level 5 · SRE<br/>CI, drift, audit, incidents, chaos"]
 ```
 
 ---
 
-## ⏱️ Step-by-Step Breakdown
+## Level 1 · Operator (week 1)
 
-### Phase 1: Ansible Core Mastery
-- **Goals**: Understand how Ansible connects, executes, and parses host variables.
-- **Key Concepts**:
-  - `inventory.ini` and `group_vars`/`host_vars`.
-  - Modules (`command`, `copy`, `apt`, `template`, `debug`).
-  - Tasks, handlers, facts (`ansible_facts`), conditionals (`when`), loops (`loop`).
-  - Native `ansible-vault` (encrypting files and strings with a passphrase) to understand why centralized secret management (HashiCorp Vault) is needed for teams.
+| Skill | Practise with | Checkpoint (you can…) |
+|---|---|---|
+| Inventory, ad-hoc, playbook runs | `00-ping`, `01-baseline` | explain every line of `ansible.cfg` and `hosts.yml` |
+| Check/diff, tags, limits | `01-baseline --check --diff --tags sysctl -l spark-02` | predict what a run will change before it runs |
+| Reading failures | [01B](01-ansible-core-engine-and-execution-internals.md) | tell whether a failure is SSH, sudo, Python, module, or logic from the error alone |
 
-### Phase 2: HashiCorp Vault Fundamentals
-- **Goals**: Run Vault locally and master secrets retrieval.
-- **Key Concepts**:
-  - Storage engines, KV v1 vs KV v2 (versioned).
-  - Paths: `secret/data/<path>` (KV v2 read) vs `secret/<path>`.
-  - Policies (HCL defining `read`, `list`, `write` permissions).
-  - Auth methods: `token`, `userpass`, and especially **`approle`** (machine-to-machine authentication with `role_id` and `secret_id`).
+## Level 2 · Author (weeks 2–3)
 
-### Phase 3: Connecting Ansible with HashiCorp Vault
-- **Goals**: Fetch dynamic and static secrets inside playbooks without hardcoding credentials.
-- **Key Concepts**:
-  - Python library: `hvac`.
-  - Collection: `community.hashi_vault`.
-  - Lookup plugins vs Action modules:
-    - `lookup('community.hashi_vault.hashi_vault', ...)`
-    - `community.hashi_vault.vault_kv2_get` module.
-  - Safe error handling and masking sensitive task outputs with `no_log: true`.
+| Skill | Practise with | Checkpoint |
+|---|---|---|
+| Custom facts | `spark.fact` ([01A](01-ansible-core-deep-dive.md)) | add a field (e.g. NVMe model) and target a group by it |
+| Jinja data transforms | `15-jinja-lab.yml` ([04](04-advanced-jinja2-filters-and-data-transforms.md)) | parse any command output into a dict and assert on it |
+| Role design & argument specs | `cx7_fabric` ([05](05-role-architecture-collections-and-galaxy.md)) | write a role with defaults, argument_specs, pre-flight → configure → verify |
+| Dynamic inventory | `spark_mdns`, `constructed` ([03A](03-dynamic-inventory-and-cloud-infrastructure.md)) | write an inventory plugin with a fixture test |
+| Idempotence | Molecule ([21](21-ansible-testing-linting-and-molecule.md)) | make any role pass the idempotence step |
 
-### Phase 4: Ansible Tower / AWX
-- **Goals**: Understand enterprise orchestration, centralization, and RBAC.
-- **Key Concepts**:
-  - Organization, Teams, Users.
-  - Projects (Git sync).
-  - Inventories & Dynamic Inventories.
-  - Custom Execution Environments (EE) containing `hvac` and collection dependencies.
-  - Job Templates, Surveys, and Notifications.
+## Level 3 · Secure (week 3)
 
-### Phase 5: Tower + HashiCorp Vault Integration
-- **Goals**: Never store secrets in Tower or Git; resolve secrets at runtime.
-- **Key Concepts**:
-  - Native Tower Credential Type: **HashiCorp Vault Secret Lookup**.
-  - Credential Linking: A Tower Machine Credential (SSH password/key or sudo password) links to a Vault Credential.
-  - Runtime resolution: Tower fetches the secret from Vault when launching the job, injects it into memory, and wipes it after execution.
+| Skill | Practise with | Checkpoint |
+|---|---|---|
+| Vault operations | [03B](03-hashicorp-vault-deep-dive.md) | init/unseal/snapshot/restore from memory; explain seal vs unseal |
+| Policies & KV v2 paths | `vault_config` role | write a least-privilege policy first time (remember `kv/data/` vs `kv/metadata/`) |
+| AppRole + short-lived tokens | `19-vault-integration.yml` ([19](19-hashicorp-vault-approle-and-dynamic-secrets.md)) | run automation with no static secrets on disk |
+| SSH certificates | `tools/vault-ssh-cert.sh` | retire static keys safely, with a break-glass path |
+| Secret hygiene | `no_log`, `.gitignore`, audit log | prove a secret never reached `ansible.log`, AWX output, or ARA |
 
----
+## Level 4 · Platform (week 4)
 
-## 🛠️ Hands-on Quickstart Commands
+| Skill | Practise with | Checkpoint |
+|---|---|---|
+| AWX install (arm64 aware) | [02B](02-ansible-tower-awx-deep-dive.md) | choose between on-Spark and hybrid based on the image pre-flight |
+| AWX as code | `awx.awx` collection | rebuild all AWX config from git |
+| Execution Environments | `ee/execution-environment.yml` ([05](05-role-architecture-collections-and-galaxy.md)) | build a multi-arch EE and pin it by digest |
+| Receptor & execution nodes | [20](20-awx-tower-production-cluster-and-receptor.md) | make a Spark an execution node |
+| Vault-backed credentials | [20](20-awx-tower-production-cluster-and-receptor.md) | jobs get secrets and SSH certs from Vault at run time |
 
-### 1. Prerequisites (Control Machine)
+## Level 5 · SRE (ongoing)
 
-Install Ansible and the `hvac` library (required by `community.hashi_vault`):
-
-```bash
-# Install Python packages
-pip install ansible hvac
-
-# Install the official HashiCorp Vault Ansible collection
-ansible-galaxy collection install community.hashi_vault
-```
-
-### 2. Start a Local Vault Dev Server (Docker or Binary)
-
-Using Docker:
-```bash
-docker run -d \
-  --name dev-vault \
-  -p 8200:8200 \
-  -e 'VAULT_DEV_ROOT_TOKEN_ID=myroottoken' \
-  -e 'VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200' \
-  hashicorp/vault:latest
-```
-
-Set environment variables:
-```bash
-export VAULT_ADDR='http://127.0.0.1:8200'
-export VAULT_TOKEN='myroottoken'
-```
-
-### 3. Write Test Secrets to Vault
-
-```bash
-# Check Vault status
-vault status
-
-# Write a secret to the KV v2 engine
-vault kv put secret/dgx/spark \
-  admin_user="dgxadmin" \
-  db_password="SparkSecurePassword2026!" \
-  api_key="nv-live-993821038"
-
-# Read back the secret
-vault kv get secret/dgx/spark
-```
-
-### 4. Create an AppRole for Machine-to-Machine Auth
-
-```bash
-# Enable approle auth
-vault auth enable approle
-
-# Create policy for Ansible
-vault policy write ansible-read - <<EOF
-path "secret/data/dgx/*" {
-  capabilities = ["read"]
-}
-EOF
-
-# Create role bound to policy
-vault write auth/approle/role/ansible-runner \
-  secret_id_ttl=24h \
-  token_num_uses=50 \
-  token_ttl=1h \
-  token_max_ttl=4h \
-  token_policies="ansible-read"
-
-# Fetch Role ID and Secret ID
-ROLE_ID=$(vault read -format=json auth/approle/role/ansible-runner/role-id | jq -r .data.role_id)
-SECRET_ID=$(vault write -format=json -f auth/approle/role/ansible-runner/secret-id | jq -r .data.secret_id)
-
-echo "Role ID:   $ROLE_ID"
-echo "Secret ID: $SECRET_ID"
-```
+| Skill | Practise with | Checkpoint |
+|---|---|---|
+| CI gates | [21](21-ansible-testing-linting-and-molecule.md) | a broken role can't merge |
+| Drift & guarded self-heal | [22](22-configuration-drift-detection-and-self-healing.md) | explain why fabric drift is reported, not healed |
+| Audit trail | [23](23-high-cardinality-logging-and-audit-compliance.md) | answer "who changed X, when, how" in under 5 minutes |
+| Incident response | [24](24-cluster-wide-emergency-drain-and-remediation.md) | run Runbooks A–E without the page open |
+| Chaos | `25-chaos.yml` ([25](25-hands-on-ansible-mastery-lab-and-test-harness.md)) | find 5 of 7 faults unaided |
 
 ---
 
-## 📄 Example: Ansible Playbook Fetching from Vault
+## Quick reference: the Vault ↔ Ansible ↔ AWX wiring
 
-Save this playbook to test Vault secret retrieval:
-
-```yaml
----
-- name: Demonstrate HashiCorp Vault retrieval with community.hashi_vault
-  hosts: localhost
-  connection: local
-  gather_facts: false
-
-  vars:
-    vault_url: "http://127.0.0.1:8200"
-    vault_mount: "secret"
-    vault_path: "dgx/spark"
-    # In production, pass role_id / secret_id via environment or Tower credentials
-    vault_role_id: "{{ lookup('env', 'VAULT_ROLE_ID') | default('my-role-id', true) }}"
-    vault_secret_id: "{{ lookup('env', 'VAULT_SECRET_ID') | default('my-secret-id', true) }}"
-
-  tasks:
-    - name: Fetch secret using vault_kv2_get module
-      community.hashi_vault.vault_kv2_get:
-        url: "{{ vault_url }}"
-        engine_mount_point: "{{ vault_mount }}"
-        path: "{{ vault_path }}"
-        auth_method: token
-        token: "myroottoken"  # Or use auth_method: approle with role_id and secret_id
-      register: spark_secrets
-      no_log: true  # Protect secrets from stdout logs
-
-    - name: Use the secret safely
-      ansible.builtin.debug:
-        msg: "Retrieved admin user: {{ spark_secrets.data.data.admin_user }}"
-
-    - name: Example with lookup plugin
-      ansible.builtin.set_fact:
-        db_pass: "{{ lookup('community.hashi_vault.hashi_vault', 'secret=secret/data/dgx/spark:data.db_password url=' ~ vault_url ~ ' token=myroottoken') }}"
-      no_log: true
+```mermaid
+flowchart LR
+  subgraph V["Vault"]
+    KV[(kv/spark-lab/*)]
+    SSH[ssh-client-signer]
+    AR[auth/approle/role/ansible]
+  end
+  subgraph CLI["CLI runs"]
+    ENV["approle.env → vault_login → token"]
+  end
+  subgraph AWX["AWX jobs"]
+    C1["Credential: HashiCorp Vault Secret Lookup"]
+    C2["Credential: HashiCorp Vault Signed SSH"]
+  end
+  AR --> ENV & C1 & C2
+  ENV -->|vault_kv2_get| KV
+  ENV -->|vault_write sign| SSH
+  C1 --> KV
+  C2 --> SSH
 ```
 
----
+## Suggested certification targets (if you want external milestones)
 
-## 🏢 Configuring in Ansible Tower / AWX
+- Red Hat Certified Engineer (EX294): Ansible fundamentals (Level 1–2).
+- HashiCorp Certified: Vault Associate (Level 3).
+- Red Hat Ansible Automation Platform specialist exams (Level 4). The skills map directly from AWX.
+- NVIDIA DLI / NVIDIA-Certified Associate/Professional in AI Infrastructure (the GPU and fabric side of this lab).
 
-1. **Add HashiCorp Vault Credential**:
-   - Go to **Credentials** ➔ **Add**.
-   - Credential Type: Select **HashiCorp Vault Secret Lookup**.
-   - Set **Server URL** (e.g., `https://vault.internal.net:8200`).
-   - Authentication method: Choose **AppRole** (Enter `Role ID` and `Secret ID`) or **Token**.
-   - Upload CA Certificate if using internal TLS.
-
-2. **Link to a Target Credential (Credential Linking)**:
-   - Go to **Credentials** ➔ Add a **Machine** credential.
-   - For **Password** or **SSH Private Key**, click the key icon (Search external credential).
-   - Select your **HashiCorp Vault Secret Lookup** credential.
-   - Enter Path: `secret/data/dgx/spark` and Key: `db_password` or `ssh_key`.
-
-3. **Execution Environments (EE)**:
-   - Make sure your AWX / Tower Execution Environment image includes `python3-hvac` and the `community.hashi_vault` collection.
+Check each vendor's site for current exam names and versions; they change.

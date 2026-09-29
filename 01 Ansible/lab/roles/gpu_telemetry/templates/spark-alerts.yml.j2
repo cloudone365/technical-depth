@@ -9,6 +9,14 @@ groups:
         annotations:
           summary: "nvidia-smi not answering on {{ '{{' }} $labels.host {{ '}}' }}"
           runbook: "Volume 24 §Runbook A — GPU hang"
+      - alert: SparkGPUMetricsStale
+        # A textfile metric that stops updating looks exactly like a healthy one.
+        expr: time() - node_textfile_mtime_seconds{file=~".*spark_gpu.prom"} > 120
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "GPU metrics on {{ '{{' }} $labels.host {{ '}}' }} are {{ '{{' }} $value | humanizeDuration {{ '}}' }} old — collector timer stopped?"
+          runbook: "systemctl status spark-gpu-metrics.timer; ansible-playbook playbooks/04-telemetry.yml"
       - alert: SparkGPUXid
         expr: delta(spark_gpu_xid_events_24h[15m]) > 0
         labels: { severity: warning }

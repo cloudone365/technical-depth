@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **You will build** | node_exporter plus a dependency-free **GPU/UMA/CX-7 textfile collector** on every Spark, a Prometheus + Alertmanager + Grafana stack on spark-01 with a provisioned dashboard and 6 alert rules (all validated with `promtool`), and an optional dcgm-exporter path |
+| **You will build** | node_exporter plus a dependency-free **GPU/UMA/CX-7 textfile collector** on every Spark, a Prometheus + Alertmanager + Grafana stack on spark-01 with a provisioned dashboard and 7 alert rules (all validated with `promtool`), and an optional dcgm-exporter path |
 | **Hardware** | 1–2× DGX Spark |
 | **Time** | 60 min |
 | **Risk** | Low. About 1 GiB RAM for the stack; data lives in Docker volumes |
@@ -57,7 +57,7 @@ flowchart LR
 | Stack | `/opt/spark-monitoring/compose.yml`: `prom/prometheus`, `prom/alertmanager`, `grafana/grafana` (multi-arch images) |
 | Retention | `30d` (`gpu_telemetry_retention`) |
 | Dashboard | `roles/gpu_telemetry/files/spark-overview.json` → folder "Spark Lab" |
-| Alerts | `SparkGPUUnresponsive`, `SparkGPUXid`, `SparkGPUHot`, `SparkUnifiedMemoryLow`, `SparkCX7Degraded`, `SparkNodeDown` |
+| Alerts | `SparkGPUUnresponsive`, `SparkGPUMetricsStale`, `SparkGPUXid`, `SparkGPUHot`, `SparkUnifiedMemoryLow`, `SparkCX7Degraded`, `SparkNodeDown` |
 
 **Why a textfile collector instead of a custom exporter?** No daemon to crash, no port to secure. The atomic `mktemp` + `mv` means Prometheus never scrapes a half-written file, and a hung `nvidia-smi` shows up as `spark_gpu_up 0` rather than a stuck exporter.
 
@@ -274,6 +274,7 @@ trap - EXIT
     -v {{ gpu_telemetry_stack_dir }}/prometheus:/etc/prometheus:ro
     {{ gpu_telemetry_prometheus_image }} check config /etc/prometheus/prometheus.yml
   changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
   when: gpu_telemetry_cfg is changed
 
 - name: Bring the stack up
@@ -304,6 +305,14 @@ groups:
         annotations:
           summary: "nvidia-smi not answering on {{ '{{' }} $labels.host {{ '}}' }}"
           runbook: "Volume 24 §Runbook A — GPU hang"
+      - alert: SparkGPUMetricsStale
+        # A textfile metric that stops updating looks exactly like a healthy one.
+        expr: time() - node_textfile_mtime_seconds{file=~".*spark_gpu.prom"} > 120
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "GPU metrics on {{ '{{' }} $labels.host {{ '}}' }} are {{ '{{' }} $value | humanizeDuration {{ '}}' }} old — collector timer stopped?"
+          runbook: "systemctl status spark-gpu-metrics.timer; ansible-playbook playbooks/04-telemetry.yml"
       - alert: SparkGPUXid
         expr: delta(spark_gpu_xid_events_24h[15m]) > 0
         labels: { severity: warning }
@@ -364,6 +373,7 @@ curl -s http://10.10.10.11:9090/api/v1/rules | jq -r '.data.groups[].rules[].nam
 | `SparkCX7Degraded` | Unplug the QSFP cable (speed drops to −1/absent) or force 100G: `sudo ethtool -s enp1s0f1np1 speed 100000 autoneg off` (revert afterwards) |
 | `SparkNodeDown` | `sudo systemctl stop prometheus-node-exporter` on spark-02 for 90 s |
 | `SparkGPUUnresponsive` | Temporarily break PATH for the collector: `sudo systemctl edit spark-gpu-metrics.service` → `Environment=PATH=/nonexistent` |
+| `SparkGPUMetricsStale` | `sudo systemctl stop spark-gpu-metrics.timer` for 4 min (the `.prom` file stops updating while node_exporter keeps serving it) |
 
 Check them in Prometheus (Alerts tab) and Alertmanager (`:9093`). Wire a receiver by setting `gpu_telemetry_webhook_url` (e.g. an ntfy.sh or Slack-compatible webhook) and re-running the play.
 

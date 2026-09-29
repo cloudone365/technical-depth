@@ -27,6 +27,7 @@
   ansible.builtin.command: apt-mark showhold
   register: spark_baseline_holds
   changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
   when: spark_baseline_hold_nvidia | bool
 
 - name: Hold NVIDIA driver stack (DGX Dashboard / planned upgrades only)
@@ -34,3 +35,14 @@
   loop: "{{ spark_baseline_nvidia_pkgs | difference(spark_baseline_holds.stdout_lines) }}"
   changed_when: true
   when: spark_baseline_hold_nvidia | bool
+
+# `command` tasks are SKIPPED (not "changed") under --check, so without this a
+# missing hold would be invisible to drift detection (Volume 22).
+- name: Report missing holds as drift in check mode
+  ansible.builtin.debug:
+    msg: "Would hold: {{ spark_baseline_nvidia_pkgs | difference(spark_baseline_holds.stdout_lines) }}"
+  changed_when: true
+  when:
+    - ansible_check_mode
+    - spark_baseline_hold_nvidia | bool
+    - spark_baseline_nvidia_pkgs | difference(spark_baseline_holds.stdout_lines) | length > 0

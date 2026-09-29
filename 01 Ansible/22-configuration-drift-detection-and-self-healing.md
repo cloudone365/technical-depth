@@ -1,467 +1,356 @@
-# Volume 22 — Configuration Drift Detection & Self-Healing
+# Volume 22 — Configuration Drift Detection & Guarded Self-Healing for DGX Spark
 
-> **AI Supercomputing Ansible Masterclass · 01 Ansible · Volume 22 of 25**
+> **Module 01 · Part V — Production SRE** · Prev: [21 Testing & CI](21-ansible-testing-linting-and-molecule.md) · Next: [23 Logging & audit](23-high-cardinality-logging-and-audit-compliance.md)
 
----
-
-## 1. Executive Intuition
-
-An AI cluster certified at 09:00 Monday can quietly drift into an unsafe
-state by 15:00 Tuesday. A sysadmin manually loads `nvidia_peermem` to debug
-a job. A kernel update in a nightly cron pulls in a new `kernel-headers`
-version that mismatches the pinned NVIDIA driver. A storage team bumps MTU
-to 1500 on a RoCE interface. None of these generate alerts.
-
-**Configuration drift** is the silent accumulation of deviation between
-declared state (Ansible playbooks) and actual state (running nodes). In AI
-clusters this directly translates to: degraded GPU-to-GPU bandwidth,
-unexpected NCCL fallbacks from RDMA to TCP, checkpointing failures, and
-XID 79 GPU reset storms.
-
-This volume covers Ansible's `--check` mode, `--diff` mode, continuous drift
-detection via scheduled AWX jobs, self-healing remediation playbooks, and a
-complete Python lab that produces a production-grade drift audit report.
+| | |
+|---|---|
+| **You will build** | A drift loop: check mode + diff against the desired state → machine-readable report (markdown, Prometheus metrics, exit codes, drifted-host list) → metrics on the Grafana dashboard → **auto-heal only safe drift on only the drifted hosts** → re-check. Scheduled by systemd timer or AWX |
+| **Hardware** | 1–2× DGX Spark |
+| **Time** | 60 min |
+| **Risk** | Low for detection. Self-healing is deliberately limited to low-risk tags |
 
 ---
 
-## 2. Lineage & Evolution
+## 1. What counts as drift, and what's allowed to heal itself
 
-```
-2013 ──► Ansible 1.x: --check mode introduced (dry-run)
-2014 ──► --diff flag: show textual changes to files/templates
-2017 ──► AWX 1.x: scheduled jobs enable periodic --check runs
-2019 ──► Ansible 2.8: check_mode per-task override
-2020 ──► ARA Records: drift tracking via job history database
-2021 ──► AAP 2.0: Compliance job templates with drift scoring
-2022 ──► ansible-lint check-mode rule enforcement
-2023 ──► community.general drift_report callback plugin (alpha)
-2024 ──► OpenTelemetry spans emitted per-task for drift dashboards
-2025 ──► Autonomous self-healing via AWX workflow job triggers
+| Drift source | Example on a Spark | Detected by | Auto-heal? |
+|---|---|---|---|
+| Config file edited by hand | `sysctl` tweak, sshd option, `chrony.conf` | `template`/`copy`/`sysctl` diff in check mode | ✅ `baseline` tag |
+| Package state | NVIDIA hold removed; tool uninstalled | `apt` check mode; the explicit "missing holds" signal | ✅ (holds only) |
+| Monitoring agent | timer disabled, collector edited | `gpu_telemetry` node tasks | ✅ `telemetry_node` tag |
+| Fabric | netplan edited, MTU changed | `cx7_fabric` template diff | ❌ Notify only: a wrong heal cuts the link |
+| Driver / kernel | DGX Dashboard update moved versions | Volume 07 audit (loaded ≠ on-disk = reboot pending) | ❌ Route to the upgrade playbook |
+| Runtime | `daemon.json` edited, CDI stale | `container_runtime` diff + CDI freshness probe | ⚠️ Only when no containers are running (manual) |
+
+```mermaid
+flowchart LR
+  T["systemd timer / AWX schedule<br/>every 30 min"] --> C["20-drift-check.yml<br/>--check --diff, JSON callback"]
+  C --> R["spark_drift_report.py<br/>md · prom · hosts · exit code"]
+  R -->|"spark_config_drift.prom"| NE["node_exporter textfile<br/>on monitoring host"] --> G["Grafana 'Config drift' stat<br/>+ alert"]
+  R -->|exit 0| OK((clean))
+  R -->|exit 3| INC["failures/unreachable →<br/>incident (Volume 24)"]
+  R -->|"exit 2 + AUTO_HEAL=1"| H["01-baseline + 04-telemetry<br/>--tags baseline,telemetry_node<br/>--limit drifted hosts"]
+  H --> C2["re-check"] --> R2{"still drift?"}
+  R2 -->|yes| TKT["notify: human needed"]
+  R2 -->|no| OK
 ```
 
 ---
 
-## 3. First-Principles Mathematics
+## 2. Making check mode trustworthy (lessons baked into the roles)
 
-### 3.1 Drift Score
+Drift detection is only as good as your roles' behaviour under `--check`. Three rules, all applied in this lab:
 
-For a cluster of $N$ nodes, each with $M$ asserted configuration items,
-define the drift matrix $D_{n,m} \in \{0, 1\}$ where 1 = drifted:
+| Rule | Why | Where you'll see it |
+|---|---|---|
+| **Read-only probes run in check mode too:** `check_mode: false` on `command`/`shell` tasks with `changed_when: false` | Otherwise they're *skipped*, their registered vars are empty, and later tasks error or evaluate wrongly | every probe task in every role |
+| **Surface skipped actions as `changed`** | `command` tasks that *would* act are reported as skipped, not changed, so the drift is invisible | "Report missing holds…" (`spark_baseline`), "Report a stale CDI spec…" (`container_runtime`), "Report runtime drift…" (`cx7_fabric`) |
+| **Compare runtime state, not only files** | A perfect netplan file says nothing about a live `ip link set mtu 1500` | `cx7_fabric` reads live MTU and re-applies netplan when it diverges |
+| **Idempotence = zero noise** | A task that's always `changed` makes every run look drifted | Molecule idempotence step (Volume 21) |
 
-$$
-\text{Drift}_n = \frac{\sum_{m=1}^{M} D_{n,m}}{M}
-$$
+```yaml
+# pattern 1 — probe must run under --check
+- name: Read current apt holds
+  ansible.builtin.command: apt-mark showhold
+  register: spark_baseline_holds
+  changed_when: false
+  check_mode: false
 
-Cluster-wide drift score:
-
-$$
-\Delta_{\text{cluster}} = \frac{1}{N} \sum_{n=1}^{N} \text{Drift}_n
-$$
-
-Alert threshold: $\Delta_{\text{cluster}} > 0.02$ (more than 2% of
-configuration items drifted cluster-wide) triggers a remediation job.
-
-### 3.2 Mean Time to Drift (MTTD)
-
-$$
-\text{MTTD} = \frac{1}{\lambda_{\text{drift}}}
-$$
-
-Where $\lambda_{\text{drift}}$ is the empirical drift introduction rate
-(events per hour). For a 1 000-node GPU cluster with typical human
-operations, $\lambda_{\text{drift}} \approx 0.1\;\text{hr}^{-1}$:
-
-$$
-\text{MTTD} = \frac{1}{0.1} = 10\;\text{hours}
-$$
-
-With a 1-hour drift scan interval, expected drift items caught per scan:
-
-$$
-\mathbb{E}[\text{caught}] = \lambda_{\text{drift}} \times 1\;\text{hr} \times N = 0.1 \times 1000 = 100
-$$
-
-### 3.3 Self-Healing Convergence
-
-With $k$ drifted nodes each requiring $t_r$ seconds to remediate, and
-Ansible forks $= f$:
-
-$$
-T_{\text{remediate}} = \left\lceil \frac{k}{f} \right\rceil \times t_r
-$$
-
-With $k = 50$, $f = 25$ forks, $t_r = 120\;\text{s}$:
-
-$$
-T = \lceil 50/25 \rceil \times 120 = 2 \times 120 = 240\;\text{s}
-$$
-
-50 drifted nodes converge in **4 minutes**.
-
----
-
-## 4. Deep Architecture
-
-```
-┌────────────────────────────────────────────────────────────────────┐
-│              Continuous Drift Detection Loop (AWX)                 │
-│                                                                    │
-│  ┌──────────────────────────────────────────────────────────┐     │
-│  │ Scheduled Job Template (every 60 min)                    │     │
-│  │   playbook: drift_audit.yml                              │     │
-│  │   flags: --check --diff                                  │     │
-│  │   tags: drift_critical                                   │     │
-│  └──────────────────────┬───────────────────────────────────┘     │
-│                          │                                         │
-│                    check mode run                                  │
-│                          │                                         │
-│       ┌──────────────────▼──────────────────┐                     │
-│       │ Callback Plugin: drift_collector     │                     │
-│       │ - accumulates changed_tasks per host │                     │
-│       │ - writes JSON report to /tmp/drift/  │                     │
-│       └──────────────────┬──────────────────┘                     │
-│                          │                                         │
-│              ┌───────────▼────────────┐                           │
-│              │ Drift Score Evaluator  │                           │
-│              │ Δ_cluster > 0.02?      │                           │
-│              └──────┬────────┬────────┘                           │
-│                     │ YES    │ NO                                  │
-│                     ▼        ▼                                     │
-│            Trigger          Log OK to                              │
-│            Remediation      Prometheus                             │
-│            Workflow         (drift_score gauge)                    │
-│                 │                                                  │
-│    ┌────────────▼────────────────────┐                            │
-│    │ Self-Healing Workflow            │                            │
-│    │  Step 1: Notify (#ops-alerts)   │                            │
-│    │  Step 2: remediate_drift.yml    │                            │
-│    │          (real run, no --check) │                            │
-│    │  Step 3: re-run drift_audit.yml │                            │
-│    │  Step 4: Assert Δ == 0          │                            │
-│    └─────────────────────────────────┘                            │
-└────────────────────────────────────────────────────────────────────┘
+# pattern 2 — make skipped-in-check actions visible
+- name: Report missing holds as drift in check mode
+  ansible.builtin.debug:
+    msg: "Would hold: {{ missing }}"
+  changed_when: true
+  when: ansible_check_mode and missing | length > 0
 ```
 
 ---
 
-## 5. Concrete Production Lab
+## 3. The pieces
+
+```yaml
+# lab/playbooks/20-drift-check.yml
+---
+# Drift = what WOULD change if we applied desired state now.
+#   ANSIBLE_STDOUT_CALLBACK=ansible.posix.json ansible-playbook playbooks/20-drift-check.yml \
+#     > .cache/drift.json; python3 tools/spark_drift_report.py .cache/drift.json
+- name: Drift check — baseline, fabric, runtime, telemetry (check mode, never changes anything)
+  hosts: spark
+  become: true
+  check_mode: true
+  diff: true
+  roles:
+    - role: spark_facts
+    - role: spark_baseline
+    - role: cx7_fabric
+      vars:
+        cx7_fabric_verify_peers: false
+    - role: container_runtime
+      vars:
+        container_runtime_smoke_test: false
+    - role: gpu_telemetry
+```
 
 ```python
+# lab/tools/spark_drift_report.py
 #!/usr/bin/env python3
 """
-ansible_drift_analyzer.py
-Parses Ansible JSON callback output (--check mode) to compute per-node
-and cluster-wide drift scores, generate remediation priority lists,
-and export Prometheus-ready metrics.
+spark_drift_report.py — turn an Ansible check-mode run into a drift report.
 
 Usage:
-  python3 ansible_drift_analyzer.py                # run self-tests
-  python3 ansible_drift_analyzer.py --report <json_file>
+  ANSIBLE_STDOUT_CALLBACK=ansible.posix.json \
+    ansible-playbook playbooks/20-drift-check.yml > .cache/drift.json
+  python3 tools/spark_drift_report.py .cache/drift.json [--markdown out.md] [--prom out.prom]
+
+Exit codes (so cron / AWX / CI can act on it):
+  0  no drift
+  2  drift detected (tasks that WOULD change)
+  3  failures or unreachable hosts (drift unknown — treat as an incident)
 """
-
-import json, sys, os, argparse
-from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
-from pathlib import Path
-
-# ── Data models ──────────────────────────────────────────────────────────────
-
-@dataclass
-class TaskResult:
-    task_name: str
-    host: str
-    status: str          # "changed", "ok", "failed", "skipped"
-    diff: str = ""
-    is_critical: bool = False
-
-@dataclass
-class NodeDrift:
-    hostname: str
-    total_tasks: int
-    changed_tasks: int
-    failed_tasks: int
-    critical_drift: int  # tasks tagged drift_critical that changed
-
-    @property
-    def drift_score(self) -> float:
-        if self.total_tasks == 0:
-            return 0.0
-        return self.changed_tasks / self.total_tasks
-
-    @property
-    def severity(self) -> str:
-        s = self.drift_score
-        if self.failed_tasks > 0 or self.critical_drift > 0:
-            return "CRITICAL"
-        if s > 0.10:
-            return "HIGH"
-        if s > 0.02:
-            return "MEDIUM"
-        if s > 0.00:
-            return "LOW"
-        return "CLEAN"
+import argparse
+import json
+import sys
+from collections import defaultdict
 
 
-class DriftAnalyzer:
-
-    def __init__(self, results: List[TaskResult]):
-        self.results = results
-        self._node_map: Dict[str, NodeDrift] = {}
-        self._analyze()
-
-    def _analyze(self):
-        # Count tasks per host
-        task_counts: Dict[str, Dict] = {}
-        for r in self.results:
-            if r.host not in task_counts:
-                task_counts[r.host] = {
-                    "total": 0, "changed": 0,
-                    "failed": 0, "critical": 0
-                }
-            c = task_counts[r.host]
-            c["total"] += 1
-            if r.status == "changed":
-                c["changed"] += 1
-                if r.is_critical:
-                    c["critical"] += 1
-            elif r.status == "failed":
-                c["failed"] += 1
-
-        for host, c in task_counts.items():
-            self._node_map[host] = NodeDrift(
-                hostname=host,
-                total_tasks=c["total"],
-                changed_tasks=c["changed"],
-                failed_tasks=c["failed"],
-                critical_drift=c["critical"],
-            )
-
-    @property
-    def cluster_drift_score(self) -> float:
-        if not self._node_map:
-            return 0.0
-        return sum(n.drift_score for n in self._node_map.values()) / len(self._node_map)
-
-    def nodes_requiring_remediation(self, threshold: float = 0.0) -> List[NodeDrift]:
-        """Return nodes with drift_score > threshold, sorted by severity."""
-        SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "CLEAN": 4}
-        drifted = [n for n in self._node_map.values() if n.drift_score > threshold
-                   or n.failed_tasks > 0]
-        return sorted(drifted, key=lambda n: SEVERITY_ORDER[n.severity])
-
-    def prometheus_metrics(self) -> str:
-        """Emit Prometheus text format metrics."""
-        lines = [
-            "# HELP ansible_drift_cluster_score Cluster-wide drift score [0..1]",
-            "# TYPE ansible_drift_cluster_score gauge",
-            f"ansible_drift_cluster_score {self.cluster_drift_score:.6f}",
-            "",
-            "# HELP ansible_drift_node_score Per-node drift score",
-            "# TYPE ansible_drift_node_score gauge",
-        ]
-        for n in self._node_map.values():
-            lines.append(
-                f'ansible_drift_node_score{{host="{n.hostname}",'
-                f'severity="{n.severity}"}} {n.drift_score:.6f}'
-            )
-        lines += [
-            "",
-            "# HELP ansible_drift_critical_items Critical drift items per node",
-            "# TYPE ansible_drift_critical_items gauge",
-        ]
-        for n in self._node_map.values():
-            lines.append(
-                f'ansible_drift_critical_items{{host="{n.hostname}"}} {n.critical_drift}'
-            )
-        return "\n".join(lines)
-
-    def print_report(self):
-        WIDTH = 72
-        print("=" * WIDTH)
-        print("ANSIBLE DRIFT AUDIT REPORT")
-        print("=" * WIDTH)
-        print(f"  Cluster drift score:  {self.cluster_drift_score:.4f}  "
-              f"(threshold 0.0200)")
-        print(f"  Nodes analyzed:       {len(self._node_map)}")
-        needs_fix = self.nodes_requiring_remediation()
-        print(f"  Nodes needing fix:    {len(needs_fix)}")
-        print("-" * WIDTH)
-        print(f"  {'HOSTNAME':<30} {'SCORE':>6} {'CHG':>4} {'FAIL':>4} {'CRIT':>4} SEV")
-        print("-" * WIDTH)
-        for n in sorted(self._node_map.values(), key=lambda x: -x.drift_score):
-            print(f"  {n.hostname:<30} {n.drift_score:>6.4f} "
-                  f"{n.changed_tasks:>4} {n.failed_tasks:>4} "
-                  f"{n.critical_drift:>4} {n.severity}")
-        print("=" * WIDTH)
-
-        if self.cluster_drift_score > 0.02:
-            print("\n  ⚠  ALERT: Cluster drift exceeds 2% threshold!")
-            print("     Trigger: awx workflow launch --workflow 'Self-Heal Drift'\n")
-        else:
-            print("\n  ✓  Cluster within drift tolerance.\n")
+def load(path):
+    with open(path) as fh:
+        text = fh.read()
+    # The json callback prints one document; tolerate leading warnings and
+    # trailing text from other callbacks (profile_tasks, timer).
+    start = text.find("{")
+    doc, _end = json.JSONDecoder().raw_decode(text[start:])
+    return doc
 
 
-# ── Verification tests ────────────────────────────────────────────────────────
+def analyse(doc):
+    drift = defaultdict(list)     # host -> [(play, task, diff summary)]
+    failed = defaultdict(list)
+    for play in doc.get("plays", []):
+        pname = play["play"]["name"]
+        for task in play.get("tasks", []):
+            tname = task["task"]["name"]
+            for host, res in task.get("hosts", {}).items():
+                if res.get("unreachable"):
+                    failed[host].append((pname, tname, "UNREACHABLE"))
+                elif res.get("failed") and not res.get("ignore_errors"):
+                    failed[host].append((pname, tname, res.get("msg", "failed")[:200]))
+                elif res.get("changed"):
+                    drift[host].append((pname, tname, summarise_diff(res)))
+    stats = doc.get("stats", {})
+    return drift, failed, stats
 
-def _make_results():
-    return [
-        TaskResult("sysctl net.core.rmem_max", "gpu-node-01", "changed", is_critical=True),
-        TaskResult("nvidia driver version pin", "gpu-node-01", "changed"),
-        TaskResult("hugepages 1GB config",      "gpu-node-01", "ok"),
-        TaskResult("MTU 9000 on rdma0",         "gpu-node-02", "ok"),
-        TaskResult("fabric-manager service",    "gpu-node-02", "ok"),
-        TaskResult("nvidia driver version pin", "gpu-node-03", "failed"),
+
+def summarise_diff(res):
+    diffs = res.get("diff")
+    if not diffs:
+        return ""
+    if isinstance(diffs, dict):
+        diffs = [diffs]
+    parts = []
+    for d in diffs:
+        if "before_header" in d or "after_header" in d:
+            parts.append(d.get("after_header") or d.get("before_header"))
+        elif "before" in d and "after" in d and isinstance(d["before"], dict):
+            changed = [k for k in d["after"] if d["before"].get(k) != d["after"].get(k)]
+            parts.append("keys: " + ",".join(changed))
+    return "; ".join(p for p in parts if p)
+
+
+def to_markdown(drift, failed, stats):
+    lines = ["# DGX Spark drift report", ""]
+    hosts = sorted(set(stats) | set(drift) | set(failed))
+    lines += ["| Host | Drifted tasks | Failures |", "|---|---|---|"]
+    for h in hosts:
+        lines.append(f"| {h} | {len(drift.get(h, []))} | {len(failed.get(h, []))} |")
+    for h in hosts:
+        if drift.get(h) or failed.get(h):
+            lines += ["", f"## {h}"]
+            for p, t, d in drift.get(h, []):
+                lines.append(f"- DRIFT `{t}` ({p}) {d}")
+            for p, t, m in failed.get(h, []):
+                lines.append(f"- FAIL `{t}` ({p}) {m}")
+    return "\n".join(lines) + "\n"
+
+
+def to_prom(drift, failed, stats):
+    out = [
+        "# HELP spark_config_drift_tasks Tasks that would change in check mode",
+        "# TYPE spark_config_drift_tasks gauge",
     ]
-
-def test_node_drift_score():
-    results = _make_results()
-    da = DriftAnalyzer(results)
-    # gpu-node-01: 2 changed / 3 total = 0.666
-    assert abs(da._node_map["gpu-node-01"].drift_score - 2/3) < 1e-9
-
-def test_clean_node():
-    results = _make_results()
-    da = DriftAnalyzer(results)
-    assert da._node_map["gpu-node-02"].drift_score == 0.0
-    assert da._node_map["gpu-node-02"].severity == "CLEAN"
-
-def test_critical_severity():
-    results = _make_results()
-    da = DriftAnalyzer(results)
-    assert da._node_map["gpu-node-01"].severity == "CRITICAL"
-
-def test_failed_node_severity():
-    results = _make_results()
-    da = DriftAnalyzer(results)
-    assert da._node_map["gpu-node-03"].severity == "CRITICAL"
-
-def test_cluster_drift_score():
-    results = _make_results()
-    da = DriftAnalyzer(results)
-    # 3 nodes: 0.666, 0.0, 0.0 → avg ≈ 0.222
-    assert da.cluster_drift_score > 0.02
-
-def test_nodes_requiring_remediation():
-    results = _make_results()
-    da = DriftAnalyzer(results)
-    needs_fix = da.nodes_requiring_remediation()
-    hostnames = [n.hostname for n in needs_fix]
-    assert "gpu-node-01" in hostnames
-    assert "gpu-node-03" in hostnames
-    assert "gpu-node-02" not in hostnames
-
-def test_prometheus_metrics_format():
-    results = _make_results()
-    da = DriftAnalyzer(results)
-    metrics = da.prometheus_metrics()
-    assert "ansible_drift_cluster_score" in metrics
-    assert "gpu-node-01" in metrics
-
-def test_drift_score_formula():
-    changed = 5
-    total = 100
-    score = changed / total
-    assert abs(score - 0.05) < 1e-9
-
-def test_remediation_time_formula():
-    import math
-    k, f, t_r = 50, 25, 120
-    T = math.ceil(k / f) * t_r
-    assert T == 240
-
-def run_tests():
-    tests = [
-        test_node_drift_score,
-        test_clean_node,
-        test_critical_severity,
-        test_failed_node_severity,
-        test_cluster_drift_score,
-        test_nodes_requiring_remediation,
-        test_prometheus_metrics_format,
-        test_drift_score_formula,
-        test_remediation_time_formula,
+    for h in sorted(set(stats) | set(drift)):
+        out.append(f'spark_config_drift_tasks{{host="{h}"}} {len(drift.get(h, []))}')
+    out += [
+        "# HELP spark_config_drift_failures Failed/unreachable tasks during drift check",
+        "# TYPE spark_config_drift_failures gauge",
     ]
-    passed = 0
-    for t in tests:
-        try:
-            t()
-            print(f"  [PASS] {t.__name__}")
-            passed += 1
-        except AssertionError as e:
-            print(f"  [FAIL] {t.__name__}: {e}")
-    print(f"\n{passed}/{len(tests)} tests passed.")
-    return passed == len(tests)
+    for h in sorted(set(stats) | set(failed)):
+        out.append(f'spark_config_drift_failures{{host="{h}"}} {len(failed.get(h, []))}')
+    return "\n".join(out) + "\n"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("json_file")
+    ap.add_argument("--markdown")
+    ap.add_argument("--prom", help="write node_exporter textfile metrics here")
+    ap.add_argument("--drifted-hosts", help="write a comma-separated list of drifted hosts (for --limit)")
+    a = ap.parse_args()
+
+    drift, failed, stats = analyse(load(a.json_file))
+    md = to_markdown(drift, failed, stats)
+    print(md)
+    if a.markdown:
+        open(a.markdown, "w").write(md)
+    if a.prom:
+        open(a.prom, "w").write(to_prom(drift, failed, stats))
+    if a.drifted_hosts:
+        open(a.drifted_hosts, "w").write(",".join(sorted(h for h, v in drift.items() if v)))
+
+    if any(failed.values()):
+        sys.exit(3)
+    if any(drift.values()):
+        sys.exit(2)
+    sys.exit(0)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--report", help="Path to Ansible JSON callback output")
-    args = parser.parse_args()
+    main()
+```
 
-    if args.report:
-        with open(args.report) as f:
-            raw = json.load(f)
-        results = [
-            TaskResult(
-                task_name=item["task"],
-                host=item["host"],
-                status=item["status"],
-                diff=item.get("diff", ""),
-                is_critical=item.get("tags", {}).get("drift_critical", False),
-            )
-            for item in raw
-        ]
-        da = DriftAnalyzer(results)
-        da.print_report()
-        prom_out = "/tmp/ansible_drift_metrics.prom"
-        with open(prom_out, "w") as f:
-            f.write(da.prometheus_metrics())
-        print(f"Prometheus metrics → {prom_out}")
-    else:
-        print("── Running verification tests ──")
-        results = _make_results()
-        da = DriftAnalyzer(results)
-        da.print_report()
-        print()
-        ok = run_tests()
-        sys.exit(0 if ok else 1)
+```bash
+# lab/tools/drift-cycle.sh
+#!/usr/bin/env bash
+# Drift cycle: detect → report → publish metrics → (optionally) heal SAFE drift → re-check.
+#
+#   tools/drift-cycle.sh                 # detect + report only (exit 0 clean, 2 drift, 3 failures)
+#   AUTO_HEAL=1 tools/drift-cycle.sh     # also re-apply safe tags on drifted hosts only
+#
+# Run from cron/systemd on the control node, or as an AWX job (Volume 20).
+set -uo pipefail
+cd "$(dirname "$0")/.."
+export ANSIBLE_CONFIG=$PWD/ansible.cfg
+OUT=.cache/drift; mkdir -p "$OUT"
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+SAFE_TAGS=${SAFE_TAGS:-baseline,telemetry_node}      # never auto-heal fabric/driver/k3s
+BECOME_ARGS=${BECOME_ARGS:-}                          # e.g. "--become-password-file /path" for unattended runs
+
+run_check() {
+  ANSIBLE_STDOUT_CALLBACK=ansible.posix.json ANSIBLE_CALLBACKS_ENABLED= \
+    ansible-playbook playbooks/20-drift-check.yml $BECOME_ARGS > "$OUT/$1.json" 2> "$OUT/$1.stderr"
+  python3 tools/spark_drift_report.py "$OUT/$1.json" \
+    --markdown "$OUT/$1.md" --prom "$OUT/spark_config_drift.prom" --drifted-hosts "$OUT/$1.hosts"
+}
+
+run_check "check-$TS"; rc=$?
+echo "drift check exit=$rc  report=$OUT/check-$TS.md"
+
+# Publish metrics to the monitoring host's textfile collector (Volume 09 dashboard shows it)
+ansible monitoring -b -m ansible.builtin.copy \
+  -a "src=$OUT/spark_config_drift.prom dest=/var/lib/prometheus/node-exporter/spark_config_drift.prom mode=0644" \
+  $BECOME_ARGS >/dev/null || echo "WARN: could not publish drift metrics"
+
+if [[ $rc -eq 2 && "${AUTO_HEAL:-0}" == "1" ]]; then
+  HOSTS=$(cat "$OUT/check-$TS.hosts")
+  echo "auto-heal: tags=$SAFE_TAGS hosts=$HOSTS"
+  ansible-playbook playbooks/01-baseline.yml playbooks/04-telemetry.yml \
+    --limit "$HOSTS" --tags "$SAFE_TAGS" $BECOME_ARGS > "$OUT/heal-$TS.log" 2>&1
+  run_check "recheck-$TS"; rc=$?
+  echo "post-heal exit=$rc  report=$OUT/recheck-$TS.md"
+fi
+exit $rc
 ```
 
 ---
 
-## 6. Comparative Matrix — Drift Detection Approaches
+## 4. Hands-on
 
-| Approach | Detection Latency | Remediation | Blast Radius Control | Audit Trail |
-|---|---|---|---|---|
-| Manual periodic playbook | Hours/days | Manual | None | None |
-| AWX scheduled `--check` | 60 min (configurable) | AWX workflow | Instance Groups | PostgreSQL job history |
-| Osquery fleet | Near-real-time (15 s) | External (Chef/Puppet) | Query filter | SQLite / Kafka |
-| InSpec / Cinc Auditor | On-demand | External | Profile filter | JSON report |
-| Prometheus node-exporter + alerting | Real-time (15 s) | Alert → AWX webhook | Alertmanager routes | Prometheus TSDB |
-| **Ansible drift_audit.yml (this vol)** | 60 min | Self-healing workflow | Limit + tags | ARA + Prometheus |
+### 4.1 Detect
+
+```bash
+cd "01 Ansible/lab"
+tools/drift-cycle.sh; echo "exit=$?"
+cat .cache/drift/check-*.md | tail -20
+```
+
+### 4.2 Create drift on purpose, then watch it
+
+```bash
+ssh nvidia@10.10.10.12 'sudo sysctl -w vm.swappiness=60 && sudo sed -i "s/^vm.swappiness.*/vm.swappiness = 60/" /etc/sysctl.d/90-spark.conf'
+ssh nvidia@10.10.10.12 'sudo apt-mark unhold $(apt-mark showhold | grep -m1 nvidia)'
+tools/drift-cycle.sh; echo "exit=$?"          # → 2, spark-02 listed with both tasks
+```
+
+Expected report (abridged):
+
+```markdown
+| Host | Drifted tasks | Failures |
+| spark-01 | 0 | 0 |
+| spark-02 | 2 | 0 |
+## spark-02
+- DRIFT `Apply sysctl tuning (persisted to /etc/sysctl.d/90-spark.conf)` (…) keys: …
+- DRIFT `Report missing holds as drift in check mode` (…)
+```
+
+The Grafana "Config drift (tasks)" stat on the overview dashboard (Volume 09) turns orange for spark-02.
+
+### 4.3 Heal (safe tags only) and confirm
+
+```bash
+AUTO_HEAL=1 tools/drift-cycle.sh; echo "exit=$?"     # → heal on spark-02 only → recheck → 0
+```
+
+### 4.4 Schedule it
+
+```ini
+# /etc/systemd/system/spark-drift.service   (control node)
+[Unit]
+Description=Spark lab drift cycle
+[Service]
+Type=oneshot
+User=ansible
+WorkingDirectory=/opt/technical-depth/01 Ansible/lab
+Environment=AUTO_HEAL=1
+Environment=BECOME_ARGS=--become-password-file=/etc/ansible/become.pass
+ExecStart=/opt/technical-depth/01 Ansible/lab/tools/drift-cycle.sh
+SuccessExitStatus=2
+
+# /etc/systemd/system/spark-drift.timer
+[Timer]
+OnCalendar=*:0/30
+RandomizedDelaySec=120
+Persistent=true
+[Install]
+WantedBy=timers.target
+```
+
+Or use AWX: the Volume 20 workflow (drift → **approval** → remediate) is the better fit once more than one person operates the lab, because a human approves anything beyond the safe tags.
 
 ---
 
-## 7. SRE Diagnostics Playbook
+## 5. Integrations
 
-| Symptom | Root Cause | Diagnostic | Remediation |
-|---|---|---|---|
-| Drift score spikes to 0.40 cluster-wide | Kernel update pulled new nvidia-headers | `grep changed /tmp/drift/*.json \| sort \| uniq -c \| sort -rn` | Pin kernel with `yum versionlock` or `apt-mark hold` |
-| Single node always drifts on sysctl | Local admin manually overriding via `/etc/rc.local` | `--diff` output shows file change each run | Remove rc.local override; enforce via `ansible.posix.sysctl` with `sysctl_file: /etc/sysctl.d/99-ansible.conf` |
-| AWX check-mode job shows 0 changed but system is broken | Task uses `changed_when: false` incorrectly | `ansible-playbook --diff --check` from CLI; compare outputs | Fix `changed_when` predicate to reflect actual state change |
-| Self-healing loop: fix triggers drift again | Two playbooks fighting over same config | `ara result list --task <id>` to trace | Deduplicate source of truth; single playbook owns each item |
-| Drift report shows FAILED tasks | Module incompatibility with new OS minor version | `journalctl -u ansible-runner` on exec node | Pin OS minor version or update collection |
+| System | Role |
+|---|---|
+| Prometheus/Grafana (Volume 09) | `spark_config_drift_tasks`, `spark_config_drift_failures` per host; alert on `> 0 for 2h` |
+| AWX (Volume 20) | Schedules plus an approval workflow; job history is the audit trail |
+| Logging (Volume 23) | Reports and heal logs in `.cache/drift/` ship to Loki; `ansible.log` records every run |
+| Upgrades (Volume 07) | Driver/kernel drift routes here rather than to self-heal |
 
----
+## 6. Troubleshooting & diagnostics
 
-## 8. Verification Checklist
+| Symptom | Diagnose | Fix |
+|---|---|---|
+| Every run shows drift on the same task | Run that play twice normally, then check `changed=0` | Non-idempotent task (missing `changed_when`, templated timestamps, unsorted dict output) |
+| Report parser: `JSONDecodeError` | `head -c 300 .cache/drift/check-*.json` | Another callback printed to stdout; the script sets `ANSIBLE_CALLBACKS_ENABLED=` for that reason |
+| Exit 3 on a healthy lab | `.cache/drift/check-*.stderr`; FAIL lines in the report | Sudo password missing for unattended runs (`BECOME_ARGS`); a node unreachable |
+| Check mode errors `'dict object' has no attribute 'stdout'` | Which task registered it? | A probe missing `check_mode: false` (§2 rule 1) |
+| Heal "succeeded" but the recheck still shows drift | `.cache/drift/heal-*.log` | Drift is in a non-safe tag (fabric/runtime): expected, so escalate |
+| Drift metrics missing in Grafana | `ls /var/lib/prometheus/node-exporter/` on the monitoring host | The publish step failed (see the WARN line); node_exporter textfile dir path |
 
-- [ ] `drift_audit.yml` runs in `--check --diff` mode without making changes
-- [ ] Callback plugin writes per-run JSON drift report to `/tmp/drift/`
-- [ ] Prometheus gauge `ansible_drift_cluster_score` exported and scraped
-- [ ] AWX workflow triggers remediation when $\Delta_{\text{cluster}} > 0.02$
-- [ ] Remediation job uses `--limit @/tmp/drift/drifted_hosts.txt` (only affected nodes)
-- [ ] Post-remediation re-audit job asserts `changed_tasks = 0` for all nodes
-- [ ] `python3 ansible_drift_analyzer.py` prints `9/9 tests passed`
-- [ ] Critical tasks tagged `drift_critical` in playbooks for elevated alerting
-- [ ] Drift history retained ≥ 90 days in AWX / ARA for compliance audit
+## 7. Validation
+
+- [ ] Clean lab → `exit=0`, report shows zero drift.
+- [ ] Introduced sysctl + hold drift → `exit=2`, both detected, dashboard reflects it.
+- [ ] `AUTO_HEAL=1` fixes only spark-02 and only safe tags; recheck exits 0.
+- [ ] A fabric drift (edit `40-cx7.yaml` MTU) is **reported but not healed**.

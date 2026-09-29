@@ -1,0 +1,187 @@
+---
+# Audit & logging stack:
+#   * auditd rules on every Spark (who changed sudoers, sshd, netplan, docker, k3s, slurm, vault…)
+#   * Loki on the monitoring host + Grafana Alloy on every Spark shipping the journal
+#   * Loki datasource in the Volume 09 Grafana
+#   * ARA API server recording every ansible-playbook run
+- name: Auditd on every Spark
+  hosts: spark
+  become: true
+  tasks:
+    - name: Install auditd
+      ansible.builtin.apt:
+        name: [auditd, audispd-plugins]
+        state: present
+
+    - name: Spark audit rules
+      ansible.builtin.template:
+        src: spark-audit.rules.j2
+        dest: /etc/audit/rules.d/60-spark.rules
+        mode: "0640"
+      notify: Load audit rules
+
+    - name: Load rules now so the check below sees them
+      ansible.builtin.meta: flush_handlers
+
+    - name: Confirm rules are active
+      ansible.builtin.command: auditctl -l
+      register: logging_auditctl
+      changed_when: false
+      check_mode: false
+      failed_when: "'-k network' not in logging_auditctl.stdout and 'key=network' not in logging_auditctl.stdout"
+  handlers:
+    - name: Load audit rules
+      ansible.builtin.command: augenrules --load     # merges /etc/audit/rules.d/*.rules
+      changed_when: true
+
+- name: Loki + Grafana datasource (monitoring host)
+  hosts: monitoring
+  become: true
+  vars:
+    logging_retention: 720h
+    logging_loki_image: grafana/loki:3.5.1
+    logging_dir: /opt/spark-logging
+  tasks:
+    - name: Directories
+      ansible.builtin.file:
+        path: "{{ logging_dir }}/{{ item }}"
+        state: directory
+        owner: "10001"          # loki image runs as uid 10001
+        group: "10001"
+        mode: "0755"
+      loop: [config, data]
+
+    - name: Loki config
+      ansible.builtin.template:
+        src: loki.yaml.j2
+        dest: "{{ logging_dir }}/config/loki.yaml"
+        mode: "0644"
+      register: logging_loki_cfg
+
+    - name: Loki container
+      community.docker.docker_container:
+        name: loki
+        image: "{{ logging_loki_image }}"
+        command: [-config.file=/etc/loki/loki.yaml]
+        network_mode: host
+        restart_policy: unless-stopped
+        volumes:
+          - "{{ logging_dir }}/config:/etc/loki:ro"
+          - "{{ logging_dir }}/data:/loki"
+        restart: "{{ logging_loki_cfg is changed }}"
+
+    - name: Wait for Loki ready
+      ansible.builtin.uri:
+        url: http://127.0.0.1:3100/ready
+      register: logging_loki_ready
+      until: logging_loki_ready.status == 200
+      retries: 30
+      delay: 3
+
+    - name: Loki datasource for Grafana (Volume 09 stack)
+      ansible.builtin.copy:
+        dest: /opt/spark-monitoring/grafana/provisioning/datasources/loki.yml
+        mode: "0644"
+        content: |
+          # {{ ansible_managed }}
+          apiVersion: 1
+          datasources:
+            - name: Loki
+              type: loki
+              access: proxy
+              url: http://127.0.0.1:3100
+      notify: Restart Grafana
+  handlers:
+    - name: Restart Grafana
+      community.docker.docker_container:
+        name: spark-monitoring-grafana-1     # compose project "spark-monitoring", service "grafana"
+        state: started
+        restart: true
+
+- name: Grafana Alloy journal shipper (every Spark)
+  hosts: spark
+  become: true
+  vars:
+    logging_alloy_image: grafana/alloy:v1.9.1
+  tasks:
+    - name: Alloy config dir
+      ansible.builtin.file:
+        path: /etc/alloy
+        state: directory
+        mode: "0755"
+
+    - name: Alloy config
+      ansible.builtin.template:
+        src: alloy.river.j2
+        dest: /etc/alloy/config.alloy
+        mode: "0644"
+      register: logging_alloy_cfg
+
+    - name: Alloy container (reads the host journal)
+      community.docker.docker_container:
+        name: alloy
+        image: "{{ logging_alloy_image }}"
+        command: [run, --storage.path=/var/lib/alloy/data, /etc/alloy/config.alloy]
+        network_mode: host
+        restart_policy: unless-stopped
+        user: root
+        volumes:
+          - /etc/alloy:/etc/alloy:ro
+          - /var/log/journal:/var/log/journal:ro
+          - /run/log/journal:/run/log/journal:ro
+          - /etc/machine-id:/etc/machine-id:ro
+          - /var/log/audit:/var/log/audit:ro
+          - alloy-data:/var/lib/alloy/data
+        restart: "{{ logging_alloy_cfg is changed }}"
+
+- name: ARA API server (records every playbook run)
+  hosts: monitoring
+  become: true
+  vars:
+    ara_dir: /opt/ara
+    ara_port: 8000
+  tasks:
+    - name: Python venv with ARA server
+      ansible.builtin.pip:
+        name: ["ara[server]>=1.7"]
+        virtualenv: "{{ ara_dir }}/venv"
+        virtualenv_command: python3 -m venv
+
+    - name: ARA settings
+      ansible.builtin.copy:
+        dest: "{{ ara_dir }}/settings.yaml"
+        mode: "0644"
+        content: |
+          default:
+            ALLOWED_HOSTS: ["*"]
+            BASE_DIR: {{ ara_dir }}/data
+            DATABASE_ENGINE: django.db.backends.sqlite3
+            DATABASE_NAME: {{ ara_dir }}/data/ansible.sqlite
+            TIME_ZONE: {{ lab_timezone | default('UTC') }}
+            READ_LOGIN_REQUIRED: false
+            WRITE_LOGIN_REQUIRED: false
+
+    - name: ARA service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ara.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=ARA Records Ansible API server
+          After=network-online.target
+          [Service]
+          Environment=ARA_SETTINGS={{ ara_dir }}/settings.yaml
+          Environment=ARA_BASE_DIR={{ ara_dir }}/data
+          ExecStartPre={{ ara_dir }}/venv/bin/ara-manage migrate
+          ExecStart={{ ara_dir }}/venv/bin/ara-manage runserver 0.0.0.0:{{ ara_port }}
+          Restart=on-failure
+          [Install]
+          WantedBy=multi-user.target
+      register: ara_unit
+
+    - name: Enable ARA
+      ansible.builtin.systemd_service:
+        name: ara
+        state: "{{ 'restarted' if ara_unit is changed else 'started' }}"
+        enabled: true
+        daemon_reload: true

@@ -1,0 +1,45 @@
+// {{ ansible_managed }}
+// Grafana Alloy on {{ inventory_hostname }}: ship the systemd journal (kernel NVRM/Xid,
+// sshd, sudo, k3s, slurmd, docker, vault, auditd via journald) to Loki.
+loki.relabel "journal" {
+  forward_to = []
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "level"
+  }
+  rule {
+    source_labels = ["__journal_syslog_identifier"]
+    target_label  = "ident"
+  }
+  rule {
+    source_labels = ["__journal__transport"]
+    target_label  = "transport"
+  }
+}
+
+loki.source.journal "journal" {
+  forward_to    = [loki.write.default.receiver]
+  relabel_rules = loki.relabel.journal.rules
+  max_age       = "12h"
+  labels        = { host = "{{ inventory_hostname }}", job = "systemd-journal", lab = "{{ lab_name | default('spark-lab') }}" }
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://{{ hostvars[groups['monitoring'][0]].ansible_host }}:3100/loki/api/v1/push"
+  }
+}
+
+// auditd writes to its own file (not reliably to journald) — tail it separately.
+local.file_match "audit" {
+  path_targets = [{ "__path__" = "/var/log/audit/audit.log", host = "{{ inventory_hostname }}", job = "auditd" }]
+}
+
+loki.source.file "audit" {
+  targets    = local.file_match.audit.targets
+  forward_to = [loki.write.default.receiver]
+}

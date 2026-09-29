@@ -29,15 +29,20 @@
   notify: Restart docker
 
 # ---- CDI: lets docker/podman/containerd request GPUs by name (nvidia.com/gpu=all)
-- name: Check CDI spec freshness against the installed driver
+- name: Check CDI spec freshness (driver version present AND every hostPath exists)
   ansible.builtin.shell: |
     set -o pipefail
+    spec={{ container_runtime_cdi_spec }}
+    [ -f "$spec" ] || { echo "stale: missing"; exit 0; }
     drv=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)
-    grep -q "$drv" {{ container_runtime_cdi_spec }} 2>/dev/null && echo fresh || echo stale
+    grep -q "$drv" "$spec" || { echo "stale: driver $drv not referenced"; exit 0; }
+    missing=$(grep -oP 'hostPath: \K\S+' "$spec" | while read -r f; do [ -e "$f" ] || echo "$f"; done)
+    [ -n "$missing" ] && echo "stale: missing paths: $missing" || echo fresh
   args:
     executable: /bin/bash
   register: container_runtime_cdi_state
   changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
   when: container_runtime_generate_cdi | bool
 
 - name: Generate CDI spec (driver changed or missing)
@@ -46,7 +51,16 @@
   changed_when: true
   when:
     - container_runtime_generate_cdi | bool
-    - container_runtime_cdi_state.stdout == 'stale'
+    - container_runtime_cdi_state.stdout is match('stale')
+
+- name: Report a stale CDI spec as drift in check mode
+  ansible.builtin.debug:
+    msg: "CDI spec would be regenerated: {{ container_runtime_cdi_state.stdout }}"
+  changed_when: true
+  when:
+    - ansible_check_mode
+    - container_runtime_generate_cdi | bool
+    - container_runtime_cdi_state.stdout is match('stale')
 
 - name: Flush handlers so docker restarts before smoke test
   ansible.builtin.meta: flush_handlers
@@ -78,6 +92,7 @@
     nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
   register: container_runtime_smoke
   changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
   when: container_runtime_smoke_test | bool
 
 - name: GPU smoke test via CDI device name
@@ -86,6 +101,7 @@
     nvidia-smi -L
   register: container_runtime_smoke_cdi
   changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
   failed_when: false
   when: container_runtime_smoke_test | bool and container_runtime_generate_cdi | bool
 

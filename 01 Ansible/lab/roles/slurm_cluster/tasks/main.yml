@@ -91,6 +91,7 @@
     executable: /bin/bash
   become: false
   changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
   failed_when: false
   register: slurm_cluster_munge_check
 
@@ -116,6 +117,7 @@
   delegate_to: "{{ groups[slurm_cluster_controller_group][0] }}"
   register: slurm_cluster_sinfo
   changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
 
 - name: Print sinfo
   ansible.builtin.debug:
