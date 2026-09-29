@@ -1,0 +1,77 @@
+---
+# Spin up N fake nodes (sshd containers) on spark-01 to practise fleet-scale
+# tuning — forks, pipelining, ControlPersist, strategies, Mitogen (Volume 02A).
+#
+#   ansible-playbook playbooks/13-fleet-sim.yml -e fleet_size=64 -K
+#   ansible-playbook -i .cache/fleet.ini playbooks/14-fleet-bench.yml -f 50
+#   ansible-playbook playbooks/13-fleet-sim.yml -e fleet_state=absent -K
+- name: Fake fleet on the Spark
+  hosts: spark[0]
+  become: true
+  vars:
+    fleet_size: 32
+    fleet_state: present
+    fleet_base_port: 22000
+    fleet_dir: /opt/fleet-sim
+    fleet_cpus: "0.25"            # 64 nodes x 0.25 = 16 of the 20 cores
+    fleet_mem: 256m
+  tasks:
+    - name: Build context
+      ansible.builtin.file:
+        path: "{{ fleet_dir }}"
+        state: directory
+        mode: "0755"
+      when: fleet_state == 'present'
+
+    - name: Copy Dockerfile
+      ansible.builtin.copy:
+        src: ../tools/fleet-sim/Dockerfile
+        dest: "{{ fleet_dir }}/Dockerfile"
+        mode: "0644"
+      when: fleet_state == 'present'
+
+    - name: Authorise the control node's key inside the fake nodes
+      ansible.builtin.copy:
+        content: "{{ spark_admin_pubkeys | select | join('\n') }}\n"
+        dest: "{{ fleet_dir }}/authorized_keys"
+        mode: "0644"
+      when: fleet_state == 'present'
+
+    - name: Build image (native arm64)
+      community.docker.docker_image_build:
+        name: fleet-node
+        tag: latest
+        path: "{{ fleet_dir }}"
+        rebuild: always
+      when: fleet_state == 'present'
+
+    - name: Fake nodes
+      community.docker.docker_container:
+        name: "fleet-{{ '%03d' | format(item) }}"
+        image: fleet-node:latest
+        state: "{{ 'started' if fleet_state == 'present' else 'absent' }}"
+        restart_policy: unless-stopped
+        cpus: "{{ fleet_cpus }}"
+        memory: "{{ fleet_mem }}"
+        published_ports: ["{{ fleet_base_port + item }}:22"]
+        labels: { spark.lab/fleet-sim: "true" }
+      loop: "{{ range(1, fleet_size | int + 1) | list }}"
+      loop_control:
+        label: "fleet-{{ '%03d' | format(item) }}"
+
+    - name: Write inventory on the control node
+      ansible.builtin.copy:
+        dest: "{{ playbook_dir }}/../.cache/fleet.ini"
+        mode: "0644"
+        content: |
+          [fleet]
+          {% for i in range(1, fleet_size | int + 1) %}
+          fleet-{{ '%03d' | format(i) }} ansible_host={{ ansible_host }} ansible_port={{ fleet_base_port + i }}
+          {% endfor %}
+          [fleet:vars]
+          ansible_user=nvidia
+          ansible_python_interpreter=/usr/bin/python3
+          ansible_ssh_common_args=-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+      delegate_to: localhost
+      become: false
+      when: fleet_state == 'present'

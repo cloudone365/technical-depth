@@ -1,0 +1,17 @@
+---
+# A representative workload: facts + 10 small idempotent tasks.
+# Compare wall time across forks / pipelining / strategy / Mitogen settings.
+- name: Fleet benchmark
+  hosts: fleet
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Ten config-file tasks (typical of a baseline role)
+      ansible.builtin.copy:
+        dest: "/etc/bench-{{ item }}.conf"
+        content: "setting_{{ item }} = {{ inventory_hostname }}\n"
+        mode: "0644"
+      loop: "{{ range(10) | list }}"
+    - name: One package-manager style query
+      ansible.builtin.command: dpkg -s python3
+      changed_when: false

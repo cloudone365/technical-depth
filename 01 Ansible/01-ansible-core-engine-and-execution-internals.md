@@ -1,359 +1,241 @@
-# Volume 01: Ansible Core Engine & Execution Internals
+# Volume 01B — Execution Internals & Debugging: What Actually Happens on the Spark
 
+> **Module 01 · Part I — Foundations** · Prev: [01A Core & first contact](01-ansible-core-deep-dive.md) · Next: [02A Performance: SSH mux, pipelining, forks, Mitogen](02-high-concurrency-tuning-mitogen-and-ssh-mux.md)
+
+| | |
+|---|---|
+| **You will learn** | To see (not just believe) each stage of a task run, and to debug failures at the right layer: SSH, sudo, Python, module, or your logic |
+| **Hardware** | 1× DGX Spark |
+| **Time** | 60 min |
+| **Risk** | None: read-only experiments plus a scratch directory |
+
+---
+
+## 1. The task lifecycle, observed
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as Control node (ansible-playbook)
+  participant S as sshd on Spark
+  participant P as python3 on Spark
+  C->>C: Template task args with host vars + facts
+  C->>C: Build AnsiballZ zip (module + module_utils), base64 wrap
+  C->>S: SSH exec via ControlMaster socket (reused TCP)
+  S->>P: sudo -H -S -n -u root /bin/sh -c 'python3'   (pipelining: payload on stdin)
+  P->>P: Unzip in memory → run module → compare desired vs actual
+  P-->>C: JSON on stdout {changed, failed, diff, ...}
+  C->>C: changed_when / failed_when / register / notify handlers
 ```
-====================================================================================================
-MODULE 01: ANSIBLE & BARE-METAL AI INFRASTRUCTURE AUTOMATION
-VOLUME 01: Core Architecture, Ansiballz Payload Compiler, Fork Physics & Idempotency
-====================================================================================================
+
+With **pipelining** on (our `ansible.cfg`), steps 3–4 are a single SSH round-trip and nothing is written to `/tmp` on the Spark. Without it you get `mkdir` → `sftp put` → `chmod` → `exec` → `rm`, which is five round-trips per task.
+
+### 1.1 See it for yourself
+
+```bash
+cd "01 Ansible/lab"
+ansible spark-01 -m ping -vvvv 2>&1 | grep -E 'ESTABLISH|SSH: EXEC|PUT|<spark-01> (EXEC|SSH)'
+```
+
+Look for `EXEC ... sudo -H -S -n -u root /bin/sh -c 'echo BECOME-SUCCESS-... ; /usr/bin/python3'` and the *absence* of `PUT`. That confirms pipelining is active.
+
+Now switch pipelining off and keep the payload on the Spark so you can read it:
+
+```bash
+ANSIBLE_PIPELINING=0 ANSIBLE_KEEP_REMOTE_FILES=1 \
+  ansible spark-01 -m ansible.builtin.stat -a path=/etc/dgx-release -vvv 2>&1 | grep -o '/home/nvidia/.ansible/tmp/[^ /]*' | head -1
+# → /home/nvidia/.ansible/tmp/ansible-tmp-1727630000.12-4242-1234
+
+ssh nvidia@10.10.10.11
+cd ~/.ansible/tmp/ansible-tmp-*/
+python3 AnsiballZ_stat.py explode        # unpacks the module into ./debug_dir
+ls debug_dir/ansible/modules/            # stat.py — the real module source
+python3 AnsiballZ_stat.py execute        # re-run it by hand, see raw JSON
+```
+
+This is the single most useful technique when a module behaves differently on aarch64 than on your laptop. You can edit `debug_dir/.../stat.py`, add prints, and run `execute` again.
+
+---
+
+## 2. Play execution model (what runs when)
+
+```mermaid
+flowchart TB
+  A[Parse playbook + inventory] --> B[For each PLAY]
+  B --> C["gather_facts (setup + facts.d)"]
+  C --> D[pre_tasks → handlers flush]
+  D --> E[roles in order: tasks]
+  E --> F[tasks]
+  F --> G[post_tasks]
+  G --> H[flush handlers]
+  H --> I{serial batch left?}
+  I -- yes --> C
+  I -- no --> B
+```
+
+| Knob | What it controls | Spark-lab usage |
+|---|---|---|
+| `strategy: linear` (default) | Every host finishes task N before any starts N+1 | Most plays: predictable output |
+| `strategy: free` | Hosts race ahead independently | Long independent builds (NCCL compile on 2+ nodes) |
+| `serial: 1` | Batches of hosts, whole play per batch | `21-emergency-drain.yml`, fabric changes: never both nodes at once |
+| `throttle: 1` | Per-task concurrency limit | Tasks hitting a shared API (Vault, the k3s API) |
+| `run_once` + `delegate_to` | One execution, on a chosen host | Generating the munge key, reading the k3s join token |
+| `order: sorted` | Host ordering | `05-k3s.yml`: spark-01 (server) before spark-02 |
+| `any_errors_fatal` / `max_fail_percentage` | Stop everything on first failure | Drain: one failed node → stop |
+
+### 2.1 Handlers: why your config didn't reload
+
+Handlers run **once, at the end of the play** (or at `meta: flush_handlers`), and only if a notifying task reported `changed`. Three things commonly go wrong:
+
+1. The task ran in check mode, so nothing actually changed and the handler never fires.
+2. The play failed before the flush, so the handler never ran. The next run sees no change and **still** doesn't restart the service. Use `--force-handlers` (or `force_handlers = True` in `ansible.cfg`) for plays that restart services.
+3. Two tasks notified the handler under different names. Name handlers once and use `listen:` for aliases.
+
+`container_runtime` shows the pattern for "restart *now*, then test":
+
+```yaml
+- name: Flush handlers so docker restarts before smoke test
+  ansible.builtin.meta: flush_handlers
 ```
 
 ---
 
-## 1. Executive Intuition: The Distributed Compiler Model
+## 3. Long-running operations: async, poll and timeouts
 
-A common misconception is that Ansible is merely a sequential wrapper around SSH commands (`ssh user@host "cmd"`). In reality, Ansible is an **asynchronous, distributed compiler and execution runtime**:
+Pulling `nvcr.io/nvidia/pytorch` (~20 GB) or building NCCL (~10 min on 20 Arm cores) can outlive SSH keepalives. Use `async`:
 
-1. **Compilation Phase (Control Node):** Ansible reads your YAML playbooks, parses the inventory DAG (Directed Acyclic Graph), merges variable scopes, and dynamically compiles a self-contained Python archive known as an **Ansiballz** bundle.
-2. **Transport Phase (Control-to-Managed):** It opens an SSH connection (or reusable multiplexed socket) to the managed GPU node, establishes a transient working directory (`~/.ansible/tmp/ansible-tmp-...`), and copies the compiled ZIP bundle.
-3. **Execution Phase (Managed Node):** The target node's Python interpreter invokes the Ansiballz entrypoint, executes the state comparison logic, applies changes if necessary, and returns a structured JSON payload over standard output (`stdout`).
-4. **Reconciliation & Cleanup:** The control node reads the JSON, parses the return codes (`changed: true/false`, `failed: true/false`), removes the remote temporary directory, and advances its internal task state machine.
+```yaml
+- name: Pre-pull NGC images (async — multi-GB pulls outlive SSH timeouts)
+  community.docker.docker_image_pull:
+    name: "{{ item }}"
+    platform: linux/arm64
+  loop: "{{ container_runtime_prepull }}"
+  async: 3600     # max seconds the job may run on the Spark
+  poll: 15        # control node checks every 15 s over a *new* short SSH call
+```
+
+Fire-and-forget with a later join:
+
+```yaml
+- name: Download model weights in the background
+  ansible.builtin.command: >
+    huggingface-cli download Qwen/Qwen2.5-7B-Instruct --local-dir /srv/models/qwen2.5-7b
+  async: 7200
+  poll: 0
+  register: dl_job
+  become_user: nvidia
+
+# ... other tasks run meanwhile ...
+
+- name: Wait for the download
+  ansible.builtin.async_status:
+    jid: "{{ dl_job.ansible_job_id }}"
+  register: dl
+  until: dl.finished
+  retries: 240
+  delay: 30
+  become_user: nvidia
+```
+
+> **Gotcha:** `async_status` must use the same `become_user` as the async task. The job file lives in that user's `~/.ansible_async/`.
+
+---
+
+## 4. Error handling that tells you *why*
+
+```yaml
+- name: GPU health gate with forensics
+  block:
+    - name: GPU must answer within 10 s
+      ansible.builtin.command: timeout 10 nvidia-smi -L
+      changed_when: false
+  rescue:
+    - name: Capture kernel evidence
+      ansible.builtin.shell: set -o pipefail; journalctl -k --since "-30 min" --no-pager | grep -E 'NVRM|Xid' | tail -50
+      args: { executable: /bin/bash }
+      register: xid
+      changed_when: false
+      failed_when: false
+    - name: Fail with context
+      ansible.builtin.fail:
+        msg: |
+          GPU unresponsive on {{ inventory_hostname }}.
+          Recent NVRM lines:
+          {{ xid.stdout | default('none') }}
+          Next: playbooks/21-emergency-drain.yml -l {{ inventory_hostname }}
+  always:
+    - name: Record outcome
+      ansible.builtin.debug:
+        msg: "GPU gate {{ 'FAILED' if ansible_failed_task is defined else 'ok' }}"
+```
+
+Other levers:
+
+| Pattern | Use when |
+|---|---|
+| `failed_when: rc not in [0, 3]` | The tool has "soft" exit codes |
+| `changed_when: false` | Read-only `command`/`shell` (keeps idempotence reports honest) |
+| `until/retries/delay` | Waiting for a service or link to converge (see `cx7_fabric`) |
+| `ignore_unreachable: true` | Drain/forensics plays where a dead host is expected |
+| `ansible.builtin.assert` with `fail_msg` | Turn a precondition into a readable error |
+
+---
+
+## 5. The interactive debugger
+
+```yaml
+- name: Parse ibdev2netdev
+  ansible.builtin.set_fact: { ... }
+  debugger: on_failed
+```
+
+or globally: `ANSIBLE_ENABLE_TASK_DEBUGGER=True ansible-playbook ...`. At the `[spark-01] TASK: ... (debug)>` prompt:
 
 ```
-+-----------------------------------------------------------------------------------------+
-|                         THE ANSIBLE CORE EXECUTION PIPELINE                             |
-+-----------------------------------------------------------------------------------------+
-| [Control Node: Python Process]                                                          |
-|   1. Parse Playbook YAML + Hostvars                                                     |
-|   2. Compile Module + module_utils into Ansiballz ZIP archive                           |
-|   3. Establish SSH Connection / ControlMaster Socket                                    |
-|   4. Upload Ansiballz payload -> Managed Node: /tmp/.ansible/tmp/                       |
-|                                                                                         |
-| [Managed Node: DGX/HGX Server]                                                          |
-|   5. /usr/bin/python3 executes Ansiballz payload in isolated process                    |
-|   6. Inspect System State (Idempotency Check: Desired == Actual?)                       |
-|   7. Execute System Call / IOCTL / Driver Mutation if divergent                         |
-|   8. Emit JSON output string to stdout: {"changed": true, "rc": 0}                      |
-|                                                                                         |
-| [Control Node: Return Processing]                                                       |
-|   9. Parse JSON, execute handlers if changed, trigger next DAG step                     |
-+-----------------------------------------------------------------------------------------+
+p task.args                 # arguments after templating
+p task_vars['cx7_interfaces']
+p result._result            # module return
+task.args['dest'] = '/tmp/x'; redo    # fix and retry without restarting the play
+c                           # continue
+```
+
+`ansible-console` gives you a REPL against the inventory:
+
+```bash
+ansible-console spark --become
+spark (2)[f:10]# nvidia-smi -L
+spark (2)[f:10]# setup filter=ansible_local
+spark (2)[f:10]# cd spark-01
 ```
 
 ---
 
-## 2. Lineage & Evolution of Infrastructure Orchestration
+## 6. Hands-on exercises
 
-```
-   [1993: CFEngine]
-             |
-       (First declarative promise theory; required local daemons and complex syntax)
-             |
-   [2005: Puppet & Chef]
-             |
-       (Ruby-based DSLs; required heavy agent daemons on every node; master certificate authority)
-             |
-   [2009: Fabric & SaltStack]
-             |
-       (Fabric: Procedural Python SSH; SaltStack: ZeroMQ high-speed bus with Minion agents)
-             |
-   [2012: Ansible (Michael DeHaan)]
-             |
-       (Agentless revolution: Zero software on target except Python + OpenSSH; declarative YAML)
-             |
-   [2020: Ansible Automation Platform & Mitogen]
-             |
-       (Receptor mesh networks, containerized Execution Environments, and C-extension bypasses)
-```
+1. **Measure the round-trip tax.** Run `playbooks/01-baseline.yml` three ways and record the `timer` line:
+   `ANSIBLE_PIPELINING=0 ANSIBLE_SSH_ARGS=""` (no pipelining, no mux) → `ANSIBLE_PIPELINING=0` → default. Chart the three numbers in Volume 02.
+2. **Read a real module.** Use `KEEP_REMOTE_FILES` + `explode` on `ansible.builtin.apt` and find where it takes the dpkg lock.
+3. **Break a handler.** Add `failed_when: true` to the last task of `spark_baseline` after changing `chrony.conf`, run it, remove the failure and run again. Did chrony restart? Now repeat with `--force-handlers`.
+4. **Async join.** Download a 7B model to `/srv/models` with `poll: 0` while `01-baseline.yml` tasks continue, then join with `async_status`.
 
 ---
 
-## 3. First-Principles Mathematics: Fork Scaling & Network Round-Trips
+## 7. Troubleshooting & diagnostics
 
-### 3.1 The Network Round-Trip Tax
+| Symptom | Layer | Diagnose | Fix |
+|---|---|---|---|
+| `Failed to connect to the host via ssh: ... Connection timed out` | Network | `nc -vz 10.10.10.11 22` | Mgmt cabling or IP. Remember that Ansible uses `ansible_host`, not DNS |
+| `Shared connection to ... closed` mid-task | SSH | `-vvvv`; check whether the task is long | Use `async`; `ServerAliveInterval=30` is already in `ansible.cfg` |
+| `MODULE FAILURE ... See stdout/stderr for the exact error` | Python on target | `KEEP_REMOTE_FILES=1`, then `explode`/`execute` | Usually a missing Python lib on the Spark (e.g. `python3-apt`) |
+| `The conditional check ... failed. The error was: ... is undefined` | Your logic | Add a debug task: `var=hostvars[inventory_hostname]` | Add `default()` or fix the variable scope (host_vars vs group_vars) |
+| `sudo: a password is required` in the middle of a run | sudo | Did the task set `become: false` and then `become_user`? | `become_user` needs `become: true` at the same level (ansible-lint `partial-become`) |
+| Handler did not run | Play flow | `--list-tasks`; was the notifying task `changed`? | `meta: flush_handlers`, or `--force-handlers` |
+| Task takes 10+ minutes then fails with `timeout` | async missing | `ps -ef \| grep AnsiballZ` on the Spark | `async:` + `poll:` |
+| Different result on the Spark vs. your laptop | aarch64 | `ansible spark-01 -m setup -a filter=ansible_architecture` | Pin `platform: linux/arm64` for images; check the module's arch assumptions |
 
-In standard Ansible, executing a single task on a remote node without pipelining incurs **5 distinct network round-trips**:
-1. `SSH`: Create remote temporary directory (`mkdir -p ~/.ansible/tmp/...`).
-2. `SFTP` / `SCP`: Upload the compiled Ansiballz Python payload.
-3. `SSH`: Set file permissions (`chmod u+x ...`).
-4. `SSH`: Invoke Python interpreter and execute payload.
-5. `SSH`: Delete remote temporary directory (`rm -rf ...`).
+## 8. Validation
 
-Let:
-- $N$ = Number of managed nodes (e.g., $1,024$ nodes in an AI cluster)
-- $M$ = Number of tasks in a baseline provisioning playbook (e.g., $80$ tasks)
-- $\text{RTT}$ = Network Round-Trip Time across datacenter management LAN ($0.5\text{ ms}$)
-
-Total SSH round-trips generated:
-$$\text{Total Round-Trips} = N \times M \times 5 = 1,024 \times 80 \times 5 = 409,600\text{ SSH operations!}$$
-
-Without connection multiplexing (`ControlMaster`) or SSH pipelining (`pipelining = true`), the management network suffers from connection establishment latency, causing playbooks to stall for hours.
-
----
-
-### 3.2 The Fork Bottleneck Equation
-
-Ansible processes managed hosts in parallel batches defined by the **`forks`** configuration parameter ($F$):
-
-$$\text{Batches} = \left\lceil \frac{N_{\text{hosts}}}{F} \right\rceil$$
-
-Let $T_{\text{task}}$ be the execution duration of an individual task. The wall-clock execution time for a play containing $M$ tasks is:
-
-$$T_{\text{play}} = \left\lceil \frac{N_{\text{hosts}}}{F} \right\rceil \sum_{i=1}^{M} T_{\text{task}_i}$$
-
-#### Concrete Numerical Proof:
-Assume a 1,024-node GPU cluster and a play with 20 tasks, each averaging $1.5\text{ seconds}$:
-- **Default Ansible Configuration ($F = 5$):**
-  $$\text{Batches} = \left\lceil \frac{1024}{5} \right\rceil = 205\text{ batches}$$
-  $$T_{\text{play}} = 205 \times (20 \times 1.5\text{ s}) = 205 \times 30\text{ s} = 6,150\text{ seconds}\quad (\mathbf{102.5\ minutes}!)$$
-- **Tuned Enterprise Configuration ($F = 256$):**
-  $$\text{Batches} = \left\lceil \frac{1024}{256} \right\rceil = 4\text{ batches}$$
-  $$T_{\text{play}} = 4 \times 30\text{ s} = 120\text{ seconds}\quad (\mathbf{2.0\ minutes}!)$$
-
-$$\text{Speedup Factor} = \frac{6150}{120} \approx \mathbf{51.25\times}$$
-
-> **Architectural Rule:** In high-performance AI clusters, running Ansible with the default `forks = 5` is an operational failure. Control nodes must be sized with sufficient RAM and file descriptors to sustain $F \ge 128 - 512$.
-
----
-
-## 4. Deep Architecture: The Ansiballz Payload Compiler
-
-When you execute an Ansible task targeting a module (e.g. `ansible.builtin.copy`), Ansible compiles an in-memory ZIP bundle:
-
-```
-+-----------------------------------------------------------------------------+
-|                           ANSIBALLZ PAYLOAD ANATOMY                         |
-+-----------------------------------------------------------------------------+
-|  ansible_payload.zip (Base64 Encoded & Transmitted over SSH)                |
-|  +-----------------------------------------------------------------------+  |
-|  | __main__.py               # Bootstrap loader & unpacker               |  |
-|  | ansible/                                                              |  |
-|  |   |-- module_utils/       # Shared utility libraries (basic.py, etc.) |  |
-|  |   |     |-- basic.py      # Argument parser, exit_json, fail_json     |  |
-|  |   |     |-- common/       # Network, system, and validation helpers   |  |
-|  |   |-- modules/                                                        |  |
-|  |         |-- target_mod.py # The actual module code executed           |  |
-|  +-----------------------------------------------------------------------+  |
-|  | Encrypted / Injected Arguments Block (JSON string of module params)   |  |
-|  +-----------------------------------------------------------------------+  |
-+-----------------------------------------------------------------------------+
-```
-
-### 4.1 Bootstrap Loader Execution
-When the managed host invokes Python:
-```python
-# Conceptual pseudocode of Ansiballz __main__.py
-import sys, os, zipimport, json
-
-# 1. Mount current ZIP file into Python module search path
-importer = zipimport.zipimporter(__file__)
-
-# 2. Extract arguments injected during compilation
-params = json.loads(ANSIBALLZ_PARAMS)
-
-# 3. Load the target module from inside the zip
-mod = importer.load_module('ansible.modules.system.ping')
-
-# 4. Invoke entry point with parameters
-mod.main(params)
-```
-
----
-
-## 5. Mathematical Definition of Idempotency in System State
-
-Idempotency is the foundational mathematical invariant of configuration automation. A state transition function $f: S \to S$ operating on a system state $S$ is idempotent if and only if:
-
-$$f(f(S)) = f(S),\quad \forall S$$
-
-In Ansible:
-- **Run 1 ($S_0 \to S_1$):** System diverges from desired state. Modifications are applied. Ansible reports `changed: true`.
-- **Run 2 ($S_1 \to S_1$):** System already conforms to desired state. No operations executed. Ansible reports `changed: false` (`ok`).
-- **Run $N$ ($S_1 \to S_1$):** Strictly zero mutation.
-
-```
-       [State S_0: nvidia-fabricmanager stopped]
-                         |
-               (Playbook Execution 1)
-                         v
-       [State S_1: nvidia-fabricmanager RUNNING] -> (changed: true)
-                         |
-               (Playbook Execution 2)
-                         v
-       [State S_1: nvidia-fabricmanager RUNNING] -> (changed: false, ok: true)
-```
-
-> **Anti-Pattern Warning:** Using `ansible.builtin.shell` or `command` without `creates`, `removes`, or `changed_when: false` breaks idempotency, triggering false alarms and unnecessary service restarts across GPU nodes.
-
----
-
-## 6. Concrete Production Lab: Authoring a High-Performance Python Module
-
-Below is a custom, production-grade Ansible module: `gpu_nvlink_probe.py`. It directly inspects local NVLink interconnect states, validates link operational status, and adheres to strict `AnsibleModule` idempotency patterns.
-
-```python
-#!/usr/bin/python
-# -*- coding: utf-8 -*-
-
-DOCUMENTATION = r'''
----
-module: gpu_nvlink_probe
-short_description: Probes local NVLink interconnect status across NVIDIA GPUs
-description:
-    - Queries nvidia-smi / NVML to ensure all NVLink links are trained and active.
-    - Flags inactive links or degraded lane bandwidth across HGX/DGX baseboards.
-author:
-    - AI Infrastructure Systems Engineering Team
-options:
-    expected_links_per_gpu:
-        description: Number of active NVLink connections expected per GPU (e.g. 18 on H100).
-        required: true
-        type: int
-'''
-
-EXAMPLES = r'''
-- name: Verify NVLink interconnect fabric health
-  gpu_nvlink_probe:
-    expected_links_per_gpu: 18
-  register: nvlink_status
-'''
-
-RETURN = r'''
-gpu_count:
-    description: Total NVIDIA GPUs detected.
-    type: int
-    returned: always
-total_active_links:
-    description: Count of active NVLink connections across all GPUs.
-    type: int
-    returned: always
-degraded_gpus:
-    description: List of GPU indices failing link count assertion.
-    type: list
-    returned: always
-'''
-
-from ansible.module_utils.basic import AnsibleModule
-import subprocess
-import re
-
-def run_nvlink_audit(expected_links):
-    # Execute nvidia-smi nvlink command
-    cmd = ["nvidia-smi", "nvlink", "-s"]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    except FileNotFoundError:
-        return False, "nvidia-smi utility not found in PATH", {}
-    except subprocess.CalledProcessError as e:
-        return False, f"nvidia-smi failed with rc={e.returncode}: {e.stderr}", {}
-
-    output = proc.stdout
-    gpu_blocks = output.strip().split("GPU ")
-    
-    degraded = []
-    total_active = 0
-    total_gpus = 0
-
-    for block in gpu_blocks[1:]:
-        total_gpus += 1
-        lines = block.splitlines()
-        gpu_id_match = re.match(r"^(\d+):", lines[0])
-        gpu_id = int(gpu_id_match.group(1)) if gpu_id_match else total_gpus - 1
-        
-        active_links = sum(1 for line in lines if "Link " in line and "Active" in line)
-        total_active += active_links
-        
-        if active_links < expected_links:
-            degraded.append({
-                "gpu_id": gpu_id,
-                "active_links": active_links,
-                "expected_links": expected_links
-            })
-
-    result_data = {
-        "gpu_count": total_gpus,
-        "total_active_links": total_active,
-        "degraded_gpus": degraded
-    }
-
-    if degraded:
-        return False, f"Detected {len(degraded)} GPUs with degraded NVLink fabrics", result_data
-    
-    return True, "All NVLink interconnects operational", result_data
-
-def main():
-    module = AnsibleModule(
-        argument_spec=dict(
-            expected_links_per_gpu=dict(type='int', required=True)
-        ),
-        supports_check_mode=True
-    )
-
-    expected_links = module.params['expected_links_per_gpu']
-
-    # In check mode, query read-only state without applying mutations
-    success, message, data = run_nvlink_audit(expected_links)
-
-    if not success:
-        module.fail_json(msg=message, **data)
-
-    module.exit_json(
-        changed=False,  # Read-only probe never mutates system state
-        msg=message,
-        **data
-    )
-
-if __name__ == '__main__':
-    main()
-```
-
----
-
-## 7. Comparative Architecture Matrix
-
-| Architectural Vector | Ansible Core | SaltStack | Puppet | Terraform |
-| :--- | :--- | :--- | :--- | :--- |
-| **Agent Requirement** | **None (SSH + Python)** | ZeroMQ Minion daemon | Ruby Puppet agent | None (Cloud/API push) |
-| **Control Model** | Push over SSH | Push via Message Bus | Pull via periodic cron | Push via REST APIs |
-| **Target Niche** | OS configuration & Bare-metal | High-speed real-time exec| Static config compliance| Cloud IaaS provisioning |
-| **Speed / Concurrency** | Medium (High w/ Mitogen)| Extremely Fast (ZeroMQ) | Slow (Agent polling) | Fast (Parallel API calls) |
-| **State Storage** | Stateless / Target-inspected| In-memory / Grains | Server-side Catalog | Local / Remote State file |
-| **GPU / Bare-Metal Fit** | **Optimal** | Good | Moderate | Poor (IaaS only) |
-
----
-
-## 8. SRE Diagnostics & Troubleshooting Playbook
-
-```
-+---------------------------------------------------------------------------------------------------+
-|                           ANSIBLE CORE SRE DIAGNOSTIC MATRIX                                      |
-+------------------------------------+--------------------------+-----------------------------------+
-| Symptom / Failure Mode             | Root Cause Hypothesis    | Triage & Remediation Command      |
-+------------------------------------+--------------------------+-----------------------------------+
-| `UNREACHABLE`: Failed to connect   | SSH Key rejected, or Max | Verify SSH connection directly:   |
-| to the host via ssh.               | Startups threshold hit   | `ssh -vvv user@gpu-node-01`       |
-|                                    | on OpenSSH server.       | Tune `MaxStartups 500:30:1000` in |
-|                                    |                          | `/etc/ssh/sshd_config`.           |
-+------------------------------------+--------------------------+-----------------------------------+
-| `MODULE FAILURE`: /usr/bin/python: | Remote node lacks Python | Explicitly declare interpreter:   |
-| No such file or directory.         | symlink (common on       | Set `ansible_python_interpreter:  |
-|                                    | modern Ubuntu/Rocky).    | /usr/bin/python3` in hostvars.    |
-+------------------------------------+--------------------------+-----------------------------------+
-| Playbook hangs indefinitely at     | Task executed interactive| Inspect active processes:         |
-| `TASK [Gathering Facts]`.          | command awaiting stdin,  | `ps aux | grep ansible`           |
-|                                    | or NFS mount deadlocked. | Audit NFS mounts on target host.  |
-+------------------------------------+--------------------------+-----------------------------------+
-| `/tmp` filled up: `No space left   | Temp directory leak from | Clean temp files and redirect:    |
-| on device` during module upload.   | abrupt job aborts.       | Set `remote_tmp = /var/tmp` in    |
-|                                    |                          | `ansible.cfg`.                    |
-+------------------------------------+--------------------------+-----------------------------------+
-```
-
----
-
-## 9. Verification & Architectural Synthesis Checklist
-
-- [ ] **Execution Model Understood:** Ansiballz compiler and multi-step SSH payload delivery validated.
-- [ ] **Fork Sizing Calculated:** Production `ansible.cfg` configured with `forks = 128 - 256` for large GPU clusters.
-- [ ] **Pipelining Enabled:** `pipelining = true` activated in `ansible.cfg` to eliminate transient SFTP round-trips.
-- [ ] **Idempotency Validated:** Custom modules and shell tasks verified to report `changed: false` on zero-mutation runs.
-- [ ] **Python 3 Standardized:** Managed node interpreter explicitly locked to `/usr/bin/python3`.
+- [ ] You can show the difference in `-vvvv` output with and without pipelining.
+- [ ] You exploded and executed an AnsiballZ payload on the Spark.
+- [ ] You wrote one `block/rescue/always` that captures evidence before failing.
+- [ ] You joined a `poll: 0` async task with `async_status`.

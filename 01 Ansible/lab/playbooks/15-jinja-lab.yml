@@ -1,0 +1,152 @@
+---
+# Jinja2 / data-transform kata using REAL DGX Spark command output.
+# Runs on localhost (no Spark needed):  ansible-playbook playbooks/15-jinja-lab.yml
+# Each task transforms raw text → structured data and ASSERTS the result.
+- name: Jinja2 transforms on Spark data
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # ---------- canned command output (captured on a Spark) ----------
+    raw_ibdev2netdev: |
+      roceP2p1s0f0 port 1 ==> enP2p1s0f0np0 (Down)
+      roceP2p1s0f1 port 1 ==> enP2p1s0f1np1 (Up)
+      rocep1s0f0 port 1 ==> enp1s0f0np0 (Down)
+      rocep1s0f1 port 1 ==> enp1s0f1np1 (Up)
+    raw_smi_csv: |
+      index, name, temperature.gpu, power.draw [W], utilization.gpu [%], memory.used [MiB]
+      0, NVIDIA GB10, 43, 12.31 W, 7 %, [N/A]
+    raw_dmesg: |
+      [ 1203.114] NVRM: Xid (PCI:000f:01:00): 13, pid=4242, name=python3, Graphics Exception
+      [ 5402.771] NVRM: Xid (PCI:000f:01:00): 31, pid=5150, name=vllm, Ch 00000010, MMU Fault
+      [ 9001.002] NVRM: Xid (PCI:000f:01:00): 79, pid=0, name=, GPU has fallen off the bus.
+      [ 9001.010] mlx5_core 0000:01:00.1: Port module event: module 1, Cable unplugged
+    k8s_nodes_json:
+      items:
+        - metadata: { name: spark-01, labels: { nvidia.com/gpu.product: GB10 } }
+          status:
+            allocatable: { nvidia.com/gpu: "4", memory: 110Gi }
+            conditions: [{ type: Ready, status: "True" }]
+        - metadata: { name: spark-02, labels: { nvidia.com/gpu.product: GB10 } }
+          status:
+            allocatable: { memory: 110Gi }
+            conditions: [{ type: Ready, status: "False" }]
+    xid_severity:
+      "13": app       # graphics/compute exception — usually the application
+      "31": app       # MMU fault — bad pointer / OOB in the app
+      "43": app
+      "48": hw        # DBE ECC
+      "63": hw
+      "74": fabric
+      "79": hw        # fell off the bus — node must be drained
+      "94": hw
+      "95": hw
+      "119": hw       # GSP timeout
+  tasks:
+    # 1 ─ line-oriented text → dict  (regex_findall + zip + dict)
+    - name: "K1 ibdev2netdev → {netdev: {rdma, state}}"
+      ansible.builtin.set_fact:
+        k1: >-
+          {{ dict(raw_ibdev2netdev | regex_findall(k1_re) | map('list') | map('community.general.json_query', '[1]')
+                  | zip(raw_ibdev2netdev | regex_findall(k1_re) | map('list')
+                        | map('community.general.json_query', '{rdma: [0], state: [2]}'))) }}
+      vars:
+        k1_re: '(\S+) port \d+ ==> (\S+) \((\w+)\)'
+    - name: K1 check
+      ansible.builtin.assert:
+        that:
+          - k1['enp1s0f1np1'].rdma == 'rocep1s0f1'
+          # GOTCHA: Jinja's sort is case-INsensitive by default; DGX netdev names mix case (enP2… vs enp1…)
+          - k1 | dict2items | selectattr('value.state', 'eq', 'Up') | map(attribute='key') | sort(case_sensitive=true) == ['enP2p1s0f1np1', 'enp1s0f1np1']
+
+    # 2 ─ CSV with units and N/A → typed list of dicts (community.general.from_csv)
+    - name: K2 nvidia-smi CSV → typed records
+      ansible.builtin.set_fact:
+        k2_clean: >-
+          {%- set out = [] -%}
+          {%- for row in (raw_smi_csv | community.general.from_csv(skipinitialspace=true)) -%}
+            {%- set r = {} -%}
+            {%- for k, v in row.items() -%}
+              {%- set key = k | regex_replace('\s*\[.*\]$', '') | replace('.', '_') -%}
+              {%- set val = v | regex_replace('\s*(W|%|MiB)$', '') -%}
+              {%- set _ = r.update({key: (none if val == '[N/A]' else (val | float if val is match('^[\d.]+$') else val))}) -%}
+            {%- endfor -%}
+            {%- set _ = out.append(r) -%}
+          {%- endfor -%}
+          {{ out }}
+    - name: K2 check (memory.used is N/A on a UMA GPU → None, not a crash)
+      ansible.builtin.assert:
+        that:
+          - k2_clean[0].name == 'NVIDIA GB10'
+          - k2_clean[0].power_draw == 12.31
+          - k2_clean[0].memory_used is none
+
+    # 3 ─ log mining: extract Xid codes, classify, decide an action
+    - name: K3 Xid classification
+      ansible.builtin.set_fact:
+        k3_codes: "{{ raw_dmesg | regex_findall('NVRM: Xid \\([^)]*\\): (\\d+)') }}"
+    - name: K3 Decide
+      ansible.builtin.set_fact:
+        k3_action: >-
+          {{ 'drain' if (k3_codes | map('extract', xid_severity) | select('in', ['hw', 'fabric']) | list | length > 0)
+             else ('notify-owner' if k3_codes | length > 0 else 'none') }}
+        k3_cable_events: "{{ raw_dmesg | regex_findall('mlx5_core (\\S+): .*Cable unplugged') }}"
+    - name: K3 check
+      ansible.builtin.assert:
+        that:
+          - k3_codes == ['13', '31', '79']
+          - k3_action == 'drain'
+          - k3_cable_events == ['0000:01:00.1']      # PCI BDF of the CX-7 function
+
+    # 4 ─ JMESPath over API objects (json_query)
+    - name: K4 Nodes that are Ready AND advertise GPUs
+      ansible.builtin.set_fact:
+        k4: "{{ k8s_nodes_json | community.general.json_query(k4_query) }}"
+      vars:
+        # Keys containing dots/slashes must be quoted in JMESPath — keep the query in a var to dodge YAML+Jinja escaping
+        k4_query: >-
+          items[?status.conditions[?type=='Ready' && status=='True']]
+          | [?status.allocatable."nvidia.com/gpu"].metadata.name
+    - name: K4 check
+      ansible.builtin.assert:
+        that: k4 == ['spark-01']
+
+    # 5 ─ deep merge without clobbering (daemon.json pattern)
+    - name: K5 recursive combine keeps unknown keys, list_merge controls arrays
+      ansible.builtin.set_fact:
+        k5: >-
+          {{ {'runtimes': {'nvidia': {'path': 'nvidia-container-runtime'}}, 'insecure-registries': ['10.10.10.11:5000']}
+             | combine({'default-runtime': 'nvidia', 'insecure-registries': ['10.10.10.12:5000'],
+                        'runtimes': {'nvidia': {'args': []}}}, recursive=True, list_merge='append_rp') }}
+    - name: K5 check
+      ansible.builtin.assert:
+        that:
+          - k5.runtimes.nvidia.path == 'nvidia-container-runtime'
+          - k5.runtimes.nvidia.args == []
+          - k5['insecure-registries'] | length == 2
+
+    # 6 ─ generate config lines from inventory (Slurm NodeName, /etc/hosts)
+    - name: K6 Build /etc/hosts fabric entries from host_vars
+      ansible.builtin.set_fact:
+        k6: >-
+          {{ groups['spark'] | map('extract', hostvars, ['cx7_interfaces', 0, 'address'])
+             | map('regex_replace', '/\d+$', '')
+             | zip(groups['spark'] | map('regex_replace', '$', '-fab'))
+             | map('join', ' ') | list }}
+    - name: K6 check
+      ansible.builtin.assert:
+        that: k6 == ['192.168.100.11 spark-01-fab', '192.168.100.12 spark-02-fab']
+
+    # 7 ─ safe defaults & type tests
+    - name: K7 Defaults that don't hide bugs
+      ansible.builtin.assert:
+        that:
+          - (undefined_thing | default('fallback')) == 'fallback'
+          - ('' | default('x', true)) == 'x'                 # true → also replace falsy values
+          - ('580.82.09'.split('.')[0] | int) >= 580
+          - ('13.0' is version('13.0', '>='))
+          - ('GB10' is search('gb10', ignorecase=true))
+
+    - name: All katas passed
+      ansible.builtin.debug:
+        msg: "7/7 Jinja katas passed"

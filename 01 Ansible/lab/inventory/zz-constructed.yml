@@ -1,0 +1,17 @@
+---
+# Loaded after hosts.yml (alphabetical). Builds groups from *facts* — including
+# the custom ansible_local.spark facts — read from the fact cache.
+# Run any play with facts once (e.g. 00-ping.yml) to populate the cache.
+plugin: ansible.builtin.constructed
+strict: false
+groups:
+  gpu_ready: ansible_local.spark.gpu.present | default(false)
+  fabric_cabled: (ansible_local.spark.cx7.up | default([])) | length > 0
+  uma_pressure: (ansible_local.spark.memory.available_gib | default(999)) < 16
+keyed_groups:
+  - prefix: driver
+    key: (ansible_local.spark.gpu.driver_version | default('unknown')).split('.')[0]
+  - prefix: cuda
+    key: (ansible_local.spark.gpu.cuda_driver_api | default('unknown')) | replace('.', '_')
+  - prefix: arch
+    key: ansible_architecture | default('unknown')
