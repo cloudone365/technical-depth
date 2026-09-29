@@ -1,0 +1,12 @@
+---
+spark_node_index: 2
+
+cx7_interfaces:
+  - name: enp1s0f1np1
+    rdma_dev: rocep1s0f1
+    address: 192.168.100.12/24
+    mtu: 9000
+  - name: enP2p1s0f1np1
+    rdma_dev: roceP2p1s0f1
+    address: 192.168.101.12/24
+    mtu: 9000

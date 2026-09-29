@@ -1,0 +1,26 @@
+---
+- name: Ensure admin user is in docker and sudo groups
+  ansible.builtin.user:
+    name: "{{ spark_baseline_admin_user }}"
+    groups: [sudo, docker]
+    append: true
+  when: not spark_baseline_container_mode
+
+- name: Authorise admin SSH public keys
+  ansible.posix.authorized_key:
+    user: "{{ spark_baseline_admin_user }}"
+    key: "{{ item }}"
+    state: present
+  loop: "{{ spark_baseline_admin_pubkeys | select | list }}"
+  loop_control:
+    label: "{{ item[:40] }}…"
+
+- name: Harden sshd (drop-in, validated before reload)
+  ansible.builtin.template:
+    src: sshd-hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/60-spark-hardening.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Reload sshd

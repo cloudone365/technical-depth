@@ -1,0 +1,16 @@
+---
+- name: ConnectX-7 200GbE fabric
+  hosts: spark
+  become: true
+  serial: "{{ fabric_serial | default('100%') }}"   # use 1 when changing live links
+  roles:
+    - role: spark_facts
+    - role: cx7_fabric
+  post_tasks:
+    - name: Print NCCL environment derived from the fabric
+      ansible.builtin.debug:
+        msg:
+          - "export NCCL_SOCKET_IFNAME={{ cx7_fabric_primary_if | default('n/a') }}"
+          - "export NCCL_IB_HCA={{ cx7_fabric_hca_list | default('n/a') }}"
+          - "export NCCL_IB_GID_INDEX={{ cx7_fabric_roce_gid_index | default('n/a') }}"
+      when: cx7_interfaces | default([]) | length > 0

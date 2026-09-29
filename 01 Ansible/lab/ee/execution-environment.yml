@@ -1,0 +1,28 @@
+---
+# ansible-builder build -t spark-ee:1.0 -f ee/execution-environment.yml --container-runtime docker
+# Build ON the Spark to get a native linux/arm64 image (or use buildx for multi-arch).
+version: 3
+images:
+  base_image:
+    name: quay.io/fedora/python-312:latest
+dependencies:
+  ansible_core:
+    package_pip: ansible-core~=2.18.0
+  ansible_runner:
+    package_pip: ansible-runner
+  galaxy: ../requirements.yml
+  python:
+    - jmespath
+    - netaddr
+    - hvac
+    - kubernetes
+  system:
+    - openssh-clients [platform:rpm]
+    - sshpass [platform:rpm]
+    - rsync [platform:rpm]
+    - git-core [platform:rpm]
+additional_build_steps:
+  append_final:
+    - RUN curl -fsSL -o /usr/local/bin/helm.tgz https://get.helm.sh/helm-v3.18.3-linux-$(uname -m | sed 's/aarch64/arm64/;s/x86_64/amd64/').tar.gz
+        && tar -xzf /usr/local/bin/helm.tgz -C /tmp && mv /tmp/linux-*/helm /usr/local/bin/helm && rm -rf /usr/local/bin/helm.tgz /tmp/linux-*
+    - LABEL org.opencontainers.image.description="Ansible EE for the DGX Spark lab"

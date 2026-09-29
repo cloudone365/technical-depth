@@ -1,0 +1,10 @@
+---
+- name: Docker + NVIDIA Container Toolkit + CDI + NGC
+  hosts: spark
+  become: true
+  vars:
+    # Pull the NGC key from Vault when it's configured, else from ansible-vault var.
+    container_runtime_ngc_api_key: "{{ ngc_api_key | default('') }}"
+    container_runtime_ngc_login: "{{ (ngc_api_key | default('')) | length > 0 }}"
+  roles:
+    - role: container_runtime

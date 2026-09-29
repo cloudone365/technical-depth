@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  role_name: slurm_cluster
+  author: cloudone365
+  description: Slurm controller/compute with munge, GRES gpu and cgroup v2 on DGX Spark
+  license: MIT
+  min_ansible_version: "2.17"
+  platforms:
+    - name: Ubuntu
+      versions: [noble]
+dependencies: []

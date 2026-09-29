@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  role_name: cx7_fabric
+  author: cloudone365
+  description: ConnectX-7 200GbE RoCE fabric addressing, MTU and link/RDMA verification for DGX Spark
+  license: MIT
+  min_ansible_version: "2.17"
+  platforms:
+    - name: Ubuntu
+      versions: [noble]
+dependencies: []

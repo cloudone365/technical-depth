@@ -1,0 +1,18 @@
+---
+# Day-0 connectivity: SSH works, sudo works, Python works, it IS a Spark.
+- name: Connectivity and identity check
+  hosts: spark
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Ping (tests SSH + Python, not ICMP)
+      ansible.builtin.ping:
+
+    - name: Show what we are talking to
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} {{ ansible_facts.architecture }}
+          {{ ansible_facts.processor_nproc }} cores
+          {{ (ansible_facts.memtotal_mb / 1024) | round(1) }} GiB
+          {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}
+          kernel {{ ansible_facts.kernel }}

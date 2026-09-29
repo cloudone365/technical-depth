@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  role_name: spark_facts
+  author: cloudone365
+  description: Installs a local fact exposing GB10 GPU, CUDA, ConnectX-7 and DGX OS state
+  license: MIT
+  min_ansible_version: "2.17"
+  platforms:
+    - name: Ubuntu
+      versions: [noble]
+dependencies: []

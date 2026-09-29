@@ -1,0 +1,11 @@
+---
+# List of {name, rdma_dev, address, mtu} — normally set in host_vars.
+cx7_fabric_interfaces: "{{ cx7_interfaces | default([]) }}"
+cx7_fabric_netplan_file: /etc/netplan/40-cx7.yaml
+cx7_fabric_expected_speed_mbps: 200000
+# Fail the play if a configured port is not at full speed / not Up.
+cx7_fabric_strict: true
+# Run a jumbo-frame DF ping to every peer address in the same subnet.
+cx7_fabric_verify_peers: true
+# RoCEv2 GID index is discovered, but you can pin it for NCCL_IB_GID_INDEX.
+cx7_fabric_gid_index: ""

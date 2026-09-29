@@ -1,0 +1,22 @@
+---
+# Full build. Each stage can also run on its own.
+- name: Baseline
+  ansible.builtin.import_playbook: 01-baseline.yml
+- name: Fabric
+  ansible.builtin.import_playbook: 02-fabric.yml
+- name: Containers
+  ansible.builtin.import_playbook: 03-containers.yml
+- name: Telemetry
+  ansible.builtin.import_playbook: 04-telemetry.yml
+- name: Vault
+  ansible.builtin.import_playbook: 08-vault.yml
+- name: Kubernetes
+  ansible.builtin.import_playbook: 05-k3s.yml
+- name: GPU Operator
+  ansible.builtin.import_playbook: 06-gpu-operator.yml
+- name: Slurm
+  ansible.builtin.import_playbook: 07-slurm.yml
+- name: Shared storage
+  ansible.builtin.import_playbook: 09-nfs-rdma.yml
+- name: Validate
+  ansible.builtin.import_playbook: 30-validate.yml

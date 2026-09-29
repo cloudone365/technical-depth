@@ -1,0 +1,41 @@
+---
+vault_config_addr: "https://{{ hostvars[groups['vault'][0]].ansible_host }}:8200"
+vault_config_cacert: "{{ playbook_dir }}/../.cache/spark-lab-ca.crt"
+# LAB: bootstrap with the root token from init; production: a short-lived admin token.
+vault_config_token: "{{ (lookup('ansible.builtin.file', playbook_dir ~ '/../.cache/vault-init.json') | from_json).root_token }}"
+
+vault_config_secret_engines:
+  - { path: kv, type: kv, options: { version: "2" } }
+  - { path: ssh-client-signer, type: ssh }
+
+vault_config_auth_methods:
+  - { path: approle, type: approle }
+
+vault_config_policies:
+  ansible-automation: |
+    # Read lab secrets
+    path "kv/data/spark-lab/*"     { capabilities = ["read"] }
+    path "kv/metadata/spark-lab/*" { capabilities = ["list", "read"] }
+    # Get SSH certificates signed for the automation user
+    path "ssh-client-signer/sign/ansible" { capabilities = ["create", "update"] }
+    # Let the token look itself up / renew (hvac does this)
+    path "auth/token/lookup-self" { capabilities = ["read"] }
+    path "auth/token/renew-self"  { capabilities = ["update"] }
+  spark-admin: |
+    path "kv/data/spark-lab/*"     { capabilities = ["create", "read", "update", "delete"] }
+    path "kv/metadata/spark-lab/*" { capabilities = ["list", "read", "delete"] }
+
+vault_config_approles:
+  - name: ansible
+    token_policies: [ansible-automation]
+    token_ttl: 20m
+    token_max_ttl: 1h
+    secret_id_ttl: 24h        # AWX/cron must refresh; stolen secret_ids expire
+    secret_id_num_uses: 0
+    token_bound_cidrs: ""     # e.g. "10.10.10.0/24" to pin to the mgmt network
+
+vault_config_ssh_role:
+  name: ansible
+  allowed_users: "{{ spark_admin_user | default('nvidia') }}"
+  default_user: "{{ spark_admin_user | default('nvidia') }}"
+  ttl: 30m

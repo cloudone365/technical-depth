@@ -1,0 +1,19 @@
+---
+- name: Slurm cluster
+  hosts: slurm_controller:slurm_compute
+  become: true
+  roles:
+    - role: slurm_cluster
+  post_tasks:
+    - name: Run a 1-GPU job and capture its output
+      ansible.builtin.command: srun -p gpu --gres=gpu:1 -t 2 nvidia-smi -L
+      become: false
+      register: slurm_job
+      changed_when: false
+      run_once: true
+      delegate_to: "{{ groups['slurm_controller'][0] }}"
+
+    - name: Job output
+      ansible.builtin.debug:
+        var: slurm_job.stdout_lines
+      run_once: true

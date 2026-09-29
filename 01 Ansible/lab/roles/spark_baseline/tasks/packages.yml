@@ -1,0 +1,36 @@
+---
+- name: Install baseline packages
+  ansible.builtin.apt:
+    name: "{{ spark_baseline_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  register: spark_baseline_apt
+  retries: 3
+  delay: 10
+  until: spark_baseline_apt is succeeded   # apt lock held by unattended-upgrades → retry
+
+- name: Gather installed package list
+  ansible.builtin.package_facts:
+    manager: apt
+  when: spark_baseline_hold_nvidia | bool
+
+- name: Compute NVIDIA packages to hold
+  ansible.builtin.set_fact:
+    spark_baseline_nvidia_pkgs: >-
+      {{ ansible_facts.packages.keys()
+         | select('match', spark_baseline_hold_regex)
+         | list | sort }}
+  when: spark_baseline_hold_nvidia | bool
+
+- name: Read current apt holds
+  ansible.builtin.command: apt-mark showhold
+  register: spark_baseline_holds
+  changed_when: false
+  when: spark_baseline_hold_nvidia | bool
+
+- name: Hold NVIDIA driver stack (DGX Dashboard / planned upgrades only)
+  ansible.builtin.command: "apt-mark hold {{ item }}"
+  loop: "{{ spark_baseline_nvidia_pkgs | difference(spark_baseline_holds.stdout_lines) }}"
+  changed_when: true
+  when: spark_baseline_hold_nvidia | bool

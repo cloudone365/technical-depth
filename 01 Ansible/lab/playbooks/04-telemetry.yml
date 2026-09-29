@@ -1,0 +1,6 @@
+---
+- name: GPU / UMA / fabric telemetry
+  hosts: spark
+  become: true
+  roles:
+    - role: gpu_telemetry

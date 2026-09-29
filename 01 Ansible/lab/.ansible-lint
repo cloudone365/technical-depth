@@ -1,0 +1,10 @@
+---
+profile: production
+exclude_paths:
+  - .cache/
+  - collections/
+  - roles/*/molecule/
+skip_list:
+  - var-naming[no-role-prefix]   # inventory-level vars (cx7_interfaces, spark_expected) are shared on purpose
+warn_list:
+  - experimental

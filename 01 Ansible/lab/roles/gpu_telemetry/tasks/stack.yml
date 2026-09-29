@@ -1,0 +1,48 @@
+---
+- name: Create monitoring stack directories
+  ansible.builtin.file:
+    path: "{{ gpu_telemetry_stack_dir }}/{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: [prometheus, alertmanager, grafana/provisioning/datasources]
+
+- name: Render stack configuration
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ gpu_telemetry_stack_dir }}/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - { src: compose.yml.j2, dest: compose.yml }
+    - { src: prometheus.yml.j2, dest: prometheus/prometheus.yml }
+    - { src: spark-alerts.yml.j2, dest: prometheus/spark-alerts.yml }
+    - { src: alertmanager.yml.j2, dest: alertmanager/alertmanager.yml }
+    - { src: grafana-datasource.yml.j2, dest: grafana/provisioning/datasources/prometheus.yml }
+  loop_control:
+    label: "{{ item.dest }}"
+  register: gpu_telemetry_cfg
+
+- name: Validate Prometheus config + rules with promtool (in the image)  # noqa: no-handler (gate before compose up)
+  ansible.builtin.command: >-
+    docker run --rm --entrypoint promtool
+    -v {{ gpu_telemetry_stack_dir }}/prometheus:/etc/prometheus:ro
+    {{ gpu_telemetry_prometheus_image }} check config /etc/prometheus/prometheus.yml
+  changed_when: false
+  when: gpu_telemetry_cfg is changed
+
+- name: Bring the stack up
+  community.docker.docker_compose_v2:
+    project_src: "{{ gpu_telemetry_stack_dir }}"
+    state: present
+    pull: missing
+  register: gpu_telemetry_compose
+
+- name: Hot-reload Prometheus when only config changed
+  ansible.builtin.uri:
+    url: http://127.0.0.1:9090/-/reload
+    method: POST
+    status_code: [200]
+  when: gpu_telemetry_cfg is changed and gpu_telemetry_compose is not changed

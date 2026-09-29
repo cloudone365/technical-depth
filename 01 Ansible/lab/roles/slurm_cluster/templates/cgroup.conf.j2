@@ -1,0 +1,8 @@
+# {{ ansible_managed }}
+CgroupPlugin=cgroup/v2
+ConstrainCores=yes
+ConstrainRAMSpace=yes
+ConstrainSwapSpace=yes
+# jobs without --gres=gpu cannot open /dev/nvidia*
+ConstrainDevices=yes
+AllowedRAMSpace=100

@@ -1,0 +1,35 @@
+---
+# Installs the spark.fact local fact and re-reads facts so that
+# ansible_local.spark is available to every role that runs afterwards.
+- name: Ensure facts.d directory exists
+  ansible.builtin.file:
+    path: /etc/ansible/facts.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install DGX Spark local fact script
+  ansible.builtin.copy:
+    src: spark.fact
+    dest: /etc/ansible/facts.d/spark.fact
+    owner: root
+    group: root
+    mode: "0755"
+  register: spark_fact_script
+
+- name: Re-read local facts after install/update
+  ansible.builtin.setup:
+    filter: ansible_local
+  when: spark_fact_script is changed or ansible_local.spark is not defined
+
+- name: Summarise hardware (visible with -v)
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}:
+      GPU={{ ansible_local.spark.gpu.name | default('n/a') }}
+      driver={{ ansible_local.spark.gpu.driver_version | default('n/a') }}
+      cuda(driver)={{ ansible_local.spark.gpu.cuda_driver_api | default('n/a') }}
+      cx7_up={{ ansible_local.spark.cx7.up | default([]) | join(',') }}
+      mem={{ ansible_local.spark.memory.total_gib | default('?') }}GiB
+    verbosity: 1

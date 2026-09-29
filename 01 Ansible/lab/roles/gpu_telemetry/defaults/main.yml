@@ -1,0 +1,16 @@
+---
+gpu_telemetry_textfile_dir: /var/lib/prometheus/node-exporter
+gpu_telemetry_interval: 15s
+
+# dcgm-exporter: enable only after `dcgmi discovery -l` lists the GB10 on your DGX OS release.
+gpu_telemetry_dcgm_enabled: false
+gpu_telemetry_dcgm_image: nvcr.io/nvidia/k8s/dcgm-exporter:4.2.3-4.1.3-ubuntu22.04
+gpu_telemetry_dcgm_port: 9400
+
+# Monitoring stack (Prometheus + Grafana + Alertmanager) — runs on the 'monitoring' group
+gpu_telemetry_stack_dir: /opt/spark-monitoring
+gpu_telemetry_prometheus_image: prom/prometheus:v3.4.1
+gpu_telemetry_grafana_image: grafana/grafana:12.0.2
+gpu_telemetry_alertmanager_image: prom/alertmanager:v0.28.1
+gpu_telemetry_grafana_admin_password: "change-me-via-vault"
+gpu_telemetry_retention: 30d

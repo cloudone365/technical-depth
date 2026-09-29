@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""
+/etc/ansible/facts.d/spark.fact — Ansible local fact for DGX Spark.
+
+Ansible executes every executable *.fact file during fact gathering and puts
+the JSON it prints under ansible_local.<name>. This one exposes GPU, CUDA,
+ConnectX-7 and DGX OS state so playbooks can branch on real hardware state
+instead of re-running shell commands in every role.
+
+Design rules:
+  * never fail — a broken fact script breaks *every* play on the host
+  * hard timeout on every subprocess (a wedged GPU makes nvidia-smi hang)
+  * report 'error' fields instead of raising
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+
+TIMEOUT = 8
+
+
+def run(cmd):
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
+        return out.returncode, out.stdout.strip(), out.stderr.strip()
+    except FileNotFoundError:
+        return 127, "", "not found"
+    except subprocess.TimeoutExpired:
+        return 124, "", "timeout"
+
+
+def gpu():
+    info = {"present": False}
+    if not shutil.which("nvidia-smi"):
+        info["error"] = "nvidia-smi not installed"
+        return info
+    fields = "name,driver_version,compute_cap,temperature.gpu,power.draw,utilization.gpu,pstate"
+    rc, out, err = run(["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader,nounits"])
+    if rc != 0:
+        info["error"] = err or f"nvidia-smi rc={rc}"
+        return info
+    first = out.splitlines()[0]
+    vals = [v.strip() for v in first.split(",")]
+    keys = ["name", "driver_version", "compute_cap", "temp_c", "power_w", "util_pct", "pstate"]
+    info.update(dict(zip(keys, vals)))
+    info["present"] = True
+    info["count"] = len(out.splitlines())
+    # CUDA version the *driver* supports comes from the nvidia-smi banner
+    rc, banner, _ = run(["nvidia-smi"])
+    m = re.search(r"CUDA Version:\s*([\d.]+)", banner)
+    info["cuda_driver_api"] = m.group(1) if m else None
+    return info
+
+
+def cuda_toolkit():
+    nvcc = shutil.which("nvcc") or "/usr/local/cuda/bin/nvcc"
+    rc, out, _ = run([nvcc, "--version"])
+    m = re.search(r"release ([\d.]+)", out)
+    return {"nvcc_path": nvcc if rc == 0 else None, "version": m.group(1) if m else None}
+
+
+def cx7():
+    """Parse `ibdev2netdev` → {netdev: {rdma_dev, state, speed_mbps, mtu}}."""
+    ports = {}
+    rc, out, err = run(["ibdev2netdev"])
+    if rc != 0:
+        return {"error": err or "ibdev2netdev unavailable", "ports": ports}
+    for line in out.splitlines():
+        m = re.match(r"(\S+) port (\d+) ==> (\S+) \((\w+)\)", line)
+        if not m:
+            continue
+        rdma, _port, netdev, state = m.groups()
+        entry = {"rdma_dev": rdma, "state": state}
+        base = f"/sys/class/net/{netdev}"
+        for key, fname in (("speed_mbps", "speed"), ("mtu", "mtu")):
+            try:
+                with open(f"{base}/{fname}") as fh:
+                    entry[key] = int(fh.read().strip())
+            except (OSError, ValueError):
+                entry[key] = None
+        ports[netdev] = entry
+    up = [n for n, p in ports.items() if p["state"] == "Up"]
+    return {"ports": ports, "up": sorted(up)}
+
+
+def memory():
+    mem = {}
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                k, v = line.split(":", 1)
+                if k in ("MemTotal", "MemAvailable", "Cached", "SwapTotal", "HugePages_Total"):
+                    mem[k] = int(v.split()[0])
+    except OSError:
+        pass
+    gib = lambda kb: round(kb / 1048576, 1)
+    return {
+        "total_gib": gib(mem.get("MemTotal", 0)),
+        "available_gib": gib(mem.get("MemAvailable", 0)),
+        "page_cache_gib": gib(mem.get("Cached", 0)),
+        "swap_gib": gib(mem.get("SwapTotal", 0)),
+        # On a UMA machine the GPU allocates from this same pool:
+        "note": "unified memory: GPU allocations consume MemAvailable",
+    }
+
+
+def dgx_release():
+    rel = {}
+    try:
+        with open("/etc/dgx-release") as fh:
+            for line in fh:
+                if "=" in line:
+                    k, v = line.strip().split("=", 1)
+                    rel[k] = v.strip('"')
+    except OSError:
+        return {"present": False}
+    rel["present"] = True
+    return rel
+
+
+def container_runtime():
+    rc, out, _ = run(["nvidia-ctk", "--version"])
+    return {
+        "nvidia_ctk": out.splitlines()[0] if rc == 0 and out else None,
+        "cdi_spec": os.path.exists("/etc/cdi/nvidia.yaml") or os.path.exists("/var/run/cdi/nvidia.yaml"),
+        "docker": shutil.which("docker") is not None,
+    }
+
+
+print(json.dumps({
+    "schema": 1,
+    "gpu": gpu(),
+    "cuda": cuda_toolkit(),
+    "cx7": cx7(),
+    "memory": memory(),
+    "dgx_release": dgx_release(),
+    "runtime": container_runtime(),
+}))

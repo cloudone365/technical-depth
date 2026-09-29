@@ -1,0 +1,84 @@
+---
+- name: Install node_exporter
+  ansible.builtin.apt:
+    name: prometheus-node-exporter
+    state: present
+
+- name: Point node_exporter at the textfile directory
+  ansible.builtin.copy:
+    dest: /etc/default/prometheus-node-exporter
+    content: |
+      # {{ ansible_managed }}
+      ARGS="--collector.textfile.directory={{ gpu_telemetry_textfile_dir }} --collector.systemd --collector.processes"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart node_exporter
+
+- name: Ensure textfile directory
+  ansible.builtin.file:
+    path: "{{ gpu_telemetry_textfile_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install GPU/UMA/CX-7 textfile collector
+  ansible.builtin.copy:
+    src: spark-gpu-metrics.sh
+    dest: /usr/local/sbin/spark-gpu-metrics.sh
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install systemd service + timer for the collector
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ item.name }}"
+    content: "{{ item.content }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - name: spark-gpu-metrics.service
+      content: |
+        [Unit]
+        Description=DGX Spark GPU textfile metrics
+        [Service]
+        Type=oneshot
+        Environment=OUT_DIR={{ gpu_telemetry_textfile_dir }}
+        ExecStart=/usr/local/sbin/spark-gpu-metrics.sh
+        Nice=10
+    - name: spark-gpu-metrics.timer
+      content: |
+        [Unit]
+        Description=Run spark-gpu-metrics every {{ gpu_telemetry_interval }}
+        [Timer]
+        OnBootSec=30s
+        OnUnitActiveSec={{ gpu_telemetry_interval }}
+        AccuracySec=1s
+        [Install]
+        WantedBy=timers.target
+  loop_control:
+    label: "{{ item.name }}"
+  notify: Reload systemd
+
+- name: Flush handlers (daemon-reload before enabling the timer)
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable collector timer
+  ansible.builtin.systemd_service:
+    name: spark-gpu-metrics.timer
+    enabled: true
+    state: started
+
+- name: Run dcgm-exporter container (optional)
+  community.docker.docker_container:
+    name: dcgm-exporter
+    image: "{{ gpu_telemetry_dcgm_image }}"
+    restart_policy: unless-stopped
+    runtime: nvidia
+    capabilities: [SYS_ADMIN]
+    published_ports: ["{{ gpu_telemetry_dcgm_port }}:9400"]
+    env:
+      NVIDIA_VISIBLE_DEVICES: all
+  when: gpu_telemetry_dcgm_enabled | bool

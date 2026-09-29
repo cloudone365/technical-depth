@@ -1,0 +1,30 @@
+---
+gpu_operator_chart_version: v25.3.0        # pin; check `helm search repo nvidia/gpu-operator -l`
+gpu_operator_namespace: gpu-operator
+gpu_operator_kubeconfig: "{{ k3s_cluster_kubeconfig_local | default(playbook_dir ~ '/../.cache/kubeconfig-spark-lab.yaml') }}"
+
+# DGX OS already provides the driver and container toolkit — the operator must
+# NOT try to install them (it would fight DGX OS updates).
+gpu_operator_values:
+  driver:
+    enabled: false
+  toolkit:
+    enabled: false
+  operator:
+    defaultRuntime: containerd
+  # k3s keeps containerd config/socket in non-standard paths
+  cdi:
+    enabled: false
+  devicePlugin:
+    config:
+      name: time-slicing-config
+      default: any
+  dcgmExporter:
+    enabled: "{{ gpu_operator_dcgm_exporter | default(false) }}"
+  migManager:
+    enabled: false        # GB10 has no MIG
+  nfd:
+    enabled: true
+
+# Time-slicing: advertise N logical GPUs per physical GB10 (no memory isolation!)
+gpu_operator_timeslice_replicas: 4

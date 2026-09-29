@@ -1,0 +1,30 @@
+# {{ ansible_managed }}
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    lab: {{ lab_name | default('spark-lab') }}
+
+rule_files:
+  - /etc/prometheus/spark-alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["127.0.0.1:9093"]
+
+scrape_configs:
+  - job_name: node
+    static_configs:
+{% for h in groups['spark'] %}
+      - targets: ["{{ hostvars[h].ansible_host | default(h) }}:9100"]
+        labels: { host: "{{ h }}" }
+{% endfor %}
+{% if gpu_telemetry_dcgm_enabled | bool %}
+  - job_name: dcgm
+    static_configs:
+{% for h in groups['spark'] %}
+      - targets: ["{{ hostvars[h].ansible_host | default(h) }}:{{ gpu_telemetry_dcgm_port }}"]
+        labels: { host: "{{ h }}" }
+{% endfor %}
+{% endif %}

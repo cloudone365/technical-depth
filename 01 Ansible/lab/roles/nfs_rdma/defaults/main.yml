@@ -1,0 +1,14 @@
+---
+# Shared model/dataset cache: spark-01 exports its NVMe over NFSv4.2 on RDMA
+# (port 20049) across the CX-7 link; spark-02 mounts it. One copy of a 70 GB
+# checkpoint instead of two downloads.
+nfs_rdma_export_path: /srv/models
+nfs_rdma_mount_path: /mnt/models
+nfs_rdma_port: 20049
+nfs_rdma_threads: 16
+nfs_rdma_server_group: nfs_server
+nfs_rdma_client_group: nfs_client
+nfs_rdma_export_cidrs: [192.168.100.0/24, 192.168.101.0/24]
+nfs_rdma_mount_opts: "vers=4.2,proto=rdma,port={{ nfs_rdma_port }},nconnect=4,hard,noatime,rsize=1048576,wsize=1048576,_netdev,x-systemd.automount"
+# Fallback when RDMA isn't available (single Spark, laptop client):
+nfs_rdma_tcp_fallback: true

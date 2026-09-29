@@ -1,0 +1,12 @@
+# {{ ansible_managed }}
+route:
+  receiver: default
+  group_by: [alertname, host]
+  group_wait: 30s
+  repeat_interval: 4h
+receivers:
+  - name: default
+{% if gpu_telemetry_webhook_url is defined %}
+    webhook_configs:
+      - url: "{{ gpu_telemetry_webhook_url }}"
+{% endif %}

@@ -1,0 +1,40 @@
+---
+# DGX OS ships Docker + NVIDIA Container Toolkit. This role *converges* them to a
+# known state rather than installing from scratch.
+container_runtime_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-compose-plugin
+  - nvidia-container-toolkit
+
+# Keys merged INTO the existing /etc/docker/daemon.json (we never clobber it).
+container_runtime_daemon_overrides:
+  default-runtime: nvidia
+  runtimes:
+    nvidia:
+      path: nvidia-container-runtime
+      args: []
+  log-driver: json-file
+  log-opts:
+    max-size: 100m
+    max-file: "3"
+  # Put images on the big NVMe; default /var/lib/docker is already on it on Spark.
+  data-root: /var/lib/docker
+  features:
+    cdi: true
+
+container_runtime_generate_cdi: true
+container_runtime_cdi_spec: /etc/cdi/nvidia.yaml
+
+# NGC (nvcr.io) — API key comes from Vault or ansible-vault, never plain text.
+container_runtime_ngc_login: false
+container_runtime_ngc_api_key: ""        # e.g. "{{ lookup('community.hashi_vault.hashi_vault', 'secret=kv/data/ngc:api_key') }}"
+
+# Images to pre-pull (big — do this once, on a fast link)
+container_runtime_prepull: []
+#  - nvcr.io/nvidia/pytorch:25.11-py3
+#  - nvcr.io/nvidia/vllm:26.01-py3
+
+container_runtime_smoke_image: nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04
+container_runtime_smoke_test: true

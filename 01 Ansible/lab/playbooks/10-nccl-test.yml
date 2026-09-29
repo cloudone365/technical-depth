@@ -1,0 +1,100 @@
+---
+# Builds NCCL + nccl-tests for Blackwell (sm_121) on every Spark, then runs
+# all_gather_perf across the CX-7 link from the first node. Mirrors NVIDIA's
+# "NCCL for Multiple Sparks" playbook, but idempotent and inventory-driven.
+- name: Build NCCL and nccl-tests
+  hosts: spark
+  become: true
+  vars:
+    nccl_version: v2.30.7-1
+    nccl_user: "{{ spark_admin_user }}"
+    nccl_home: "/home/{{ spark_admin_user }}"
+  tasks:
+    - name: Build dependencies
+      ansible.builtin.apt:
+        name: [libopenmpi-dev, openmpi-bin, build-essential, git]
+        state: present
+
+    - name: Clone NCCL
+      ansible.builtin.git:
+        repo: https://github.com/NVIDIA/nccl.git
+        dest: "{{ nccl_home }}/nccl"
+        version: "{{ nccl_version }}"
+        depth: 1
+      become: true
+      become_user: "{{ nccl_user }}"
+
+    - name: Build NCCL for sm_121 (≈10 min first time)
+      ansible.builtin.command: make -j20 src.build NVCC_GENCODE="-gencode=arch=compute_121,code=sm_121"
+      args:
+        chdir: "{{ nccl_home }}/nccl"
+        creates: "{{ nccl_home }}/nccl/build/lib/libnccl.so"   # rm -rf ~/nccl/build to force a rebuild
+      environment:
+        CUDA_HOME: /usr/local/cuda
+        PATH: "/usr/local/cuda/bin:{{ ansible_env.PATH }}"
+      become: true
+      become_user: "{{ nccl_user }}"
+      async: 3600
+      poll: 30
+
+    - name: Clone nccl-tests
+      ansible.builtin.git:
+        repo: https://github.com/NVIDIA/nccl-tests.git
+        dest: "{{ nccl_home }}/nccl-tests"
+        version: master
+        depth: 1
+        update: false
+      become: true
+      become_user: "{{ nccl_user }}"
+
+    - name: Build nccl-tests with MPI
+      ansible.builtin.command: >-
+        make -j20 MPI=1 MPI_HOME=/usr/lib/aarch64-linux-gnu/openmpi
+        CUDA_HOME=/usr/local/cuda NCCL_HOME={{ nccl_home }}/nccl/build
+      args:
+        chdir: "{{ nccl_home }}/nccl-tests"
+        creates: "{{ nccl_home }}/nccl-tests/build/all_gather_perf"
+      become: true
+      become_user: "{{ nccl_user }}"
+
+- name: Run all_gather_perf across all Sparks
+  hosts: spark[0]
+  gather_facts: false
+  become: false
+  vars:
+    nccl_home: "/home/{{ spark_admin_user }}"
+    nccl_bytes: 16G
+  tasks:
+    - name: Skip on single node
+      ansible.builtin.meta: end_play
+      when: groups['spark'] | length < 2
+
+    - name: Run mpirun over the management network, data over CX-7 RoCE
+      ansible.builtin.shell: |
+        export LD_LIBRARY_PATH={{ nccl_home }}/nccl/build/lib:/usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu/openmpi/lib:$LD_LIBRARY_PATH
+        mpirun -np {{ groups['spark'] | length }} \
+          -H {{ groups['spark'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '$', ':1') | join(',') }} \
+          --mca plm_rsh_agent "ssh -o StrictHostKeyChecking=accept-new" \
+          --mca btl_tcp_if_include {{ mgmt_interface }} \
+          -x LD_LIBRARY_PATH \
+          -x NCCL_SOCKET_IFNAME={{ mgmt_interface }} \
+          -x UCX_NET_DEVICES={{ mgmt_interface }} \
+          -x NCCL_IB_HCA={{ cx7_interfaces | map(attribute='rdma_dev') | join(',') }} \
+          -x NCCL_DEBUG=INFO -x NCCL_DEBUG_SUBSYS=INIT,NET \
+          {{ nccl_home }}/nccl-tests/build/all_gather_perf -b {{ nccl_bytes }} -e {{ nccl_bytes }} -f 2
+      args:
+        executable: /bin/bash
+      register: nccl_run
+      changed_when: false
+
+    - name: Extract bus bandwidth
+      ansible.builtin.set_fact:
+        nccl_busbw: "{{ nccl_run.stdout | regex_search('Avg bus bandwidth\\s*:\\s*([\\d.]+)', '\\1') | first | default('n/a') }}"
+        nccl_transport: "{{ nccl_run.stdout_lines | select('search', 'NET/IB|NET/Socket|Using network') | list | unique | first | default('unknown') }}"
+
+    - name: Result
+      ansible.builtin.debug:
+        msg:
+          - "Avg bus bandwidth: {{ nccl_busbw }} GB/s"
+          - "Transport line   : {{ nccl_transport }}"
+          - "If this says NET/Socket, RDMA isn't in use — see Volume 12 troubleshooting."

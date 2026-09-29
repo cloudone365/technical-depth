@@ -1,0 +1,16 @@
+---
+# ansible-playbook playbooks/21-emergency-drain.yml -l spark-02 \
+#   -e node_drain_reboot=true -e node_drain_undrain_after=true -e node_drain_bug_report=true
+- name: Emergency drain / remediation
+  hosts: spark
+  become: true
+  serial: 1                       # never take the whole lab down at once
+  max_fail_percentage: 0
+  pre_tasks:
+    - name: Refuse to run against every host without -l
+      ansible.builtin.assert:
+        that: ansible_limit is defined or (allow_all | default(false) | bool)
+        fail_msg: "Use -l <host> (or -e allow_all=true if you really mean it)"
+      run_once: true
+  roles:
+    - role: node_drain

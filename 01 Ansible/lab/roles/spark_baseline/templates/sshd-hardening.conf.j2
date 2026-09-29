@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+PermitRootLogin no
+PubkeyAuthentication yes
+PasswordAuthentication {{ 'no' if spark_baseline_ssh_disable_passwords | bool else 'yes' }}
+KbdInteractiveAuthentication no
+X11Forwarding no
+# Allow NVIDIA Sync / manual tunnels to the DGX Dashboard (localhost:11000)
+AllowTcpForwarding yes
+ClientAliveInterval 60
+ClientAliveCountMax 5
+MaxStartups 30:30:100

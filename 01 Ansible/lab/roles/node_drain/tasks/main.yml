@@ -1,0 +1,102 @@
+---
+# Order matters: stop NEW work → collect evidence → stop RUNNING work → remediate → prove → return.
+- name: "1/6 Cordon + drain Kubernetes node"
+  kubernetes.core.k8s_drain:
+    kubeconfig: "{{ node_drain_kubeconfig }}"
+    name: "{{ inventory_hostname }}"
+    state: drain
+    delete_options:
+      ignore_daemonsets: true
+      delete_emptydir_data: true
+      terminate_grace_period: 60
+      wait_timeout: 300
+  delegate_to: localhost
+  become: false
+  when: node_drain_k8s | bool
+
+- name: "2/6 Drain in Slurm (running jobs finish, no new ones start)"
+  ansible.builtin.command: >-
+    scontrol update NodeName={{ inventory_hostname }} State=DRAIN Reason="{{ node_drain_reason }}"
+  delegate_to: "{{ groups['slurm_controller'][0] }}"
+  changed_when: true
+  when: node_drain_slurm | bool
+
+- name: "3/6 Collect forensic bundle"
+  when: node_drain_collect | bool
+  block:
+    - name: Create remote bundle dir
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: incident-
+      register: node_drain_tmp
+
+    - name: Capture state (each command time-boxed; a hung GPU must not hang the drain)
+      ansible.builtin.shell: |
+        set -o pipefail
+        cd {{ node_drain_tmp.path }}
+        timeout 30 nvidia-smi -q                > nvidia-smi-q.txt 2>&1
+        timeout 30 nvidia-smi                   > nvidia-smi.txt 2>&1
+        journalctl -k --since "-2h" --no-pager  > kernel.log 2>&1
+        journalctl -k --no-pager | grep -E 'NVRM|Xid|mlx5' > nvrm-xid.log 2>&1 || true
+        journalctl -u docker -u k3s -u k3s-agent -u slurmd --since "-2h" --no-pager > services.log 2>&1
+        cat /proc/meminfo > meminfo.txt
+        ibdev2netdev > ibdev2netdev.txt 2>&1
+        for d in $(ls /sys/class/infiniband 2>/dev/null); do ibv_devinfo -d $d; done > ibv_devinfo.txt 2>&1
+        ip -s link > ip-link.txt
+        docker ps -a > docker-ps.txt 2>&1
+        {% if node_drain_bug_report %}
+        timeout 600 nvidia-bug-report.sh --output-file nvidia-bug-report.log.gz >/dev/null 2>&1
+        {% endif %}
+
+        tar czf /tmp/{{ inventory_hostname }}-incident.tgz -C {{ node_drain_tmp.path }} .
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Pull bundle to the control node
+      ansible.builtin.fetch:
+        src: "/tmp/{{ inventory_hostname }}-incident.tgz"
+        dest: "{{ node_drain_bundle_dir }}/{{ inventory_hostname }}-{{ now(fmt='%Y%m%d-%H%M%S') }}.tgz"
+        flat: true
+
+- name: "4/6 Stop GPU containers"
+  ansible.builtin.shell: |
+    set -o pipefail
+    ids=$(docker ps -q)
+    [ -z "$ids" ] && exit 0
+    docker inspect $ids --format '{{ '{{' }}.Id{{ '}}' }} {{ '{{' }}.HostConfig.Runtime{{ '}}' }} {{ '{{' }}json .HostConfig.DeviceRequests{{ '}}' }}' \
+      | awk '/nvidia/ {print $1}' | xargs -r docker stop -t 60
+  args:
+    executable: /bin/bash
+  register: node_drain_stopped
+  changed_when: node_drain_stopped.stdout | length > 0
+  when: node_drain_stop_containers | bool
+
+- name: "5/6 Reboot (optional)"
+  ansible.builtin.reboot:
+    reboot_timeout: 900
+    post_reboot_delay: 30
+    test_command: nvidia-smi -L
+  when: node_drain_reboot | bool
+
+- name: "6/6 Validate, then return to service"
+  when: node_drain_undrain_after | bool
+  block:
+    - name: Run validation role
+      ansible.builtin.include_role:
+        name: spark_validate
+
+    - name: Uncordon Kubernetes node
+      kubernetes.core.k8s_drain:
+        kubeconfig: "{{ node_drain_kubeconfig }}"
+        name: "{{ inventory_hostname }}"
+        state: uncordon
+      delegate_to: localhost
+      become: false
+      when: node_drain_k8s | bool
+
+    - name: Resume in Slurm
+      ansible.builtin.command: scontrol update NodeName={{ inventory_hostname }} State=RESUME
+      delegate_to: "{{ groups['slurm_controller'][0] }}"
+      changed_when: true
+      when: node_drain_slurm | bool

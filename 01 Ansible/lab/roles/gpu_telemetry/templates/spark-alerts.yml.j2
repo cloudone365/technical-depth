@@ -1,0 +1,44 @@
+# {{ ansible_managed }}
+groups:
+  - name: spark-gpu
+    rules:
+      - alert: SparkGPUUnresponsive
+        expr: spark_gpu_up == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "nvidia-smi not answering on {{ '{{' }} $labels.host {{ '}}' }}"
+          runbook: "Volume 24 §Runbook A — GPU hang"
+      - alert: SparkGPUXid
+        expr: delta(spark_gpu_xid_events_24h[15m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "New NVRM Xid on {{ '{{' }} $labels.host {{ '}}' }}"
+          runbook: "Volume 24 §Runbook B — Xid triage"
+      - alert: SparkGPUHot
+        expr: spark_gpu_temperature_celsius > 85
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "GPU {{ '{{' }} $value {{ '}}' }}C on {{ '{{' }} $labels.host {{ '}}' }} — check airflow / desk placement"
+      - alert: SparkUnifiedMemoryLow
+        expr: spark_uma_available_bytes < 8 * 1024 * 1024 * 1024
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "<8 GiB unified memory available on {{ '{{' }} $labels.host {{ '}}' }}"
+          runbook: "Volume 24 §Runbook C — UMA pressure (drop caches, stop idle model servers)"
+  - name: spark-fabric
+    rules:
+      - alert: SparkCX7Degraded
+        expr: spark_cx7_link_speed_mbps > 0 and spark_cx7_link_speed_mbps < 200000
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ '{{' }} $labels.device {{ '}}' }} negotiated {{ '{{' }} $value {{ '}}' }} Mb/s on {{ '{{' }} $labels.host {{ '}}' }}"
+      - alert: SparkNodeDown
+        expr: up{job="node"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ '{{' }} $labels.host {{ '}}' }} unreachable"

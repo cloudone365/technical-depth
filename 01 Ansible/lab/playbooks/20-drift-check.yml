@@ -1,0 +1,19 @@
+---
+# Drift = what WOULD change if we applied desired state now.
+#   ANSIBLE_STDOUT_CALLBACK=ansible.posix.json ansible-playbook playbooks/20-drift-check.yml \
+#     > .cache/drift.json; python3 tools/spark_drift_report.py .cache/drift.json
+- name: Drift check — baseline, fabric, runtime, telemetry (check mode, never changes anything)
+  hosts: spark
+  become: true
+  check_mode: true
+  diff: true
+  roles:
+    - role: spark_facts
+    - role: spark_baseline
+    - role: cx7_fabric
+      vars:
+        cx7_fabric_verify_peers: false
+    - role: container_runtime
+      vars:
+        container_runtime_smoke_test: false
+    - role: gpu_telemetry

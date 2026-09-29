@@ -1,0 +1,15 @@
+---
+- name: Reload sshd
+  ansible.builtin.service:
+    name: ssh
+    state: reloaded
+
+- name: Restart chrony
+  ansible.builtin.service:
+    name: chrony
+    state: restarted
+
+- name: Restart journald
+  ansible.builtin.service:
+    name: systemd-journald
+    state: restarted

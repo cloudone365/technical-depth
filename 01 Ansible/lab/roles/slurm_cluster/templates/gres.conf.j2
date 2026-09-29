@@ -1,0 +1,6 @@
+# {{ ansible_managed }}
+# Explicit File= is used instead of AutoDetect=nvml because distro Slurm
+# builds are not always compiled against NVML. Check: `slurmd -G`
+{% for dev in slurm_cluster_gpu_devices %}
+Name=gpu Type={{ slurm_cluster_gpu_type }} File={{ dev }}
+{% endfor %}
