@@ -34,7 +34,7 @@ Single Spark? Remove `spark-02` from the inventory. The fabric, NCCL and NFS/RDM
 
 ## Start here
 
-1. **[Step-by-step build guide](ansible-step-by-step-guide.md)**: the build order, 19 steps.
+1. **[Step-by-step build guide](00-ansible-step-by-step-guide.md)**: the build order, 19 steps.
 2. **[Learning roadmap](ansible-tower-vault-roadmap.md)**: skills and checkpoints by level.
 3. **[`lab/README.md`](lab/README.md)**: the project layout and quick start.
 

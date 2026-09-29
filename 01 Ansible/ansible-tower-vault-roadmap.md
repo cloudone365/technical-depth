@@ -1,6 +1,6 @@
 # Learning Roadmap: Ansible → Vault → AWX, Practised on DGX Spark
 
-> **Module 01 companion.** A skills roadmap with checkpoints. The [step-by-step guide](ansible-step-by-step-guide.md) is the *build order*; this page is the *learning order*, with what to be able to do (not just read) at each level.
+> **Module 01 companion.** A skills roadmap with checkpoints. The [step-by-step guide](00-ansible-step-by-step-guide.md) is the *build order*; this page is the *learning order*, with what to be able to do (not just read) at each level.
 
 ```mermaid
 flowchart TB

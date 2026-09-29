@@ -252,7 +252,7 @@ The complete curriculum is indexed in [**01Ansible/README.md**](01Ansible/README
 
 ## 🗺️ Roadmaps & Quick References
 
-- [Ansible Step-by-Step Beginner's Guide](01Ansible/ansible-step-by-step-guide.md)
+- [Ansible Step-by-Step Beginner's Guide](01%20Ansible/00-ansible-step-by-step-guide.md)
 - [Ansible, Tower & HashiCorp Vault Roadmap](01Ansible/ansible-tower-vault-roadmap.md)
 
 ## 🔧 Project Files

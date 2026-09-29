@@ -30,7 +30,7 @@ lab/
 │   ├── nfs_rdma                # NFSv4.2 over RDMA model cache                                   (Vol 15)
 │   ├── node_drain              # cordon → capture → stop → reboot → validate → return            (Vol 24)
 │   └── spark_validate          # end-to-end invariants + JSON report                             (Vol 25)
-├── playbooks/                  # 00-bootstrap … 30-validate, site.yml (see the step-by-step guide)
+├── playbooks/                  # 00-bootstrap … 30-validate, site.yml (see ../00-ansible-step-by-step-guide.md)
 │   ├── files/uma_probe.cu      # sm_121 unified-memory probe                                     (Vol 08)
 │   └── templates/              # RDMA device plugin, Loki, Alloy, auditd rules                   (Vol 13, 23)
 ├── tools/
