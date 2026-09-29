@@ -90,10 +90,17 @@ Use the **same cage number** on both Sparks. It keeps the config symmetric, and 
 ```yaml
 # lab/roles/cx7_fabric/tasks/main.yml
 ---
-- name: Skip when no CX-7 interfaces are defined for this host
-  ansible.builtin.meta: end_host
-  when: cx7_fabric_interfaces | length == 0
+# Everything lives in fabric.yml. We use a conditional include instead of
+# `meta: end_host`: end_host would end the host for the WHOLE play, silently
+# skipping any roles that follow this one (e.g. in 20-drift-check.yml).
+- name: Configure and verify CX-7 fabric
+  ansible.builtin.include_tasks: fabric.yml
+  when: cx7_fabric_interfaces | length > 0
+```
 
+```yaml
+# lab/roles/cx7_fabric/tasks/fabric.yml
+---
 # ---------------------------------------------------------------- pre-flight
 - name: Discover RDMA <-> netdev mapping
   ansible.builtin.command: ibdev2netdev

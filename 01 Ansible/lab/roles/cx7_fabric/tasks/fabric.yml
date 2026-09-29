@@ -1,0 +1,201 @@
+---
+# ---------------------------------------------------------------- pre-flight
+- name: Discover RDMA <-> netdev mapping
+  ansible.builtin.command: ibdev2netdev
+  register: cx7_fabric_ibdev
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+
+# "rocep1s0f1 port 1 ==> enp1s0f1np1 (Up)"  ->  {"enp1s0f1np1": {"rdma_dev": "rocep1s0f1", "state": "Up"}}
+- name: Parse ibdev2netdev into a dict keyed by netdev
+  ansible.builtin.set_fact:
+    cx7_fabric_map: >-
+      {%- set m = {} -%}
+      {%- for line in cx7_fabric_ibdev.stdout_lines -%}
+        {%- set f = line.split() -%}
+        {%- if f | length >= 6 -%}
+          {%- set _ = m.update({f[4]: {'rdma_dev': f[0], 'state': f[5] | trim('()')}}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ m }}
+
+- name: Assert every configured interface exists
+  ansible.builtin.assert:
+    that: item.name in cx7_fabric_map
+    fail_msg: >-
+      {{ item.name }} not found. ibdev2netdev shows: {{ cx7_fabric_map.keys() | list }}.
+      Fix host_vars/{{ inventory_hostname }}.yml cx7_interfaces.
+    quiet: true
+  loop: "{{ cx7_fabric_interfaces }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# ---------------------------------------------------------------- configure
+- name: Render netplan for CX-7
+  ansible.builtin.template:
+    src: 40-cx7.yaml.j2
+    dest: "{{ cx7_fabric_netplan_file }}"
+    owner: root
+    group: root
+    mode: "0600"            # netplan warns on world-readable files
+  register: cx7_fabric_netplan
+
+- name: Validate netplan syntax before applying  # noqa: no-handler (must run before apply, in order)
+  ansible.builtin.command: netplan generate
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  when: cx7_fabric_netplan is changed
+
+- name: Apply netplan  # noqa: no-handler (later verify tasks need the links up in this run)
+  ansible.builtin.command: netplan apply
+  changed_when: true
+  when: cx7_fabric_netplan is changed
+
+- name: Wait for CX-7 links to come up
+  ansible.builtin.command: "cat /sys/class/net/{{ item.name }}/operstate"
+  register: cx7_fabric_oper
+  until: cx7_fabric_oper.stdout == 'up'
+  retries: 15
+  delay: 2
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  failed_when: false
+  loop: "{{ cx7_fabric_interfaces }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# ---------------------------------------------------------------- runtime reconciliation
+# The netplan FILE can be perfect while the RUNNING state is not (someone ran
+# `ip link set ... mtu 1500`). Compare live MTU with desired and re-apply.
+- name: Read live MTU per interface
+  ansible.builtin.command: "cat /sys/class/net/{{ item.name }}/mtu"
+  register: cx7_fabric_live_mtu
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  loop: "{{ cx7_fabric_interfaces }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Interfaces whose runtime MTU differs from desired
+  ansible.builtin.set_fact:
+    cx7_fabric_runtime_drift: >-
+      {%- set bad = [] -%}
+      {%- for r in cx7_fabric_live_mtu.results -%}
+        {%- if (r.stdout | int) != (r.item.mtu | default(9000) | int) -%}
+          {%- set _ = bad.append(r.item.name) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ bad }}
+
+- name: Re-apply netplan to fix runtime drift
+  ansible.builtin.command: netplan apply
+  changed_when: true
+  when:
+    - cx7_fabric_runtime_drift | length > 0
+    - not ansible_check_mode
+
+- name: Report runtime drift in check mode
+  ansible.builtin.debug:
+    msg: "Runtime MTU drift on {{ cx7_fabric_runtime_drift }} — netplan apply would fix it"
+  changed_when: true
+  when:
+    - cx7_fabric_runtime_drift | length > 0
+    - ansible_check_mode
+
+# ---------------------------------------------------------------- verify
+- name: Read link speed / MTU / RDMA port state
+  ansible.builtin.shell: |
+    set -o pipefail
+    printf '{"speed":%s,"mtu":%s,"oper":"%s","rdma_state":"%s"}' \
+      "$(cat /sys/class/net/{{ item.name }}/speed 2>/dev/null || echo -1)" \
+      "$(cat /sys/class/net/{{ item.name }}/mtu)" \
+      "$(cat /sys/class/net/{{ item.name }}/operstate)" \
+      "$(ibv_devinfo -d {{ item.rdma_dev }} 2>/dev/null | awk '/state:/{print $2; exit}')"
+  args:
+    executable: /bin/bash
+  register: cx7_fabric_link
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  loop: "{{ cx7_fabric_interfaces }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Build link report
+  ansible.builtin.set_fact:
+    cx7_fabric_report: >-
+      {{ cx7_fabric_report | default({}) | combine({item.item.name: (item.stdout | from_json)}) }}
+  loop: "{{ cx7_fabric_link.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Assert link health
+  ansible.builtin.assert:
+    that:
+      - cx7_fabric_report[item.name].oper == 'up'
+      - cx7_fabric_report[item.name].speed | int == cx7_fabric_expected_speed_mbps
+      - cx7_fabric_report[item.name].mtu | int == item.mtu | default(9000) | int
+      - cx7_fabric_report[item.name].rdma_state == 'PORT_ACTIVE'
+    fail_msg: "{{ item.name }} unhealthy: {{ cx7_fabric_report[item.name] }}"
+    success_msg: "{{ item.name }} OK: {{ cx7_fabric_report[item.name] }}"
+  register: cx7_fabric_assert
+  failed_when: cx7_fabric_strict | bool and cx7_fabric_assert.failed | default(false)
+  loop: "{{ cx7_fabric_interfaces }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Discover RoCEv2 IPv4 GID index (value for NCCL_IB_GID_INDEX)
+  ansible.builtin.shell: |
+    set -o pipefail
+    d=/sys/class/infiniband/{{ item.rdma_dev }}/ports/1
+    for t in "$d"/gid_attrs/types/*; do
+      idx=$(basename "$t")
+      type=$(cat "$t" 2>/dev/null) || continue
+      gid=$(cat "$d/gids/$idx")
+      # RoCE v2 + IPv4-mapped GID (0000:...:ffff:c0a8:640b)
+      if [ "$type" = "RoCE v2" ] && [[ "$gid" == 0000:0000:0000:0000:0000:ffff:* ]]; then
+        echo "$idx"; exit 0
+      fi
+    done
+    exit 1
+  args:
+    executable: /bin/bash
+  register: cx7_fabric_gid
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  failed_when: false
+  loop: "{{ cx7_fabric_interfaces }}"
+  loop_control:
+    label: "{{ item.rdma_dev }}"
+
+- name: Publish fabric facts for later roles (NCCL, Slurm, k3s, vLLM)
+  ansible.builtin.set_fact:
+    cx7_fabric_primary_if: "{{ cx7_fabric_interfaces[0].name }}"
+    cx7_fabric_primary_ip: "{{ cx7_fabric_interfaces[0].address.split('/')[0] }}"
+    cx7_fabric_hca_list: "{{ cx7_fabric_interfaces | map(attribute='rdma_dev') | join(',') }}"
+    cx7_fabric_roce_gid_index: "{{ cx7_fabric_gid_index or (cx7_fabric_gid.results[0].stdout | default('', true)) }}"
+
+# Build [peer_ip, my_interface] pairs for peers that share a /24 with one of my ports.
+- name: Compute fabric peers
+  ansible.builtin.set_fact:
+    cx7_fabric_peer_pairs: >-
+      {%- set pairs = [] -%}
+      {%- for peer in groups['spark'] | difference([inventory_hostname]) -%}
+        {%- for p in hostvars[peer].cx7_interfaces | default([]) -%}
+          {%- for mine in cx7_fabric_interfaces -%}
+            {%- if p.address.split('.')[:3] == mine.address.split('.')[:3] -%}
+              {%- set _ = pairs.append({'peer': peer, 'ip': p.address.split('/')[0], 'dev': mine.name, 'mtu': mine.mtu | default(9000)}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ pairs }}
+
+- name: Jumbo-frame reachability to peers (DF bit set, MTU-28 byte payload)
+  ansible.builtin.command: >-
+    ping -c 3 -W 1 -M do -s {{ item.mtu | int - 28 }} -I {{ item.dev }} {{ item.ip }}
+  loop: "{{ cx7_fabric_peer_pairs }}"
+  loop_control:
+    label: "{{ item.dev }} -> {{ item.peer }} ({{ item.ip }})"
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  when: cx7_fabric_verify_peers | bool

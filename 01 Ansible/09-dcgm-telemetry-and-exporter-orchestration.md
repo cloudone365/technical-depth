@@ -71,6 +71,9 @@ flowchart LR
 # spark-gpu-metrics.sh — node_exporter textfile collector for DGX Spark.
 # Writes Prometheus metrics atomically to $OUT (tmp file + mv), run by a systemd timer.
 #
+# Field note: clocks_event_reasons.* replaced the older clocks_throttle_reasons.* names;
+# one invalid field makes the whole query fail, so keep field names current.
+#
 # Why not only dcgm-exporter? It may not expose every GB10 field, and on a UMA
 # system "GPU memory used" is not reported by nvidia-smi (shows [N/A]) — the real
 # memory signal is host MemAvailable. This script is the dependency-free fallback.
@@ -85,7 +88,7 @@ num() { [[ "$1" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] && echo "$1" || echo "NaN"; }
 {
 echo "# HELP spark_gpu_up 1 if nvidia-smi answered within the timeout"
 echo "# TYPE spark_gpu_up gauge"
-if q=$(timeout 10 nvidia-smi --query-gpu=index,name,temperature.gpu,power.draw,utilization.gpu,clocks.sm,clocks_throttle_reasons.active \
+if q=$(timeout 10 nvidia-smi --query-gpu=index,name,temperature.gpu,power.draw,utilization.gpu,clocks.sm,clocks_event_reasons.active \
         --format=csv,noheader,nounits 2>/dev/null); then
   echo "spark_gpu_up 1"
   echo "# HELP spark_gpu_temperature_celsius GPU die temperature"
@@ -96,7 +99,7 @@ if q=$(timeout 10 nvidia-smi --query-gpu=index,name,temperature.gpu,power.draw,u
   echo "# TYPE spark_gpu_utilization_ratio gauge"
   echo "# HELP spark_gpu_sm_clock_mhz SM clock"
   echo "# TYPE spark_gpu_sm_clock_mhz gauge"
-  echo "# HELP spark_gpu_throttle_reasons_bitmask Active clock throttle reasons (0 = none)"
+  echo "# HELP spark_gpu_throttle_reasons_bitmask Active clock event (throttle) reasons bitmask (0 = none)"
   echo "# TYPE spark_gpu_throttle_reasons_bitmask gauge"
   while IFS=',' read -r idx name temp power util sm thr; do
     idx=$(echo "$idx" | xargs); name=$(echo "$name" | xargs)
