@@ -10,9 +10,9 @@ spec:
   containers:
     - name: kserve-container
       image: nvcr.io/nvidia/vllm:25.09-py3
-      command: ["vllm", "serve"]
-      args: ["{{.Name}}", "--model=/mnt/models", "--served-model-name={{.Name}}",
-             "--port=8080", "--gpu-memory-utilization=0.25", "--max-model-len=8192"]
+      command: ["vllm", "serve", "/mnt/models"]          # storage-initializer downloads storageUri here
+      args: ["--served-model-name={{.Name}}", "--port=8080",
+             "--gpu-memory-utilization=0.25", "--max-model-len=8192"]
       ports: [{containerPort: 8080, protocol: TCP}]
       resources:
         requests: {cpu: "4", memory: 16Gi, nvidia.com/gpu: "1"}

@@ -16,7 +16,7 @@ for k in $(find manifests -name kustomization.yaml -printf '%h\n' | sort); do
   "$KUBECTL" kustomize "$k" | kubeconform -strict -kubernetes-version 1.32.0 \
     -schema-location default -schema-location "$CRD_CATALOG" -ignore-missing-schemas - >/dev/null
 done
-for f in addons/*.yaml breakfix/*.yaml manifests/*/*.yaml tests/policy/*.yaml; do
+for f in addons/*.yaml breakfix/*.yaml gitops/*.yaml manifests/*/*.yaml manifests/*/*/*.yaml tests/policy/*.yaml; do
   [[ $(basename "$f") == kustomization.yaml ]] && continue
   kubeconform -strict -kubernetes-version 1.32.0 -schema-location default -schema-location "$CRD_CATALOG" -ignore-missing-schemas "$f"
 done
@@ -30,7 +30,7 @@ echo "== dashboard up to date"
 diff -q <(python3 manifests/95-observability/gen_dashboard.py) manifests/95-observability/spark-k8s-dashboard.json
 echo "== python";     python3 -m py_compile manifests/45-controller/slice_ledger.py manifests/40-ingress/mock_llm.py manifests/70-gpu/gemm_bench.py \
                         manifests/80-distributed/base/allreduce_bench.py manifests/90-serving/pd-disagg/pd_proxy.py \
-                        manifests/90-serving/triton/model_repository/*/1/model.py manifests/95-observability/gen_dashboard.py
+                        manifests/90-serving/triton/model_repository/*/1/model.py manifests/95-observability/gen_dashboard.py scripts/fabric_calc.py scripts/ttft_probe.py scripts/mtbf_calc.py manifests/70-gpu/compile_compare.py manifests/80-distributed/resilient/train_resilient.py
 echo "== mock-llm functional"
 python3 manifests/40-ingress/mock_llm.py & pid=$!; trap 'kill $pid 2>/dev/null' EXIT; sleep 1
 curl -sf localhost:8000/health >/dev/null

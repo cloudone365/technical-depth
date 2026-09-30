@@ -1,6 +1,6 @@
 # DGX Spark Kubernetes Lab — runnable companion to Module 02
 
-Everything the 26 volumes teach, as manifests, scripts and drills you apply to the
+Everything the 26 volumes (plus the [step-by-step guide](../00-kubernetes-step-by-step-guide.md)) teach, as manifests, scripts and drills you apply to the
 k3s cluster that the [01 Ansible lab](../../01%20Ansible/lab/README.md) builds on
 one DGX Spark (a second Spark is optional). Every code block in the volumes is
 taken from this directory.
@@ -12,20 +12,25 @@ lab/
 ├── addons/                      # HelmChart CRs (k3s helm-controller) + StorageClasses       (Vol 09, 11, 16)
 ├── manifests/
 │   ├── 00-platform/             # namespaces, PSA labels, PriorityClasses                     (Vol 05, 12)
-│   ├── 10-tenancy/              # 5 % quotas, LimitRanges, RBAC, NetworkPolicies               (Vol 02, 06, 12)
+│   ├── 10-tenancy/              # 5 % quotas, LimitRanges, RBAC, NetworkPolicies; experiments/ (Vol 02, 06, 12)
 │   ├── 15-admission/            # ValidatingAdmissionPolicies (CEL)                            (Vol 02)
 │   ├── 16-apf/                  # API Priority & Fairness for tenants                          (Vol 02)
 │   ├── 20-scheduling/           # Kueue flavors/queues, gang demo, taints & affinity           (Vol 05)
 │   ├── 30-networking/           # netshoot, echo + headless Service, ndots lab, CoreDNS custom (Vol 06-08)
 │   ├── 40-ingress/              # mock OpenAI API, Traefik middlewares, Ingress, HTTPRoute     (Vol 09)
+│   ├── 45-controller/           # slice-ledger: a dependency-free controller                    (Vol 04)
 │   ├── 50-workloads/            # Qdrant StatefulSet, node-probe DaemonSet, Indexed Job, PDBs  (Vol 10)
 │   ├── 60-storage/              # model-cache PVC, fio AI profiles                             (Vol 11)
 │   ├── 70-gpu/                  # gpu-smoke, GEMM benchmark, time-slice contention             (Vol 13-16)
-│   ├── 80-distributed/          # torchrun all-reduce job (1 Spark: gloo · 2 Sparks: NCCL/RoCE) (Vol 17)
+│   ├── 80-distributed/          # torchrun all-reduce (1 Spark gloo · 2 Sparks NCCL/RoCE), resilient/ (Vol 17, 26)
+│   ├── 85-network-operator/     # NicClusterPolicy + macvlan RDMA network for 2 Sparks         (Vol 16)
 │   ├── 90-serving/              # vLLM, Triton ensemble, SGLang, KServe, prefill/decode split  (Vol 21-24)
 │   └── 95-observability/        # host-exporter scrape, alert rules, Grafana dashboard         (Vol 16, 19)
-├── scripts/                     # preflight, install-addons, apply-lab, verify, breakfix, diag, etcd drill,
-│                                #   cgroup/netns/iptables inspectors, make-user, uma-watch
+├── etcd-sandbox/                # throw-away 3-member etcd (docker compose) for Raft drills      (Vol 03)
+├── gitops/                      # Argo CD app-of-apps, one Application per layer              (production-mlops)
+├── scripts/                     # preflight, install-addons, apply-lab, verify, breakfix, diag, etcd drill/sandbox,
+│                                #   cgroup/netns/iptables inspectors, make-user, uma-watch,
+│                                #   ttft_probe.py, fabric_calc.py, mtbf_calc.py
 ├── breakfix/                    # 15 fault-injection scenarios                                  (Vol 19, 20)
 └── tests/                       # local checks, admission fixtures, fake-GPU node, Kueue gang test (CI)
 ```

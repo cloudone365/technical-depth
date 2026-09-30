@@ -1,252 +1,209 @@
-# 24. Disaggregated Prefill & Decode Serving (PD Separation) on Kubernetes
+# Volume 24 — Disaggregated Prefill & Decode: KV-Cache Transfer with vLLM + NIXL, Routing, and When It Pays Off
 
-In monolithic LLM serving (standard vLLM, TGI, or Triton setups), each GPU instance handles both the **Prefill phase** (evaluating prompt tokens) and the **Decode phase** (generating tokens one-by-one). 
+> **Module 02 · Part VI — Serving** · Prev: [23 Alternatives & KServe](23-llm-inference-alternatives-and-kserve.md) · Next: [25 Hyperscaler silicon](25-hyperscaler-silicon-and-compilers.md)
 
-At enterprise and hyperscaler scale (OpenAI, Anthropic, Google), monolithic serving causes severe interference: compute-intensive prefill batches preempt latency-sensitive decode steps, causing catastrophic jitter in **Time-To-First-Token (TTFT)** and **Inter-Token Latency (ITL)**. **Disaggregated Prefill and Decode (PD Separation)** decouples these workloads into dedicated, specialized GPU pools interconnected by high-speed RDMA networks.
-
----
-
-## 📑 Table of Contents
-1. [The Monolithic Interference Problem](#1-the-monolithic-interference-problem)
-2. [Prefill vs. Decode: Hardware & Execution Dynamics](#2-prefill-vs-decode-hardware--execution-dynamics)
-3. [Disaggregated Architecture Overview (Splitwise / DistServe / Mooncake)](#3-disaggregated-architecture-overview-splitwise--distserve--mooncake)
-4. [KV-Cache Network Transfer & RDMA Mechanics](#4-kv-cache-network-transfer--rdma-mechanics)
-5. [Kubernetes Dual-Pool Cluster Topology](#5-kubernetes-dual-pool-cluster-topology)
-6. [Production Kubernetes Manifests (Prefill, Decode & KV Router)](#6-production-kubernetes-manifests-prefill-decode--kv-router)
-7. [Benchmark Comparison: Monolithic vs. Disaggregated](#7-benchmark-comparison-monolithic-vs-disaggregated)
-8. [Troubleshooting & KV Transfer Bottlenecks](#8-troubleshooting--kv-transfer-bottlenecks)
+| | |
+|---|---|
+| **You will build** | A working prefill/decode (P/D) split: two vLLM instances with the NIXL KV connector and a small proxy that routes each request prefill → decode. You'll see the KV handoff in logs and headers, plus a transfer-time model that tells you when disaggregation is worth it. On two Sparks, the KV cache moves over the CX-7 |
+| **Hardware** | spark-01 (both roles share the GB10 via 2 slices: mechanics, not speed). 2 Sparks for §5.5 |
+| **Time** | 90 min |
+| **Risk** | Medium-low. Experimental feature: pin versions, and verify `import nixl` in your image first |
+| **Lab files** | [`manifests/90-serving/pd-disagg/`](lab/manifests/90-serving/pd-disagg/) (`pd.yaml`, `pd_proxy.py`) |
 
 ---
 
-## 1. The Monolithic Interference Problem
+## 1. Why this matters
 
-In a standard colocated serving engine:
+LLM inference has two phases with opposite hardware appetites:
 
-```text
-Monolithic Worker Timeline:
-+------------------------------------------------------------------------------------+
-|  Request A: Prefill (2048 tokens) [Compute Bound: Saturates Tensor Cores for 85ms] |
-+------------------------------------------------------------------------------------+
-                                      |
-                                      v (Decodes for Requests B, C, D are PAUSED!)
-+------------------------------------------------------------------------------------+
-|  Batched Decode Step (Token N)    [Memory Bound: Pauses waiting for Memory Bus]   |
-+------------------------------------------------------------------------------------+
-```
+| | Prefill | Decode |
+|---|---|---|
+| Work | process the whole prompt in parallel | one token per step per sequence |
+| Bound by | **compute** (big GEMMs) | **memory bandwidth** (read all weights + KV each step) |
+| Latency metric | TTFT | TPOT / inter-token latency |
+| Batch behaviour | a few long prompts saturate the GPU | many sequences needed to use the GPU |
 
-### The Conflict:
-1. **Prefill Phase**: Highly parallelized, matrix-matrix multiplication (GEMM). Compute-bound ($O(N^2)$ FLOPs). Saturates GPU Tensor Cores.
-2. **Decode Phase**: Sequential autoregression, matrix-vector multiplication (GEMV). Memory bandwidth-bound ($O(N)$ FLOPs per token). Dependent on GPU High-Bandwidth Memory (HBM) bandwidth.
-3. **The Consequence**: When a user submits a long prompt (e.g. 10k tokens for RAG), all running streams experience an **ITL spike (jitter)** from 15ms up to 250ms+ while the GPU crunches the prefill.
+In one engine, a burst of long prompts stalls every in-flight decode (TPOT spikes), and a crowd of decoders delays new prefills (TTFT spikes). **Disaggregation** runs them on separate workers sized and scaled independently, at the cost of moving the prompt's KV cache from P to D.
 
 ---
 
-## 2. Prefill vs. Decode: Hardware & Execution Dynamics
-
-| Characteristic | Prefill Stage (Prompt Evaluation) | Decode Stage (Token Generation) |
-| :--- | :--- | :--- |
-| **Arithmetic Intensity** | High (FLOPs/byte > 100) | Extremely Low (FLOPs/byte < 5) |
-| **Primary Bottleneck** | Tensor Core Compute (TFLOPs) | Memory Bandwidth (TB/s HBM) |
-| **GPU Optimization** | High batch size, FP8 GEMMs | High memory frequency, PagedAttention |
-| **Hardware Ideal** | High compute density (e.g., Blackwell GB10/H100) | Large HBM capacity (e.g., H200/Grace unified RAM) |
-| **Primary SLA Metric** | **Time-To-First-Token (TTFT)** | **Inter-Token Latency (ITL / Time-per-Output-Token)** |
-
----
-
-## 3. Disaggregated Architecture Overview
-
-Disaggregation physically divides the serving infrastructure into two independent tiers managed by a centralized **KV-Cache Router**:
+## 2. Architecture — HLD
 
 ```mermaid
-graph TD
-    Client["Client Request (Prompt: 4k tokens)"] --> Router["KV-Aware Smart Router / Dispatcher"]
-    
-    subgraph PrefillPool["Tier 1: Prefill GPU Cluster (Compute-Optimized)"]
-        P1["Prefill Worker Pod 01<br/>Compute-Bound GEMM<br/>Computes KV Cache"]
-        P2["Prefill Worker Pod 02"]
-    end
-    
-    subgraph DecodePool["Tier 2: Decode GPU Cluster (Memory-Optimized)"]
-        D1["Decode Worker Pod 01<br/>Autoregressive Token Gen<br/>Maintains Active Streams"]
-        D2["Decode Worker Pod 02"]
-    end
-
-    Router -->|"1. Forward Prompt"| P1
-    P1 -->|"2. Transfer KV Cache via RoCE/InfiniBand RDMA (Sub-5ms)"| D1
-    Router -->|"3. Connect Token Streaming Stream (SSE)"| D1
-    D1 -->|"4. Stream Tokens to Client"| Client
+sequenceDiagram
+  autonumber
+  box rgb(246,248,250) Client side
+    participant C as client
+    participant X as pd-proxy
+  end
+  box rgb(234,246,214) Prefill worker
+    participant P as vllm-prefill
+  end
+  box rgb(221,234,255) Decode worker
+    participant D as vllm-decode
+  end
+  C->>X: POST /v1/chat/completions (stream)
+  X->>P: same request, max_tokens=1, stream=false,<br/>kv_transfer_params.do_remote_decode=true
+  P->>P: prefill whole prompt → KV blocks kept (lease)
+  P-->>X: 1 token + kv_transfer_params {engine_id, block_ids, host, port}
+  X->>D: original request + kv_transfer_params (do_remote_prefill)
+  D->>P: NIXL/UCX read of KV blocks (side channel :5600)
+  Note over D,P: same GPU on 1 Spark · CX-7 RDMA on 2 Sparks
+  D-->>X: stream tokens
+  X-->>C: stream (+ header X-Prefill-Ms)
 ```
-
-### Open-Source Implementations:
-* **DistServe (OSDI '24)**: First academic implementation demonstrating 10x lower P99 latency.
-* **Splitwise (ISCA '24)**: Hardware-cost optimization by running prefill on high-FLOPs chips and decode on high-capacity memory nodes.
-* **Mooncake (DeepSeek Infra)**: DeepSeek's production KV-cache-centric disaggregated architecture powered by 3FS and RDMA.
-* **vLLM Disaggregated Prefill (V1 Engine)**: Upstream vLLM support via Ray/NIX transfer backends.
-
----
-
-## 4. KV-Cache Network Transfer & RDMA Mechanics
-
-The viability of PD separation hinges entirely on one metric: **KV-Cache Transfer Latency**.
-
-### The Math:
-For a 32B model (e.g., Qwen2.5-32B or DeepSeek-R1-Distill-32B) using GQA (8 KV heads, head dimension 128, 64 layers):
-$$\text{KV Cache Size per token} = 2 \times \text{layers} \times \text{kv\_heads} \times \text{head\_dim} \times \text{precision\_bytes}$$
-$$\text{KV Size per token} = 2 \times 64 \times 8 \times 128 \times 2 \text{ bytes (FP16)} = 262,144 \text{ bytes} \approx 256 \text{ KB/token}$$
-
-For a **4,096-token prompt**:
-$$\text{Total KV Payload} = 4,096 \times 256 \text{ KB} = 1.0 \text{ GiB}$$
-
-### Network Transfer Time:
-* **Standard 10 GbE TCP/IP**: $1.0\text{ GiB} / 1.25\text{ GB/s} \approx 800\text{ ms}$ $\to$ **Unusable**.
-* **100 Gbps RoCEv2 (DGX Spark)**: $1.0\text{ GiB} / 12.5\text{ GB/s} \approx 80\text{ ms}$ $\to$ **Viable**.
-* **400 Gbps InfiniBand (NDR) with GPUDirect RDMA**: $1.0\text{ GiB} / 50\text{ GB/s} \approx 20\text{ ms}$ $\to$ **Zero perceived latency**.
-* **With MLA (DeepSeek-V3/R1)**: KV cache is compressed by 93%! The same 4,096-token prompt requires only **70 MB** of data transfer ($<2\text{ ms}$ over 400 Gbps fabric).
-
----
-
-## 5. Kubernetes Dual-Pool Cluster Topology
-
-To implement this on Kubernetes:
-1. Two distinct `NodePools` are labeled with `ai.infra/role: prefill` and `ai.infra/role: decode`.
-2. A secondary CNI network (`Multus`) attaches high-speed RDMA / RoCE interfaces (`net1`) to both sets of pods.
-3. A lightweight **KV-Router Service** proxies OpenAI-compatible requests.
 
 ```mermaid
-graph LR
-    subgraph K8s["Kubernetes Cluster"]
-        subgraph NetSec["Secondary High-Speed Fabric (RoCEv2 / InfiniBand via Multus)"]
-            P_POD["Prefill Pod<br/>(ai.infra/role=prefill)"] <====>|"GPUDirect RDMA Transfer"| D_POD["Decode Pod<br/>(ai.infra/role=decode)"]
-        end
-        ROUTER["KV-Aware Router Pod"] --> P_POD
-        ROUTER --> D_POD
-    end
+flowchart LR
+  subgraph ONE["1 Spark (lab)"]
+    P1["vllm-prefill<br/>slice 1 · util 0.15"] <-->|"UCX: cuda_ipc / shm"| D1["vllm-decode<br/>slice 2 · util 0.15"]
+  end
+  subgraph TWO["2 Sparks"]
+    P2["prefill · spark-01"] <==>|"UCX rc over RoCE<br/>CX-7 200 Gb/s"| D2["decode · spark-02"]
+  end
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  class P1,D1,P2,D2 gpu
+  style ONE fill:#e6f4f5,stroke:#0e7c86
+  style TWO fill:#e6f4f5,stroke:#0e7c86,stroke-dasharray:5 3
 ```
 
 ---
 
-## 6. Production Kubernetes Manifests
+## 3. LLD
 
-### 1. Prefill Worker Deployment (`prefill-deployment.yaml`)
+### 3.1 Components
+
+| Object | Key settings |
+|---|---|
+| `vllm-prefill`, `vllm-decode` Deployments | `--kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_both"}`, `--enforce-eager`, `--gpu-memory-utilization=0.15` each, `VLLM_NIXL_SIDE_CHANNEL_HOST=<podIP>`, port 5600, `UCX_TLS=all` |
+| `pd-proxy` | stdlib Python (`pd_proxy.py`): prefill with `max_tokens=1` → copy `kv_transfer_params` → decode, streaming passthrough, `X-Prefill-Ms` header |
+| Services | `vllm-prefill:8000`, `vllm-decode:8000`, `pd-proxy:8000` |
+
+### 3.2 KV-transfer time model
+
+KV bytes for a prompt = prompt tokens × KV bytes/token (Vol 21 §3.1). Transfer time ≈ bytes / effective bandwidth.
+
+| Model | Prompt | KV size | CX-7 RDMA (~22 GB/s eff.) | 10 GbE TCP (~1.1 GB/s) | Same GPU (UMA copy) |
+|---|---|---|---|---|---|
+| Qwen2.5-0.5B | 4K tokens | 48 MiB | ~2 ms | ~45 ms | < 1 ms |
+| Qwen2.5-7B | 4K | 224 MiB | ~10 ms | ~210 ms | ~1 ms |
+| Llama-3.1-8B | 32K | 4 GiB | ~195 ms | ~3.9 s | ~15 ms |
+
+**Rule:** disaggregation pays off when the TTFT/TPOT interference you remove is larger than the transfer you add. That means long prompts, strict TPOT SLOs, and a fast interconnect. Over the 10 GbE management network, it rarely pays off.
+
+---
+
+## 4. Integrations
+
+- **Vol 21** supplies the model cache and monitoring. Both P and D export `vllm:*` metrics, and the dashboard's TTFT comes from prefill, TPOT from decode.
+- **Vol 16/17**: on two Sparks, UCX needs the RDMA devices in the pods (Network Operator `rdma/rdma_shared_cx7` + `IPC_LOCK`, or hostNetwork) and `UCX_NET_DEVICES=rocep1s0f1:1,roceP2p1s0f1:1`.
+- **Vol 09 §8**: at scale, the proxy's job moves into the gateway (Gateway API Inference Extension / llm-d / Dynamo routers), which also pick decode workers by KV-cache locality.
+
+---
+
+## 5. Lab
+
+### 5.1 Pre-flight: does the image have NIXL?
+
+```bash
+cd "02 Kubernetes/lab"
+kubectl -n llm-serving scale deploy vllm sglang --replicas=0 2>/dev/null
+kubectl -n llm-serving run nixl-check --rm -i --restart=Never --image=nvcr.io/nvidia/vllm:25.09-py3 -- \
+  python3 -c "import nixl, vllm; print('nixl OK, vllm', vllm.__version__)"
+```
+
+If `import nixl` fails, use a newer NGC vLLM tag that bundles it, or build a thin image `FROM nvcr.io/nvidia/vllm:<tag>` with `RUN pip install nixl` (and pin it).
+
+### 5.2 Deploy P, D and the proxy
+
+```bash
+kubectl apply -k manifests/90-serving/pd-disagg
+kubectl -n llm-serving rollout status deploy/vllm-prefill --timeout=30m
+kubectl -n llm-serving rollout status deploy/vllm-decode --timeout=30m
+kubectl -n llm-serving logs deploy/vllm-prefill | grep -iE 'nixl|kv_transfer|connector' | head
+```
+
+Expected: both engines log that the `NixlConnector` initialised (role `kv_both`) with a side-channel port.
+
+### 5.3 Send traffic through the proxy
+
+```bash
+kubectl -n llm-serving port-forward svc/pd-proxy 8000 &
+curl -sN -D /tmp/h localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model":"Qwen/Qwen2.5-0.5B-Instruct","stream":true,"max_tokens":64,
+  "messages":[{"role":"user","content":"Explain prefill vs decode in two sentences."}]}' \
+  | sed -n 's/^data: //p' | grep -v DONE | jq -rj '.choices[0].delta.content // empty'; echo
+grep -i x-prefill-ms /tmp/h
+kubectl -n llm-serving logs deploy/vllm-decode --since=1m | grep -iE 'nixl|remote|transfer' | tail -5
+```
+
+Evidence of a real handoff: the decode log shows remote-prefill/NIXL read activity for the request, and the prefill log shows a request with `max_tokens=1`. The proxy header reports how long prefill took.
+
+### 5.4 Compare with a monolithic engine under mixed load
+
+```bash
+python3 scripts/ttft_probe.py --url http://localhost:8000 --model Qwen/Qwen2.5-0.5B-Instruct -n 10      # through P/D
+kill %1
+kubectl delete -k manifests/90-serving/pd-disagg
+kubectl -n llm-serving scale deploy vllm --replicas=1 && kubectl -n llm-serving rollout status deploy/vllm
+kubectl -n llm-serving port-forward svc/vllm 8000 &
+python3 scripts/ttft_probe.py --url http://localhost:8000 --model qwen2.5-0.5b -n 10; kill %1
+```
+
+On one GB10 expect **no latency win**, and possibly a small loss: both roles share the same compute, and the proxy adds a hop. That's the honest result, and it's the point. Disaggregation is an *interference* fix for separate hardware. Write down both numbers. §5.5 is where the architecture starts to make sense.
+
+### 5.5 (2 Sparks) Prefill on spark-01, decode on spark-02
+
+Add to the prefill Deployment `nodeSelector: {kubernetes.io/hostname: spark-01}`, to decode `spark-02`, plus on both:
+
 ```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: llm-prefill-worker
-  namespace: ai-serving
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: llm-prefill
-  template:
-    metadata:
-      labels:
-        app: llm-prefill
-      annotations:
-        k8s.v1.cni.cncf.io/networks: roce-cni-network
-    spec:
-      nodeSelector:
-        ai.infra/role: prefill
-      containers:
-      - name: vllm-prefill
-        image: vllm/vllm-openai:latest
-        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
-        args:
-          - "--model=/models/Qwen2.5-32B-Instruct"
-          - "--gpu-memory-utilization=0.90"
-          - "--enforce-eager"
-          - "--port=8000"
-          - "--kv-transfer-config"
-          - '{"kv_role":"kv_producer","kv_connector":"PyNcclConnector","kv_buffer_device":"cuda"}'
-        resources:
-          limits:
-            nvidia.com/gpu: "1"
-            memory: "32Gi"
-            cpu: "8"
-        ports:
-          - containerPort: 8000
-        volumeMounts:
-          - name: model-weights
-            mountPath: /models
-      volumes:
-        - name: model-weights
-          persistentVolumeClaim:
-            claimName: local-nvme-models-pvc
+        env:
+          - {name: UCX_NET_DEVICES, value: "rocep1s0f1:1,roceP2p1s0f1:1"}
+          - {name: UCX_TLS, value: "rc,cuda_copy,cuda_ipc"}
+        securityContext: {capabilities: {add: [IPC_LOCK]}}
+        resources: {limits: {rdma/rdma_shared_cx7: "1"}}     # Network Operator (Vol 16 §5.6)
 ```
 
-### 2. Decode Worker Deployment (`decode-deployment.yaml`)
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: llm-decode-worker
-  namespace: ai-serving
-spec:
-  replicas: 4
-  selector:
-    matchLabels:
-      app: llm-decode
-  template:
-    metadata:
-      labels:
-        app: llm-decode
-      annotations:
-        k8s.v1.cni.cncf.io/networks: roce-cni-network
-    spec:
-      nodeSelector:
-        ai.infra/role: decode
-      containers:
-      - name: vllm-decode
-        image: vllm/vllm-openai:latest
-        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
-        args:
-          - "--model=/models/Qwen2.5-32B-Instruct"
-          - "--gpu-memory-utilization=0.95"
-          - "--max-num-seqs=256"
-          - "--port=8000"
-          - "--kv-transfer-config"
-          - '{"kv_role":"kv_consumer","kv_connector":"PyNcclConnector","kv_buffer_device":"cuda"}'
-        resources:
-          limits:
-            nvidia.com/gpu: "1"
-            memory: "32Gi"
-            cpu: "8"
-        ports:
-          - containerPort: 8000
-        volumeMounts:
-          - name: model-weights
-            mountPath: /models
-      volumes:
-        - name: model-weights
-          persistentVolumeClaim:
-            claimName: local-nvme-models-pvc
-```
+Then run a prefill-heavy mix (long prompts, short outputs) against both setups with `vllm bench serve --random-input-len 8192 --random-output-len 64`. Now decode TPOT stays flat while prefill runs on the other Spark.
 
 ---
 
-## 7. Benchmark Comparison: Monolithic vs. Disaggregated
+## 6. Verify
 
-Production metrics captured under a sustained load of 50 concurrent requests with mixed prompt lengths (512 tokens to 8,192 tokens):
-
-| Serving Architecture | P50 TTFT | P99 TTFT | P50 ITL (Token Speed) | P99 ITL (Jitter) | System Max Throughput |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Monolithic (Standard vLLM)** | 145 ms | 2,850 ms | 18 ms/tok | **280 ms/tok** | 420 tok/sec |
-| **Disaggregated (PD Separation)**| **68 ms** | **185 ms** | **14 ms/tok** | **22 ms/tok** | **780 tok/sec** |
-
-### Key Observations:
-1. **P99 ITL Drops by >90%**: The dreaded "hiccup" where a user's typing animation freezes for a quarter-second disappears completely because decode workers are never interrupted by incoming prompts.
-2. **Resource Efficiency**: Prefill instances can be run on high-power Blackwell/Hopper nodes while Decode instances can be run on cheaper nodes with high memory capacity.
+| Check | Expected |
+|---|---|
+| `import nixl` in the image | OK |
+| proxy response | streamed tokens + `X-Prefill-Ms` header |
+| decode log | NIXL/remote-prefill activity per request |
+| written result | P/D vs monolithic TTFT on 1 Spark (and on 2 if available) |
 
 ---
 
-## 8. Troubleshooting & KV Transfer Bottlenecks
+## 7. Troubleshooting
 
-### Diagnostic Checklist:
-1. **Network Bandwidth Saturation**:
-   ```bash
-   # Verify RDMA throughput between prefill and decode pods
-   ib_write_bw -d mlx5_0 -a <decode-pod-ip>
-   ```
-2. **Transfer Time Outliers**: If KV transfer takes $>50\text{ ms}$, ensure that RoCEv2 Priority Flow Control (PFC) is configured on top-of-rack switches (`cos 3`) to prevent packet drops and TCP fallback.
-3. **KV Cache Fragmentation**: When running heterogeneous prompt sizes, verify that decode workers have enabled virtual memory block allocation (`--block-size=16` or `32`).
+| Symptom | Cause | Diagnose | Fix |
+|---|---|---|---|
+| decode recomputes the prompt (slow, no NIXL logs) | `kv_transfer_params` not forwarded, or prefill returned none | proxy logic, prefill response JSON | proxy must copy `kv_transfer_params` from the prefill response |
+| `NIXL handshake failed / timeout` | side-channel host/port unreachable | `VLLM_NIXL_SIDE_CHANNEL_HOST` = pod IP, containerPort 5600, NetworkPolicy | allow 5600 between the two Deployments (same namespace is allowed in the lab) |
+| UCX errors `no usable transports` | UCX can't find RDMA/cuda transports | `UCX_LOG_LEVEL=info` | set `UCX_TLS`, give pods RDMA devices + `IPC_LOCK` |
+| KV blocks freed before decode reads them | lease too short under load | prefill log `lease expired` | `kv_connector_extra_config.kv_lease_duration` |
+| OOM when both start | two engines × fraction > free UMA | `free -g` | 0.15 each (lab), scale other engines to 0 |
+
+---
+
+## 8. Scale-out path
+
+| Lab | Datacenter |
+|---|---|
+| 1 P + 1 D, stdlib proxy | xP + yD pools sized from traffic mix (prefill-heavy RAG vs decode-heavy chat), KV-aware router (llm-d, NVIDIA Dynamo, Gateway API Inference Extension) |
+| UCX over one CX-7 link | NIXL over IB/RoCE rails, GPUDirect RDMA, KV offload tiers (CPU memory → NVMe → remote, e.g. LMCache) |
+| manual comparison | SLO-driven autoscaling per pool (TTFT for P, TPOT for D) |
+
+---
+
+## 9. Checklist
+
+- [ ] I can explain why prefill and decode interfere, and which metric each one hurts.
+- [ ] I ran a P/D split and found evidence of the KV handoff in logs and headers.
+- [ ] I can estimate KV-transfer time for any model/prompt/link and decide whether P/D pays off.
+- [ ] I have an honest one-Spark result, and a plan for the two-Spark experiment.

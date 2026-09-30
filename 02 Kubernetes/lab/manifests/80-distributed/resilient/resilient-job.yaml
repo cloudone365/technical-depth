@@ -1,0 +1,43 @@
+# Survives pod kills by resuming from the newest complete checkpoint; fails
+# fast (no retries) on a silent-data-corruption canary mismatch (exit 86).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: ckpt, namespace: batch}
+spec:
+  storageClassName: local-nvme
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 20Gi}}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: resilient-train
+  namespace: batch
+spec:
+  backoffLimit: 6
+  podFailurePolicy:
+    rules:
+      - action: FailJob                # SDC: retrying on the same node is pointless
+        onExitCodes: {containerName: train, operator: In, values: [86]}
+      - action: Ignore                 # node drain / preemption doesn't count against backoffLimit
+        onPodConditions: [{type: DisruptionTarget, status: "True"}]
+  template:
+    spec:
+      restartPolicy: Never
+      priorityClassName: spark-batch
+      containers:
+        - name: train
+          image: nvcr.io/nvidia/pytorch:25.09-py3
+          command: ["python3", "/app/train_resilient.py"]
+          env:
+            - {name: STEPS, value: "400"}
+            - {name: CKPT_EVERY, value: "50"}
+          resources:
+            requests: {cpu: "2", memory: 8Gi, nvidia.com/gpu: "1"}
+            limits: {memory: 16Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: app, mountPath: /app}
+            - {name: ckpt, mountPath: /ckpt}
+      volumes:
+        - {name: app, configMap: {name: train-resilient}}
+        - {name: ckpt, persistentVolumeClaim: {claimName: ckpt}}
