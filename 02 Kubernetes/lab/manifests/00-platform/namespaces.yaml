@@ -46,3 +46,19 @@ metadata:
   labels:
     spark.lab/tier: tools                  # netshoot, fio, probes (privileged)
     pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ingress
+  labels:
+    spark.lab/tier: platform               # Traefik (addons/traefik.yaml)
+    pod-security.kubernetes.io/enforce: baseline
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    spark.lab/tier: platform               # kube-prometheus-stack (addons/kube-prometheus-stack.yaml)
+    pod-security.kubernetes.io/enforce: privileged   # node-level exporters if you enable them
