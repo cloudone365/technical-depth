@@ -1,0 +1,13 @@
+# D07: Qwen2.5-7B without --enable-auto-tool-choice/--tool-call-parser.
+# Symptom: agent_tools.py gets HTTP 400 ("auto" tool choice requires …) or plain
+# text that *describes* a tool call instead of a structured tool_calls field.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: [../../k8s/models/qwen2.5-7b-tools]
+patches:
+  - target: {kind: Deployment, name: vllm}
+    patch: |
+      - op: remove
+        path: /spec/template/spec/containers/0/args/9
+      - op: remove
+        path: /spec/template/spec/containers/0/args/8

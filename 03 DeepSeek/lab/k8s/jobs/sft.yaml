@@ -17,7 +17,9 @@ spec:
           image: nvcr.io/nvidia/pytorch:25.09-py3
           command: ["bash", "-c"]
           args:
-            - pip install --quiet trl==0.23.0 peft==0.17.1 transformers==4.56.2 accelerate==1.10.1 datasets==4.1.1 && python3 /train/sft_lora.py --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --steps 300 --rank 16 --merge --out /ckpt/sft-lora
+            - >-
+              pip install --quiet trl==0.23.0 peft==0.17.1 transformers==4.56.2 accelerate==1.10.1 datasets==4.1.1 &&
+              python3 /train/sft_lora.py --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --steps 300 --rank 16 --merge --out /ckpt/sft-lora
           env:
             - {name: HF_HOME, value: /ckpt/hf}
             - {name: TOKENIZERS_PARALLELISM, value: "false"}

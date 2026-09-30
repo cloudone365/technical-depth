@@ -15,6 +15,7 @@ configMapGenerator:
       - tools/mla_attention_demo.py
       - tools/fp8_blockscale.py
       - tools/spec_decode_calc.py
+      - tools/vault_sync.py
   - name: deepseek-evaldata
     namespace: llm-serving
     files:
