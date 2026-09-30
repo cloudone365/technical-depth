@@ -1,0 +1,34 @@
+# LoRA SFT for the <think>/<answer> format (Volume 23-24) — gang-admitted by Kueue in the batch namespace.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sft
+  namespace: batch
+  labels: {kueue.x-k8s.io/queue-name: train}
+spec:
+  suspend: true
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      priorityClassName: spark-batch
+      containers:
+        - name: train
+          image: nvcr.io/nvidia/pytorch:25.09-py3
+          command: ["bash", "-c"]
+          args:
+            - pip install --quiet trl==0.23.0 peft==0.17.1 transformers==4.56.2 accelerate==1.10.1 datasets==4.1.1 && python3 /train/sft_lora.py --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --steps 300 --rank 16 --merge --out /ckpt/sft-lora
+          env:
+            - {name: HF_HOME, value: /ckpt/hf}
+            - {name: TOKENIZERS_PARALLELISM, value: "false"}
+          resources:
+            requests: {cpu: "4", memory: 24Gi, nvidia.com/gpu: "1"}
+            limits: {cpu: "4", memory: 48Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: train, mountPath: /train}
+            - {name: ckpt, mountPath: /ckpt}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - {name: train, configMap: {name: deepseek-train}}
+        - {name: ckpt, persistentVolumeClaim: {claimName: deepseek-ckpt}}
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 8Gi}}

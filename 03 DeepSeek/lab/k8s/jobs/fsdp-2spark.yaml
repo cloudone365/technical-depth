@@ -1,0 +1,62 @@
+# FSDP2 full fine-tune across two Sparks (Volume 26): one rank per Spark over
+# the CX-7 link (hostNetwork + NCCL/RoCE, like 02's two-spark DDP overlay).
+apiVersion: v1
+kind: Service
+metadata: {name: fsdp, namespace: batch}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: {job-name: fsdp}
+  ports: [{port: 29500}]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fsdp
+  namespace: batch
+  labels: {kueue.x-k8s.io/queue-name: train}
+spec:
+  suspend: true
+  completions: 2
+  parallelism: 2
+  completionMode: Indexed
+  backoffLimit: 0
+  template:
+    spec:
+      subdomain: fsdp
+      restartPolicy: Never
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      priorityClassName: spark-batch
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector: {matchLabels: {job-name: fsdp}}
+      containers:
+        - name: train
+          image: nvcr.io/nvidia/pytorch:25.09-py3
+          command: ["bash", "-c"]
+          args:
+            - >-
+              pip install --quiet transformers==4.56.2 accelerate==1.10.1 &&
+              torchrun --nnodes=2 --nproc-per-node=1 --node-rank=${JOB_COMPLETION_INDEX}
+              --master-addr=192.168.100.11 --master-port=29500
+              /train/fsdp_finetune.py --model deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --steps 100
+          env:
+            - {name: NCCL_SOCKET_IFNAME, value: enp1s0f1np1}
+            - {name: NCCL_IB_HCA, value: "rocep1s0f1,roceP2p1s0f1"}
+            - {name: NCCL_IB_GID_INDEX, value: "3"}
+            - {name: HF_HOME, value: /ckpt/hf}
+          securityContext: {capabilities: {add: [IPC_LOCK]}}
+          resources:
+            requests: {cpu: "8", memory: 32Gi, nvidia.com/gpu: "1"}
+            limits: {memory: 100Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: train, mountPath: /train}
+            - {name: ckpt, mountPath: /ckpt}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - {name: train, configMap: {name: deepseek-train}}
+        - {name: ckpt, emptyDir: {}}
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 16Gi}}

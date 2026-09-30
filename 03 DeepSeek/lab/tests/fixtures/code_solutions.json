@@ -1,0 +1,14 @@
+{
+ "code-01": "def parse_quantity(s):\n    u={'Ki':2**10,'Mi':2**20,'Gi':2**30,'Ti':2**40}\n    for k,v in u.items():\n        if s.endswith(k): return int(s[:-2])*v\n    return int(s)",
+ "code-02": "def is_balanced(s):\n    st=[];m={')':'(',']':'[','}':'{'}\n    for ch in s:\n        if ch in '([{': st.append(ch)\n        elif ch in m:\n            if not st or st.pop()!=m[ch]: return False\n    return not st",
+ "code-03": "def merge_intervals(iv):\n    out=[]\n    for a,b in sorted(iv):\n        if out and a<=out[-1][1]: out[-1][1]=max(out[-1][1],b)\n        else: out.append([a,b])\n    return out",
+ "code-04": "def rolling_mean(xs,k):\n    return [sum(xs[i:i+k])/k for i in range(len(xs)-k+1)] if k<=len(xs) else []",
+ "code-05": "def roman_to_int(s):\n    v={'I':1,'V':5,'X':10,'L':50,'C':100,'D':500,'M':1000};t=0\n    for i,c in enumerate(s):\n        t+= -v[c] if i+1<len(s) and v[s[i+1]]>v[c] else v[c]\n    return t",
+ "code-06": "from collections import Counter\ndef top_k_frequent(w,k):\n    c=Counter(w);return sorted(c,key=lambda x:(-c[x],x))[:k]",
+ "code-07": "def flatten(x):\n    out=[]\n    for e in x:\n        out.extend(flatten(e) if isinstance(e,list) else [e])\n    return out",
+ "code-08": "def chunk(xs,n):\n    return [xs[i:i+n] for i in range(0,len(xs),n)]",
+ "code-09": "def kv_cache_bytes(layers,kv_heads,head_dim,tokens,bytes_per_elem=2):\n    return 2*layers*kv_heads*head_dim*tokens*bytes_per_elem",
+ "code-10": "from math import gcd\nfrom functools import reduce\ndef gcd_list(xs):\n    return reduce(gcd,xs)",
+ "code-11": "import re\ndef word_count(t):\n    d={}\n    for w in re.findall(r'[A-Za-z0-9]+',t.lower()): d[w]=d.get(w,0)+1\n    return d",
+ "code-12": "def binary_search(xs,t):\n    lo,hi=0,len(xs)-1\n    while lo<=hi:\n        m=(lo+hi)//2\n        if xs[m]==t: return m\n        if xs[m]<t: lo=m+1\n        else: hi=m-1\n    return -1"
+}

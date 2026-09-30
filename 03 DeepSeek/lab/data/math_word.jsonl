@@ -1,0 +1,40 @@
+{"id": "math-00", "question": "A DGX Spark has 108 GB of unified memory. A model uses 35 GB for weights and 12 GB for KV cache. How many GB remain free?", "answer": 61}
+{"id": "math-01", "question": "A training job runs 37 steps per hour for 3 hours, then 11 more steps. How many steps in total?", "answer": 122}
+{"id": "math-02", "question": "An inference server answers 89 requests per minute. How many requests does it answer in 3 hours and 10 minutes?", "answer": 16910}
+{"id": "math-03", "question": "Each of 74 racks holds 2 servers, and each server has 1 GPUs. How many GPUs are there?", "answer": 148}
+{"id": "math-04", "question": "A dataset has 85 documents split evenly into 5 shards. 9 documents are removed from each shard. How many documents are left in total?", "answer": 40}
+{"id": "math-05", "question": "A model generates 45 tokens per second. How many seconds does it take to generate 540 tokens?", "answer": 12}
+{"id": "math-06", "question": "A team has a budget of 7700 dollars. They buy 6 SSDs at 130 dollars each. How many dollars are left?", "answer": 6920}
+{"id": "math-07", "question": "A queue holds 77 jobs. Every minute 4 jobs finish and 3 new jobs arrive. How many jobs are in the queue after 5 minutes?", "answer": 72}
+{"id": "math-08", "question": "A DGX Spark has 110 GB of unified memory. A model uses 26 GB for weights and 7 GB for KV cache. How many GB remain free?", "answer": 77}
+{"id": "math-09", "question": "A training job runs 68 steps per hour for 3 hours, then 6 more steps. How many steps in total?", "answer": 210}
+{"id": "math-10", "question": "An inference server answers 64 requests per minute. How many requests does it answer in 6 hours and 13 minutes?", "answer": 23872}
+{"id": "math-11", "question": "Each of 25 racks holds 9 servers, and each server has 9 GPUs. How many GPUs are there?", "answer": 2025}
+{"id": "math-12", "question": "A dataset has 408 documents split evenly into 8 shards. 9 documents are removed from each shard. How many documents are left in total?", "answer": 336}
+{"id": "math-13", "question": "A model generates 66 tokens per second. How many seconds does it take to generate 1122 tokens?", "answer": 17}
+{"id": "math-14", "question": "A team has a budget of 2800 dollars. They buy 2 SSDs at 110 dollars each. How many dollars are left?", "answer": 2580}
+{"id": "math-15", "question": "A queue holds 64 jobs. Every minute 2 jobs finish and 4 new jobs arrive. How many jobs are in the queue after 5 minutes?", "answer": 74}
+{"id": "math-16", "question": "A DGX Spark has 126 GB of unified memory. A model uses 43 GB for weights and 10 GB for KV cache. How many GB remain free?", "answer": 73}
+{"id": "math-17", "question": "A training job runs 67 steps per hour for 7 hours, then 4 more steps. How many steps in total?", "answer": 473}
+{"id": "math-18", "question": "An inference server answers 54 requests per minute. How many requests does it answer in 3 hours and 10 minutes?", "answer": 10260}
+{"id": "math-19", "question": "Each of 41 racks holds 5 servers, and each server has 3 GPUs. How many GPUs are there?", "answer": 615}
+{"id": "math-20", "question": "A dataset has 384 documents split evenly into 8 shards. 15 documents are removed from each shard. How many documents are left in total?", "answer": 264}
+{"id": "math-21", "question": "A model generates 61 tokens per second. How many seconds does it take to generate 366 tokens?", "answer": 6}
+{"id": "math-22", "question": "A team has a budget of 2400 dollars. They buy 7 SSDs at 70 dollars each. How many dollars are left?", "answer": 1910}
+{"id": "math-23", "question": "A queue holds 86 jobs. Every minute 4 jobs finish and 2 new jobs arrive. How many jobs are in the queue after 5 minutes?", "answer": 76}
+{"id": "math-24", "question": "A DGX Spark has 120 GB of unified memory. A model uses 49 GB for weights and 9 GB for KV cache. How many GB remain free?", "answer": 62}
+{"id": "math-25", "question": "A training job runs 53 steps per hour for 4 hours, then 4 more steps. How many steps in total?", "answer": 216}
+{"id": "math-26", "question": "An inference server answers 88 requests per minute. How many requests does it answer in 6 hours and 12 minutes?", "answer": 32736}
+{"id": "math-27", "question": "Each of 74 racks holds 8 servers, and each server has 6 GPUs. How many GPUs are there?", "answer": 3552}
+{"id": "math-28", "question": "A dataset has 96 documents split evenly into 4 shards. 8 documents are removed from each shard. How many documents are left in total?", "answer": 64}
+{"id": "math-29", "question": "A model generates 26 tokens per second. How many seconds does it take to generate 156 tokens?", "answer": 6}
+{"id": "math-30", "question": "A team has a budget of 4000 dollars. They buy 8 SSDs at 100 dollars each. How many dollars are left?", "answer": 3200}
+{"id": "math-31", "question": "A queue holds 88 jobs. Every minute 5 jobs finish and 5 new jobs arrive. How many jobs are in the queue after 5 minutes?", "answer": 88}
+{"id": "math-32", "question": "A DGX Spark has 123 GB of unified memory. A model uses 27 GB for weights and 13 GB for KV cache. How many GB remain free?", "answer": 83}
+{"id": "math-33", "question": "A training job runs 63 steps per hour for 3 hours, then 5 more steps. How many steps in total?", "answer": 194}
+{"id": "math-34", "question": "An inference server answers 75 requests per minute. How many requests does it answer in 4 hours and 8 minutes?", "answer": 18600}
+{"id": "math-35", "question": "Each of 20 racks holds 6 servers, and each server has 9 GPUs. How many GPUs are there?", "answer": 1080}
+{"id": "math-36", "question": "A dataset has 162 documents split evenly into 3 shards. 11 documents are removed from each shard. How many documents are left in total?", "answer": 129}
+{"id": "math-37", "question": "A model generates 84 tokens per second. How many seconds does it take to generate 672 tokens?", "answer": 8}
+{"id": "math-38", "question": "A team has a budget of 6700 dollars. They buy 4 SSDs at 90 dollars each. How many dollars are left?", "answer": 6340}
+{"id": "math-39", "question": "A queue holds 70 jobs. Every minute 5 jobs finish and 1 new jobs arrive. How many jobs are in the queue after 5 minutes?", "answer": 50}

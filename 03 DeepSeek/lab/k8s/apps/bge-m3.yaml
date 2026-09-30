@@ -1,0 +1,36 @@
+# Embedding server for RAG (Volume 29): vLLM serving BAAI/bge-m3 (1024-dim,
+# multilingual, 8K context) on a small slice of the GB10. Runs next to the chat model.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: bge-m3, namespace: llm-serving, labels: {app: bge-m3}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: bge-m3}}
+  template:
+    metadata: {labels: {app: bge-m3}}
+    spec:
+      priorityClassName: spark-serving
+      containers:
+        - name: vllm
+          image: nvcr.io/nvidia/vllm:25.09-py3
+          command: ["vllm", "serve", "BAAI/bge-m3"]
+          args: ["--task=embed", "--served-model-name=bge-m3", "--host=0.0.0.0", "--port=8000",
+                 "--gpu-memory-utilization=0.06", "--max-model-len=8192", "--download-dir=/models/hf"]
+          env: [{name: HF_HOME, value: /models/hf}]
+          ports: [{name: http, containerPort: 8000}]
+          startupProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, failureThreshold: 90}
+          readinessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 5}
+          resources:
+            requests: {cpu: "1", memory: 4Gi, nvidia.com/gpu: "1"}
+            limits: {memory: 12Gi, nvidia.com/gpu: "1"}
+          volumeMounts: [{name: models, mountPath: /models}]
+      volumes:
+        - {name: models, persistentVolumeClaim: {claimName: model-cache}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: bge-m3, namespace: llm-serving}
+spec:
+  selector: {app: bge-m3}
+  ports: [{name: http, port: 8000, targetPort: http}]
