@@ -22,6 +22,7 @@ apply_dir 15-admission
 apply_dir 16-apf
 apply_dir 60-storage
 apply_dir 30-networking
+apply_dir 45-controller
 apply_dir 40-ingress   middlewares.traefik.io
 apply_dir 50-workloads
 apply_dir 70-gpu

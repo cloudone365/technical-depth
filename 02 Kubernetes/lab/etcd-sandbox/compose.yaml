@@ -1,0 +1,53 @@
+# Throw-away 3-member etcd cluster for Raft / quota / defrag experiments
+# (Volume 03). Never touches the k3s datastore. Runs on the Spark or a laptop.
+#   docker compose up -d && ../scripts/etcd-sandbox.sh status
+x-etcd: &etcd
+  image: quay.io/coreos/etcd:v3.5.21
+  environment: &env
+    ETCD_INITIAL_CLUSTER: e1=http://e1:2380,e2=http://e2:2380,e3=http://e3:2380
+    ETCD_INITIAL_CLUSTER_STATE: new
+    ETCD_INITIAL_CLUSTER_TOKEN: spark-sandbox
+    ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+    ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+    ETCD_QUOTA_BACKEND_BYTES: "33554432"      # 32 MiB, tiny on purpose: fill it in minutes
+    ETCD_AUTO_COMPACTION_MODE: revision
+    ETCD_AUTO_COMPACTION_RETENTION: "0"        # off: you compact by hand in the lab
+    ETCD_HEARTBEAT_INTERVAL: "100"
+    ETCD_ELECTION_TIMEOUT: "1000"
+  networks: [etcd]
+services:
+  e1:
+    <<: *etcd
+    hostname: e1
+    environment:
+      <<: *env
+      ETCD_NAME: e1
+      ETCD_ADVERTISE_CLIENT_URLS: http://e1:2379
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://e1:2380
+    ports: ["12379:2379"]
+  e2:
+    <<: *etcd
+    hostname: e2
+    environment:
+      <<: *env
+      ETCD_NAME: e2
+      ETCD_ADVERTISE_CLIENT_URLS: http://e2:2379
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://e2:2380
+    ports: ["22379:2379"]
+  e3:
+    <<: *etcd
+    hostname: e3
+    environment:
+      <<: *env
+      ETCD_NAME: e3
+      ETCD_ADVERTISE_CLIENT_URLS: http://e3:2379
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://e3:2380
+    ports: ["32379:2379"]
+  cli:                                         # etcdctl lives here, so killing any member never kills your client
+    image: quay.io/coreos/etcd:v3.5.21
+    entrypoint: ["sleep", "infinity"]
+    environment:
+      ETCDCTL_ENDPOINTS: http://e1:2379,http://e2:2379,http://e3:2379
+    networks: [etcd]
+networks:
+  etcd: {}

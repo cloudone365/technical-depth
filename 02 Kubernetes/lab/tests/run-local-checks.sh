@@ -28,7 +28,7 @@ PY
 )
 echo "== dashboard up to date"
 diff -q <(python3 manifests/95-observability/gen_dashboard.py) manifests/95-observability/spark-k8s-dashboard.json
-echo "== python";     python3 -m py_compile manifests/40-ingress/mock_llm.py manifests/70-gpu/gemm_bench.py \
+echo "== python";     python3 -m py_compile manifests/45-controller/slice_ledger.py manifests/40-ingress/mock_llm.py manifests/70-gpu/gemm_bench.py \
                         manifests/80-distributed/base/allreduce_bench.py manifests/90-serving/pd-disagg/pd_proxy.py \
                         manifests/90-serving/triton/model_repository/*/1/model.py manifests/95-observability/gen_dashboard.py
 echo "== mock-llm functional"

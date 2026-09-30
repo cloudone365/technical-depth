@@ -1,286 +1,297 @@
-# 03. ETCD Database Deep Dive — Raft Consensus, Architecture & Disaster Recovery
+# Volume 03 — etcd Deep Dive: Raft, MVCC, Quotas, Backups & Disaster Recovery
 
-The **`etcd`** database is the single source of truth in a Kubernetes cluster. Every Pod, Service, ConfigMap, and Node status is persisted within its distributed key-value store. If `etcd` loses quorum or suffers disk corruption, the entire Kubernetes control plane halts.
+> **Module 02 · Part I — Control plane** · Prev: [02 API server](02-kube-apiserver-internals.md) · Next: [04 Controllers](04-kube-controller-manager-and-controllers.md)
 
-This guide details the Raft consensus protocol, internal storage engines (WAL and bbolt), maintenance procedures (compaction/defrag), and disaster recovery.
-
----
-
-## 📑 Table of Contents
-1. [What is etcd? Architecture & Role](#1-what-is-etcd-architecture--role)
-2. [The Raft Consensus Protocol](#2-the-raft-consensus-protocol)
-3. [Internal Storage Mechanics: WAL, bbolt & MVCC](#3-internal-storage-mechanics-wal-bbolt--mvcc)
-4. [Keyspace Structure in Kubernetes](#4-keyspace-structure-in-kubernetes)
-5. [Maintenance: Compaction, Defragmentation & Space Quotas](#5-maintenance-compaction-defragmentation--space-quotas)
-6. [Backup, Snapshotting & Disaster Recovery](#6-backup-snapshotting--disaster-recovery)
-7. [Production Failure Scenarios & High-Impact Troubleshooting](#7-production-failure-scenarios--high-impact-troubleshooting)
-8. [Hands-On etcdctl Operational Labs](#8-hands-on-etcdctl-operational-labs)
+| | |
+|---|---|
+| **You will build** | k3s migrated from SQLite to embedded etcd with scheduled snapshots. A throw-away 3-member etcd where you break Raft on purpose: kill the leader, lose quorum, hit NOSPACE. And a tested restore of the real cluster |
+| **Hardware** | spark-01 (Docker is already installed by 01 Ansible `container_runtime`) |
+| **Time** | 2 h |
+| **Risk** | **Medium.** The restore step rolls cluster state back. Snapshot first, and do it when nothing important is running |
+| **Lab files** | [`k3s/20-k8s-lab.yaml`](lab/k3s/20-k8s-lab.yaml), [`etcd-sandbox/compose.yaml`](lab/etcd-sandbox/compose.yaml), [`scripts/etcd-sandbox.sh`](lab/scripts/etcd-sandbox.sh), [`scripts/etcd-drill.sh`](lab/scripts/etcd-drill.sh), [`manifests/95-observability/rules.yaml`](lab/manifests/95-observability/rules.yaml) |
 
 ---
 
-## 1. What is etcd? Architecture & Role
+## 1. Why this matters on a Spark
 
-`etcd` is an open-source, strongly consistent, distributed key-value store written in Go. In Kubernetes:
-- It runs as a cluster of distributed members (typically 3 or 5 nodes for high availability).
-- It provides linearizable reads and atomic transactions.
-- It exposes a gRPC v3 API over TLS (port 2379 for client traffic, port 2380 for peer traffic).
+etcd is the cluster's only source of truth. If it's lost, every Deployment, Secret, quota and Kueue queue is gone. If it's slow, the API server is slow, leases expire, and controllers thrash. On a Spark it shares **one NVMe** with 60 GB model downloads, checkpoint writes and `fio`. That makes fsync latency, not capacity, the thing to watch.
 
-```text
-+-----------------------------------------------------------------------------------+
-|                                 etcd 3-Node Cluster                               |
-|                                                                                   |
-|  +-------------------------+                     +-------------------------+      |
-|  |     etcd-1 (Follower)   |    Peer Traffic     |      etcd-2 (Leader)    |      |
-|  |   - In-memory B-tree    | <=================> |   - In-memory B-tree    |      |
-|  |   - WAL on NVMe         |     (Port 2380)     |   - WAL on NVMe         |      |
-|  |   - bbolt (db file)     |                     |   - bbolt (db file)     |      |
-|  +-------------------------+                     +-------------------------+      |
-|                \                                     /                            |
-|                 \               Peer Traffic        /                             |
-|                  +=================================+                              |
-|                                         |                                         |
-|                                         v                                         |
-|                          +-------------------------+                              |
-|                          |     etcd-3 (Follower)   |                              |
-|                          |   - In-memory B-tree    |                              |
-|                          |   - WAL on NVMe         |                              |
-|                          |   - bbolt (db file)     |                              |
-|                          +-------------------------+                              |
-|                                       ▲                                           |
-|                                       │ Client Traffic (mTLS Port 2379)           |
-|                          +─────────────────────────+                              |
-|                          |      kube-apiserver     |                              |
-|                          +─────────────────────────+                              |
-+-----------------------------------------------------------------------------------+
-```
+| Datastore choice | When | This lab |
+|---|---|---|
+| SQLite via kine (k3s default) | single server, no HA ever | what 01 Ansible installs |
+| **Embedded etcd** (`cluster-init: true`) | single server now, HA later. Snapshots and `etcdctl` tooling | **what we switch to** |
+| External etcd / managed | large clusters, strict separation | datacenter (§8) |
 
 ---
 
-## 2. The Raft Consensus Protocol
-
-Raft ensures that a distributed cluster reaches consensus on a sequence of log entries, even if some nodes fail.
-
-### 2.1 Quorum Math
-To survive failures, an etcd cluster must maintain a **Majority Quorum**:
-$$\text{Quorum} = \left\lfloor \frac{N}{2} \right\rfloor + 1$$
-
-| Cluster Size ($N$) | Quorum Needed | Fault Tolerance (Max Dead Nodes) | Why Even Numbers are Bad |
-| :--- | :--- | :--- | :--- |
-| **1** (Lab/K3s) | 1 | 0 nodes | Any failure stops the cluster. |
-| **3** (Production) | 2 | **1 node** | Tolerates 1 node failure. |
-| **4** | 3 | **1 node** | Still only tolerates 1 node failure, but requires 3 votes (strictly worse than 3 nodes!). |
-| **5** (Enterprise) | 3 | **2 nodes** | Recommended for high-scale enterprise clusters. |
-
-### 2.2 Leader Election & State Machine
-Every node in the cluster exists in one of three states:
-1. **Leader**: Handles all client writes. Replicates logs to followers. Emits periodic heartbeats.
-2. **Follower**: Passive. Accepts log entries from the leader. If election timeout elapses without a heartbeat, becomes Candidate.
-3. **Candidate**: Increments term, votes for itself, and broadcasts `RequestVote` RPCs to peers.
+## 2. Architecture — HLD
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Follower
-    Follower --> Candidate: Heartbeat Timeout (150-300ms)
-    Candidate --> Candidate: Split Vote Timeout
-    Candidate --> Leader: Receives Votes from Majority (Quorum)
-    Leader --> Follower: Discovers higher Term / Step Down
-    Candidate --> Follower: Discovers new Leader
+flowchart LR
+  subgraph K3S["k3s server · spark-01"]
+    API["kube-apiserver"] -->|"gRPC :2379<br/>mTLS"| ET
+    subgraph ET["embedded etcd"]
+      direction TB
+      RAFT["Raft log<br/>leader = spark-01"] --> WAL[("WAL<br/>fdatasync per commit")]
+      RAFT --> MVCC["MVCC keyspace<br/>/registry/…  revision N"]
+      MVCC --> BOLT[("bbolt db<br/>member/snap/db")]
+    end
+  end
+  SNAP["k3s etcd-snapshot<br/>cron 0 */6 * * *<br/>retention 20"] -->|reads| ET
+  SNAP --> DISK[("/var/lib/rancher/k3s/server/<br/>db/snapshots/")]
+  DISK -. "copy off-box (§5.7)" .-> NAS[("control node / S3")]
+  PROM["Prometheus"] -->|":2381/metrics"| ET
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef obs fill:#fb8500,stroke:#9a5200,color:#000
+  class API,RAFT,MVCC ctrl
+  class WAL,BOLT,DISK,NAS store
+  class PROM,SNAP obs
+  style K3S fill:#e6f4f5,stroke:#0e7c86,stroke-width:2px
+  style ET fill:#ffffff,stroke:#8c959f
 ```
+
+### 2.1 Raft in one picture
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as apiserver
+  participant L as leader
+  participant F1 as follower 1
+  participant F2 as follower 2
+  C->>L: Put /registry/pods/x
+  L->>L: append to WAL + fdatasync
+  par replicate
+    L->>F1: AppendEntries(term, index)
+    L->>F2: AppendEntries(term, index)
+  end
+  F1->>F1: WAL + fdatasync
+  F1-->>L: ack
+  Note over L: majority (2 of 3) has it → commit
+  L->>L: apply to MVCC / bbolt
+  L-->>C: OK revision N+1
+  F2-->>L: ack (late is fine)
+```
+
+Quorum is ⌊n/2⌋+1. **1 member tolerates 0 failures, 2 members tolerate 0, and 3 tolerate 1.** Two Sparks don't give you HA etcd; you need a third voter (§8).
 
 ---
 
-## 3. Internal Storage Mechanics: WAL, bbolt & MVCC
+## 3. LLD
 
-`etcd` maintains two distinct storage layers to guarantee both high performance and durability:
+### 3.1 Paths, ports, flags (k3s)
+
+| Item | Value |
+|---|---|
+| Data dir | `/var/lib/rancher/k3s/server/db/etcd/` (`member/wal`, `member/snap/db`) |
+| Client / peer / metrics | `127.0.0.1:2379` · `:2380` · `:2381` (`etcd-expose-metrics: true`) |
+| TLS for etcdctl | `/var/lib/rancher/k3s/server/tls/etcd/{server-ca.crt,client.crt,client.key}` |
+| Snapshots | `/var/lib/rancher/k3s/server/db/snapshots/`, every 6 h, keep 20 |
+| Backend quota | 2 GiB default. Raise with `etcd-arg: ["quota-backend-bytes=8589934592"]` if needed |
+| Compaction | the API server compacts every 5 min (`--etcd-compaction-interval`). **Defrag is manual** |
+
+### 3.2 Keyspace
+
+| Prefix | Holds |
+|---|---|
+| `/registry/pods/<ns>/<name>` | Pods (protobuf, prefix `k8s\x00`) |
+| `/registry/secrets/<ns>/<name>` | Secrets, encrypted: value starts `k8s:enc:aescbc:v1:` |
+| `/registry/leases/kube-system/*` | leader election leases (written every ~2 s) |
+| `/registry/events/…` | Events, with a 1 h TTL. Often the biggest churn |
+| `/registry/apiextensions.k8s.io/customresourcedefinitions/…` | CRDs (Kueue, KEDA, Traefik, Prometheus…) |
+
+### 3.3 Health targets on NVMe
+
+| Metric | Healthy | Alarm (lab rule) |
+|---|---|---|
+| `etcd_disk_wal_fsync_duration_seconds` p99 | < 10 ms | > 50 ms for 10 min (`EtcdSlowFsync`) |
+| `etcd_disk_backend_commit_duration_seconds` p99 | < 25 ms | > 100 ms |
+| `etcd_mvcc_db_total_size_in_bytes / etcd_server_quota_backend_bytes` | < 50 % | > 80 % (`EtcdDbNearQuota`) |
+| `etcd_server_leader_changes_seen_total` rate | 0 on a single member | any increase |
+
+---
+
+## 4. Integrations
+
+| With | How |
+|---|---|
+| Vol 02 secrets encryption | Proven in §5.3 by reading the raw key |
+| Prometheus (Vol 16) | `kubeEtcd.endpoints: [10.10.10.11]` port 2381 in [`addons/kube-prometheus-stack.yaml`](lab/addons/kube-prometheus-stack.yaml). Two alert rules in [`rules.yaml`](lab/manifests/95-observability/rules.yaml) |
+| Off-box backup | §5.7 pulls snapshots + token + encryption config to the control node. In production use k3s's `etcd-s3-*` options (MinIO from module 08 works) |
+| Storage module (08) | fsync latency is a storage QoS problem. The checkpoint-write patterns in 08 are what hurt etcd |
+
+---
+
+## 5. Lab
+
+### 5.1 Migrate k3s to embedded etcd
+
+If you ran Volume 02 step 1, this is done. Otherwise:
+
+```bash
+cd "02 Kubernetes/lab"
+scripts/install-addons.sh k3s-config
+sudo journalctl -u k3s --since -3m | grep -iE 'migrat|etcd' | head
+sudo apt-get install -y etcd-client            # etcdctl (v3 API)
+scripts/etcd-drill.sh status
+```
+
+Expected (abridged):
 
 ```text
-Incoming Write Request (PUT /registry/pods/default/pytorch)
-       │
-       ▼
-1. Append to Write-Ahead Log (WAL) on Disk
-   ├── Buffered write
-   └── Synchronous `fdatasync()` flush to physical NVMe block storage
-       │
-       ▼ (Once WAL is safely on disk, consensus is confirmed)
-2. In-Memory Key Index (B-tree)
-   └── Maps human keys to monotonic generation Revision Numbers
-       │
-       ▼
-3. Backend Storage Engine: `bbolt`
-   └── Copy-on-Write B+ Tree database file (`member/snap/db`)
-       └── Written asynchronously in memory-mapped pages (mmap)
++------------------+---------+----------+---------------------------+
+|        ID        | STATUS  |   NAME   |        PEER ADDRS         |
+| 3a1f…            | started | spark-01-… | https://10.10.10.11:2380 |
++----------------------------+---------+--------+---------+-----------+-----------+
+|          ENDPOINT          | DB SIZE | IS LEADER | RAFT TERM | RAFT INDEX |
+| https://127.0.0.1:2379     |  12 MB  |   true    |     2     |   48211    |
 ```
 
-### 3.1 Write-Ahead Log (WAL)
-Before any write is applied to memory or confirmed to the client, it is appended to the WAL file on disk and flushed with `fdatasync`.
-- If the machine suddenly loses power, `etcd` restarts by reading the WAL from start to finish, restoring exact state with zero data loss.
-- **Disk Latency Sensitivity**: Because `fdatasync` is synchronous, slow storage (> 10ms flush latency) immediately causes Raft heartbeats to miss their deadlines, triggering leader election storms.
+### 5.2 Measure the disk the way etcd uses it
 
-### 3.2 Multi-Version Concurrency Control (MVCC)
-In etcd v3, keys are never updated in place. Every mutation generates a monotonically increasing **64-bit Revision Number**.
-- Key: `/registry/pods/default/pod-1`
-- Revision 101: `CREATE` (Pod Pending)
-- Revision 105: `UPDATE` (Pod Assigned to Node)
-- Revision 110: `UPDATE` (Pod Running)
-- Revision 120: `DELETE` (Pod Terminated - tombstone written)
+etcd writes small records and fdatasyncs each one. Test exactly that on the filesystem that holds the WAL:
 
-This revision history allows the Kubernetes API server to execute the **`Watch`** API efficiently: clients ask for changes starting from a specific revision ID without polling.
+```bash
+sudo mkdir -p /var/lib/rancher/k3s/fio-etcd && cd /var/lib/rancher/k3s/fio-etcd
+sudo fio --name=etcd-wal --rw=write --ioengine=sync --fdatasync=1 --bs=2300 --size=22m --directory=.
+cd - && sudo rm -rf /var/lib/rancher/k3s/fio-etcd
+```
 
----
+Read the `fsync/fdatasync/sync_file_range` section: **99.00th percentile should be well under 10 ms** (a healthy Gen4/Gen5 NVMe gives tens to hundreds of µs). Now run it again while `kubectl apply -f manifests/60-storage/fio-job.yaml` runs its sequential writes (Vol 11). The tail latency jumps. That's what happens to your API server during a checkpoint write.
 
-## 4. Keyspace Structure in Kubernetes
+### 5.3 Look inside the keyspace
 
-The Kubernetes API server prefixes all resources under `/registry`:
+```bash
+E="sudo ETCDCTL_API=3 etcdctl --cacert=/var/lib/rancher/k3s/server/tls/etcd/server-ca.crt \
+   --cert=/var/lib/rancher/k3s/server/tls/etcd/client.crt --key=/var/lib/rancher/k3s/server/tls/etcd/client.key"
+$E get /registry --prefix --keys-only | awk -F/ 'NF>2 {print $3}' | sort | uniq -c | sort -rn | head -12
+
+kubectl -n tenant-alpha create secret generic demo --from-literal=password=hunter2
+$E get /registry/secrets/tenant-alpha/demo --print-value-only | head -c 64 | xxd | head -3
+```
+
+Expected: the value starts with `k8s:enc:aescbc:v1:aescbckey` and `hunter2` is nowhere in it. If you see the plaintext password, secrets encryption is off (Vol 02).
+
+MVCC in action. Every write gets a new revision, and old revisions stay until compaction:
+
+```bash
+for i in 1 2 3; do kubectl -n tenant-alpha annotate secret demo rev=$i --overwrite >/dev/null; done
+$E get /registry/secrets/tenant-alpha/demo -w json | jq '.kvs[0] | {create_revision, mod_revision, version}'
+```
+
+### 5.4 Break Raft on purpose (sandbox, not your cluster)
+
+```bash
+cd lab/etcd-sandbox && docker compose up -d && cd ..
+scripts/etcd-sandbox.sh status
+scripts/etcd-sandbox.sh kill-leader
+scripts/etcd-sandbox.sh kill-two
+```
+
+Expected:
 
 ```text
-/registry
-├── pods
-│   ├── default
-│   │   └── pytorch-worker
-│   └── kube-system
-│       └── coredns-xyz
-├── services
-│   └── endpoints
-├── namespaces
-│   ├── default
-│   └── k3s-alpha
-├── persistentvolumeclaims
-│   └── k3s-alpha
-│       └── data-volume-alpha
-└── priorityclasses
+[....] stopping leader e2
+[PASS] new leader e1 after 1180 ms (election timeout 1000 ms)
+OK
+[PASS] writes still work with 2/3 members
+Error: context deadline exceeded
+[PASS] write failed: no quorum (expected)
+[PASS] serializable (possibly stale) read still served locally
 ```
 
----
+This is why a Kubernetes control plane with 1 of 3 etcd members left serves `kubectl get` from caches but can't create anything.
 
-## 5. Maintenance: Compaction, Defragmentation & Space Quotas
-
-Because MVCC retains historical revisions for every update, the database file (`db`) continuously grows.
-
-### 5.1 Compaction
-Compaction permanently discards historical revisions older than a specified revision or window.
-- The Kubernetes API Server automatically issues compaction commands every 5 minutes (`--etcd-compaction-interval=5m`).
-- Compaction marks the pages inside `bbolt` as free, but **it does not shrink the physical database file size on disk**.
-
-### 5.2 Space Quota & Database Alarms
-`etcd` enforces a strict space quota (default **2 GiB**, recommended enterprise maximum **8 GiB**).
-- If the physical file size exceeds this quota, `etcd` raises a cluster-wide **`NOSPACE` alarm**.
-- When `NOSPACE` is active, **all write operations are rejected with HTTP 500 errors**. Only read and delete operations are permitted.
-
-### 5.3 Defragmentation (`etcdctl defrag`)
-Defragmentation rewrites the bbolt database into a contiguous sequence of pages, releasing freed space back to the underlying host filesystem.
+### 5.5 Hit the space quota and recover
 
 ```bash
-# Defragment all cluster endpoints:
-etcdctl defrag --cluster \
-  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
-  --cert=/etc/kubernetes/pki/etcd/server.crt \
-  --key=/etc/kubernetes/pki/etcd/server.key
+scripts/etcd-sandbox.sh fill          # 32 MiB quota → NOSPACE
+scripts/etcd-sandbox.sh recover-space # compact → defrag --cluster → alarm disarm
 ```
 
----
+Expected at the end of `fill`: `memberID:… alarm:NOSPACE`, with writes failing with `etcdserver: mvcc: database space exceeded`. After recovery, `DB SIZE` drops and the alarm list is empty.
 
-## 6. Backup, Snapshotting & Disaster Recovery
+The same sequence on the real cluster, if `EtcdDbNearQuota` ever fires:
 
-Taking regular snapshots of `etcd` is the only guaranteed recovery method against ransomware, corrupted etcd databases, or accidental mass namespace deletions.
-
-### 6.1 Creating a Point-In-Time Snapshot
 ```bash
-ETCDCTL_API=3 etcdctl snapshot save /backup/etcd-snapshot-$(date +%Y%m%d_%H%M%S).db \
-  --endpoints=https://127.0.0.1:2379 \
-  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
-  --cert=/etc/kubernetes/pki/etcd/server.crt \
-  --key=/etc/kubernetes/pki/etcd/server.key
+rev=$($E endpoint status -w json | jq '.[0].Status.header.revision')
+$E compact "$rev" && $E defrag && $E alarm disarm
 ```
 
-### 6.2 Verifying Snapshot Integrity
-Always verify a snapshot immediately after creation:
+### 5.6 Snapshot and restore the real cluster
+
 ```bash
-ETCDCTL_API=3 etcdctl snapshot status /backup/etcd-snapshot-latest.db -w table
-```
-*Expected Output:*
-```text
-+----------+----------+------------+------------+
-|   HASH   | REVISION | TOTAL KEYS | TOTAL SIZE |
-+----------+----------+------------+------------+
-| 3c1a82f4 |    48291 |       2480 |     42 MB  |
-+----------+----------+------------+------------+
+scripts/etcd-drill.sh snapshot
+kubectl create namespace doomed-by-restore
+scripts/etcd-drill.sh status | tail -3          # note the snapshot name
+scripts/etcd-drill.sh restore drill-20260930-120000
+kubectl get ns doomed-by-restore                 # NotFound: created after the snapshot
 ```
 
-### 6.3 Restoring an etcd Cluster from Snapshot
-When disaster strikes:
-1. Stop all control plane components (`systemctl stop k3s` or stop `kube-apiserver`).
-2. Restore the database file to a fresh directory:
-   ```bash
-   ETCDCTL_API=3 etcdctl snapshot restore /backup/etcd-snapshot-latest.db \
-     --data-dir=/var/lib/etcd-restored
-   ```
-3. Update the etcd data directory path to point to `/var/lib/etcd-restored`.
-4. Restart etcd and the control plane.
+What `restore` does: stop k3s → `k3s server --cluster-reset --cluster-reset-restore-path=<file>` → start k3s. Running pods whose objects no longer exist are cleaned up by the kubelet within a minute.
 
----
+> **Encrypted secrets:** the snapshot holds ciphertext. Restoring on a *new* machine also needs the encryption config (`/var/lib/rancher/k3s/server/cred/encryption-config.json`) and the server token (`/var/lib/rancher/k3s/server/token`). Back those up with the snapshot, into Vault (01 Ansible Vol 19).
 
-## 7. Production Failure Scenarios & High-Impact Troubleshooting
+### 5.7 Copy snapshots off the box
 
-### Scenario 1: `etcdserver: mvcc: database space exceeded` (Cluster Read-Only)
-- **Symptom**: All `kubectl create` or `apply` commands fail.
-- **Root Cause**: Database size reached the 2GB limit; `NOSPACE` alarm triggered.
-- **Triage & Recovery Procedure**:
-  ```bash
-  # 1. Check alarm status
-  etcdctl alarm list
-  
-  # 2. Find current revision number
-  REV=$(etcdctl endpoint status --write-out="json" | jq '.[0].Status.header.revision')
-  
-  # 3. Compact historical revisions up to current
-  etcdctl compact $REV
-  
-  # 4. Defragment database to reclaim disk space
-  etcdctl defrag
-  
-  # 5. Clear the alarm
-  etcdctl alarm disarm
-  ```
+From the control node, pull everything a restore on *new* hardware needs (snapshots + server token + encryption config) in one tarball:
 
----
-
-### Scenario 2: `fdatasync took too long` & Leader Election Storms
-- **Symptom**: `dmesg` or etcd logs show warnings:
-  ```text
-  apply request took too long (182ms)
-  fdatasync took too long (45ms)
-  failed to send out heartbeat on time
-  ```
-- **Root Cause**: The physical disk hosting etcd has high write latency (caused by competing processes like Docker image downloads or heavy logging).
-- **Resolution**:
-  - Always place etcd's data directory (`/var/lib/etcd` or `/var/lib/rancher/k3s/server/db`) on dedicated NVMe storage with guaranteed IOPS.
-  - Set `ionice` priority on the etcd process: `ionice -c2 -n0 -p $(pgrep etcd)`.
-
----
-
-## 8. Hands-On etcdctl Operational Labs
-
-### Lab 1: Inspect Cluster Health and Endpoint Status
-Run this on your control plane node:
 ```bash
-ETCDCTL_API=3 etcdctl endpoint status -w table \
-  --endpoints=https://127.0.0.1:2379 \
-  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
-  --cert=/etc/kubernetes/pki/etcd/server.crt \
-  --key=/etc/kubernetes/pki/etcd/server.key
+mkdir -p ~/spark-backups
+ssh nvidia@10.10.10.11 'sudo tar czf - -C /var/lib/rancher/k3s/server db/snapshots token cred/encryption-config.json' \
+  > ~/spark-backups/k3s-$(date +%F).tgz
+tar tzf ~/spark-backups/k3s-$(date +%F).tgz | head
 ```
-*Observe the `IS LEADER` boolean, `DB SIZE`, and `IN USE` metrics.*
 
-### Lab 2: Query Raw Keys from etcd
-View the raw Kubernetes object keys stored inside:
-```bash
-# List all pods stored in etcd keyspace:
-ETCDCTL_API=3 etcdctl get /registry/pods --prefix --keys-only
-
-# Read the raw etcd metadata for a specific pod:
-ETCDCTL_API=3 etcdctl get /registry/pods/k3s-alpha/pytorch-benchmark
-```
+Treat that tarball like a password: it holds the key that decrypts every Secret. Encrypt it at rest, or store it in Vault.
 
 ---
 
-Proceed to [**04-kube-controller-manager-and-controllers.md**](04-kube-controller-manager-and-controllers.md) to explore the reconciliation loop, Informers, Workqueues, and Custom Resource Controllers.
+## 6. Verify
+
+| Check | Expected |
+|---|---|
+| `scripts/etcd-drill.sh status` | 1 member, `IS LEADER true`, empty alarm list, ≥ 1 snapshot |
+| raw secret starts with `k8s:enc:` | yes |
+| Prometheus `histogram_quantile(0.99, rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m]))` | < 0.01 when idle |
+| Restore drill | namespace created after the snapshot is gone |
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Cause | Diagnose | Fix |
+|---|---|---|---|
+| All writes fail: `mvcc: database space exceeded` | Quota hit, NOSPACE alarm | `etcdctl alarm list`, `endpoint status` DB size | compact → defrag → `alarm disarm`. Find the churn (`--keys-only` counts). Often Events or a CRD in a hot loop (Vol 04) |
+| API latency spikes, `apply request took too long` in k3s log | fsync slow | `EtcdSlowFsync`, §5.2 fio, `iostat -x 1` | Move bulk writers (checkpoints, fio, image pulls) off peak. `ionice -c3` on batch jobs |
+| Leader changes on a single member | not normally possible. Clock jumps or process stalls | `journalctl -u k3s \| grep -i 'leader\|elect'` | check chrony (01 Ansible baseline), CPU starvation (system-reserved) |
+| k3s won't start after restore: `bootstrap data already found and encrypted with different token` | token mismatch | compare `/var/lib/rancher/k3s/server/token` | restore the original token file |
+| `etcdctl: context deadline exceeded` | wrong endpoint/certs | run with `--debug` | use the TLS paths from §3.1 |
+| DB grows while object count doesn't | no defrag after compaction | `DB SIZE` vs `DB SIZE IN USE` (etcd ≥3.4 shows both in JSON) | `defrag` (it blocks the member briefly, so do it off-peak) |
+
+---
+
+## 8. Scale-out path
+
+```mermaid
+flowchart LR
+  A["1 Spark<br/>embedded etcd<br/>quorum 1"] --> B["2 Sparks<br/>still 1 etcd voter<br/>(spark-02 = agent)"]
+  B --> C["2 Sparks + small x86 box<br/>3 servers, quorum 2<br/>survives 1 failure"]
+  C --> D["Datacenter<br/>3-5 dedicated CP nodes<br/>NVMe for WAL, snapshots to S3"]
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  class A,B,C,D store
+```
+
+- **Don't make spark-02 a second server** with only two machines. A 2-member etcd *halves* your availability, because either member failing loses quorum.
+- For real HA, the third voter can be any small Linux box (a NUC, or a VM on the control node) running `k3s server --server https://10.10.10.11:6443`, tainted `node-role.kubernetes.io/control-plane:NoSchedule`.
+- Production: snapshots every hour to object storage (`etcd-s3: true`, `etcd-s3-bucket`), a quarterly restore rehearsal on a scratch cluster, and a 99th-percentile fsync SLO under 10 ms on dedicated disks.
+
+---
+
+## 9. Checklist
+
+- [ ] I migrated k3s to etcd and have at least one off-box snapshot plus the token and encryption config.
+- [ ] I measured fdatasync latency and saw it degrade under competing I/O.
+- [ ] I saw an election, a quorum loss and a NOSPACE alarm in the sandbox, and recovered each.
+- [ ] I restored the real cluster from a snapshot and know which files make that possible on a new machine.
