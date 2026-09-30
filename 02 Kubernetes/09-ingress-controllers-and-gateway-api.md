@@ -1,263 +1,263 @@
-# 09. Ingress Controllers & Gateway API — L7 Routing, gRPC & Inference Gateways
+# Volume 09 — Ingress & Gateway API for LLM APIs: Streaming, Limits, Auth, Canaries, TLS, gRPC
 
-When serving AI models to end users (e.g. streaming LLM tokens via HTTP SSE or high-performance computer vision inference via gRPC), Layer 4 Kubernetes Services (NodePort/ClusterIP) are insufficient. You need an intelligent **Layer 7 reverse proxy** that handles SSL/TLS termination, path routing, streaming connections, and traffic splitting.
+> **Module 02 · Part II — Networking** · Prev: [08 CoreDNS](08-coredns-and-service-discovery.md) · Next: [10 Workload controllers](10-advanced-workload-controllers.md)
 
-This guide explores **Ingress Controllers** (Nginx/Traefik), the next-generation **Kubernetes Gateway API**, and tuning for high-throughput AI inference endpoints.
-
----
-
-## 📑 Table of Contents
-1. [Layer 4 vs. Layer 7 Routing](#1-layer-4-vs-layer-7-routing)
-2. [Anatomy of an Ingress Controller](#2-anatomy-of-an-ingress-controller)
-3. [Path-Based & Host-Based Routing for AI APIs](#3-path-based--host-based-routing-for-ai-apis)
-4. [Tuning Ingress for LLM Streaming & Large Tensors](#4-tuning-ingress-for-llm-streaming--large-tensors)
-5. [The Next Generation: Kubernetes Gateway API](#5-the-next-generation-kubernetes-gateway-api)
-6. [Automated TLS Termination with `cert-manager`](#6-automated-tls-termination-with-cert-manager)
-7. [Production Failure Scenarios & Diagnostics](#7-production-failure-scenarios--diagnostics)
-8. [Hands-On Ingress & Inference Routing Labs](#8-hands-on-ingress--inference-routing-labs)
+| | |
+|---|---|
+| **You will build** | Traefik v3 as both Ingress controller and Gateway API implementation in front of an OpenAI-compatible endpoint. You'll prove token streaming isn't buffered, add body-size limits, rate limits and API-key auth, run a 90/10 canary with an `HTTPRoute`, terminate TLS and route gRPC to Triton. The mock LLM makes all of it GPU-free |
+| **Hardware** | spark-01 (servicelb binds :80/:443 on 10.10.10.11). Your laptop is the client |
+| **Time** | 90 min |
+| **Risk** | Low |
+| **Lab files** | [`addons/traefik.yaml`](lab/addons/traefik.yaml), [`manifests/40-ingress/`](lab/manifests/40-ingress/) (`mock_llm.py`, `middlewares.yaml`, `ingress.yaml`, `gateway-routes.yaml`), [`breakfix/08`](lab/breakfix/08-selector-typo.yaml), [`breakfix/09`](lab/breakfix/09-buffered-stream.yaml) |
 
 ---
 
-## 1. Layer 4 vs. Layer 7 Routing
+## 1. Why this matters on a Spark
 
-```text
-Layer 4 Routing (Service NodePort / LoadBalancer):
-Client ──> TCP Handshake (IP:Port) ──> Blind packet forwarding to Pod
-* No inspection of HTTP headers, URL paths, or cookies.
-* Cannot terminate TLS per domain name.
-* Inefficient for gRPC multiplexing.
+LLM traffic breaks web-app assumptions:
 
-Layer 7 Routing (Ingress / Gateway API):
-Client ──> TLS Handshake (SNI: api.ai.org) ──> Decrypts HTTP/gRPC stream
-       ├── /v1/chat/completions ──────────> vLLM Inference Pod
-       ├── /v2/models/resnet50/infer ────> Triton Inference Pod
-       └── /metrics ──────────────────────> Monitoring Pod
-```
+| Web default | LLM reality | What breaks |
+|---|---|---|
+| responses in < 1 s | a long generation streams for minutes | proxy `readTimeout` 60 s cuts the stream (504) |
+| small bodies | RAG prompts and base64 images run to megabytes | `413 Request Entity Too Large` |
+| buffering responses is harmless | SSE tokens must flush one by one | the user waits 40 s then gets everything at once (drill 09) |
+| round-robin per connection | clients keep connections alive | one replica hot, others idle (Vol 07) |
+
+> **Controller choice.** k3s ships Traefik; the 01 Ansible lab disabled the bundled copy so this volume installs a pinned one. The community **ingress-nginx** controller has been retired (best-effort maintenance ended March 2026), so new platforms should use Gateway API implementations (Traefik, Envoy Gateway, Cilium, NGINX Gateway Fabric).
 
 ---
 
-## 2. Anatomy of an Ingress Controller
-
-An Ingress setup requires two distinct components:
-1. **The Ingress Resource**: A declarative Kubernetes YAML specification defining routing rules.
-2. **The Ingress Controller**: A physical reverse proxy daemon (e.g. **Traefik**, **Ingress-Nginx**, or **Envoy**) that watches the API server, dynamically compiles configuration files, and reloads routing tables in memory.
+## 2. Architecture — HLD
 
 ```mermaid
-graph TD
-    Client["Client / Web Browser / Mobile App"] -->|HTTPS (Port 443)| IC["Ingress Controller<br/>(Nginx / Traefik / Envoy)"]
-    IC -->|Terminate TLS & Inspect Path| Router{"URL Path Match"}
-    
-    Router -->|/v1/chat| LLM["vLLM Service (ClusterIP)<br/>Port 8000"]
-    Router -->|/v2/models| Triton["Triton Service (ClusterIP)<br/>Port 8000"]
-    
-    LLM -.-> P1["vLLM GPU Pod 1"]
-    LLM -.-> P2["vLLM GPU Pod 2"]
-    Triton -.-> P3["Triton GPU Pod 1"]
+flowchart LR
+  CL["client<br/>curl / OpenAI SDK / Open WebUI"] -->|"http://llm.lab.local<br/>10.10.10.11:80"| LB["k3s servicelb<br/>svclb-traefik DaemonSet"]
+  LB --> TR["Traefik v3 · ns ingress<br/>entrypoints web :8000 / websecure :8443<br/>readTimeout 0 · idleTimeout 600s"]
+  subgraph MW["Middlewares (per route)"]
+    direction TB
+    M1["llm-body-limit<br/>32 MiB request body"]
+    M2["llm-ratelimit<br/>20 r/s avg · burst 40"]
+    M3["llm-apikey<br/>basicAuth"]
+  end
+  TR --> MW
+  MW -->|"Ingress llm.lab.local"| S1["Service mock-llm<br/>2 pods"]
+  TR -->|"HTTPRoute gw.lab.local<br/>90 / 10"| S1
+  TR -->|"weight 10"| S2["Service mock-llm-canary"]
+  TR -->|"h2c / gRPC"| S3["Service triton :8001"]
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
+  classDef sec fill:#cf222e,stroke:#82071e,color:#fff
+  classDef ext fill:#24292f,stroke:#000,color:#fff
+  classDef tenant fill:#eaeef2,stroke:#57606a,color:#000
+  class LB,TR net
+  class M1,M2,M3 sec
+  class CL ext
+  class S1,S2,S3 tenant
+  style MW fill:#fff5f5,stroke:#cf222e
 ```
+
+### 2.1 Ingress vs Gateway API
+
+| | Ingress | Gateway API |
+|---|---|---|
+| Roles | one object does everything | `GatewayClass` (infra) → `Gateway` (platform team) → `HTTPRoute` (app team) |
+| Traffic split / canary | controller-specific annotations | `backendRefs[].weight`, portable |
+| Timeouts | annotations | `rules[].timeouts.request` |
+| gRPC | annotations / `appProtocol` | `GRPCRoute` |
+| Cross-namespace | no | `ReferenceGrant` |
+| Status | minimal | per-route `Accepted` / `ResolvedRefs` conditions: *debuggable* |
 
 ---
 
-## 3. Path-Based & Host-Based Routing for AI APIs
+## 3. LLD
 
-Deploy an Ingress manifest that routes traffic to two different AI models running on your cluster:
-
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: ai-inference-gateway
-  namespace: k3s-beta
-  annotations:
-    kubernetes.io/ingress.class: "traefik" # or "nginx"
-    # Enable WebSocket & Server-Sent Events (SSE) for token streaming:
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-spec:
-  rules:
-    - host: api.dgx-spark.local
-      http:
-        paths:
-          # Route 1: LLM OpenAI-compatible endpoint
-          - path: /v1/chat/completions
-            pathType: Prefix
-            backend:
-              service:
-                name: vllm-service
-                port:
-                  number: 8000
-
-          # Route 2: Computer Vision Inference Server
-          - path: /v2/models
-            pathType: Prefix
-            backend:
-              service:
-                name: triton-service
-                port:
-                  number: 8000
-```
+| Item | Value |
+|---|---|
+| Traefik chart / app | 34.4.1 / v3.3.x (`versions.env`) |
+| Namespace | `ingress` |
+| Entrypoints | `web` 8000→80, `websecure` 8443→443, `traefik` 8080 (dashboard, internal) |
+| Transport timeouts | `readTimeout: 0s`, `writeTimeout: 0s`, `idleTimeout: 600s` on web and websecure |
+| Gateway | `ingress/lab-gateway`, listener `web` :8000 HTTP, `namespacePolicy: All` |
+| Hostnames | `llm.lab.local` (Ingress), `gw.lab.local` (HTTPRoute) → add both to your laptop's `/etc/hosts` as `10.10.10.11` |
+| Metrics | ServiceMonitor `release: kps` → `traefik_service_*` (KEDA uses these in Vol 21) |
+| Priority | platform (keep ingress alive under memory pressure) |
 
 ---
 
-## 4. Tuning Ingress for LLM Streaming & Large Tensors
+## 4. Integrations
 
-Standard web ingress proxies are tuned for lightweight JSON payloads. When serving AI models, default settings will cause connection drops:
-
-### 1. HTTP 413 "Request Entity Too Large"
-When uploading 4K video frames, high-res medical images, or audio files for transcription:
-- **Default limit**: Ingress-Nginx defaults to `1m` (1 Megabyte).
-- **Fix**:
-  ```yaml
-  nginx.ingress.kubernetes.io/proxy-body-size: "100m"
-  ```
-
-### 2. Broken Streaming Tokens (LLM Generation Timeout)
-Generating a 4,000-token response with an LLM can take 30 to 60 seconds of continuous HTTP streaming (Server-Sent Events):
-- **Default limit**: Standard proxy timeouts terminate idle sockets after 60 seconds.
-- **Fix**:
-  ```yaml
-  nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
-  nginx.ingress.kubernetes.io/proxy-buffering: "off" # Stream tokens instantly!
-  ```
-
-### 3. gRPC Multiplexing for Triton Inference Server
-Triton uses **HTTP/2 gRPC** for maximum throughput. Standard proxies downgrade connections to HTTP/1.1 unless configured:
-```yaml
-nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
-```
+- **NetworkPolicy (Vol 06)**: `llm-serving` admits the `ingress` namespace. Without that allow, you get 504s (drill 06).
+- **KEDA (Vol 21)**: scales `mock-llm` on `traefik_service_open_connections`.
+- **Vault (01 Ansible Vol 19)**: the `llm-api-users` htpasswd Secret and TLS keys belong in Vault KV, synced by Vault Agent or External Secrets.
+- **Open WebUI / LiteLLM (modules 03, 04)**: point them at `http://llm.lab.local/v1`.
 
 ---
 
-## 5. The Next Generation: Kubernetes Gateway API
+## 5. Lab
 
-The legacy `Ingress` API suffered from a fundamental flaw: it combined infrastructure provisioning, TLS secrets, and routing rules into a single monolithic object.
+### 5.1 Install and check Traefik and the Gateway
 
-The **Kubernetes Gateway API** replaces Ingress with a modular, role-oriented architecture:
-
-```text
-+─────────────────────────────────────────────────────────────+
-| GatewayClass (Managed by Cloud/Infrastructure Admin)         |
-| Defines the proxy controller (e.g. Envoy, Cilium, Traefik)  |
-+─────────────────────────────────────────────────────────────+
-                               │
-                               ▼
-+─────────────────────────────────────────────────────────────+
-| Gateway (Managed by Cluster Platform Engineer)               |
-| Allocates IP address, port 443, and attaches TLS certificate|
-+─────────────────────────────────────────────────────────────+
-                               │
-                               ▼
-+─────────────────────────────────────────────────────────────+
-| HTTPRoute / GRPCRoute (Managed by AI Application Developer) |
-| Defines path rules: /v1/chat -> vllm-service                |
-+─────────────────────────────────────────────────────────────+
+```bash
+cd "02 Kubernetes/lab"
+scripts/install-addons.sh traefik
+kubectl -n ingress get pods,svc
+kubectl get gatewayclass,gateway -A
 ```
 
-### Gateway API Manifest (`llm-httproute.yaml`)
+Expected: `svc/traefik-lab` `LoadBalancer` with `EXTERNAL-IP 10.10.10.11`. GatewayClass `traefik` `ACCEPTED True`. Gateway `lab-gateway` `PROGRAMMED True`.
+
+### 5.2 Deploy the mock API behind Ingress and HTTPRoute
+
+```bash
+kubectl apply -k manifests/40-ingress
+kubectl -n llm-serving get pods,ingress,httproute
+kubectl -n llm-serving get httproute llm-gw -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {end}{"\n"}'
+echo "10.10.10.11 llm.lab.local gw.lab.local" | sudo tee -a /etc/hosts     # on your laptop
+curl -s http://llm.lab.local/v1/models | jq
+```
+
+Expected: `Accepted=True ResolvedRefs=True`, and `{"object":"list","data":[{"id":"mock-llm",…}]}`.
+
+### 5.3 Prove streaming isn't buffered
+
+```bash
+curl -sN -o /dev/null -w 'TTFB %{time_starttransfer}s  total %{time_total}s\n' \
+  http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":100}'
+curl -sN http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":8}' | ts '%.s'   # moreutils ts
+```
+
+Expected: **TTFB ≈ 0.05 s, total ≈ 5 s** (100 tokens at 20 tok/s), and timestamps 50 ms apart. Now the broken version:
+
+```bash
+scripts/breakfix.sh inject 09
+echo "10.10.10.11 bf09.lab.local" | sudo tee -a /etc/hosts
+curl -sN -o /dev/null -w 'TTFB %{time_starttransfer}s  total %{time_total}s\n' \
+  http://bf09.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":100}'
+scripts/breakfix.sh reset 09
+```
+
+Expected with the buffering middleware: **TTFB ≈ total ≈ 5 s**. TTFB equal to total is the signature of a buffering proxy.
+
+### 5.4 Long generations don't time out
+
+```bash
+time curl -sN http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":2000}' | tail -1
+```
+
+2000 tokens at 20 tok/s = 100 s, past the old 60 s default. Expected: ends with `data: [DONE]`. Set `readTimeout: 60s` in `addons/traefik.yaml`, re-apply, and watch it fail at 60 s. That's the #1 support ticket for self-hosted LLM APIs.
+
+### 5.5 Body limit and rate limit
+
+```bash
+head -c 40000000 /dev/zero | tr '\0' 'a' | jq -Rs '{messages:[{role:"user",content:.}]}' > /tmp/big.json
+curl -s -o /dev/null -w '%{http_code}\n' http://llm.lab.local/v1/chat/completions --data-binary @/tmp/big.json   # 413
+
+seq 200 | xargs -P50 -I{} curl -s -o /dev/null -w '%{http_code}\n' http://llm.lab.local/v1/models | sort | uniq -c
+```
+
+Expected: `413`, then a mix of `200` and `429`. Roughly the burst (40) plus 20/s get through, and the rest are rejected.
+
+### 5.6 API-key auth (basicAuth as a simple key)
+
+```bash
+htpasswd -nbB team-alpha "$(openssl rand -hex 16 | tee /tmp/alpha.key)" > /tmp/users
+kubectl -n llm-serving create secret generic llm-api-users --from-file=users=/tmp/users
+kubectl -n llm-serving annotate ingress llm --overwrite \
+  traefik.ingress.kubernetes.io/router.middlewares=llm-serving-llm-body-limit@kubernetescrd,llm-serving-llm-ratelimit@kubernetescrd,llm-serving-llm-apikey@kubernetescrd
+curl -s -o /dev/null -w '%{http_code}\n' http://llm.lab.local/v1/models                               # 401
+curl -s -u "team-alpha:$(cat /tmp/alpha.key)" http://llm.lab.local/v1/models | jq -r '.data[0].id'   # mock-llm
+```
+
+For OpenAI SDKs that only send `Authorization: Bearer`, use LiteLLM (module 03) or Traefik's ForwardAuth to an auth service. basicAuth here teaches the middleware chain.
+
+### 5.7 Canary with Gateway API weights
+
+```bash
+for i in $(seq 200); do curl -s http://gw.lab.local/v1/models | jq -r '.data[0].id'; done | sort | uniq -c
+```
+
+Expected: ≈ `180 mock-llm` / `20 mock-llm-canary`. Promote by editing the weights in `gateway-routes.yaml` (90/10 → 50/50 → 0/100) and re-applying. Every step is a Git diff.
+
+### 5.8 TLS
+
+```bash
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 365 \
+  -subj "/CN=llm.lab.local" -addext "subjectAltName=DNS:llm.lab.local" -keyout /tmp/tls.key -out /tmp/tls.crt
+kubectl -n llm-serving create secret tls llm-tls --cert=/tmp/tls.crt --key=/tmp/tls.key
+kubectl -n llm-serving patch ingress llm --type merge -p '{"spec":{"tls":[{"hosts":["llm.lab.local"],"secretName":"llm-tls"}]}}'
+kubectl -n llm-serving annotate ingress llm traefik.ingress.kubernetes.io/router.entrypoints=web,websecure --overwrite
+curl -s --cacert /tmp/tls.crt https://llm.lab.local/v1/models | jq -r '.data[0].id'
+```
+
+In production, cert-manager issues and renews these (`scripts/install-addons.sh kserve` installs cert-manager).
+
+### 5.9 gRPC to Triton (after Vol 22)
+
+The Triton Service declares `appProtocol: kubernetes.io/h2c` on port 8001, so Traefik speaks cleartext HTTP/2 to it:
+
 ```yaml
 apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata:
-  name: llm-api-route
-  namespace: k3s-beta
+kind: GRPCRoute
+metadata: {name: triton, namespace: llm-serving}
 spec:
-  parentRefs:
-    - name: central-ai-gateway
-      namespace: default
-  hostnames:
-    - "llm.company.internal"
+  parentRefs: [{name: lab-gateway, namespace: ingress}]
+  hostnames: ["triton.lab.local"]
   rules:
-    - matches:
-        - path:
-            type: PathPrefix
-            value: /v1
-      backendRefs:
-        - name: vllm-service
-          port: 8000
+    - backendRefs: [{name: triton, port: 8001}]
+```
+
+(`GRPCRoute` is in the Gateway API standard channel since v1.1. The lab pins v1.2.1.)
+
+---
+
+## 6. Verify
+
+```bash
+scripts/verify.sh ingress
+```
+
+```text
+── ingress
+[PASS] Traefik LoadBalancer IP 10.10.10.11
+[PASS] Ingress llm.lab.local/v1/models → 200
+[PASS] SSE streaming through ingress (11 events)
+[PASS] Gateway API HTTPRoute gw.lab.local → 200
 ```
 
 ---
 
-## 6. Automated TLS Termination with `cert-manager`
+## 7. Troubleshooting
 
-Never manage SSL certificates manually. **`cert-manager`** automates certificate issuance and renewal via Let's Encrypt or corporate HashiCorp Vault instances.
+| Symptom | Cause | Diagnose | Fix |
+|---|---|---|---|
+| `404 page not found` (Traefik) | no router matched: wrong Host header or ingressClass | `curl -v -H 'Host: …'`, Traefik dashboard `kubectl -n ingress port-forward deploy/traefik-lab 8080` → `/dashboard/` | fix host/path/`ingressClassName: traefik` |
+| `503 no available server` | Service has no ready endpoints | `kubectl get endpointslices -l kubernetes.io/service-name=…` | drill 08: selector/port mismatch. Or readiness failing |
+| `504 Gateway Timeout` after exactly N s | timeout on entrypoint, route or client | which N? 60 → Traefik `readTimeout`. 600 → HTTPRoute `timeouts.request`. Other → client | raise where it cuts |
+| Stream arrives all at once | response buffering (middleware, compression, another proxy in front) | TTFB ≈ total (§5.3) | remove response buffering. Set `X-Accel-Buffering: no` for NGINX hops |
+| `413` | body limit | Traefik access log | raise `maxRequestBodyBytes` deliberately |
+| `429` for everyone | rate limit keyed on the servicelb/NAT IP, not the client | Traefik logs `ClientHost` | `ipStrategy.depth` / trust `X-Forwarded-For` from a known proxy |
+| HTTPRoute `Accepted=False NotAllowedByListeners` | listener `namespacePolicy` excludes the route's namespace | `kubectl describe httproute` | `namespacePolicy: All` or `Selector` |
+| gRPC `UNAVAILABLE: … protocol error` | proxy spoke HTTP/1.1 to the backend | Service port `appProtocol` | `kubernetes.io/h2c` |
+
+---
+
+## 8. Scale-out path
 
 ```mermaid
-graph LR
-    Ingress["Ingress / Gateway"] --> CM["cert-manager Controller"]
-    CM --> ACME["Let's Encrypt / Vault CA"]
-    ACME -- Issues Signed x509 Cert --> Secret["Kubernetes Secret (tls.crt / tls.key)"]
-    Secret --> Ingress
+flowchart LR
+  A["1 Spark<br/>Traefik + servicelb"] --> B["2 Sparks<br/>Traefik 2 replicas<br/>anti-affinity + PDB"]
+  B --> C["DC edge<br/>MetalLB/BGP or HW LB<br/>WAF + OIDC at the edge"]
+  C --> D["Inference-aware routing<br/>Gateway API Inference Extension:<br/>InferencePool + endpoint picker<br/>(KV-cache / queue aware)"]
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
+  class A,B,C,D net
 ```
 
-### Ingress Manifest with Automated TLS:
-```yaml
-spec:
-  tls:
-    - hosts:
-        - api.dgx-spark.local
-      secretName: dgx-spark-tls-cert # cert-manager auto-populates this secret!
-```
+The **Gateway API Inference Extension** adds `InferencePool` / `InferenceModel` objects and an *endpoint picker* that chooses the model-server replica by queue depth and KV-cache hit (prefix affinity). It's the production answer to "round-robin is wrong for LLMs", and the natural next step after Vol 24.
 
 ---
 
-## 7. Production Failure Scenarios & Diagnostics
+## 9. Checklist
 
-### Scenario 1: `HTTP 504 Gateway Timeout` During LLM Generation
-- **Symptom**: User sends a prompt; generation starts, but exactly 60 seconds later, the connection breaks with a 504 Gateway Timeout error.
-- **Root Cause**: Proxy buffer timeout reached. The proxy waited for the entire response to finish before sending bytes to the client.
-- **Resolution**: Disable proxy buffering (`proxy-buffering: "off"`) so that tokens stream out chunk-by-chunk in real time.
-
----
-
-### Scenario 2: `HTTP 503 Service Temporarily Unavailable`
-- **Symptom**: Ingress endpoint immediately returns 503.
-- **Root Cause**: The backing service has no ready Endpoints (all backend AI pods are crashing, failing readiness probes, or loading model weights into GPU VRAM).
-- **Triage**:
-  ```bash
-  # Check if backend endpoints exist:
-  kubectl get endpoints triton-service -n k3s-beta
-  ```
-  *If `ENDPOINTS` is `<none>`, inspect the Pod's readiness probe logs!*
-
----
-
-## 8. Hands-On Ingress & Inference Routing Labs
-
-### Lab 1: Deploy a Mock Inference API Behind Ingress
-1. Deploy a lightweight HTTP echo server simulating an AI endpoint:
-   ```bash
-   kubectl create deployment mock-inference --image=ealen/echo-server:latest -n k3s-beta
-   kubectl expose deployment mock-inference --port=80 --targetPort=80 -n k3s-beta
-   ```
-2. Apply an Ingress rule:
-   ```yaml
-   apiVersion: networking.k8s.io/v1
-   kind: Ingress
-   metadata:
-     name: mock-ai-ingress
-     namespace: k3s-beta
-   spec:
-     rules:
-       - http:
-           paths:
-             - path: /ai-test
-               pathType: Prefix
-               backend:
-                 service:
-                   name: mock-inference
-                   port:
-                     number: 80
-   ```
-   Save as `mock-ingress.yaml` and apply:
-   ```bash
-   kubectl apply -f mock-ingress.yaml
-   ```
-3. Test connectivity through the host reverse proxy:
-   ```bash
-   curl -i http://localhost/ai-test
-   ```
-   *Verify HTTP 200 response.*
-
----
-
-Proceed to [**10-advanced-workload-controllers.md**](10-advanced-workload-controllers.md) to explore StatefulSets, DaemonSets, Indexed Jobs, and Pod Disruption Budgets (PDB).
+- [ ] I proved streaming isn't buffered by comparing TTFB and total time.
+- [ ] A 100-second generation completes through the proxy.
+- [ ] I can add body limits, rate limits and auth as middlewares without touching the app.
+- [ ] I ran a weighted canary with an `HTTPRoute` and read its status conditions.

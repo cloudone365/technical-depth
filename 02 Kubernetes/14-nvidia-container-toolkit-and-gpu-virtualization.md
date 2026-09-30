@@ -1,211 +1,207 @@
-# 14. NVIDIA Container Toolkit & GPU Virtualization — CDI, MIG, Time-Slicing & MPS
+# Volume 14 — NVIDIA Container Toolkit, CDI & GPU Sharing on GB10: Time-Slicing, MPS, (no) MIG
 
-By default, Linux containers have zero access to the host's GPU hardware. The character device nodes (`/dev/nvidia0`, `/dev/nvidiactl`) and driver libraries (`libcuda.so`) are isolated outside the container's mount namespace.
+> **Module 02 · Part IV — NVIDIA platform** · Prev: [13 Hardware & drivers](13-nvidia-hardware-and-driver-stack.md) · Next: [15 DGX Spark datacenter simulation](15-dgx-spark-datacenter-simulation-lab.md)
 
-This guide explores the **NVIDIA Container Toolkit (`nvidia-ctk`)**, the **Container Device Interface (CDI)**, and a deep architectural comparison of GPU partitioning technologies: **Time-Slicing**, **MIG**, **MPS**, and **vGPU**.
-
----
-
-## 📑 Table of Contents
-1. [The Container GPU Isolation Problem](#1-the-container-gpu-isolation-problem)
-2. [Evolution of the NVIDIA Container Stack](#2-evolution-of-the-nvidia-container-stack)
-3. [NVIDIA Container Toolkit & CDI Architecture](#3-nvidia-container-toolkit--cdi-architecture)
-4. [GPU Sharing Strategy 1: Time-Slicing (Recommended for Lab)](#4-gpu-sharing-strategy-1-time-slicing-recommended-for-lab)
-5. [GPU Sharing Strategy 2: Multi-Instance GPU (MIG)](#5-gpu-sharing-strategy-2-multi-instance-gpu-mig)
-6. [GPU Sharing Strategy 3: Multi-Process Service (MPS)](#6-gpu-sharing-strategy-3-multi-process-service-mps)
-7. [GPU Sharing Strategy 4: vGPU & Why VMware is Avoided](#7-gpu-sharing-strategy-4-vgpu--why-vmware-is-avoided)
-8. [Comprehensive Comparison Matrix](#8-comprehensive-comparison-matrix)
-9. [Production Diagnostics & Troubleshooting](#9-production-diagnostics--troubleshooting)
-10. [Hands-On CDI & Container Toolkit Labs](#10-hands-on-cdi--container-toolkit-labs)
+| | |
+|---|---|
+| **You will build** | A clear picture of how a GPU gets into a container (runtime hook vs CDI). You'll measure what time-slicing actually gives four tenants on one GB10, and close the "GPU leak" where pods that asked for no GPU still get one |
+| **Hardware** | spark-01 |
+| **Time** | 75 min |
+| **Risk** | Low. §5.5 (runtime hardening) restarts k3s |
+| **Lab files** | [`manifests/70-gpu/gemm-bench.yaml`](lab/manifests/70-gpu/gemm-bench.yaml), [`gemm-solo.yaml`](lab/manifests/70-gpu/gemm-solo.yaml), [`breakfix/10-gpu-leak.yaml`](lab/breakfix/10-gpu-leak.yaml), [`manifests/15-admission/policies.yaml`](lab/manifests/15-admission/policies.yaml) |
 
 ---
 
-## 1. The Container GPU Isolation Problem
+## 1. Why this matters on a Spark
 
-When `containerd` creates a Linux container:
-- It creates isolated namespaces (`pid`, `net`, `mnt`).
-- The `/dev` directory inside the container is an empty `tmpfs`.
-- The container cannot see `/dev/nvidia*` or `/dev/nvidia-uvm`.
-- The container has its own `/usr/lib/` and lacks the host's proprietary `libcuda.so.1` driver library.
+One GPU, several tenants. The sharing mechanism decides **isolation** (can one tenant crash or starve another?), **accounting** (does the quota mean anything?) and **performance** (what does each tenant actually get?). GB10 has no MIG, so the realistic options are time-slicing and MPS. The lab runs time-slicing with 4 replicas, which the 01 Ansible `gpu_operator` role configured.
 
-If you run `python3 -c "import torch; torch.cuda.is_available()"` inside a standard unconfigured container, it returns `False`.
-
----
-
-## 2. Evolution of the NVIDIA Container Stack
-
-```text
-1. nvidia-docker (v1) [Deprecated]
-   └── Custom Docker daemon wrapper that pre-mounted host volumes. Fragile and non-standard.
-
-2. nvidia-docker2 (v2) [Deprecated]
-   └── Injected an OCI prestart hook into Docker engine.
-
-3. NVIDIA Container Toolkit (Current Industry Standard)
-   └── Plugs natively into `containerd` and `CRI-O` using OCI hooks and `libnvidia-container`.
-
-4. Container Device Interface (CDI) [Next Generation]
-   └── Declarative YAML specification (`/etc/cdi/nvidia.yaml`) standardized by CNCF.
-```
+| | Time-slicing (lab) | MPS | MIG | Whole GPU |
+|---|---|---|---|---|
+| On GB10 | ✅ | device-plugin MPS mode (validate on your stack) | ❌ | ✅ (replicas: 1) |
+| Compute isolation | none, context switched | shared SMs, optional % cap | hardware | n/a |
+| Memory isolation | **none** (and UMA shares with the OS) | per-client limit | hardware | n/a |
+| Fault isolation | none. One Xid can hit all | none | yes | n/a |
+| Best for | dev pods, small services, CI | many small inference processes | multi-tenant prod on datacenter GPUs | one big model |
 
 ---
 
-## 3. NVIDIA Container Toolkit & CDI Architecture
+## 2. Architecture — HLD
 
 ```mermaid
-graph TD
-    Kubelet["kubelet"] --> CRI["containerd Runtime Engine"]
-    CRI --> Hook["nvidia-container-runtime (OCI Hook)"]
-    Hook --> Lib["libnvidia-container (C Library)"]
-    
-    subgraph HostInjection["Host Hardware Injection"]
-        D1["Mounts /dev/nvidia0, /dev/nvidiactl, /dev/nvidia-uvm"]
-        D2["Bind-mounts /usr/lib/x86_64-linux-gnu/libcuda.so.1"]
-        D3["Sets NVIDIA_VISIBLE_DEVICES=all"]
-    end
-    
-    Lib --> HostInjection
-    HostInjection --> Pod["Running Pod Container (PyTorch/CUDA Active)"]
+flowchart LR
+  subgraph KUBELET["kubelet"]
+    DPAPI["Device Plugin API<br/>Allocate()"]
+  end
+  DP["nvidia-device-plugin<br/>time-slicing replicas=4<br/>advertises 4 × nvidia.com/gpu"] --> DPAPI
+  DPAPI -->|"env NVIDIA_VISIBLE_DEVICES=GPU-uuid<br/>or CDI device nvidia.com/gpu=…"| CTRD["containerd"]
+  CTRD -->|"runtime handler: nvidia"| NCR["nvidia-container-runtime"]
+  NCR -->|"legacy: prestart hook<br/>nvidia-container-cli"| INJ
+  NCR -->|"CDI: edits from<br/>/etc/cdi/nvidia.yaml"| INJ["inject into OCI spec:<br/>/dev/nvidia0, /dev/nvidiactl, /dev/nvidia-uvm*<br/>libcuda.so, libnvidia-ml.so, nvidia-smi"]
+  INJ --> C1["pod A"] & C2["pod B"] & C3["pod C"] & C4["pod D"]
+  C1 & C2 & C3 & C4 --> GPU["one GB10<br/>time-sliced contexts"]
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef node fill:#0e7c86,stroke:#064e54,color:#fff
+  classDef tenant fill:#eaeef2,stroke:#57606a,color:#000
+  class DP,NCR,INJ,GPU gpu
+  class DPAPI,CTRD node
+  class C1,C2,C3,C4 tenant
+  style KUBELET fill:#e6f4f5,stroke:#0e7c86
 ```
 
-### The Container Device Interface (CDI):
-With CDI, device access is declared statically in a YAML manifest:
-```yaml
-# /etc/cdi/nvidia.yaml
-cdiVersion: "0.5.0"
-kind: "nvidia.com/gpu"
-devices:
-  - name: "0"
-    containerEdits:
-      deviceNodes:
-        - path: "/dev/nvidia0"
-        - path: "/dev/nvidiactl"
-        - path: "/dev/nvidia-uvm"
-```
+**The leak (breakfix 10).** With `default-runtime: nvidia`, every container goes through `nvidia-container-runtime`. Any image that sets `NVIDIA_VISIBLE_DEVICES=all` (every CUDA base image does) gets the GPU injected, even though it never asked the device plugin and the quota never counted it.
 
 ---
 
-## 4. GPU Sharing Strategy 1: Time-Slicing (Recommended for Lab)
+## 3. LLD
 
-Time-slicing allows multiple Pods to share a single physical GPU by alternating execution cycles in time:
+### 3.1 Files and settings
 
-```text
-Physical GPU: 100% Compute
-├── Pod 1 (k3s-alpha) ──> Executes CUDA kernels for 10ms
-├── Pod 2 (k3s-beta)  ──> Executes CUDA kernels for 10ms
-└── Pod 3             ──> Executes CUDA kernels for 10ms
-```
+| Item | Location | Lab value |
+|---|---|---|
+| Toolkit config | `/etc/nvidia-container-runtime/config.toml` | set by DGX OS / 01 Ansible `container_runtime` |
+| CDI spec | `/etc/cdi/nvidia.yaml` (`nvidia-ctk cdi generate`) | regenerated by 01 Ansible when the driver changes |
+| containerd runtime | `/var/lib/rancher/k3s/agent/etc/containerd/config.toml` | `default_runtime_name = "nvidia"` (01 Ansible default) |
+| RuntimeClass | `nvidia` | created by k3s |
+| Time-slicing | ConfigMap `gpu-operator/time-slicing-config` | `replicas: 4`, `failRequestsGreaterThanOne: true` |
 
-### Pros:
-- Works on **every NVIDIA GPU** (including single workstation GPUs, DGX Spark, and GPUs without MIG).
-- Configured purely in software via the Kubernetes Device Plugin ConfigMap.
+### 3.2 Hardened mode (recommended once you're comfortable)
 
-### Cons:
-- **No Hardware Memory Isolation**: If Pod 1 allocates 100% of the GPU's memory, Pod 2 will crash with `CUDA out of memory`.
-
----
-
-## 5. GPU Sharing Strategy 2: Multi-Instance GPU (MIG)
-
-Available on Ampere (A100), Hopper (H100), and Blackwell enterprise architectures.
-
-MIG partitions the **physical silicon** of a single GPU into up to 7 independent GPU instances:
-
-```text
-+-----------------------------------------------------------------------------------+
-|                        Physical A100/H100/Blackwell GPU (80GB)                    |
-|                                                                                   |
-|  +------------------+  +------------------+  +----------------------------------+  |
-|  | MIG 1g.10gb      |  | MIG 1g.10gb      |  | MIG 3g.40gb                      |  |
-|  | - 1/7th SMs      |  | - 1/7th SMs      |  | - 3/7th SMs                      |  |
-|  | - 10GB HBM       |  | - 10GB HBM       |  | - 40GB HBM                       |  |
-|  | - Isolated Path  |  | - Isolated Path  |  | - Isolated Memory Controller     |  |
-|  +------------------+  +------------------+  +----------------------------------+  |
-+-----------------------------------------------------------------------------------+
-```
-
-### The Superpower of MIG:
-- **100% Hardware Fault Isolation**: If Pod 1 triggers a kernel panic or out-of-memory error inside its slice, **the other slices continue running without dropping a single frame**.
+| Setting | Default lab | Hardened |
+|---|---|---|
+| k3s `default-runtime` | `nvidia` | **unset** (runc). GPU pods set `runtimeClassName: nvidia` |
+| toolkit `accept-nvidia-visible-devices-envvar-when-unprivileged` | true | **false** |
+| device plugin `deviceListStrategy` | `envvar` | **`volume-mounts`** or `cdi-cri` |
+| Admission | CEL policy forbids `NVIDIA_*` env in tenants | same, plus require `runtimeClassName: nvidia` only with a GPU request |
 
 ---
 
-## 6. GPU Sharing Strategy 3: Multi-Process Service (MPS)
+## 4. Integrations
 
-CUDA Multi-Process Service (MPS) allows multiple CUDA processes to execute concurrently on the same GPU without time-slicing context switch overhead:
-
-- A central MPS control daemon runs on the host.
-- Multiple client containers connect to the MPS server over a shared IPC domain socket.
-- **Resource Limits**:
-  - `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT=0=5120M` (Strictly caps memory at 5GB).
-  - `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=20` (Caps compute execution threads at 20%).
+- **01 Ansible**: `k3s_cluster_default_runtime_nvidia` and `gpu_operator_timeslice_replicas` are the two knobs. Change them there and re-run playbooks 05/06. Don't hand-edit nodes.
+- **Admission (Vol 02)**: `spark-no-nvidia-env-bypass` stops explicit env bypasses in tenant namespaces. The hardened runtime closes the implicit one.
+- **Kueue / quotas (Vol 05, 12)** count `nvidia.com/gpu` requests. The leak is exactly the GPU use they *don't* see.
 
 ---
 
-## 7. GPU Sharing Strategy 4: vGPU & Why VMware is Avoided
+## 5. Lab
 
-In enterprise virtualization (VMware ESXi), GPUs are partitioned using **NVIDIA vGPU (Virtual GPU Manager)**:
-- A hypervisor kernel driver intercepts PCI configuration cycles.
-- Creates virtual PCI devices attached to virtual machines.
+### 5.1 Inspect the toolkit and CDI on the host
 
-### Why Leading AI Teams Avoid VMware/vGPU:
-1. **Virtualization Tax**: 5% to 15% compute overhead from hypervisor CPU scheduling and MMIO page table translations.
-2. **Unified Memory Disruption**: High-speed NVLink-C2C coherent memory between Grace CPU and Blackwell GPU cannot traverse the VM boundary natively.
-3. **Expensive Licensing**: Requires annual per-GPU enterprise software licenses.
-4. **Containerization Superiority**: Bare-metal Linux containers provide native hardware performance (<0.1% overhead) with instant sub-second startup times.
-
----
-
-## 8. Comprehensive Comparison Matrix
-
-| Feature | Time-Slicing | CUDA MPS | MIG (Multi-Instance) | VMware vGPU |
-| :--- | :--- | :--- | :--- | :--- |
-| **Isolation Level** | Software Temporal | Software Threads | **Hardware Silicon** | Hardware Emulation |
-| **Supported Hardware** | **All NVIDIA GPUs** | All NVIDIA GPUs | A100 / H100 / Blackwell | Enterprise GPUs |
-| **Memory Isolation** | ❌ Shared / None | ⚠️ Software Pinned | ✅ **100% Hardware** | ✅ Hardware Memory |
-| **Fault Isolation** | ❌ Shared Context | ❌ Shared Context | ✅ **Isolated Slices** | ✅ Isolated VMs |
-| **Overhead** | Context Switch Delay | Ultra-Low | **0% (Native Silicon)**| 5% - 15% (Hypervisor) |
-| **Suitability for Lab** | **Ideal for DGX Spark** | Advanced Batch | Enterprise Clusters | Virtual Desktops |
-
----
-
-## 9. Production Diagnostics & Troubleshooting
-
-### Scenario 1: `could not select device driver "" with capabilities: [[gpu]]`
-- **Symptom**: Pod fails to start; `containerd` reports device driver error.
-- **Root Cause**: `containerd` has not been configured to use the NVIDIA runtime as default, or `nvidia-container-runtime` binary is missing from PATH.
-- **Resolution**: Verify `/etc/containerd/config.toml` includes `BinaryName = "/usr/bin/nvidia-container-runtime"` and restart containerd.
-
----
-
-### Scenario 2: CDI Device Not Found (`unknown device nvidia.com/gpu=0`)
-- **Symptom**: Pod fails with `unrecognized CDI device`.
-- **Resolution**: Regenerate the CDI specification file on the host:
-  ```bash
-  sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
-  ```
-
----
-
-## 10. Hands-On CDI & Container Toolkit Labs
-
-### Lab 1: Generate and Inspect the Host CDI Specification
-Run this command on your DGX Spark host:
 ```bash
-# Generate CDI configuration:
-sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
-
-# Verify recognized devices:
-nvidia-ctk cdi list
+ssh nvidia@10.10.10.11
+nvidia-ctk --version
+sudo nvidia-ctk cdi list
+grep -nE 'default_runtime_name|runtimes.nvidia|BinaryName' /var/lib/rancher/k3s/agent/etc/containerd/config.toml
+grep -nE 'accept-nvidia-visible-devices|mode' /etc/nvidia-container-runtime/config.toml
 ```
-*Inspect `/etc/cdi/nvidia.yaml` using `cat` to see the exact character device nodes and driver libraries injected into containers.*
 
-### Lab 2: Test Low-Level Container GPU Access Without Kubernetes
-Verify that the host container runtime can run a GPU container directly via `nerdctl` or `crictl`:
+Expected: CDI devices `nvidia.com/gpu=0`, `nvidia.com/gpu=GPU-<uuid>`, `nvidia.com/gpu=all`, and the `nvidia` runtime pointing at `/usr/bin/nvidia-container-runtime`.
+
+Run a container through CDI without Kubernetes (Docker 25+ understands CDI):
+
 ```bash
-sudo ctr run --rm --gpus 0 docker.io/nvidia/cuda:12.0.0-base-ubuntu22.04 test-cuda nvidia-smi
+docker run --rm --device nvidia.com/gpu=all nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04 nvidia-smi -L
 ```
-*Observe the clean `nvidia-smi` output generated from inside the isolated container.*
+
+### 5.2 See what the device plugin hands a pod
+
+```bash
+cd "02 Kubernetes/lab"
+kubectl apply -f manifests/70-gpu/gpu-smoke.yaml
+POD_CID=$(kubectl -n tenant-beta get pod gpu-smoke -o jsonpath='{.status.containerStatuses[0].containerID}' | sed 's|.*://||')
+sudo k3s crictl inspect "$POD_CID" | jq -r '.info.config.envs[] | select(.key|startswith("NVIDIA")) | "\(.key)=\(.value)"'
+sudo k3s crictl inspect "$POD_CID" | jq -r '.info.runtimeSpec.linux.devices[]?.path'
+```
+
+### 5.3 Measure time-slicing: 1 → 2 → 4 tenants
+
+```bash
+kubectl apply -k manifests/70-gpu
+for n in 1 2 4; do
+  kubectl -n lab-tools scale deploy gemm-contention --replicas=$n
+  kubectl -n lab-tools rollout status deploy gemm-contention --timeout=15m >/dev/null
+  sleep 60
+  echo "== $n pod(s)"
+  kubectl -n lab-tools logs -l app=gemm-contention --tail=1 --prefix | sed -E 's/.*"tflops": ([0-9.]+).*/\1/' | awk -v n=$n '{s+=$1; print "  pod", NR, $1, "TFLOPS"} END {print "  aggregate", s, "TFLOPS  (per pod ≈", s/n, ")"}'
+done
+kubectl -n lab-tools scale deploy gemm-contention --replicas=0
+```
+
+What to expect, with your baseline B from Vol 13:
+
+| Pods | Per pod | Aggregate |
+|---|---|---|
+| 1 | ≈ B | ≈ B |
+| 2 | ≈ B/2 | ≈ B (minus switch overhead) |
+| 4 | ≈ B/4 | ≈ B, or a bit lower |
+
+**Time-slicing adds no capacity.** It shares one GPU fairly and costs some context-switch overhead. Four `nvidia.com/gpu` slices doesn't mean four GPUs. It means four tickets to one GPU.
+
+### 5.4 Reproduce and understand the leak
+
+```bash
+scripts/breakfix.sh inject 10
+sleep 15; kubectl -n lab-tools logs bf10-leak     # GPU 0: NVIDIA GB10 … although it requested nothing
+kubectl -n lab-tools get pod bf10-leak -o jsonpath='{.spec.containers[0].resources}{"\n"}'
+scripts/breakfix.sh answer 10; scripts/breakfix.sh reset 10
+```
+
+### 5.5 (Optional) Harden the runtime
+
+Via 01 Ansible, so it's reproducible:
+
+```bash
+cd "../../01 Ansible/lab"
+ansible-playbook playbooks/05-k3s.yml -e k3s_cluster_default_runtime_nvidia=false
+cd "../../02 Kubernetes/lab"
+scripts/breakfix.sh inject 10; sleep 15; kubectl -n lab-tools logs bf10-leak   # now: nvidia-smi not found / no devices
+scripts/breakfix.sh reset 10
+kubectl apply -f manifests/70-gpu/gpu-smoke.yaml && sleep 20 && kubectl -n tenant-beta logs gpu-smoke   # still works: runtimeClassName: nvidia
+```
+
+After hardening, **every GPU pod must set `runtimeClassName: nvidia`**. `gpu-smoke.yaml` does. Other lab manifests rely on the default runtime, so add the field to them (the GPU Operator's own pods are fine because the operator sets it).
 
 ---
 
-Proceed to [**15-dgx-spark-datacenter-simulation-lab.md**](15-dgx-spark-datacenter-simulation-lab.md) to execute the complete bare-metal simulation lab on your DGX Spark machine.
+## 6. Verify
+
+| Check | Expected |
+|---|---|
+| `nvidia-ctk cdi list` | `nvidia.com/gpu=all` present |
+| allocatable | `nvidia.com/gpu: 4` |
+| contention table | aggregate ≈ baseline, per-pod ≈ baseline/N |
+| hardened mode | `bf10-leak` no longer sees the GPU, `gpu-smoke` still does |
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Cause | Diagnose | Fix |
+|---|---|---|---|
+| `could not select device driver "" with capabilities: [[gpu]]` (docker) | Docker not configured for the NVIDIA runtime | `docker info \| grep -i runtime` | `sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker` |
+| `unresolvable CDI devices nvidia.com/gpu=…` | stale CDI spec after a driver upgrade | `nvidia-ctk cdi list` vs `nvidia-smi -L` UUID | `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` (01 Ansible does this) |
+| allocatable `nvidia.com/gpu: 1` instead of 4 | time-slicing ConfigMap not applied or wrong key | `kubectl -n gpu-operator get cm time-slicing-config -o yaml`, device-plugin logs | fix and restart the device-plugin DaemonSet |
+| Pod asks for 2 GPUs → `UnexpectedAdmissionError` | `failRequestsGreaterThanOne: true` | pod events | request 1 (2 slices of one GPU are not 2 GPUs) |
+| Tenant's pod is slow at random times | another tenant's kernels share the GPU | `nvidia-smi` process list on the host. Grafana *GPU slices in use* | Kueue/priorities, or a dedicated time window |
+| Pod sees GPU without requesting | the leak | §5.4 | hardened mode §5.5 |
+
+---
+
+## 8. Scale-out path
+
+| Spark | Datacenter |
+|---|---|
+| time-slicing ×4 | MIG on H100/B200 (hardware isolation) for multi-tenant inference. Whole GPUs for training |
+| envvar device list | CDI everywhere (`cdi-cri`), no default nvidia runtime |
+| device plugin integer counts | DRA (`ResourceClaim`s) with the NVIDIA DRA driver: sharing strategies and MIG profiles as claim parameters |
+| vGPU? | vGPU is for VMs (virtual desktops, VM-per-tenant clouds). For containers on bare metal, the stack above is simpler and faster, and there's no hypervisor tax |
+
+---
+
+## 9. Checklist
+
+- [ ] I can explain both injection paths (legacy hook and CDI) and find their config files.
+- [ ] I measured that 4 time-slices share one GPU's throughput rather than multiplying it.
+- [ ] I reproduced the GPU leak and know the two changes that close it.
+- [ ] I know which sharing modes GB10 supports and which it doesn't.

@@ -1,0 +1,27 @@
+# Three pods, three QoS classes (Volume 12 §5.2). Compare their cgroups with
+#   scripts/cgroup-inspect.sh lab-tools qos-guaranteed   (… -burstable, -besteffort)
+apiVersion: v1
+kind: Pod
+metadata: {name: qos-guaranteed, namespace: lab-tools}
+spec:
+  containers:
+    - name: c
+      image: registry.k8s.io/pause:3.10
+      resources: {requests: {cpu: 500m, memory: 256Mi}, limits: {cpu: 500m, memory: 256Mi}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: qos-burstable, namespace: lab-tools}
+spec:
+  containers:
+    - name: c
+      image: registry.k8s.io/pause:3.10
+      resources: {requests: {cpu: 100m, memory: 64Mi}, limits: {memory: 512Mi}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: qos-besteffort, namespace: lab-tools}
+spec:
+  containers:
+    - name: c
+      image: registry.k8s.io/pause:3.10

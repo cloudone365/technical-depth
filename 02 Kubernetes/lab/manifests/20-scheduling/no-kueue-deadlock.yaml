@@ -1,0 +1,59 @@
+# The problem Kueue solves (Volume 05 §5.4). Two 2-rank "training" jobs WITHOUT
+# a queue label, with only 2 free slices (scale 'filler' to 2 first). The scheduler
+# places pods one at a time, so it can give ONE slice to each job: both rank-0s then
+# wait forever for a rank-1 that can never be scheduled, each holding the slice the
+# other needs. Real torchrun blocks in rendezvous the same way; the wait-for-peer
+# loop below simulates it. Run it 2-3 times — the split is not deterministic.
+apiVersion: v1
+kind: Service
+metadata: {name: peers, namespace: lab-tools}
+spec:
+  clusterIP: None
+  selector: {demo: deadlock}
+  ports: [{port: 29500}]
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: job-x, namespace: lab-tools}
+spec:
+  completions: 2
+  parallelism: 2
+  completionMode: Indexed
+  template:
+    metadata: {labels: {demo: deadlock}}
+    spec:
+      subdomain: peers
+      restartPolicy: Never
+      containers:
+        - name: rank
+          image: nicolaka/netshoot:v0.13
+          command: ["bash", "-c"]
+          args:
+            - |
+              peer="job-x-$((1-JOB_COMPLETION_INDEX)).peers"
+              until getent hosts "$peer" >/dev/null; do echo "rank $JOB_COMPLETION_INDEX waiting for $peer"; sleep 5; done
+              echo "rank $JOB_COMPLETION_INDEX: all ranks present, training…"; sleep 60
+          resources: {limits: {nvidia.com/gpu: "1", memory: 64Mi}, requests: {cpu: 10m}}
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: job-y, namespace: lab-tools}
+spec:
+  completions: 2
+  parallelism: 2
+  completionMode: Indexed
+  template:
+    metadata: {labels: {demo: deadlock}}
+    spec:
+      subdomain: peers
+      restartPolicy: Never
+      containers:
+        - name: rank
+          image: nicolaka/netshoot:v0.13
+          command: ["bash", "-c"]
+          args:
+            - |
+              peer="job-y-$((1-JOB_COMPLETION_INDEX)).peers"
+              until getent hosts "$peer" >/dev/null; do echo "rank $JOB_COMPLETION_INDEX waiting for $peer"; sleep 5; done
+              echo "rank $JOB_COMPLETION_INDEX: all ranks present, training…"; sleep 60
+          resources: {limits: {nvidia.com/gpu: "1", memory: 64Mi}, requests: {cpu: 10m}}

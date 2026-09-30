@@ -62,7 +62,7 @@ spec:
       containers:
         - name: fio
           image: docker.io/xridge/fio:3.38
-          command: ["fio", "/profiles/ai.fio", "--output-format=normal,json", "--output=/scratch/result.json"]
+          command: ["sh", "-c", "fio /profiles/ai.fio --output-format=normal,json | tee /scratch/result.all"]   # human text + one JSON document
           resources: {requests: {cpu: "4", memory: 1Gi}, limits: {memory: 2Gi}}
           volumeMounts:
             - {name: scratch, mountPath: /scratch}

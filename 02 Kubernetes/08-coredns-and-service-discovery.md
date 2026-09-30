@@ -1,224 +1,228 @@
-# 08. CoreDNS & Service Discovery — Architecture & The `ndots:5` AI Latency Problem
+# Volume 08 — CoreDNS & Service Discovery: Records, the `ndots:5` Tax, Custom Zones, DNS Failures
 
-In Kubernetes, application microservices and distributed AI training workers discover each other using the Domain Name System (DNS). The engine powering this is **CoreDNS**.
+> **Module 02 · Part II — Networking** · Prev: [07 kube-proxy](07-kube-proxy-and-cluster-ip-mechanics.md) · Next: [09 Ingress & Gateway API](09-ingress-controllers-and-gateway-api.md)
 
-This guide details CoreDNS architecture, the Kubernetes DNS specification, the Corefile configuration, and a critical performance issue that plagues AI platforms: **the `ndots:5` DNS lookup amplification penalty**.
-
----
-
-## 📑 Table of Contents
-1. [CoreDNS Architecture & Role in Kubernetes](#1-coredns-architecture--role-in-kubernetes)
-2. [The Kubernetes DNS Domain Name Specification](#2-the-kubernetes-dns-domain-name-specification)
-3. [Anatomy of the Corefile](#3-anatomy-of-the-corefile)
-4. [Container `/etc/resolv.conf` Deep Dive](#4-container-etcresolvconf-deep-dive)
-5. [The Infamous `ndots:5` Latency Problem in AI Clusters](#5-the-infamous-ndots5-latency-problem-in-ai-clusters)
-6. [NodeLocal DNSCache: Eliminating UDP Conntrack Race Conditions](#6-nodelocal-dnscache-eliminating-udp-conntrack-race-conditions)
-7. [Production Failure Scenarios & DNS Troubleshooting](#7-production-failure-scenarios--dns-troubleshooting)
-8. [Hands-On DNS Diagnostic Labs](#8-hands-on-dns-diagnostic-labs)
+| | |
+|---|---|
+| **You will build** | A measured before/after of DNS query amplification for model downloads and external APIs, query logging through k3s's `coredns-custom` hook, a forward zone for `lab.local`, and a rehearsed cluster-wide DNS outage |
+| **Hardware** | spark-01 |
+| **Time** | 60 min |
+| **Risk** | Low. The outage drill (`breakfix 07`) breaks name resolution for ~5 min |
+| **Lab files** | [`manifests/30-networking/dns-lab.yaml`](lab/manifests/30-networking/dns-lab.yaml), [`coredns-custom.yaml`](lab/manifests/30-networking/coredns-custom.yaml), [`manifests/30-networking/echo-service.yaml`](lab/manifests/30-networking/echo-service.yaml) |
 
 ---
 
-## 1. CoreDNS Architecture & Role in Kubernetes
+## 1. Why this matters on a Spark
 
-CoreDNS is a fast, flexible, plugin-chained DNS server. In Kubernetes:
-- It runs as a Deployment (typically 2 replicas) in the `kube-system` namespace.
-- It exposes a Service with a static ClusterIP (e.g. `10.43.0.10` in K3s).
-- It connects to the `kube-apiserver` and maintains an in-memory index of all Services and Endpoints.
+Model servers resolve names constantly: `huggingface.co` and `cdn-lfs.hf.co` at startup, `nvcr.io` for pulls, `qdrant.llm-serving` on every RAG call, and the rendezvous host for torchrun. With the Kubernetes default `ndots:5`, any name with fewer than five dots is first tried against every search domain. **One lookup of `huggingface.co` costs 6–8 extra queries** (3–4 search domains × A + AAAA) before the real answer. On a busy gateway, that's most of CoreDNS's load, and every one of those queries is also a conntrack entry (Vol 07).
+
+---
+
+## 2. Architecture — HLD
 
 ```mermaid
-graph TD
-    Pod["Pod Container"] -->|UDP Port 53 Request| CoreDNS["CoreDNS Pod (10.43.0.10)"]
-    
-    subgraph PluginChain["CoreDNS Plugin Chain"]
-        P1["health & ready"] --> P2["kubernetes plugin<br/>(Resolves cluster.local from API Server)"]
-        P2 --> P3["cache<br/>(In-Memory TTL Cache)"]
-        P3 --> P4["forward plugin<br/>(Upstream DNS: 8.8.8.8 / Host resolv.conf)"]
-    end
-    
-    CoreDNS --> PluginChain
+flowchart LR
+  subgraph POD["pod · /etc/resolv.conf"]
+    APP["app: getaddrinfo('huggingface.co')"]
+    RC["nameserver 10.43.0.10<br/>search &lt;ns&gt;.svc.cluster.local svc.cluster.local cluster.local lab.local<br/>options ndots:5"]
+  end
+  APP --> RC -->|"UDP/TCP 53"| SVC["Service kube-dns<br/>10.43.0.10"]
+  SVC --> CD["CoreDNS pod<br/>kube-system"]
+  subgraph CF["Corefile"]
+    direction TB
+    K8S["kubernetes cluster.local<br/>→ Services, pods, headless"]
+    CUST["import /etc/coredns/custom/*.override<br/>(log, …)"]
+    LAB["lab.local:53 → forward 10.10.10.1<br/>(*.server from coredns-custom)"]
+    FWD["forward . /etc/resolv.conf<br/>(host upstream)"]
+    CACHE["cache 30"]
+  end
+  CD --- CF
+  FWD --> UP["site DNS 10.10.10.1 → internet"]
+  LAB --> UP
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef ext fill:#24292f,stroke:#000,color:#fff
+  classDef tenant fill:#eaeef2,stroke:#57606a,color:#000
+  class SVC,CD net
+  class K8S,CUST,LAB,FWD,CACHE ctrl
+  class UP ext
+  class APP,RC tenant
+  style CF fill:#f6f8fa,stroke:#57606a
 ```
 
 ---
 
-## 2. The Kubernetes DNS Domain Name Specification
+## 3. LLD
 
-Every resource created in Kubernetes is automatically assigned a deterministic Fully Qualified Domain Name (FQDN):
+### 3.1 Record types you'll use
 
-```text
-[ Service Name ] . [ Namespace ] . [ Resource Type ] . [ Cluster Domain ]
-    triton-svc   .   k3s-alpha   .       svc         .  cluster.local
-```
+| Query | Answer | Example |
+|---|---|---|
+| `svc.ns.svc.cluster.local` A | ClusterIP | `vllm.llm-serving.svc.cluster.local → 10.43.x.y` |
+| headless `svc.ns.svc.cluster.local` A | every ready pod IP | `echo-headless.lab-tools… → 3 IPs` |
+| `pod-hostname.subdomain.ns.svc.cluster.local` A | that pod | `ddp-0.ddp-workers.batch.svc.cluster.local` (Vol 17) |
+| `qdrant-0.qdrant-headless.llm-serving.svc.cluster.local` | StatefulSet pod | Vol 10 |
+| `_http._tcp.echo.lab-tools.svc.cluster.local` SRV | port + target | named ports |
 
-### 1. Normal Services (ClusterIP)
-- Returns the single 32-bit virtual ClusterIP address (e.g. `10.43.100.50`).
+### 3.2 Query amplification with `ndots:5`
 
-### 2. Headless Services (`clusterIP: None`)
-- Returns the collection of **direct Pod IP addresses** (A records) backing the service:
-  ```text
-  pytorch-nodes.k3s-alpha.svc.cluster.local. 30 IN A 10.42.0.15
-  pytorch-nodes.k3s-alpha.svc.cluster.local. 30 IN A 10.42.0.16
-  ```
+For `huggingface.co` (1 dot < 5) from a pod in `tenant-alpha`:
 
-### 3. Named Service Ports (SRV Records)
-- Maps port names to port numbers:
-  `_grpc._tcp.triton-svc.k3s-alpha.svc.cluster.local` $\to$ Port `8001`.
+| # | Name tried | Result |
+|---|---|---|
+| 1-2 | `huggingface.co.tenant-alpha.svc.cluster.local` A/AAAA | NXDOMAIN |
+| 3-4 | `huggingface.co.svc.cluster.local` | NXDOMAIN |
+| 5-6 | `huggingface.co.cluster.local` | NXDOMAIN |
+| 7-8 | `huggingface.co.lab.local`, only if the host's resolv.conf has `search lab.local` | NXDOMAIN (forwarded upstream!) |
+| 9-10 | `huggingface.co` | ✅ |
 
----
+Three fixes, in order of preference:
 
-## 3. Anatomy of the Corefile
+| Fix | Where | Trade-off |
+|---|---|---|
+| Use FQDNs with a trailing dot: `huggingface.co.` | app config / env | zero cost. Some HTTP libraries mishandle the dot in `Host:` |
+| `dnsConfig.options: ndots: "1"` | pod spec (as in `dns-ndots1`) | short in-cluster names (`qdrant`) still work via search. `qdrant.llm-serving` needs `.svc` |
+| NodeLocal DNSCache | DaemonSet on every node | caches on the node, avoids conntrack for UDP. Worth it at DC scale |
 
-The behavior of CoreDNS is configured via a ConfigMap named `coredns` in `kube-system`:
+### 3.3 k3s specifics
 
-```text
-.:53 {
-    errors                   # Log all DNS errors to stdout
-    health {                 # Health check endpoint on port 8080
-       lameduck 5s
-    }
-    ready                    # Readiness probe on port 8181
-    kubernetes cluster.local in-addr.arpa ip6.arpa {
-       pods insecure         # Resolve Pod IP addresses
-       fallthrough in-addr.arpa ip6.arpa
-       ttl 30
-    }
-    prometheus :9153         # Prometheus metrics endpoint
-    forward . /etc/resolv.conf # Forward non-cluster queries to host DNS
-    cache 30                 # Cache answers for 30 seconds
-    loop                     # Detect and break infinite forwarding loops
-    reload                   # Auto-reload configuration on ConfigMap changes
-    loadbalance              # Randomize order of A records (round-robin)
-}
-```
+| Item | Value |
+|---|---|
+| Corefile | ConfigMap `kube-system/coredns` (managed by k3s, reset on restart). **Don't edit it.** |
+| Your changes | ConfigMap `kube-system/coredns-custom`: keys `*.override` go *inside* the `.:53` block, keys `*.server` add blocks |
+| Upstream | k3s points CoreDNS at `/run/systemd/resolve/resolv.conf` on Ubuntu, not `127.0.0.53` (which would loop) |
+| Cluster DNS IP | `10.43.0.10` (`cluster-dns`) |
 
 ---
 
-## 4. Container `/etc/resolv.conf` Deep Dive
+## 4. Integrations
 
-Whenever `kubelet` initializes a Pod's network namespace, it automatically injects a tailored `/etc/resolv.conf`:
-
-```text
-nameserver 10.43.0.10
-search k3s-alpha.svc.cluster.local svc.cluster.local cluster.local
-options ndots:5
-```
-
-- **`nameserver`**: Points to the CoreDNS Service ClusterIP.
-- **`search`**: Suffixes appended sequentially to any domain query that contains fewer than `ndots` dots.
-- **`ndots:5`**: If a query has fewer than 5 dots, **try all search domains first** before querying the root domain!
+- **01 Ansible site DNS (`dns_servers: [10.10.10.1, …]`)**: the `lab.local` forward zone lets pods resolve `spark-02.lab.local` and your NAS by name.
+- **Model downloads (Vol 21, modules 03–06)**: set `HF_ENDPOINT`/`HF_HUB_*` and any registry mirrors as FQDNs.
+- **Prometheus (Vol 16)**: CoreDNS exposes `coredns_dns_requests_total{type}` and `coredns_dns_responses_total{rcode}`. An NXDOMAIN ratio > 50 % is the ndots tax showing up in a graph.
 
 ---
 
-## 5. The Infamous `ndots:5` Latency Problem in AI Clusters
+## 5. Lab
 
-In modern AI engineering, training jobs constantly connect to external APIs:
-- Downloading Hugging Face datasets: `huggingface.co` (1 dot).
-- Pulling weights from AWS S3: `my-bucket.s3.us-west-2.amazonaws.com` (4 dots).
-- Sending telemetry to Weights & Biases: `api.wandb.ai` (2 dots).
+### 5.1 Inspect a pod's resolver
 
-### What Actually Happens Over the Network:
-Because `api.wandb.ai` has only 2 dots (which is $< 5$), the Linux resolver assumes it is an internal cluster address and executes **4 sequential DNS queries**:
-
-```text
-1. Query: api.wandb.ai.k3s-alpha.svc.cluster.local    ──> Response: NXDOMAIN (Wait 5ms)
-2. Query: api.wandb.ai.svc.cluster.local              ──> Response: NXDOMAIN (Wait 5ms)
-3. Query: api.wandb.ai.cluster.local                  ──> Response: NXDOMAIN (Wait 5ms)
-4. Query: api.wandb.ai.                               ──> Response: SUCCESS (Resolved!)
-```
-
-### The Cost:
-- **300% query amplification**: CoreDNS receives 4x more traffic than necessary.
-- **Latency overhead**: Each network request incurs a 15-50ms DNS resolution delay.
-
-### The Solutions for AI Workloads:
-
-#### Solution 1: Add a Trailing Dot to External Hostnames in Code
-In your Python training script, use a trailing dot to mark the domain as absolute:
-```python
-# Tells the Linux resolver to bypass search paths immediately:
-WANDB_HOST = "https://api.wandb.ai./" 
-```
-
-#### Solution 2: Custom Pod `dnsConfig`
-Override `ndots` directly in your Pod or Job manifest:
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: pytorch-fast-dns
-spec:
-  dnsConfig:
-    options:
-      - name: ndots
-        value: "2"
-  containers:
-    - name: worker
-      image: nvcr.io/nvidia/pytorch:24.01-py3
-```
-
----
-
-## 6. NodeLocal DNSCache: Eliminating UDP Conntrack Race Conditions
-
-Under heavy UDP traffic, the Linux kernel's `conntrack` engine can suffer from race conditions when two DNS queries are sent from the same socket simultaneously, leading to unexplained **5-second DNS timeouts**.
-
-**NodeLocal DNSCache** runs a lightweight DNS caching daemon (CoreDNS) as a DaemonSet on every node, listening on a link-local IP (`169.254.20.10`).
-
-```text
-Pod (Container) ──> Localhost Cache (169.254.20.10) [0ms Latency]
-                         │
-                         ▼ (Cache Miss: Uses persistent TCP connection)
-                    Central CoreDNS Service (10.43.0.10)
-```
-- Queries hit local node memory over a loopback socket (0ms latency).
-- Uses **TCP** instead of UDP for upstream queries, completely eliminating conntrack drops.
-
----
-
-## 7. Production Failure Scenarios & DNS Troubleshooting
-
-### Scenario 1: CoreDNS CrashLoopBackOff (`Loop detected`)
-- **Symptom**: CoreDNS pods continuously restart with error:
-  ```text
-  plugin/loop: Loop (127.0.0.1:55953 -> :53) detected for zone "."
-  ```
-- **Root Cause**: The host's `/etc/resolv.conf` points to `127.0.0.53` (systemd-resolved). CoreDNS inherits this and forwards queries to itself, creating an infinite forwarding loop.
-- **Resolution**: Point K3s / CoreDNS to an upstream upstream DNS server (e.g. `8.8.8.8` or company DNS) in `/etc/resolv.conf`.
-
----
-
-### Scenario 2: Intermittent `getaddrinfo EAI_AGAIN` in Python Scripts
-- **Symptom**: PyTorch or HuggingFace scripts intermittently crash during initialization with DNS resolution failure.
-- **Diagnostic Command**: Run `nslookup` inside a debug pod:
-  ```bash
-  kubectl run dns-test --rm -it --image=busybox:1.28 -- nslookup kubernetes.default
-  ```
-- **Resolution**: Check CoreDNS resource limits (CPU throttling) and scale CoreDNS replicas from 1 to 2.
-
----
-
-## 8. Hands-On DNS Diagnostic Labs
-
-### Lab 1: Inspect Container Search Paths
-Run an interactive session inside your tenant pod to inspect its resolver configuration:
 ```bash
-kubectl exec -it pytorch-benchmark -n k3s-alpha -- cat /etc/resolv.conf
+cd "02 Kubernetes/lab"
+kubectl apply -k manifests/30-networking
+kubectl -n lab-tools exec dns-default -- cat /etc/resolv.conf
+kubectl -n lab-tools exec dns-ndots1  -- cat /etc/resolv.conf
+kubectl -n kube-system get cm coredns -o jsonpath='{.data.Corefile}'
 ```
-*Observe the exact `nameserver` IP matching the `kube-dns` service and the list of search domains.*
 
-### Lab 2: Trace Query Amplification via CoreDNS Logs
-Enable the `log` plugin in CoreDNS to watch live queries:
+### 5.2 Turn on query logging and add the `lab.local` zone
 
-1. Edit the CoreDNS ConfigMap:
-   ```bash
-   kubectl edit configmap coredns -n kube-system
-   ```
-2. Add the `log` directive inside the main server block.
-3. Stream logs:
-   ```bash
-   kubectl logs -n kube-system -l k8s-app=kube-dns -f
-   ```
-4. In another window, execute `curl huggingface.co` inside a pod. Watch the 3 resulting `NXDOMAIN` log entries appear before the successful resolution!
+```bash
+kubectl apply -f manifests/30-networking/coredns-custom.yaml
+kubectl -n kube-system rollout restart deploy coredns && kubectl -n kube-system rollout status deploy coredns
+kubectl -n kube-system logs deploy/coredns -f --tail=0 > /tmp/coredns.log &
+```
+
+### 5.3 Measure the amplification
+
+```bash
+for p in dns-default dns-ndots1; do
+  : > /tmp/coredns.log; sleep 1
+  kubectl -n lab-tools exec $p -- sh -c 'getent ahosts huggingface.co >/dev/null'
+  sleep 2; echo "$p: $(grep -c 'huggingface' /tmp/coredns.log) queries"; grep huggingface /tmp/coredns.log | awk '{print $6, $7, $9}' | head -12
+done
+kill %1
+```
+
+Expected:
+
+```text
+dns-default: 10 queries        # 8 if your host has no 'search lab.local'
+"AAAA IN huggingface.co.lab-tools.svc.cluster.local. NXDOMAIN
+"A IN huggingface.co.lab-tools.svc.cluster.local. NXDOMAIN
+…
+"A IN huggingface.co. NOERROR
+dns-ndots1: 2 queries
+"A IN huggingface.co. NOERROR
+"AAAA IN huggingface.co. NOERROR
+```
+
+Time it too:
+
+```bash
+for p in dns-default dns-ndots1; do
+  kubectl -n lab-tools exec $p -- sh -c 'time (for i in $(seq 50); do getent ahosts huggingface.co >/dev/null; done)' 2>&1 | grep real | sed "s/^/$p /"
+done
+```
+
+### 5.4 Service discovery records
+
+```bash
+kubectl -n lab-tools exec deploy/netshoot -- dig +short echo.lab-tools.svc.cluster.local
+kubectl -n lab-tools exec deploy/netshoot -- dig +short echo-headless.lab-tools.svc.cluster.local
+kubectl -n lab-tools exec deploy/netshoot -- dig +short SRV _http._tcp.echo.lab-tools.svc.cluster.local
+kubectl -n lab-tools exec deploy/netshoot -- dig +short spark-02.lab.local       # via the lab.local forward zone
+```
+
+### 5.5 Outage drill
+
+```bash
+scripts/breakfix.sh inject 07
+kubectl -n lab-tools exec deploy/netshoot -- curl -s -m3 http://echo.lab-tools || echo "name lookup failed"
+kubectl -n lab-tools exec deploy/netshoot -- curl -s -m3 "http://$(kubectl -n lab-tools get svc echo -o jsonpath='{.spec.clusterIP}')"   # by IP → works
+# diagnose and fix it yourself; then:
+scripts/breakfix.sh answer 07
+```
+
+The key triage move: **try by IP**. If the IP works and the name doesn't, it's DNS, not networking.
+
+Turn query logging off when you're done (it's chatty):
+
+```bash
+kubectl -n kube-system patch cm coredns-custom --type json -p '[{"op":"remove","path":"/data/log.override"}]'
+kubectl -n kube-system rollout restart deploy coredns
+```
 
 ---
 
-Proceed to [**09-ingress-controllers-and-gateway-api.md**](09-ingress-controllers-and-gateway-api.md) to explore Layer 7 routing, Ingress-Nginx, Traefik, Gateway API, and TLS termination for AI inference endpoints.
+## 6. Verify
+
+| Check | Expected |
+|---|---|
+| `dns-default` query count for one external lookup | 8–10 |
+| `dns-ndots1` query count | 2 |
+| headless lookup | 3 A records |
+| `coredns_dns_responses_total{rcode="NXDOMAIN"}` rate | drops after you apply `ndots: "1"` to hot clients |
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Cause | Diagnose | Fix |
+|---|---|---|---|
+| `Could not resolve host`, everything by name fails | CoreDNS down / 0 replicas / NetworkPolicy blocks egress to kube-system | `kubectl -n kube-system get deploy coredns`. Try by IP | restore CoreDNS. Allow UDP/TCP 53 to `kube-system` in egress policies |
+| CoreDNS `CrashLoopBackOff`, log `Loop … detected` | upstream is a local stub (127.0.0.53) forwarding back to itself | `kubectl -n kube-system logs deploy/coredns` | point k3s at the real resolv.conf (`resolv-conf: /run/systemd/resolve/resolv.conf`) |
+| Intermittent `EAI_AGAIN` / 5 s stalls in Python | UDP conntrack race on parallel A+AAAA queries | `conntrack -S` `insert_failed` counter rises | `single-request-reopen` option (in `dns-ndots1`), NodeLocal DNSCache |
+| Slow first request to HF/NGC, fast afterwards | ndots amplification + cold cache | §5.3 | trailing dots / `ndots:1` |
+| `ddp-0.ddp-workers…` NXDOMAIN at job start | pod not Ready yet and Service lacks `publishNotReadyAddresses` | `dig` from another pod | set `publishNotReadyAddresses: true` on rendezvous Services (the lab's does) |
+| Custom zone ignored | edited `coredns` instead of `coredns-custom` (k3s overwrote it) | compare ConfigMaps | use `coredns-custom` keys ending `.override` / `.server` |
+
+---
+
+## 8. Scale-out path
+
+| Lab | Datacenter |
+|---|---|
+| 1 CoreDNS replica | ≥ 2 replicas with anti-affinity, HPA or cluster-proportional-autoscaler |
+| query logging on demand | CoreDNS metrics + sampled logs to Loki |
+| `ndots` per pod | NodeLocal DNSCache everywhere, plus an admission policy that sets `ndots:2` on serving namespaces |
+| forward zone to site DNS | split-horizon DNS, ExternalDNS publishing Ingress hosts |
+
+---
+
+## 9. Checklist
+
+- [ ] I measured how many queries one external lookup costs with `ndots:5`, and with `ndots:1`.
+- [ ] I added a zone and query logging the k3s way, without editing the managed Corefile.
+- [ ] I resolved a Service, a headless Service, an SRV record and a StatefulSet pod by name.
+- [ ] I can tell a DNS outage from a network outage in one command.
