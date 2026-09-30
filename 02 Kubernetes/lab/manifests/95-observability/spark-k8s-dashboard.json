@@ -642,7 +642,7 @@
      "refId": "B"
     },
     {
-     "expr": "max(vllm:gpu_cache_usage_perc)*100",
+     "expr": "max(vllm:kv_cache_usage_perc or vllm:gpu_cache_usage_perc)*100",
      "legendFormat": "KV cache %",
      "refId": "C"
     }

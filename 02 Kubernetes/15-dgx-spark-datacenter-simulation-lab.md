@@ -116,7 +116,7 @@ flowchart TB
 |---|---|---|---|---|
 | `tenant-alpha`, `tenant-beta` | restricted | 1 CPU · 6 Gi · 1 slice · 185 Gi · 10 pods | no-latest, ≤1 slice, no NVIDIA env | interactive |
 | `llm-serving` | baseline | 8 CPU req · 96 Gi lim · 2 slices · 1 Ti | no-latest, readiness required | serving |
-| `batch` | baseline | Kueue `spark-cq`: 8 CPU · 64 Gi · 2 slices | no-latest | batch |
+| `batch` | privileged (warn: baseline). RDMA needs hostNetwork/IPC_LOCK | Kueue `spark-cq`: 8 CPU · 64 Gi · 2 slices | no-latest | batch |
 | `lab-tools` | privileged | none (instructor namespace) | — | mixed |
 | `ingress`, `observability` | baseline / privileged | none | — | platform |
 

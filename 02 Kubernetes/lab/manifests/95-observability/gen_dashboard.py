@@ -82,7 +82,7 @@ ts("TTFT p95", [("spark:vllm_ttft_p95_seconds", "{{namespace}}")], "s", x=0,
    thresholds=[{"color": "#76b900", "value": None}, {"color": "#cf222e", "value": 1}])
 ts("Time per output token p95", [("spark:vllm_tpot_p95_seconds", "{{namespace}}")], "s", x=8)
 ts("Queue & KV cache", [("sum(vllm:num_requests_running)", "running"), ("sum(vllm:num_requests_waiting)", "waiting"),
-                        ("max(vllm:gpu_cache_usage_perc)*100", "KV cache %")], x=16)
+                        ("max(vllm:kv_cache_usage_perc or vllm:gpu_cache_usage_perc)*100", "KV cache %")], x=16)
 nl()
 row("Control plane")
 ts("etcd WAL fsync p99", [("histogram_quantile(0.99, sum by (le) (rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m])))", "p99")],

@@ -26,4 +26,5 @@ free_gib=$(df -BG --output=avail / | tail -1 | tr -dc 0-9)
 [[ "$free_gib" -ge 300 ]] && ok "${free_gib} GiB free on / (models + images)" || warn "only ${free_gib} GiB free on /"
 [[ -d /data/k8s ]] && ok "/data/k8s exists" || warn "/data/k8s missing: sudo mkdir -p /data/k8s"
 [[ -f /etc/rancher/k3s/config.yaml.d/20-k8s-lab.yaml ]] && ok "k3s lab drop-in installed" || info "k3s lab drop-in not installed yet (scripts/install-addons.sh k3s-config)"
+yq --version 2>/dev/null | grep -q mikefarah && ok "yq (mikefarah) present" || warn "mikefarah yq missing (used in Vol 05/10/17): see versions.env YQ_VERSION"
 summary

@@ -37,7 +37,11 @@ metadata:
   labels:
     spark.lab/tier: batch                  # Kueue-managed training jobs
     kueue.x-k8s.io/managed: "true"
-    pod-security.kubernetes.io/enforce: baseline
+    # Multi-node NCCL needs hostNetwork or IPC_LOCK (RDMA pinned memory), which
+    # baseline forbids. Enforce privileged, but WARN at baseline so anything
+    # unusual is visible on every apply (Volume 17).
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: baseline
 ---
 apiVersion: v1
 kind: Namespace

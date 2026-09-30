@@ -1,161 +1,247 @@
-# 18. Large-Scale SuperPOD & Network Fabrics — InfiniBand, RoCE & Topologies
+# Volume 18 — From Two Sparks to a SuperPOD: Fabrics, Rails, RoCE vs InfiniBand, and Fabric Health
 
-Operating a single DGX node is software engineering; orchestrating **1,000+ DGX nodes in a SuperPOD** is industrial supercomputing. At this scale, physics, optical transceiver health, rack power distribution, and network switch oversubscription dictate cluster throughput.
+> **Module 02 · Part V — Distributed AI & diagnostics** · Prev: [17 Distributed training](17-distributed-ai-training-and-nccl.md) · Next: [19 Diagnostics playbook](19-cluster-diagnostics-and-failure-scenarios.md)
 
-This guide details the architectural blueprint of an **NVIDIA DGX SuperPOD**, the Four Data Center Fabrics, non-blocking Fat-Tree topologies, Rail-Optimized routing, and InfiniBand vs. Spectrum-X RoCE.
-
----
-
-## 📑 Table of Contents
-1. [Anatomy of an NVIDIA DGX SuperPOD](#1-anatomy-of-an-nvidia-dgx-superpod)
-2. [The Four Data Center Physical Fabrics](#2-the-four-data-center-physical-fabrics)
-3. [Fat-Tree (Clos) Network Topologies & Non-Blocking Bandwidth](#3-fat-tree-clos-network-topologies--non-blocking-bandwidth)
-4. [Rail-Optimized Networking Deep Dive](#4-rail-optimized-networking-deep-dive)
-5. [InfiniBand vs. Spectrum-X Ethernet (RoCE v2)](#5-infiniband-vs-spectrum-x-ethernet-roce-v2)
-6. [NVIDIA BlueField-3 DPUs: Infrastructure Offloading](#6-nvidia-bluefield-3-dpus-infrastructure-offloading)
-7. [Production Fabric Diagnostics & Cable Fault Isolation](#7-production-fabric-diagnostics--cable-fault-isolation)
-8. [Hands-On High-Speed Fabric Labs](#8-hands-on-high-speed-fabric-labs)
+| | |
+|---|---|
+| **You will build** | A working model of datacenter AI fabrics anchored in hardware you can touch: the two-Spark CX-7 link as a "one-rail, zero-switch" fabric. You'll read and interpret NIC counters, simulate a degraded link and watch NCCL react, and size a rail-optimised fat tree with a calculator |
+| **Hardware** | 1 Spark for §5.1–5.2 and §5.5. 2 Sparks + QSFP cable for §5.3–5.4 |
+| **Time** | 75 min |
+| **Risk** | Low. §5.4 takes one logical CX-7 port down for a minute |
+| **Lab files** | [`scripts/fabric_calc.py`](lab/scripts/fabric_calc.py), [`manifests/80-distributed/two-spark/`](lab/manifests/80-distributed/two-spark/kustomization.yaml). 01 Ansible `playbooks/02-fabric.yml`, `11-rdma-perftest.yml`, `12b-roce-qos.yml` |
 
 ---
 
-## 1. Anatomy of an NVIDIA DGX SuperPOD
+## 1. Why this matters on a Spark
 
-The standard unit of scale in NVIDIA AI supercomputers is the **Scalable Unit (SU)**:
+You won't cable 1,000 GPUs at home. You *will* meet every concept in a SuperPOD on your two Sparks:
 
-```text
-+-----------------------------------------------------------------------------------+
-|                        DGX SuperPOD Scalable Unit (SU)                            |
-|                                                                                   |
-|  ├── 32x DGX Server Nodes (256x Tensor Core GPUs)                                 |
-|  ├── Intra-Node: 5th Gen NVLink (1.8 TB/s per GPU bisection bandwidth)           |
-|  ├── Inter-Node Compute: 8x Quantum-2 InfiniBand Switches (800 Gbps per rail)     |
-|  ├── Storage Fabric: High-Throughput NVMe-oF Array (VAST Data / Weka.IO)          |
-|  ├── Management Fabric: 2x 100GbE SN2201 Switches for Kubernetes Control Plane    |
-|  └── Power & Cooling: 40kW - 120kW per rack (Direct-to-Chip Liquid Cooling)       |
-+-----------------------------------------------------------------------------------+
-```
+| SuperPOD concept | On two Sparks |
+|---|---|
+| Compute (backend) fabric, 400–800 Gb/s per GPU | the QSFP cable, 200 Gb/s, RoCE v2 |
+| Rails (GPU *i* of every node on the same leaf) | 1 GPU/node → 1 rail |
+| Frontend network (storage, management, users) | the 10 GbE `enP7s7` |
+| Out-of-band management (BMC) | none on the Spark. The 01 Ansible Redfish lab simulates it |
+| Lossless Ethernet (PFC/ECN) or InfiniBand credit flow control | RoCE QoS settings from 01 Ansible `12b-roce-qos.yml` |
+| Link flaps, symbol errors, degraded lanes | `ethtool -S` counters, a downed logical port |
 
 ---
 
-## 2. The Four Data Center Physical Fabrics
+## 2. Architecture — HLD
 
-Every enterprise AI data center operates four strictly segregated network fabrics:
+### 2.1 The four networks of an AI datacenter
 
 ```mermaid
-graph TD
-    subgraph DataCenter["NVIDIA AI Data Center Network Hierarchy"]
-        F1["1. Compute Fabric<br/>(Quantum-2 InfiniBand / Spectrum-X)<br/>800 Gbps/rail | Sub-microsecond | Lossless | NCCL"]
-        F2["2. Storage Fabric<br/>(Dedicated RoCE / InfiniBand)<br/>GPUDirect Storage (GDS) | Line-rate NVMe streaming"]
-        F3["3. In-Band Cluster Fabric<br/>(100GbE / 25GbE Standard Ethernet)<br/>Kubernetes API, Docker image pulls, Prometheus"]
-        F4["4. Out-of-Band (OOB) Fabric<br/>(1GbE Isolated Network)<br/>IPMI / BMC, Redfish API, PDU control, remote console"]
-    end
+flowchart TB
+  subgraph POD["Scalable unit (32 nodes × 8 GPUs)"]
+    N1["node 1<br/>8× GPU · 8× NIC"]
+    N2["node …"]
+    N32["node 32"]
+  end
+  subgraph BE["① Compute fabric (backend)<br/>IB NDR/XDR or Spectrum-X RoCE · rail-optimised"]
+    L1["rail-1 leaf"]
+    L8["rail-8 leaf"]
+    SP["spines"]
+  end
+  subgraph FE["② Storage + ③ in-band mgmt (frontend Ethernet)"]
+    FSW["frontend leaves"]
+    STO[("parallel FS")]
+  end
+  OOB["④ Out-of-band<br/>BMC · PDUs · switches mgmt"]
+  N1 & N2 & N32 -->|"NIC i → rail i"| L1 & L8
+  L1 & L8 --> SP
+  N1 & N2 & N32 --> FSW --> STO
+  N1 & N2 & N32 -.-> OOB
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef ext fill:#24292f,stroke:#000,color:#fff
+  class N1,N2,N32 gpu
+  class L1,L8,SP,FSW net
+  class STO store
+  class OOB ext
+```
+
+### 2.2 The same shape at lab scale
+
+```mermaid
+flowchart LR
+  subgraph S1["spark-01"]
+    G1["GB10"] --- C1["CX-7<br/>enp1s0f1np1 · enP2p1s0f1np1"]
+    M1["enP7s7 10 GbE"]
+  end
+  subgraph S2["spark-02"]
+    G2["GB10"] --- C2["CX-7"]
+    M2["enP7s7"]
+  end
+  C1 <== "① compute fabric: 1 rail, 0 switches<br/>192.168.100/101.0/24 · RoCE v2 · MTU 9000" ==> C2
+  M1 <-->|"②③ frontend: 10.10.10.0/24<br/>API, pulls, NFS-TCP"| SW["home/lab switch"] <--> M2
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
+  class G1,G2 gpu
+  class C1,C2,M1,M2,SW net
+  style S1 fill:#e6f4f5,stroke:#0e7c86
+  style S2 fill:#e6f4f5,stroke:#0e7c86,stroke-dasharray:5 3
 ```
 
 ---
 
-## 3. Fat-Tree (Clos) Network Topologies & Non-Blocking Bandwidth
+## 3. LLD
 
-In traditional corporate networks, switches are oversubscribed (e.g. 3:1 ratio: 300 Gbps downlink to servers, but only 100 Gbps uplink to the core).
+### 3.1 Why "rail-optimised"
 
-In an AI SuperPOD, **oversubscription is strictly forbidden**. The network must be **1:1 Full Bisection Non-Blocking**: any GPU can transmit at full 800 Gbps to any other GPU in the data center simultaneously without dropped packets or congestion.
+In a node with 8 GPUs and 8 NICs, NIC *i* sits next to GPU *i* (same PCIe switch). If NIC *i* of every node plugs into the same **rail leaf**, then the dominant collective traffic (GPU *i* ↔ GPU *i* across nodes, in ring/tree all-reduce) crosses **one switch hop**. Cross-rail traffic moves over NVLink inside the node first (NCCL PXN), then onto the right rail.
 
-```text
-                 [ Spine Switch Layer (Director Switches) ]
-                        /            |            \
-                       /             |             \
-                      /              |              \
-           [ Leaf Switch 1 ]   [ Leaf Switch 2 ]   [ Leaf Switch 3 ]
-              /        \          /        \          /        \
-           DGX-1      DGX-2    DGX-3      DGX-4    DGX-5      DGX-6
-```
+### 3.2 Sizing (from `fabric_calc.py`)
 
----
+| Design | Nodes × GPUs | Radix | Leaves | Spines | Cables | Bisection |
+|---|---|---|---|---|---|---|
+| Two Sparks | 2 × 1 | — | 0 | 0 | 1 | 0.2 Tb/s |
+| 1 scalable unit | 32 × 8 | 64 | 8 | 4 | 512 | 51.2 Tb/s |
+| 4 SUs (127 nodes) | 127 × 8 | 64 | 32 | 16 | 2,040 | 203 Tb/s |
 
-## 4. Rail-Optimized Networking Deep Dive
+### 3.3 InfiniBand vs Spectrum-X Ethernet (RoCE)
 
-In an 8-GPU DGX server, each GPU is paired directly with its own dedicated ConnectX Network Interface Card (NIC 0 through 7).
+| | InfiniBand (Quantum-2/X800) | Spectrum-X Ethernet (RoCE v2) | Spark CX-7 link |
+|---|---|---|---|
+| Losslessness | credit-based, built in | PFC + ECN (+ adaptive routing, congestion control in SuperNIC/switch) | PFC/ECN optional on a direct cable |
+| Management | Subnet Manager (UFM/opensm) | standard Ethernet + NetQ/Cumulus | none (point-to-point) |
+| Addressing | LID/GUID, IPoIB optional | IP + GID (RoCE v2 = UDP/4791) | IP + GID index 3 |
+| Ops skills | specialised | Ethernet teams feel at home | — |
+| NCCL | `NET/IB` | `NET/IB` (verbs over RoCE) | `NET/IB` |
 
-Instead of wiring all NICs on a server to the same switch, DGX SuperPODs use **Rail Optimization**:
+### 3.4 Counters that matter
 
-```text
-DGX Node 1                                              DGX Node 2
-+----------------------------+                          +----------------------------+
-| GPU 0 ─── ConnectX NIC 0   |==== [ Rail 0 Switch ] ===| ConnectX NIC 0 ─── GPU 0   |
-| GPU 1 ─── ConnectX NIC 1   |==== [ Rail 1 Switch ] ===| ConnectX NIC 1 ─── GPU 1   |
-| GPU 2 ─── ConnectX NIC 2   |==== [ Rail 2 Switch ] ===| ConnectX NIC 2 ─── GPU 2   |
-| GPU 3 ─── ConnectX NIC 3   |==== [ Rail 3 Switch ] ===| ConnectX NIC 3 ─── GPU 3   |
-| GPU 4 ─── ConnectX NIC 4   |==== [ Rail 4 Switch ] ===| ConnectX NIC 4 ─── GPU 4   |
-| GPU 5 ─── ConnectX NIC 5   |==== [ Rail 5 Switch ] ===| ConnectX NIC 5 ─── GPU 5   |
-| GPU 6 ─── ConnectX NIC 6   |==== [ Rail 6 Switch ] ===| ConnectX NIC 6 ─── GPU 6   |
-| GPU 7 ─── ConnectX NIC 7   |==== [ Rail 7 Switch ] ===| ConnectX NIC 7 ─── GPU 7   |
-+----------------------------+                          +----------------------------+
-```
-
-### The Architectural Advantage:
-When a distributed AllReduce runs:
-- GPU 0 on all 1,000 servers communicates strictly through the **Rail 0 Switch fabric**.
-- GPU 1 communicates strictly through **Rail 1 Switch fabric**.
-- Traffic never crosses rails, completely eliminating inter-switch cross-talk and buffer contention!
+| Counter (`ethtool -S <if>`) | Means | Healthy |
+|---|---|---|
+| `rx_crc_errors_phy`, `rx_symbol_err_phy` | bad cable/optic/lane | 0 and not increasing |
+| `rx_discards_phy`, `rx_out_of_buffer` | NIC or host couldn't keep up | ~0 |
+| `rx_pause_ctrl_phy` / `tx_pause_ctrl_phy` | PFC pause frames | small. A storm means congestion or misconfig |
+| `np_cnp_sent` / `rp_cnp_handled` | ECN/DCQCN congestion notifications | present under heavy load, not at idle |
+| `link_down_events_phy` | flaps | 0 |
 
 ---
 
-## 5. InfiniBand vs. Spectrum-X Ethernet (RoCE v2)
+## 4. Integrations
 
-| Criterion | Quantum-2 InfiniBand | Spectrum-X Ethernet (RoCE v2) |
-| :--- | :--- | :--- |
-| **Flow Control** | **Credit-Based** (Physical hardware flow control; zero packet drops) | **Priority Flow Control (PFC)** + ECN (Congestion Notification) |
-| **Routing** | Static / Adaptive via Subnet Manager (OpenSM) | Dynamic Adaptive Routing across Ethernet paths |
-| **Latency** | **< 100 nanoseconds** | ~ 400 - 800 nanoseconds |
-| **Standard** | Dedicated InfiniBand Standard | Standard IEEE 802.3 Ethernet Compatible |
-| **Deployment** | Turnkey DGX SuperPOD standard | Preferred by hyperscalers leveraging existing Ethernet fiber |
+- **01 Ansible** owns the link: `cx7_fabric` role (netplan, MTU, GIDs), `12b-roce-qos.yml` (PFC/ECN trust, DSCP), `11-rdma-perftest.yml` (the ≥ 180 Gb/s gate).
+- **Vol 17** puts NCCL on this link. **Vol 16** can hand it to pods via the Network Operator.
+- **Module 07 Nvidia** (NVLink/NVSwitch, Quantum/Spectrum, UFM) and **module 08 Storage** (RoCE for storage traffic) go deeper on the same fabric ideas.
 
 ---
 
-## 6. NVIDIA BlueField-3 DPUs: Infrastructure Offloading
+## 5. Lab
 
-A **Data Processing Unit (DPU)** is a system-on-chip that pairs high-performance ARM CPU cores with ConnectX network silicon:
-- Runs its own independent Linux operating system directly on the PCIe card.
-- **Offloads Infrastructure Workloads**:
-  - Kubernetes CNI (OVS / Open Virtual Network) runs inside the DPU, consuming 0% of the host Grace CPU.
-  - Line-rate hardware encryption (IPsec / TLS).
-  - Storage virtualization (emulates local NVMe drives over remote NVMe-oF networks).
+### 5.1 Inventory the CX-7 (1 Spark)
 
----
-
-## 7. Production Fabric Diagnostics & Cable Fault Isolation
-
-In a cluster with 10,000 optical transceivers and fiber cables, cable degradation is a daily occurrence.
-
-### Diagnostic Tools:
 ```bash
-# 1. Query status of InfiniBand ports:
-ibstat
-
-# 2. Check for port error counters (symbol errors, link down, buffer overruns):
-ibqueryerrors
-
-# 3. Perform automated fabric health check:
-sudo ibdiagnet
+ssh nvidia@10.10.10.11
+ibdev2netdev                               # rocep1s0f1 port 1 ==> enp1s0f1np1 (Up) …
+for i in enp1s0f1np1 enP2p1s0f1np1; do ethtool $i | grep -E 'Speed|Link detected'; ip -br link show $i; done
+rdma link show
+sudo lspci -d 15b3: -nn                    # Mellanox/NVIDIA devices and PCIe IDs
 ```
 
-### Symptoms of a Bad Cable:
-- `SymbolErrors`: High count indicates dirty optical connector or bend in fiber cable.
-- `PortRcvErrors`: Indicates signal integrity loss.
-- `LinkDowned`: Port keeps flapping; automatically isolated by Subnet Manager.
+Note that one physical QSFP cage shows up as **two** netdevs and two RDMA devices, one per PCIe root. You need both to reach 200 Gb/s (01 Ansible Vol 11 explains why).
 
----
+### 5.2 Size real fabrics
 
-## 8. Hands-On High-Speed Fabric Labs
-
-### Lab 1: Query High-Speed Network Interfaces on Host
 ```bash
-# Check for ConnectX / InfiniBand network devices:
-lspci | grep -i mellanox
-
-# Inspect link speed on host interfaces:
-ip -s link show
+cd "02 Kubernetes/lab"
+python3 scripts/fabric_calc.py --nodes 2 --gpus 1 --radix 2 --link-gbps 200
+python3 scripts/fabric_calc.py --nodes 32 --gpus 8 --radix 64 --link-gbps 400
+python3 scripts/fabric_calc.py --nodes 127 --gpus 8 --radix 64 --link-gbps 400
+python3 scripts/fabric_calc.py --nodes 64 --gpus 8 --radix 128 --link-gbps 800   # next-gen radix/speed
 ```
+
+Exercise: how many optical transceivers does the 127-node design need, if every node↔leaf and leaf↔spine link is optical with one transceiver per end? (Answer: `cables × 2`.)
+
+### 5.3 (2 Sparks) Baseline and counters
+
+```bash
+cd "../../01 Ansible/lab" && ansible-playbook playbooks/11-rdma-perftest.yml     # host RDMA baseline
+ssh nvidia@10.10.10.11 'ethtool -S enp1s0f1np1 | grep -E "crc|symbol|discard|pause|cnp|link_down" | grep -v ": 0$"'
+```
+
+Then run the NCCL job (Vol 17 §5.5) and diff the counters before and after. PFC pause counters rising only during the run, and discards staying at 0, is healthy lossless behaviour.
+
+### 5.4 (2 Sparks) Degrade the fabric and watch NCCL
+
+```bash
+# take ONE logical half down on spark-02 for the duration of a run
+ssh nvidia@10.10.10.12 'sudo ip link set enP2p1s0f1np1 down'
+kubectl delete -k manifests/80-distributed/two-spark --ignore-not-found; kubectl apply -k manifests/80-distributed/two-spark
+kubectl -n batch logs -l job-name=ddp --prefix | grep -E 'NET/IB|busbw|1073741824|WARN' | head
+ssh nvidia@10.10.10.12 'sudo ip link set enP2p1s0f1np1 up'
+```
+
+Expected: NCCL warns about the missing HCA or uses only one device, and large-message busbw drops to roughly **half**. That's the signature of a degraded rail or a half-seated cable. It's also why fabric health checks run *before* a job is admitted in large clusters.
+
+### 5.5 Build a fabric health check
+
+A pre-flight any scheduler could call before admitting a multi-node job:
+
+```bash
+cat > /tmp/fabric-health.sh <<'EOF'
+#!/usr/bin/env bash
+# exit 0 = healthy; non-zero = do not schedule distributed jobs here
+fail=0
+for i in enp1s0f1np1 enP2p1s0f1np1; do
+  [[ $(cat /sys/class/net/$i/operstate) == up ]] || { echo "$i down"; fail=1; }
+  [[ $(cat /sys/class/net/$i/mtu) == 9000 ]] || { echo "$i mtu $(cat /sys/class/net/$i/mtu)"; fail=1; }
+  errs=$(ethtool -S $i | awk -F: '/crc_errors_phy|symbol_err_phy|link_down_events_phy/ {s+=$2} END {print s+0}')
+  [[ $errs -eq 0 ]] || { echo "$i error counters=$errs"; fail=1; }
+done
+exit $fail
+EOF
+chmod +x /tmp/fabric-health.sh && /tmp/fabric-health.sh && echo HEALTHY
+```
+
+In Kubernetes, this becomes a node-problem-detector custom plugin. A failing check sets a node condition, and a taint keeps distributed jobs away. The 01 Ansible `spark_validate` role runs the same checks at the host level.
 
 ---
 
-Proceed to [**19-cluster-diagnostics-and-failure-scenarios.md**](19-cluster-diagnostics-and-failure-scenarios.md) for the master cluster diagnostics playbook, covering etcd recovery, certificate expiration, network partitions, and NVIDIA Xid errors.
+## 6. Verify
+
+| Check | Expected |
+|---|---|
+| `ibdev2netdev` | both RDMA devices `Up` (with the cable connected) |
+| host RDMA baseline | ≥ 180 Gb/s (01 Ansible gate) |
+| NCCL busbw with one half down | ≈ 50 % of normal |
+| `fabric-health.sh` | `HEALTHY` with both halves up. Fails with one down |
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Likely cause | Check | Fix |
+|---|---|---|---|
+| Link `Up` but ~100 Gb/s | only one logical half in use | NCCL log device list, `rdma link` | list both HCAs. Both IPs configured |
+| CRC/symbol errors increasing | cable/optic/dirty connector | `ethtool -S` twice, 60 s apart | reseat, clean, replace the DAC/AOC |
+| Throughput collapses under load, pause counters huge | PFC storm / mismatched QoS | `rx_pause_ctrl_phy`, `mlnx_qos -i <if>` | align trust mode + PFC priority both ends (01 Ansible `12b-roce-qos.yml`) |
+| RDMA works host-to-host, NCCL in pods uses sockets | pod can't see RDMA devices | `ibv_devices` in pod | hostNetwork / Network Operator (Vol 16/17) |
+| Link flaps | thermal/power, bad cable | `link_down_events_phy`, `dmesg \| grep mlx5` | replace the cable. Check airflow |
+
+---
+
+## 8. Scale-out path
+
+```mermaid
+flowchart LR
+  A["2 Sparks<br/>1 cable"] --> B["4-8 Sparks<br/>1 × 200/400G switch<br/>still 1 rail"]
+  B --> C["DGX SU<br/>32 nodes × 8 rails<br/>leaf/spine, UFM or NetQ"]
+  C --> D["SuperPOD<br/>4+ SUs, 3-tier or larger radix<br/>SHARP · adaptive routing · telemetry"]
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
+  class A,B,C,D net
+```
+
+Design rules that carry over unchanged from your two Sparks: MTU and QoS identical end to end, both halves of every NIC in use, counters watched continuously, fabric health checked before admission, and the host RDMA baseline recorded for every link.
+
+---
+
+## 9. Checklist
+
+- [ ] I can name the four networks of an AI datacenter and the lab equivalent of each.
+- [ ] I sized a 32-node and a 127-node rail-optimised fabric and can explain leaf/spine counts.
+- [ ] I read CX-7 counters and know which ones mean "bad cable" vs "congestion".
+- [ ] I degraded a link on purpose and saw NCCL bandwidth halve.

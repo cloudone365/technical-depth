@@ -1,213 +1,241 @@
-# 19. Cluster Diagnostics & Failure Scenarios — Master Troubleshooting Playbook
+# Volume 19 — Cluster Diagnostics & Failure Playbook for a DGX Spark Kubernetes Platform
 
-When operating production AI clusters, failures are not anomalies; they are normal daily events. At a scale of 10,000 GPUs, hardware failures, optic degradations, silent hangs, memory corruptions, and network partitions happen constantly.
+> **Module 02 · Part V — Distributed AI & diagnostics** · Prev: [18 Fabrics](18-large-scale-superpod-and-network-fabrics.md) · Next: [20 Workbook](20-hands-on-practice-exercises-workbook.md)
 
-This guide provides the **Master Troubleshooting Playbook** for infrastructure engineers, covering control plane recovery, certificate expiration, network isolation, and the complete **NVIDIA Xid Hardware Error Matrix**.
-
----
-
-## 📑 Table of Contents
-1. [The AI Infrastructure Triage Methodology](#1-the-ai-infrastructure-triage-methodology)
-2. [Scenario 1: Control Plane Quorum Loss (etcd Disaster)](#2-scenario-1-control-plane-quorum-loss-etcd-disaster)
-3. [Scenario 2: TLS Certificate Expiration Trap](#3-scenario-2-tls-certificate-expiration-trap)
-4. [Scenario 3: Complete CNI Network Partition](#4-scenario-3-complete-cni-network-partition)
-5. [Scenario 4: CoreDNS Cluster-Wide Lookup Failure](#5-scenario-4-coredns-cluster-wide-lookup-failure)
-6. [Scenario 5: The Production NVIDIA Xid Error Matrix](#6-scenario-5-the-production-nvidia-xid-error-matrix)
-7. [Scenario 6: Identifying GPU Stragglers in Distributed Training](#7-scenario-6-identifying-gpu-stragglers-in-distributed-training)
-8. [Container Exit Codes Diagnostic Reference](#8-container-exit-codes-diagnostic-reference)
-9. [Hands-On Fault Injection & Recovery Labs](#9-hands-on-fault-injection--recovery-labs)
+| | |
+|---|---|
+| **You will build** | A triage method you can follow under pressure, a support bundle, runbooks for the failures that actually happen on a Spark (control plane, certificates, network, DNS, GPU/Xid, unified memory, stragglers), and fifteen injectable drills to practise them |
+| **Hardware** | spark-01 |
+| **Time** | 2 h (plus drills over time) |
+| **Risk** | Drills are reversible. BF-15 (UMA pressure) and the etcd restore are the only risky ones, and both ask first |
+| **Lab files** | [`scripts/breakfix.sh`](lab/scripts/breakfix.sh), [`breakfix/`](lab/breakfix/), [`scripts/collect-diag.sh`](lab/scripts/collect-diag.sh), [`scripts/verify.sh`](lab/scripts/verify.sh), [`scripts/etcd-drill.sh`](lab/scripts/etcd-drill.sh), [`manifests/95-observability/rules.yaml`](lab/manifests/95-observability/rules.yaml) |
 
 ---
 
-## 1. The AI Infrastructure Triage Methodology
+## 1. The triage method
 
-When an alert fires, follow this deterministic 4-layer diagnostic triage tree:
+Work **outside-in** and **top-down**. Prove each layer before blaming the next.
 
 ```mermaid
-graph TD
-    Alert["Alert: Distributed Training Job Stalled / Pod Failed"] --> L1{"Layer 1: Host & Kernel Health<br/>dmesg | nvidia-smi | free -m"}
-    L1 -->|Xid Error / OOM / Hardware Drop| H1["Action: Hardware RMA / Taint Node / Reboot"]
-    
-    L1 -->|Hardware Healthy| L2{"Layer 2: Storage & Mounts<br/>df -h / | df -i | PVC status"}
-    L2 -->|Disk Full / Stale NFS Mount| H2["Action: Purge Temp / Remount Storage"]
-    
-    L2 -->|Storage Healthy| L3{"Layer 3: Network & DNS<br/>curl CoreDNS | ping CNI | NCCL_DEBUG"}
-    L3 -->|DNS Timeout / Packet Drops| H3["Action: Restart CoreDNS / Check MTU"]
-    
-    L3 -->|Network Healthy| L4{"Layer 4: Kubernetes Engine<br/>kubectl describe | Quota | Events"}
-    L4 -->|OOMKilled / CPU Throttled| H4["Action: Tune Pod Memory & CFS Limits"]
+flowchart TD
+  S(["Symptom reported"]) --> Q1{"kubectl get --raw /readyz<br/>works?"}
+  Q1 -- no --> CP["CONTROL PLANE<br/>k3s service · etcd · certs · disk<br/>§3.1-3.3"]
+  Q1 -- yes --> Q2{"node Ready?<br/>conditions clean?"}
+  Q2 -- no --> ND["NODE<br/>kubelet · pressure · containerd<br/>§3.6-3.7"]
+  Q2 -- yes --> Q3{"pod scheduled?"}
+  Q3 -- "no (Pending)" --> SC["SCHEDULING<br/>quota · slices · taints · PVC · Kueue<br/>Vol 05, 11, 12"]
+  Q3 -- yes --> Q4{"containers running?"}
+  Q4 -- no --> RT["RUNTIME<br/>image · probes · OOM · GPU injection<br/>Vol 13, 14"]
+  Q4 -- yes --> Q5{"reachable by IP?"}
+  Q5 -- no --> NET["NETWORK<br/>netpol · CNI · MTU · kube-proxy<br/>§3.4, Vol 06-07"]
+  Q5 -- yes --> Q6{"reachable by name /<br/>through ingress?"}
+  Q6 -- no --> DNS["DNS / INGRESS<br/>§3.5, Vol 08-09"]
+  Q6 -- yes --> APP["APPLICATION / GPU<br/>Xid · UMA · stragglers · SLOs<br/>§3.8-3.10"]
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef sec fill:#cf222e,stroke:#82071e,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
+  class Q1,Q2,Q3,Q4,Q5,Q6 ctrl
+  class CP,ND,SC,RT sec
+  class NET,DNS net
+  class APP gpu
 ```
 
----
-
-## 2. Scenario 1: Control Plane Quorum Loss (etcd Disaster)
-
-### The Failure:
-In a 3-node etcd cluster, 2 nodes experience simultaneous hardware failure. Quorum ($Q = 2$) is lost. The `kube-apiserver` crashes, and `kubectl` commands fail with:
-```text
-The connection to the server 192.168.1.101:6443 was refused - did you specify the right host or port?
-```
-
-### Emergency Recovery Procedure:
-Force the single surviving node to re-elect itself as a new standalone cluster:
-
-1. Stop the failing etcd service:
-   ```bash
-   sudo systemctl stop etcd
-   ```
-2. Re-initialize the cluster using `--force-new-cluster`:
-   ```bash
-   etcd --force-new-cluster \
-     --data-dir=/var/lib/etcd \
-     --listen-peer-urls=https://127.0.0.1:2380 \
-     --listen-client-urls=https://127.0.0.1:2379 \
-     --initial-advertise-peer-urls=https://127.0.0.1:2380
-   ```
-3. Once the database is online, restart the Kubernetes API server.
-4. Scale up new healthy members to restore 3-node high availability.
-
----
-
-## 3. Scenario 2: TLS Certificate Expiration Trap
-
-### The Failure:
-Standard Kubernetes PKI certificates expire exactly **1 year** after cluster initialization. When they expire, all communication between `kubelet`, `apiserver`, and `scheduler` is terminated:
-```text
-Unable to connect to the server: x509: certificate has expired or is not yet valid
-```
-
-### Emergency Renewal Procedure:
-```bash
-# 1. Check expiration dates of all cluster certs:
-sudo kubeadm certs check-expiration
-
-# 2. Renew all certificates immediately:
-sudo kubeadm certs renew all
-
-# 3. If using K3s, rotate certificates with a single restart:
-sudo systemctl restart k3s
-```
-
----
-
-## 4. Scenario 3: Complete CNI Network Partition
-
-### The Failure:
-Pods on Node 1 cannot send packets to Pods on Node 2. Training jobs hang at the initial socket handshake.
-
-### Root Cause Checklist:
-1. **Firewall Blocking VXLAN Port 8472**:
-   ```bash
-   sudo ufw allow 8472/udp
-   ```
-2. **iptables FORWARD Chain Set to DROP**:
-   Docker or host security software set the default policy of the `FORWARD` chain to `DROP`:
-   ```bash
-   sudo iptables -P FORWARD ACCEPT
-   ```
-3. **MTU Black Hole**: Physical network MTU is 1500, but VXLAN packets exceed this size.
-   - Configure CNI MTU to `1450`.
-
----
-
-## 5. Scenario 4: CoreDNS Cluster-Wide Lookup Failure
-
-### The Failure:
-Every new Pod reports `curl: (6) Could not resolve host`.
-
-### Triage Commands:
-```bash
-# 1. Check if CoreDNS pods are running:
-kubectl get pods -n kube-system -l k8s-app=kube-dns
-
-# 2. Check CoreDNS endpoint backends:
-kubectl get endpoints kube-dns -n kube-system
-
-# 3. Check for infinite loop crash:
-kubectl logs -n kube-system -l k8s-app=kube-dns | grep "Loop detected"
-```
-
----
-
-## 6. Scenario 5: The Production NVIDIA Xid Error Matrix
-
-NVIDIA drivers emit **Xid error codes** directly into the Linux kernel log buffer (`dmesg`) whenever an abnormal GPU event occurs.
+**Always first:**
 
 ```bash
-sudo dmesg -T | grep -i "NVRM: Xid"
+cd "02 Kubernetes/lab"
+scripts/verify.sh                   # which layer is red?
+scripts/collect-diag.sh             # freeze the evidence before you change anything
+kubectl get events -A --sort-by=.lastTimestamp | tail -30
 ```
-
-### The Definitive AI Infrastructure Xid Reference:
-
-| Xid Code | Error Message | Underlying Root Cause | Required Action |
-| :--- | :--- | :--- | :--- |
-| **Xid 31** | `GPU memory page fault` | CUDA application accessed an unmapped virtual memory address. | **Software Bug**: Developer error (tensor index out of bounds). No hardware replacement needed. |
-| **Xid 45** | `Preemption timeout` | A CUDA kernel ran continuously without yielding to the scheduler, triggering the watchdog timer. | **Software / Algorithmic**: Tune watchdog or optimize monolithic kernel. |
-| **Xid 62** | `Internal microcode breakpoint` | GPU microcode or driver internal state corrupted. | **Driver Glitch**: Reload driver (`modprobe -r nvidia`) or reboot server. |
-| **Xid 79** | `GPU has fallen off the bus` | The PCIe link between the GPU and motherboard dropped completely. Caused by power dip, thermal spike, or riser failure. | **Hardware Emergency**: Reseat power cables; check PCIe bus; if recurring, initiate RMA replacement. |
-| **Xid 92** | `High uncorrectable ECC error` | A double-bit memory corruption occurred in the High-Bandwidth Memory (HBM). Data is unrecoverable. | **Fatal Silicon Failure**: Taint node immediately (`dedicated=broken:NoSchedule`); replace GPU. |
 
 ---
 
-## 7. Scenario 6: Identifying GPU Stragglers in Distributed Training
+## 2. Evidence map: where each layer writes its story
 
-A **Straggler** is a GPU that appears healthy to `nvidia-smi`, but runs 20% to 50% slower than its peers due to subtle thermal throttling, degraded PCIe links, or high uncorrectable ECC retries.
+| Layer | Primary evidence | Command |
+|---|---|---|
+| k3s / control plane | journal | `sudo journalctl -u k3s --since -30m -p warning` |
+| API decisions | audit log | `sudo jq -c 'select(.responseStatus.code>=400)' /var/log/k3s/audit.log \| tail` |
+| etcd | endpoint status, alarms, metrics | `scripts/etcd-drill.sh status` |
+| Scheduling | pod events | `kubectl describe pod` → Events |
+| Controllers | object events, `.status.conditions` | `kubectl describe rs/job/deploy` |
+| Containers | logs (current + previous), lastState | `kubectl logs --previous`, `-o jsonpath='{.status.containerStatuses}'` |
+| Node | conditions, kubelet, dmesg | `kubectl describe node`, `sudo dmesg -T` |
+| GPU | Xid, nvidia-smi, validator | `sudo dmesg -T \| grep -i xid`, `nvidia-smi -q` |
+| Metrics / alerts | Prometheus, Grafana | dashboard *Spark · Kubernetes* |
 
-### Detection Script:
-Run across all nodes to compare GPU core clocks and PCIe replay counters:
+---
+
+## 3. Runbooks
+
+### 3.1 API server unreachable
+
+| Step | Command | Look for |
+|---|---|---|
+| service up? | `systemctl status k3s` | crash loop, `failed to start` |
+| why? | `sudo journalctl -u k3s -n 200 --no-pager` | etcd errors, cert errors, `address already in use`, bad config YAML |
+| disk full? | `df -h / /var/lib/rancher` | 100 % → etcd and containerd fail |
+| memory? | `free -g`, `dmesg \| grep -i oom` | k3s OOM-killed under UMA pressure |
+
+Fixes: free disk (`sudo k3s crictl rmi --prune`, old snapshots), fix the drop-in YAML, restore etcd (Vol 03 §5.6) as a last resort.
+
+### 3.2 etcd: NOSPACE or slow
+
+`mvcc: database space exceeded` → compact → defrag → disarm (Vol 03 §5.5). Slow fsync → find the competing writer (`sudo iotop -oa`, checkpoint jobs, fio). Rehearse it in the sandbox: `scripts/etcd-sandbox.sh fill`.
+
+### 3.3 Certificates
+
+k3s issues 1-year leaf certificates and renews any within 90 days of expiry **when k3s restarts**. A server that never restarts for a year eventually serves an expired cert.
+
 ```bash
-nvidia-smi --query-gpu=index,name,clocks.current.graphics,clocks.max.graphics,temperature.gpu,pcie.link.gen.current,pcie.link.width.current \
-  --format=csv
+sudo k3s certificate check --output table 2>/dev/null || \
+  for c in /var/lib/rancher/k3s/server/tls/*.crt; do printf '%-60s %s\n' "$c" "$(openssl x509 -enddate -noout -in "$c" | cut -d= -f2)"; done
+sudo k3s certificate rotate && sudo systemctl restart k3s       # planned rotation
 ```
-*If all GPUs run at 1,980 MHz but GPU 4 is stuck at 1,200 MHz, GPU 4 is your straggler.*
+
+Then re-fetch kubeconfigs (01 Ansible `05-k3s.yml`) and re-issue `make-user.sh` certs.
+
+### 3.4 Pod network partition
+
+Symptoms: pods Running, same-node traffic OK, cross-node traffic fails (2 Sparks), or everything fails after a reboot.
+
+```bash
+ip -d link show flannel.1; cat /run/flannel/subnet.env
+sudo iptables -S FORWARD | head; sysctl net.ipv4.ip_forward
+sudo tcpdump -ni enp1s0f1np1 udp port 8472 -c 5
+```
+
+Usual causes: `ip_forward=0` after a hardening change, ufw blocking 8472/udp, MTU mismatch, flannel bound to the wrong interface (Vol 06).
+
+### 3.5 DNS
+
+Try by IP, then by name (Vol 08 §5.5). CoreDNS replicas, `coredns-custom` syntax errors (`kubectl -n kube-system logs deploy/coredns`), upstream loops.
+
+### 3.6 Node NotReady
+
+```bash
+kubectl describe node spark-01 | sed -n '/Conditions/,/Addresses/p'
+sudo journalctl -u k3s | grep -iE 'PLEG|not ready|runtime' | tail
+sudo k3s crictl info | jq '.status.conditions'
+```
+
+`PLEG is not healthy` means containerd is slow or stuck. Often it's disk I/O saturation, or thousands of dead containers (`sudo k3s crictl rm $(sudo k3s crictl ps -a -q --state exited)`).
+
+### 3.7 Unified-memory pressure (the Spark-specific one)
+
+| Signal | Where |
+|---|---|
+| `SparkUMAPressure`, `SparkNodeMemoryPressureCondition` alerts | Alertmanager |
+| `MemAvailable` low, `Cached` high | `scripts/uma-watch.sh`, Grafana UMA row |
+| CUDA OOM in serving logs while pods are under their limits | `kubectl logs deploy/vllm` |
+| `Evicted` events | `kubectl get events -A --field-selector reason=Evicted` |
+
+Order of actions: (1) stop or scale down preemptible and batch work, (2) drop page cache (`sync; echo 3 > /proc/sys/vm/drop_caches`, or 01 Ansible `24-uma-relief.yml`), (3) lower engine memory fractions, (4) revisit the capacity plan (Vol 15 §3.3). Drill: BF-15.
+
+### 3.8 GPU errors (Xid)
+
+```bash
+sudo dmesg -T | grep -iE 'NVRM: Xid' | tail
+nvidia-smi -q | sed -n '/Clocks Event Reasons/,/Sync Boost/p'
+```
+
+| Xid | Meaning | Usually | Action |
+|---|---|---|---|
+| 13 | Graphics engine exception | application bug (bad kernel, OOB access) | fix the app. Node OK |
+| 31 | GPU memory page fault | application (illegal address) | fix the app. Run compute-sanitizer (module 07) |
+| 43 | GPU stopped processing | app fault or driver | restart the pod. If it recurs without app changes → driver |
+| 45 | preemptive cleanup | follows other errors / killed contexts | look at the *preceding* Xid |
+| 48 / 94 / 95 | ECC errors (contained/uncontained) | hardware memory | drain. Reboot if uncontained. Repeated → RMA |
+| 62 / 109 | internal micro-controller / context-switch timeout | driver/firmware, occasionally app | collect `nvidia-bug-report.sh`, update DGX OS |
+| 79 | GPU has fallen off the bus | hardware/power/thermal | drain + power cycle. Repeated → RMA |
+| 119 / 120 | GSP RPC timeout / GSP error | firmware/driver | reboot. Update DGX OS. Report |
+| 74 | NVLink error | not applicable to GB10 (no external NVLink) | — |
+
+Drain procedure: 01 Ansible `playbooks/21-emergency-drain.yml` (cordon → capture → stop → reboot → validate → return).
+
+### 3.9 Stragglers and hangs (distributed jobs)
+
+From Vol 17 §5.4: all ranks stuck in a collective means find the absent rank. Per-rank step-time spread above ~10 % means a straggler. Check that rank's node for throttling (`nvidia-smi -q -d PERFORMANCE`), its NIC counters (Vol 18) and its data loader (CPU throttling, Vol 12).
+
+### 3.10 Serving SLO breaches
+
+| Symptom | Metric | Cause |
+|---|---|---|
+| TTFT p95 up, queue up | `vllm:num_requests_waiting` | load > capacity. Scale, or lower `max-num-seqs` to protect latency |
+| TPOT up | `spark:vllm_tpot_p95_seconds` | GPU contention (other slices busy), thermal throttling |
+| KV cache ~100 %, preemptions | `vllm:gpu_cache_usage_perc` | context lengths grew. Raise utilisation or lower `max-model-len` |
+| 5xx at ingress | Traefik metrics | readiness flaps, timeouts (Vol 09) |
 
 ---
 
-## 8. Container Exit Codes Diagnostic Reference
+## 4. The drill catalogue
 
-When a Pod terminates unexpectedly, its exit code reveals the exact cause of death:
+| # | Scenario | Layer | Inject | Primary diagnosis |
+|---|---|---|---|---|
+| 01 | quota: only some replicas | scheduling/admission | `breakfix.sh inject 01` | RS events |
+| 02 | GPU slices exhausted | scheduling | 02 | pod events + node allocated |
+| 03 | image pull failure | runtime | 03 | pod events |
+| 04 | OOMKilled | runtime | 04 | lastState + memory.events |
+| 05 | liveness kills slow model | runtime | 05 | probe events |
+| 06 | NetworkPolicy blocks ingress | network | 06 | netpol list, curl from ingress ns |
+| 07 | cluster DNS down | DNS | 07 | IP vs name test |
+| 08 | Service with no endpoints | network | 08 | EndpointSlice |
+| 09 | streaming buffered | ingress | 09 | TTFB ≈ total |
+| 10 | GPU leak without request | GPU runtime | 10 | runtime + env |
+| 11 | drain blocked by PDB | ops | 11 | `get pdb` |
+| 12 | PVC stuck Pending | storage | 12 | PVC events |
+| 13 | node tainted NoSchedule | scheduling | 13 | node taints |
+| 14 | deployment creates no pods | admission | 14 | RS events (CEL) |
+| 15 | UMA pressure (risky) | node/GPU | 15 | node conditions, evictions |
 
-| Exit Code | Signal Name | Meaning & Infrastructure Diagnosis |
-| :--- | :--- | :--- |
-| **0** | `SUCCESS` | Normal termination. Workload completed cleanly (expected for Jobs). |
-| **1** | `SIGHUP / General` | Application-level exception (e.g. unhandled Python syntax error or missing file). |
-| **137** | `SIGKILL` ($128 + 9$) | **OOMKilled**: Process exceeded container memory limit (`memory.max`) or host ran out of RAM. |
-| **139** | `SIGSEGV` ($128 + 11$)| **Segmentation Fault**: Application tried to read/write invalid CPU/GPU memory. |
-| **143** | `SIGTERM` ($128 + 15$)| **Graceful Termination**: Kubernetes sent a stop signal (e.g. node drain or scaling down). |
-
----
-
-## 9. Hands-On Fault Injection & Recovery Labs
-
-### Lab 1: Simulate and Recover from an OOMKilled Event
-1. Launch a container that purposely allocates 500MB with a 100MB limit:
-   ```yaml
-   apiVersion: v1
-   kind: Pod
-   metadata:
-     name: test-oom-crash
-     namespace: default
-   spec:
-     restartPolicy: Never
-     containers:
-       - name: eater
-         image: python:3.10-slim
-         command: ["python3", "-c", "x = '0' * (500 * 1024 * 1024)"]
-         resources:
-           limits:
-             memory: "100Mi"
-   ```
-2. Apply and observe the immediate exit code `137`:
-   ```bash
-   kubectl apply -f test-oom-crash.yaml
-   kubectl get pod test-oom-crash
-   kubectl describe pod test-oom-crash | grep -E "Reason|Exit Code"
-   ```
-3. Clean up:
-   ```bash
-   kubectl delete pod test-oom-crash
-   ```
+How to drill properly: have someone else inject (or pick a random number), **time yourself**, write down the first command that showed the cause, then `answer` to compare. Reset with `scripts/breakfix.sh reset all`.
 
 ---
 
-Proceed to [**20-hands-on-practice-exercises-workbook.md**](20-hands-on-practice-exercises-workbook.md) for 20 hands-on practice challenges and mastery exercises.
+## 5. Lab
+
+```bash
+scripts/breakfix.sh list
+n=$(printf '%02d' $(( (RANDOM % 14) + 1 ))); echo "drill $n"; scripts/breakfix.sh inject "$n"
+# … diagnose using §1 and §3 only …
+scripts/breakfix.sh hint "$n"; scripts/breakfix.sh answer "$n"; scripts/breakfix.sh reset "$n"
+scripts/collect-diag.sh && tar tzf diag-*.tar.gz | head
+```
+
+---
+
+## 6. Verify
+
+| Check | Expected |
+|---|---|
+| `collect-diag.sh` | tarball with nodes, events, quotas, admission, per-namespace describes/logs, meminfo, nvidia-smi, filtered dmesg |
+| 5 drills done | each fixed within 10 min, first diagnostic command recorded |
+| `breakfix.sh reset all` then `verify.sh` | all PASS |
+
+---
+
+## 7. Anti-patterns
+
+| Don't | Because | Instead |
+|---|---|---|
+| restart k3s / reboot as step 1 | destroys evidence (previous logs, dmesg, stuck state) | `collect-diag.sh` first |
+| `kubectl delete pod` in a loop | the controller recreates the same broken pod | read events/lastState, fix the spec |
+| raise every limit "to be safe" | hides leaks and breaks the UMA budget | measure, then size (Vol 12) |
+| disable NetworkPolicies / admission to "test" | you'll forget to re-enable them | server-side dry-run tests, targeted exceptions |
+
+---
+
+## 8. Scale-out path
+
+At scale, the same runbooks get automated. Node-problem-detector sets conditions, a remediation controller cordons and drains, DCGM diagnostics gate re-admission, and alerts link straight to runbooks. The `runbook` annotation on each lab alert points here.
+
+---
+
+## 9. Checklist
+
+- [ ] I can walk the triage tree from any symptom to the right layer in under two minutes.
+- [ ] I know the Spark-specific failure (UMA pressure) and its order of actions.
+- [ ] I can read an Xid and decide app vs node vs hardware.
+- [ ] I've done at least five drills and recorded my times.

@@ -16,7 +16,7 @@ spec:
           labels: {severity: warning}
           annotations:
             summary: "{{ $labels.node }}: <10 % unified memory available"
-            runbook: "02 Kubernetes/19-cluster-diagnostics-and-failure-scenarios.md#uma"
+            runbook: "https://github.com/cloudone365/technical-depth/blob/main/02%20Kubernetes/19-cluster-diagnostics-and-failure-scenarios.md#37-unified-memory-pressure-the-spark-specific-one"
         - alert: SparkNodeMemoryPressureCondition
           expr: kube_node_status_condition{condition="MemoryPressure",status="true"} == 1
           for: 1m
@@ -48,7 +48,8 @@ spec:
           annotations:
             summary: "vLLM has >32 requests waiting — saturated KV cache or GPU"
         - alert: VLLMKVCacheFull
-          expr: max by (namespace, pod) (vllm:gpu_cache_usage_perc) > 0.95
+          # vllm:kv_cache_usage_perc (current) or vllm:gpu_cache_usage_perc (older releases)
+          expr: max by (namespace, pod) (vllm:kv_cache_usage_perc or vllm:gpu_cache_usage_perc) > 0.95
           for: 5m
           labels: {severity: warning}
           annotations:
@@ -56,7 +57,8 @@ spec:
         - record: spark:vllm_ttft_p95_seconds
           expr: histogram_quantile(0.95, sum by (le, namespace) (rate(vllm:time_to_first_token_seconds_bucket[5m])))
         - record: spark:vllm_tpot_p95_seconds
-          expr: histogram_quantile(0.95, sum by (le, namespace) (rate(vllm:time_per_output_token_seconds_bucket[5m])))
+          # inter_token_latency (current name) or time_per_output_token (older releases)
+          expr: histogram_quantile(0.95, sum by (le, namespace) (rate(vllm:inter_token_latency_seconds_bucket[5m]) or rate(vllm:time_per_output_token_seconds_bucket[5m])))
     - name: spark-control-plane
       rules:
         - alert: EtcdSlowFsync
