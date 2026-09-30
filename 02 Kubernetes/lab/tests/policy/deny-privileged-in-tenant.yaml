@@ -1,0 +1,11 @@
+# expect: deny
+# Pod Security Admission 'restricted' on tenant namespaces
+apiVersion: v1
+kind: Pod
+metadata: {name: pt-priv, namespace: tenant-beta}
+spec:
+  containers:
+    - name: c
+      image: registry.k8s.io/pause:3.10
+      securityContext: {privileged: true}
+      resources: {limits: {cpu: 50m, memory: 32Mi}}

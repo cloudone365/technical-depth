@@ -1,0 +1,18 @@
+# One benchmark run on one time-slice: the baseline for Volume 14's contention lab.
+apiVersion: batch/v1
+kind: Job
+metadata: {name: gemm-solo, namespace: lab-tools}
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: bench
+          image: nvcr.io/nvidia/pytorch:25.09-py3
+          command: ["python3", "/bench/gemm_bench.py"]
+          resources: {limits: {nvidia.com/gpu: "1", memory: 8Gi}, requests: {cpu: "1", memory: 4Gi}}
+          volumeMounts: [{name: bench, mountPath: /bench}]
+      volumes:
+        - name: bench
+          configMap: {name: gemm-bench}

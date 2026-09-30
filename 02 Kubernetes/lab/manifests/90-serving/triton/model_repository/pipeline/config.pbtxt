@@ -1,0 +1,16 @@
+# Ensemble: TEXT -> preprocess -> scorer -> SCORE, one request from the client
+name: "pipeline"
+platform: "ensemble"
+max_batch_size: 64
+input [ { name: "TEXT", data_type: TYPE_STRING, dims: [ 1 ] } ]
+output [ { name: "SCORE", data_type: TYPE_FP32, dims: [ 1 ] } ]
+ensemble_scheduling {
+  step [
+    { model_name: "preprocess" model_version: -1
+      input_map { key: "TEXT" value: "TEXT" }
+      output_map { key: "IDS" value: "ids" } },
+    { model_name: "scorer" model_version: -1
+      input_map { key: "IDS" value: "ids" }
+      output_map { key: "SCORE" value: "SCORE" } }
+  ]
+}

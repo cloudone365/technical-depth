@@ -1,0 +1,12 @@
+# expect: allow
+# digest-pinned image passes
+apiVersion: v1
+kind: Pod
+metadata: {name: pt-allow-digest-image, namespace: tenant-beta}
+spec:
+  securityContext: {runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}}
+  containers:
+    - name: c
+      image: registry.k8s.io/pause@sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a
+      securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+      resources: {limits: {cpu: 50m, memory: 32Mi}}

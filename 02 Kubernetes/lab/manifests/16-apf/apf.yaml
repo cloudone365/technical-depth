@@ -1,0 +1,41 @@
+# API Priority & Fairness (Volume 02): tenant tooling that hammers LIST
+# (dashboards, `kubectl get pods -A -w` loops, badly written operators) gets a
+# small, fair-queued share so it can never starve the kubelet or controllers.
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: PriorityLevelConfiguration
+metadata:
+  name: spark-tenants
+spec:
+  type: Limited
+  limited:
+    nominalConcurrencyShares: 10          # vs workload-low 100, global-default 20
+    lendablePercent: 0
+    limitResponse:
+      type: Queue
+      queuing:
+        queues: 16
+        handSize: 4
+        queueLengthLimit: 50
+---
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: FlowSchema
+metadata:
+  name: spark-tenants
+spec:
+  priorityLevelConfiguration:
+    name: spark-tenants
+  matchingPrecedence: 900                 # before global-default (9900)
+  distinguisherMethod:
+    type: ByUser                          # fairness between users, not namespaces
+  rules:
+    - subjects:
+        - kind: Group
+          group: {name: team-alpha}
+        - kind: Group
+          group: {name: team-beta}
+      resourceRules:
+        - verbs: ["*"]
+          apiGroups: ["*"]
+          resources: ["*"]
+          namespaces: ["*"]
+          clusterScope: true

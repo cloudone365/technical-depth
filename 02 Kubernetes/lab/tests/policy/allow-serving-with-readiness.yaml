@@ -1,0 +1,15 @@
+# expect: allow
+# serving Deployment with a readinessProbe and pinned image
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: pt-ready, namespace: llm-serving}
+spec:
+  selector: {matchLabels: {app: pt}}
+  template:
+    metadata: {labels: {app: pt}}
+    spec:
+      containers:
+        - name: c
+          image: registry.k8s.io/pause:3.10
+          readinessProbe: {tcpSocket: {port: 8080}}
+          resources: {limits: {memory: 32Mi}}

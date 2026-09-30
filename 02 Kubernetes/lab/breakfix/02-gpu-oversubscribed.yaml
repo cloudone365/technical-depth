@@ -1,0 +1,15 @@
+# BF-02: 6 pods × 1 GPU slice on a node that advertises 4.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: bf02-gpu, namespace: lab-tools, labels: {breakfix: "02"}}
+spec:
+  replicas: 6
+  selector: {matchLabels: {app: bf02}}
+  template:
+    metadata: {labels: {app: bf02}}
+    spec:
+      containers:
+        - name: app
+          image: nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04
+          command: ["sleep", "infinity"]
+          resources: {limits: {nvidia.com/gpu: "1", memory: 64Mi}, requests: {cpu: 10m}}

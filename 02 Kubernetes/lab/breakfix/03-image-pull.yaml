@@ -1,0 +1,9 @@
+# BF-03: a tag that does not exist.
+apiVersion: v1
+kind: Pod
+metadata: {name: bf03-pull, namespace: lab-tools, labels: {breakfix: "03"}}
+spec:
+  containers:
+    - name: app
+      image: nvcr.io/nvidia/cuda:99.9-base-ubuntu24.04
+      resources: {limits: {memory: 64Mi}}

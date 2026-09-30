@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: [gemm-bench.yaml]          # gpu-smoke.yaml and gemm-solo.yaml are one-off runs
+configMapGenerator:
+  - name: gemm-bench
+    namespace: lab-tools
+    files: [gemm_bench.py]
+generatorOptions:
+  disableNameSuffixHash: true

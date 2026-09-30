@@ -1,0 +1,12 @@
+# expect: deny
+# VAP spark-no-latest-tag
+apiVersion: v1
+kind: Pod
+metadata: {name: pt-deny-latest-tag, namespace: tenant-beta}
+spec:
+  securityContext: {runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}}
+  containers:
+    - name: c
+      image: registry.k8s.io/pause:latest
+      securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+      resources: {limits: {cpu: 50m, memory: 32Mi}}

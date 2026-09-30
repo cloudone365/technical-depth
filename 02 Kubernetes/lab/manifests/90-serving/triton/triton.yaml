@@ -1,0 +1,95 @@
+# Triton with an ensemble pipeline (Volume 22). Model files come from
+# ConfigMaps (kustomize) and are laid out into a repository by an init container.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: triton, namespace: llm-serving, labels: {app: triton}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: triton}}
+  template:
+    metadata: {labels: {app: triton}}
+    spec:
+      priorityClassName: spark-serving
+      initContainers:
+        - name: layout
+          image: python:3.12-slim
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              for m in preprocess scorer pipeline; do mkdir -p /repo/$m/1; done
+              cp /cm/preprocess/config.pbtxt /repo/preprocess/ && cp /cm/preprocess/model.py /repo/preprocess/1/
+              cp /cm/scorer/config.pbtxt /repo/scorer/ && cp /cm/scorer/model.py /repo/scorer/1/
+              cp /cm/pipeline/config.pbtxt /repo/pipeline/
+              find /repo -type f
+          volumeMounts:
+            - {name: repo, mountPath: /repo}
+            - {name: cm-preprocess, mountPath: /cm/preprocess}
+            - {name: cm-scorer, mountPath: /cm/scorer}
+            - {name: cm-pipeline, mountPath: /cm/pipeline}
+          resources: {limits: {memory: 64Mi}}
+      containers:
+        - name: triton
+          image: nvcr.io/nvidia/tritonserver:25.09-pyt-python-py3   # includes PyTorch for the python backend
+          args: ["tritonserver", "--model-repository=/repo", "--strict-model-config=false",
+                 "--log-verbose=0", "--metrics-port=8002"]
+          ports:
+            - {name: http, containerPort: 8000}
+            - {name: grpc, containerPort: 8001}
+            - {name: metrics, containerPort: 8002}
+          startupProbe: {httpGet: {path: /v2/health/ready, port: http}, periodSeconds: 5, failureThreshold: 60}
+          readinessProbe: {httpGet: {path: /v2/health/ready, port: http}, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /v2/health/live, port: http}, periodSeconds: 15}
+          resources:
+            requests: {cpu: "2", memory: 4Gi, nvidia.com/gpu: "1"}
+            limits: {memory: 16Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: repo, mountPath: /repo}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - name: repo
+          emptyDir: {}
+        - name: shm
+          emptyDir: {medium: Memory, sizeLimit: 2Gi}
+        - name: cm-preprocess
+          configMap: {name: triton-preprocess}
+        - name: cm-scorer
+          configMap: {name: triton-scorer}
+        - name: cm-pipeline
+          configMap: {name: triton-pipeline}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: triton, namespace: llm-serving, labels: {app: triton}}
+spec:
+  selector: {app: triton}
+  ports:
+    - {name: http, port: 8000, targetPort: http}
+    - {name: grpc, port: 8001, targetPort: grpc, appProtocol: kubernetes.io/h2c}
+    - {name: metrics, port: 8002, targetPort: metrics}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata: {name: triton, namespace: llm-serving, labels: {release: kps}}
+spec:
+  selector: {matchLabels: {app: triton}}
+  endpoints: [{port: metrics, interval: 15s}]
+---
+# Load generator (Volume 22 lab): perf_analyzer from the SDK image
+apiVersion: batch/v1
+kind: Job
+metadata: {name: triton-perf, namespace: llm-serving}
+spec:
+  suspend: true                        # kubectl patch job triton-perf -p '{"spec":{"suspend":false}}'
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: perf
+          image: nvcr.io/nvidia/tritonserver:25.09-py3-sdk
+          command: ["perf_analyzer"]
+          args: ["-m", "pipeline", "-u", "triton:8001", "-i", "grpc",
+                 "--string-data", "unified memory makes the dgx spark simple",
+                 "--concurrency-range", "1:32:2", "-b", "1"]
+          resources: {requests: {cpu: "2", memory: 1Gi}, limits: {memory: 2Gi}}

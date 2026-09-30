@@ -1,0 +1,12 @@
+# expect: deny
+# LimitRange max 6Gi / quota 6Gi
+apiVersion: v1
+kind: Pod
+metadata: {name: pt-deny-over-quota-memory, namespace: tenant-alpha}
+spec:
+  securityContext: {runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}}
+  containers:
+    - name: c
+      image: registry.k8s.io/pause:3.10
+      securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+      resources: {limits: {cpu: 500m, memory: 7Gi}}

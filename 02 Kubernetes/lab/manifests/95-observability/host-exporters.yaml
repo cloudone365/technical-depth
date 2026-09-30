@@ -1,0 +1,44 @@
+# Scrape exporters that run on the Spark host, outside Kubernetes (Volume 16):
+#   :9100  prometheus-node-exporter + textfile GPU/UMA/CX-7 metrics (01 Ansible Vol 09)
+#   :9400  dcgm-exporter, only if enabled (see addons/dcgm-exporter-values.md)
+# A selector-less Service + EndpointSlice points at the node IPs.
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-host-exporters
+  namespace: observability
+  labels: {app: spark-host-exporters}
+spec:
+  clusterIP: None
+  ports:
+    - {name: node, port: 9100}
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: spark-host-exporters-1
+  namespace: observability
+  labels:
+    kubernetes.io/service-name: spark-host-exporters
+addressType: IPv4
+ports:
+  - {name: node, port: 9100, protocol: TCP}
+endpoints:
+  - addresses: ["10.10.10.11"]
+    nodeName: spark-01
+  # - addresses: ["10.10.10.12"]      # uncomment when spark-02 joins
+  #   nodeName: spark-02
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: spark-host-exporters
+  namespace: observability
+  labels: {release: kps}
+spec:
+  selector: {matchLabels: {app: spark-host-exporters}}
+  endpoints:
+    - port: node
+      interval: 15s
+      relabelings:
+        - {sourceLabels: [__meta_kubernetes_endpoint_node_name], targetLabel: node}

@@ -1,0 +1,86 @@
+# CI for "02 Kubernetes/lab" — see 02 Kubernetes/20-hands-on-practice-exercises-workbook.md §0
+name: k8s-lab
+
+on:
+  pull_request:
+    paths: ["02 Kubernetes/lab/**", ".github/workflows/k8s-lab-ci.yml"]
+  push:
+    branches: [main]
+    paths: ["02 Kubernetes/lab/**"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: "02 Kubernetes/lab"
+
+env:
+  KUBECONFORM: v0.6.7
+  PROMETHEUS: "3.4.1"
+
+jobs:
+  static:
+    name: lint · kubeconform · promtool · python · shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - uses: azure/setup-kubectl@v4
+        with: {version: v1.32.5}
+      - name: Tools
+        run: |
+          pip install yamllint shellcheck-py pyyaml
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM}/kubeconform-linux-amd64.tar.gz" | sudo tar xz -C /usr/local/bin kubeconform
+          curl -sSL "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS}/prometheus-${PROMETHEUS}.linux-amd64.tar.gz" \
+            | sudo tar xz -C /usr/local/bin --strip-components=1 "prometheus-${PROMETHEUS}.linux-amd64/promtool"
+      - run: tests/run-local-checks.sh
+
+  kind:
+    name: apply + admission + Kueue gang on kind (fake GPUs)
+    needs: static
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: spark-sim
+          node_image: kindest/node:v1.32.2
+      - name: Tools
+        run: |
+          pip install yamllint shellcheck-py pyyaml
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM}/kubeconform-linux-amd64.tar.gz" | sudo tar xz -C /usr/local/bin kubeconform
+          curl -sSL "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS}/prometheus-${PROMETHEUS}.linux-amd64.tar.gz" \
+            | sudo tar xz -C /usr/local/bin --strip-components=1 "prometheus-${PROMETHEUS}.linux-amd64/promtool"
+      - name: Pretend the kind node is a DGX Spark
+        run: tests/fake-gpu-node.sh
+      - name: CRDs the lab expects (no controllers except Kueue)
+        run: |
+          source versions.env
+          kubectl apply --server-side -f "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml"
+          kubectl apply --server-side -f "https://github.com/prometheus-operator/prometheus-operator/releases/download/v0.81.0/stripped-down-crds.yaml"
+          kubectl apply --server-side -f "https://github.com/kedacore/keda/releases/download/${KEDA_VERSION}/keda-${KEDA_VERSION#v}-crds.yaml"
+          for c in traefik.io_middlewares traefik.io_ingressroutes; do
+            kubectl apply --server-side -f "https://raw.githubusercontent.com/traefik/traefik-helm-chart/v${TRAEFIK_CHART_VERSION}/traefik/crds/${c}.yaml"
+          done
+          kubectl apply --server-side -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
+          kubectl -n kueue-system rollout status deploy/kueue-controller-manager --timeout=5m
+      - name: Apply lab + tenancy/admission checks
+        run: API=1 tests/run-local-checks.sh
+      - name: Workloads actually run (CPU-only parts)
+        run: |
+          kubectl -n llm-serving rollout status deploy/mock-llm --timeout=3m
+          kubectl -n lab-tools rollout status deploy/echo --timeout=3m
+          # from inside llm-serving (the namespace's NetworkPolicy admits same-namespace pods)
+          kubectl -n llm-serving exec deploy/mock-llm-canary -- python3 -c \
+            "import urllib.request; print(urllib.request.urlopen('http://mock-llm:8000/v1/models').read().decode())"
+          kubectl -n lab-tools exec deploy/netshoot -- dig +short echo-headless.lab-tools.svc.cluster.local | wc -l | grep -q 3
+      - name: Kueue gang admission
+        run: tests/kueue-gang-test.sh
+      - name: Diagnostics on failure
+        if: failure()
+        run: scripts/collect-diag.sh && ls -la diag-*.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with: {name: diag, path: "02 Kubernetes/lab/diag-*.tar.gz"}

@@ -1,0 +1,23 @@
+# BF-09: a response-buffering middleware turns token streaming into one big blob.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata: {name: bf09-buffer, namespace: llm-serving, labels: {breakfix: "09"}}
+spec:
+  buffering:
+    maxResponseBodyBytes: 10485760
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bf09
+  namespace: llm-serving
+  labels: {breakfix: "09"}
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: llm-serving-bf09-buffer@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: bf09.lab.local
+      http:
+        paths:
+          - {path: /, pathType: Prefix, backend: {service: {name: mock-llm, port: {number: 8000}}}}

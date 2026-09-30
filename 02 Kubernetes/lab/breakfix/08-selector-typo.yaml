@@ -1,0 +1,18 @@
+# BF-08: Service selector does not match the pods → no endpoints → 503.
+apiVersion: v1
+kind: Service
+metadata: {name: bf08-api, namespace: llm-serving, labels: {breakfix: "08"}}
+spec:
+  selector: {app: mock-lm}
+  ports: [{name: http, port: 8000, targetPort: 8000}]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: {name: bf08, namespace: llm-serving, labels: {breakfix: "08"}}
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: bf08.lab.local
+      http:
+        paths:
+          - {path: /, pathType: Prefix, backend: {service: {name: bf08-api, port: {number: 8000}}}}

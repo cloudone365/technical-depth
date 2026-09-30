@@ -1,0 +1,28 @@
+# StorageClasses on top of k3s's bundled local-path provisioner (Volume 11).
+#
+# The DGX Spark has ONE NVMe (the 4 TB M.2 that also holds /). k3s is told
+# (k3s/20-k8s-lab.yaml) to root local-path volumes at /data/k8s; these classes
+# add readable directory names and two reclaim policies:
+#   local-nvme          scratch, caches, Prometheus      → Delete
+#   local-nvme-retain   model weights, vector DB data    → Retain (survives PVC delete)
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-nvme
+provisioner: rancher.io/local-path
+parameters:
+  nodePath: /data/k8s
+  pathPattern: "{{ .PVC.Namespace }}/{{ .PVC.Name }}"
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-nvme-retain
+provisioner: rancher.io/local-path
+parameters:
+  nodePath: /data/k8s
+  pathPattern: "retain/{{ .PVC.Namespace }}/{{ .PVC.Name }}"
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain

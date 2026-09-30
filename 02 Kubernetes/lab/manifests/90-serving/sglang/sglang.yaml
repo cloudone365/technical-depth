@@ -1,0 +1,49 @@
+# SGLang with RadixAttention prefix caching (Volume 23). The `spark` tag is
+# the arm64/sm_121 build published for DGX Spark — re-check tags before use.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: sglang, namespace: llm-serving, labels: {app: sglang}}
+spec:
+  replicas: 0                          # scale to 1 when vLLM is scaled to 0 (UMA budget)
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: sglang}}
+  template:
+    metadata: {labels: {app: sglang}}
+    spec:
+      priorityClassName: spark-serving
+      containers:
+        - name: sglang
+          image: lmsysorg/sglang:spark
+          command: ["python3", "-m", "sglang.launch_server"]
+          args:
+            - "--model-path=Qwen/Qwen2.5-0.5B-Instruct"
+            - "--served-model-name=qwen2.5-0.5b"
+            - "--host=0.0.0.0"
+            - "--port=30000"
+            - "--mem-fraction-static=0.30"
+            - "--enable-metrics"
+          env:
+            - {name: HF_HOME, value: /models/hf}
+            - name: HF_TOKEN
+              valueFrom: {secretKeyRef: {name: hf-token, key: token}}
+          ports: [{name: http, containerPort: 30000}]
+          startupProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, failureThreshold: 180}
+          readinessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 5}
+          resources:
+            requests: {cpu: "4", memory: 16Gi, nvidia.com/gpu: "1"}
+            limits: {memory: 48Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: models, mountPath: /models}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - name: models
+          persistentVolumeClaim: {claimName: model-cache}
+        - name: shm
+          emptyDir: {medium: Memory, sizeLimit: 8Gi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: sglang, namespace: llm-serving, labels: {app: sglang}}
+spec:
+  selector: {app: sglang}
+  ports: [{name: http, port: 30000, targetPort: http}]

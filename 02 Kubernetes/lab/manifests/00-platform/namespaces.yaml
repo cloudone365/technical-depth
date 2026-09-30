@@ -1,0 +1,48 @@
+# Lab namespace layout (Volume 12, 15). Labels drive admission policies,
+# NetworkPolicies and Pod Security Admission.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-alpha
+  labels:
+    spark.lab/tenant: "true"
+    spark.lab/team: alpha                  # training / notebooks
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-beta
+  labels:
+    spark.lab/tenant: "true"
+    spark.lab/team: beta                   # inference prototyping
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llm-serving
+  labels:
+    spark.lab/tier: serving
+    # NGC serving images run as root and need /dev/shm → baseline, not restricted
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: batch
+  labels:
+    spark.lab/tier: batch                  # Kueue-managed training jobs
+    kueue.x-k8s.io/managed: "true"
+    pod-security.kubernetes.io/enforce: baseline
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lab-tools
+  labels:
+    spark.lab/tier: tools                  # netshoot, fio, probes (privileged)
+    pod-security.kubernetes.io/enforce: privileged

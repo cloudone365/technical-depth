@@ -1,0 +1,24 @@
+# Traefik middlewares for LLM APIs (Volume 09).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata: {name: llm-body-limit, namespace: llm-serving}
+spec:
+  buffering:
+    maxRequestBodyBytes: 33554432      # 32 MiB: long RAG prompts / base64 images, not whole datasets
+    memRequestBodyBytes: 1048576
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata: {name: llm-ratelimit, namespace: llm-serving}
+spec:
+  rateLimit:
+    average: 20                        # requests/s per client IP
+    burst: 40
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata: {name: llm-apikey, namespace: llm-serving}
+spec:
+  basicAuth:
+    secret: llm-api-users              # htpasswd -nbB user pass | kubectl create secret generic ... --from-file=users=/dev/stdin
+    removeHeader: true

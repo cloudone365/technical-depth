@@ -1,0 +1,10 @@
+# Python-backend model on the GPU: ids -> score (embedding + GEMM via PyTorch;
+# the *-pyt-python-py3 image ships torch, other images fall back to CPU)
+name: "scorer"
+backend: "python"
+max_batch_size: 64
+input [ { name: "IDS", data_type: TYPE_INT32, dims: [ 16 ] } ]
+output [ { name: "SCORE", data_type: TYPE_FP32, dims: [ 1 ] } ]
+dynamic_batching { preferred_batch_size: [ 16, 32 ] max_queue_delay_microseconds: 2000 }
+instance_group [ { count: 2, kind: KIND_GPU, gpus: [ 0 ] } ]
+parameters: { key: "EXECUTION_ENV_PATH", value: { string_value: "" } }

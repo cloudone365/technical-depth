@@ -1,0 +1,9 @@
+# Model cache shared by the serving volumes (Volume 11, 21). Retain: deleting
+# the PVC never deletes 60 GB of downloaded weights.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: model-cache, namespace: llm-serving}
+spec:
+  storageClassName: local-nvme-retain
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 500Gi}}

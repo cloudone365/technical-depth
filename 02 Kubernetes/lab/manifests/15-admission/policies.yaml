@@ -1,0 +1,129 @@
+# In-process admission with CEL — no webhook server to run or to time out
+# (Volume 02). admissionregistration.k8s.io/v1 is GA since Kubernetes 1.30.
+#
+# P1  no ':latest' / untagged images in tenant namespaces
+# P2  at most one GPU slice per container (the API server itself already
+#     rejects extended-resource requests != limits)
+# P3  tenants may not set NVIDIA_VISIBLE_DEVICES / NVIDIA_DRIVER_CAPABILITIES
+#     (that would bypass the device plugin when the default runtime is nvidia)
+# P4  serving pods must declare a readinessProbe
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: spark-no-latest-tag
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+  validations:
+    - expression: >-
+        object.spec.containers.all(c,
+          c.image.contains('@sha256:') ||
+          (c.image.split('/')[c.image.split('/').size()-1].contains(':') &&
+           !c.image.endsWith(':latest')))
+      messageExpression: "'image must be pinned to a tag or digest (not :latest): ' + object.spec.containers.map(c, c.image).join(', ')"
+      reason: Invalid
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: spark-gpu-slice-limits
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+  validations:
+    # `?.` / `[?key]` are CEL optional-field accessors: absent → orValue()
+    - expression: >-
+        object.spec.containers.all(c,
+          quantity(c.?resources.?limits[?'nvidia.com/gpu'].orValue('0')).compareTo(quantity('1')) <= 0)
+      message: "tenant containers may request at most 1 nvidia.com/gpu time-slice"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: spark-no-nvidia-env-bypass
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+  validations:
+    - expression: >-
+        object.spec.containers.all(c,
+          !has(c.env) ||
+          c.env.all(e, !(e.name in ['NVIDIA_VISIBLE_DEVICES', 'NVIDIA_DRIVER_CAPABILITIES', 'CUDA_VISIBLE_DEVICES'])))
+      message: "GPU access is granted by requesting nvidia.com/gpu, not by setting NVIDIA_*/CUDA_VISIBLE_DEVICES"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: spark-serving-needs-readiness
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [apps]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [deployments, statefulsets]
+  validations:
+    - expression: "object.spec.template.spec.containers.all(c, has(c.readinessProbe))"
+      message: "serving workloads must define a readinessProbe (the Service must not route to a loading model)"
+---
+# ---- bindings --------------------------------------------------------------
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: spark-no-latest-tag
+spec:
+  policyName: spark-no-latest-tag
+  validationActions: [Deny, Audit]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - {key: kubernetes.io/metadata.name, operator: In, values: [tenant-alpha, tenant-beta, llm-serving, batch]}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: spark-gpu-slice-limits
+spec:
+  policyName: spark-gpu-slice-limits
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels: {spark.lab/tenant: "true"}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: spark-no-nvidia-env-bypass
+spec:
+  policyName: spark-no-nvidia-env-bypass
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels: {spark.lab/tenant: "true"}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: spark-serving-needs-readiness
+spec:
+  policyName: spark-serving-needs-readiness
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels: {spark.lab/tier: serving}

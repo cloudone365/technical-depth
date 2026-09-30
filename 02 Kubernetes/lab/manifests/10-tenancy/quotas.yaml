@@ -1,0 +1,55 @@
+# Budget math for one DGX Spark (Volume 12):
+#   capacity   : 20 cores, 128 GB UMA (≈119.7 GiB visible), ~3.7 TiB NVMe, 1 GB10
+#   5 % tenant : 1 core (1000m), 6 Gi memory, 185 Gi storage, 1 GPU time-slice
+# Remember: on UMA, "memory" is CPU RAM *and* GPU memory. A pod's memory
+# limit caps its CPU-side allocations only — CUDA allocations are NOT charged
+# to the pod cgroup. That is why serving pods also cap themselves with
+# engine flags (e.g. vLLM --gpu-memory-utilization).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: budget-5pct
+  namespace: tenant-alpha
+spec:
+  hard:
+    requests.cpu: "1"
+    limits.cpu: "1"
+    requests.memory: 6Gi
+    limits.memory: 6Gi
+    requests.nvidia.com/gpu: "1"
+    requests.storage: 185Gi
+    persistentvolumeclaims: "5"
+    pods: "10"
+    services.loadbalancers: "0"
+    services.nodeports: "0"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: budget-5pct
+  namespace: tenant-beta
+spec:
+  hard:
+    requests.cpu: "1"
+    limits.cpu: "1"
+    requests.memory: 6Gi
+    limits.memory: 6Gi
+    requests.nvidia.com/gpu: "1"
+    requests.storage: 185Gi
+    persistentvolumeclaims: "5"
+    pods: "10"
+    services.loadbalancers: "0"
+    services.nodeports: "0"
+---
+# Serving gets the lion's share: 8 cores, 96 Gi, 2 of 4 GPU slices.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: serving-budget
+  namespace: llm-serving
+spec:
+  hard:
+    requests.cpu: "8"
+    limits.memory: 96Gi
+    requests.nvidia.com/gpu: "2"
+    requests.storage: 1Ti

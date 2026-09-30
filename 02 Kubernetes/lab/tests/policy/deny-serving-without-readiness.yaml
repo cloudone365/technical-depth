@@ -1,0 +1,14 @@
+# expect: deny
+# VAP spark-serving-needs-readiness
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: pt-noready, namespace: llm-serving}
+spec:
+  selector: {matchLabels: {app: pt}}
+  template:
+    metadata: {labels: {app: pt}}
+    spec:
+      containers:
+        - name: c
+          image: registry.k8s.io/pause:3.10
+          resources: {limits: {memory: 32Mi}}

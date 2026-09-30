@@ -1,0 +1,92 @@
+# vLLM OpenAI-compatible server on one GB10 time-slice (Volume 21).
+#
+# UMA budget: --gpu-memory-utilization is a fraction of the ~119.7 GiB the GPU
+# reports — i.e. of the SAME memory the OS, k3s and every other pod use.
+# 0.30 ≈ 36 GiB (weights + KV cache). Leave ≥ 25 % of the box to the host.
+apiVersion: v1
+kind: Secret
+metadata: {name: hf-token, namespace: llm-serving}
+type: Opaque
+stringData:
+  token: "replace-me"                  # or sync from Vault (01 Ansible Vol 19)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: llm-serving
+  labels: {app: vllm, model: qwen2-5-0-5b}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate                     # a 2nd copy during rollout would double UMA use
+  selector: {matchLabels: {app: vllm}}
+  template:
+    metadata:
+      labels: {app: vllm, model: qwen2-5-0-5b}
+    spec:
+      priorityClassName: spark-serving
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: vllm
+          image: nvcr.io/nvidia/vllm:25.09-py3
+          command: ["vllm", "serve"]
+          args:
+            - "$(MODEL)"
+            - "--served-model-name=$(SERVED_NAME)"
+            - "--host=0.0.0.0"
+            - "--port=8000"
+            - "--gpu-memory-utilization=0.30"
+            - "--max-model-len=8192"
+            - "--max-num-seqs=64"
+            - "--enable-prefix-caching"
+            - "--download-dir=/models/hf"
+          env:
+            - {name: MODEL, value: Qwen/Qwen2.5-0.5B-Instruct}
+            - {name: SERVED_NAME, value: qwen2.5-0.5b}
+            - {name: HF_HOME, value: /models/hf}
+            - name: HF_TOKEN
+              valueFrom: {secretKeyRef: {name: hf-token, key: token}}
+          ports: [{name: http, containerPort: 8000}]
+          startupProbe:                # first start downloads weights: allow 30 min
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 180
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 15
+            failureThreshold: 4
+          resources:
+            requests: {cpu: "4", memory: 16Gi, nvidia.com/gpu: "1"}
+            limits: {memory: 48Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: models, mountPath: /models}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - name: models
+          persistentVolumeClaim: {claimName: model-cache}
+        - name: shm
+          emptyDir: {medium: Memory, sizeLimit: 8Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: llm-serving
+  labels: {app: vllm}
+spec:
+  selector: {app: vllm}
+  ports: [{name: http, port: 8000, targetPort: http}]
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm
+  namespace: llm-serving
+  labels: {release: kps}
+spec:
+  selector: {matchLabels: {app: vllm}}
+  endpoints: [{port: http, path: /metrics, interval: 15s}]

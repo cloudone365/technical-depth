@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: [mock-llm.yaml, middlewares.yaml, ingress.yaml, gateway-routes.yaml]
+configMapGenerator:
+  - name: mock-llm-app
+    namespace: llm-serving
+    files: [mock_llm.py]
+generatorOptions:
+  disableNameSuffixHash: true

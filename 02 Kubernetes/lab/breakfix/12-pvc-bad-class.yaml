@@ -1,0 +1,19 @@
+# BF-12: PVC names a StorageClass that doesn't exist.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: bf12-data, namespace: lab-tools, labels: {breakfix: "12"}}
+spec:
+  storageClassName: fast-nvme
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Gi}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: bf12-pod, namespace: lab-tools, labels: {breakfix: "12"}}
+spec:
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.10
+      resources: {limits: {memory: 32Mi}}
+      volumeMounts: [{name: d, mountPath: /d}]
+  volumes: [{name: d, persistentVolumeClaim: {claimName: bf12-data}}]
