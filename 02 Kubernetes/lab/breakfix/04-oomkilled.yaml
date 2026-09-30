@@ -1,0 +1,11 @@
+# BF-04: allocates 512 MiB inside a 256 MiB limit.
+apiVersion: v1
+kind: Pod
+metadata: {name: bf04-oom, namespace: lab-tools, labels: {breakfix: "04"}}
+spec:
+  restartPolicy: Always
+  containers:
+    - name: hog
+      image: python:3.12-slim
+      command: ["python3", "-c", "b = bytearray(512 * 2**20); import time; time.sleep(3600)"]
+      resources: {requests: {memory: 256Mi, cpu: 10m}, limits: {memory: 256Mi}}

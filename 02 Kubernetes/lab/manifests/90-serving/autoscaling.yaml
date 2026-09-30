@@ -1,0 +1,32 @@
+# Queue-depth autoscaling with KEDA (Volume 21 §8). Scale on what users feel
+# (requests waiting), not on GPU utilisation (a time-sliced GB10 reads ~100 %
+# whenever anything runs). Install KEDA: scripts/install-addons.sh keda
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: {name: mock-llm, namespace: llm-serving}
+spec:
+  scaleTargetRef: {name: mock-llm}
+  minReplicaCount: 1
+  maxReplicaCount: 6
+  cooldownPeriod: 120
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://kps-prometheus.observability.svc:9090
+        # in-flight requests on the Traefik service that fronts mock-llm
+        query: sum(traefik_service_open_connections{exported_service=~"llm-serving-mock-llm-8000@kubernetes"})
+        threshold: "8"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: {name: vllm, namespace: llm-serving}
+spec:
+  scaleTargetRef: {name: vllm}
+  minReplicaCount: 1
+  maxReplicaCount: 1                   # raise to 2 when spark-02 joins
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://kps-prometheus.observability.svc:9090
+        query: sum(vllm:num_requests_waiting{namespace="llm-serving"})
+        threshold: "16"

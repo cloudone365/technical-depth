@@ -1,0 +1,20 @@
+# BF-05: the "model" takes 60 s to load, the liveness probe gives up after ~15 s.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: bf05-slow, namespace: llm-serving, labels: {breakfix: "05"}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: bf05}}
+  template:
+    metadata: {labels: {app: bf05}}
+    spec:
+      containers:
+        - name: api
+          image: python:3.12-slim
+          command: ["python3", "/app/mock_llm.py"]
+          env: [{name: STARTUP_DELAY, value: "60"}]
+          readinessProbe: {httpGet: {path: /health, port: 8000}, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /health, port: 8000}, initialDelaySeconds: 5, periodSeconds: 5, failureThreshold: 2}
+          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 128Mi}}
+          volumeMounts: [{name: app, mountPath: /app}]
+      volumes: [{name: app, configMap: {name: mock-llm-app}}]

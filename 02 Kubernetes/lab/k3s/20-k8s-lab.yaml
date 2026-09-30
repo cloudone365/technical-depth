@@ -1,0 +1,29 @@
+# /etc/rancher/k3s/config.yaml.d/20-k8s-lab.yaml   (Volume 01, 02, 03, 15)
+# Drop-in merged on top of the 01 Ansible lab's /etc/rancher/k3s/config.yaml.
+# Install:  sudo install -D -m 0600 k3s/20-k8s-lab.yaml /etc/rancher/k3s/config.yaml.d/20-k8s-lab.yaml
+#           sudo install -D -m 0600 k3s/audit-policy.yaml /etc/rancher/k3s/audit-policy.yaml
+#           sudo systemctl restart k3s
+#
+# cluster-init switches the datastore from SQLite (kine) to embedded etcd.
+# k3s migrates the existing SQLite data on the first start with this flag.
+cluster-init: true
+etcd-snapshot-schedule-cron: "0 */6 * * *"
+etcd-snapshot-retention: 20
+etcd-expose-metrics: true
+secrets-encryption: true
+kube-apiserver-arg:
+  - "audit-policy-file=/etc/rancher/k3s/audit-policy.yaml"
+  - "audit-log-path=/var/log/k3s/audit.log"
+  - "audit-log-maxage=7"
+  - "audit-log-maxbackup=5"
+  - "audit-log-maxsize=100"
+kube-controller-manager-arg:
+  - "bind-address=0.0.0.0"
+kube-scheduler-arg:
+  - "bind-address=0.0.0.0"
+kube-proxy-arg:
+  - "metrics-bind-address=0.0.0.0:10249"
+  - "conntrack-max-per-core=65536"
+# Put local-path PVs under /data/k8s (same NVMe as /, but one tidy tree that
+# the 'local-nvme' StorageClasses and the backup scripts know about).
+default-local-storage-path: /data/k8s

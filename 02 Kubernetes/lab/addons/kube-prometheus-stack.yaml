@@ -1,0 +1,75 @@
+# Prometheus Operator + Prometheus + Alertmanager + Grafana (Volume 16, 19).
+# Sized for one Spark: 15d retention, 50Gi on local NVMe.
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: kps
+  namespace: kube-system
+spec:
+  repo: https://prometheus-community.github.io/helm-charts
+  chart: kube-prometheus-stack
+  version: "70.4.2"
+  targetNamespace: observability
+  createNamespace: true
+  valuesContent: |-
+    fullnameOverride: kps
+    crds:
+      enabled: true
+    defaultRules:
+      rules:
+        etcd: true
+        kubeProxy: true
+    kubeEtcd:
+      enabled: true
+      endpoints: [10.10.10.11]      # k3s exposes etcd metrics on :2381 with etcd-expose-metrics
+      service:
+        port: 2381
+        targetPort: 2381
+    kubeControllerManager:
+      endpoints: [10.10.10.11]
+      service: {port: 10257, targetPort: 10257}
+      serviceMonitor: {https: true, insecureSkipVerify: true}
+    kubeScheduler:
+      endpoints: [10.10.10.11]
+      service: {port: 10259, targetPort: 10259}
+      serviceMonitor: {https: true, insecureSkipVerify: true}
+    kubeProxy:
+      endpoints: [10.10.10.11]
+    # The 01 Ansible lab already runs prometheus-node-exporter on the host
+    # (:9100, with the GPU/UMA textfile collector). Don't start a second one;
+    # manifests/95-observability/host-exporters.yaml scrapes the existing one.
+    nodeExporter:
+      enabled: false
+    prometheus:
+      prometheusSpec:
+        retention: 15d
+        retentionSize: 40GB
+        # pick up every ServiceMonitor/PodMonitor/Rule labelled release=kps
+        serviceMonitorSelector:
+          matchLabels: {release: kps}
+        podMonitorSelector:
+          matchLabels: {release: kps}
+        ruleSelector:
+          matchLabels: {release: kps}
+        resources:
+          requests: {cpu: 500m, memory: 2Gi}
+          limits: {memory: 6Gi}
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: local-nvme
+              accessModes: [ReadWriteOnce]
+              resources: {requests: {storage: 50Gi}}
+    alertmanager:
+      alertmanagerSpec:
+        resources: {limits: {memory: 256Mi}}
+    grafana:
+      adminPassword: change-me          # replace from Vault (01 Ansible Vol 19)
+      sidecar:
+        dashboards:
+          enabled: true
+          label: grafana_dashboard
+          searchNamespace: ALL
+      service:
+        type: NodePort
+        nodePort: 32000

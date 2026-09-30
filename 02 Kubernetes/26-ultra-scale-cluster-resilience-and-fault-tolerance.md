@@ -1,203 +1,210 @@
-# 26. Ultra-Scale Cluster Resilience & Fault Tolerance (10k–100k Accelerators)
+# Volume 26 — Resilience at Scale, Practised Small: Failure Math, Async Checkpoints, SDC Canaries, Quarantine
 
-When scaling AI clusters from 8 GPUs (a single server) to **16,384–100,000 GPUs** (Meta Llama-3, OpenAI GPT-4, Google Gemini clusters), the laws of statistics transform hardware failures from rare anomalies into an **uninterrupted continuous state of operation**.
+> **Module 02 · Part VII — Hyperscale** · Prev: [25 Accelerators & compilers](25-hyperscaler-silicon-and-compilers.md) · Up: [Module README](README.md)
 
-At this scale, a GPU, optical transceiver, memory module, or power delivery unit fails every **2 to 3 hours**. If a failure requires restarting the entire training job from disk, the cluster will spend 100% of its time restarting and 0% making forward training progress.
-
-This volume covers the engineering mechanisms deployed by hyperscalers to survive continuous hardware failures: **Mean Time Between Failures (MTBF)** economics, **Silent Data Corruption (SDC)** triage, **Sub-Minute Asynchronous Checkpointing**, and **Kubernetes Auto-Healing**.
-
----
-
-## 📑 Table of Contents
-1. [The Math of Cluster MTBF at Scale](#1-the-math-of-cluster-mtbf-at-scale)
-2. [Failure Taxonomy in Ultra-Scale AI Datacenters](#2-failure-taxonomy-in-ultra-scale-ai-datacenters)
-3. [Silent Data Corruption (SDC): The Invisible Training Killer](#3-silent-data-corruption-sdc-the-invisible-training-killer)
-4. [Sub-Minute Asynchronous Checkpointing Architecture](#4-sub-minute-asynchronous-checkpointing-architecture)
-5. [In-Flight Auto-Healing & Hot-Spare Replacement in Kubernetes](#5-in-flight-auto-healing--hot-spare-replacement-in-kubernetes)
-6. [Automated Triage Runbook & Node Quarantine Operator](#6-automated-triage-runbook--node-quarantine-operator)
+| | |
+|---|---|
+| **You will build** | The operating model hyperscalers use to keep 10k–100k-GPU jobs productive, rehearsed on one Spark. You'll have a failure-rate and checkpoint-interval calculator, a training Job that survives pod kills by resuming from **async** distributed checkpoints, a **silent-data-corruption canary** that fails fast, and node quarantine by taint |
+| **Hardware** | spark-01 |
+| **Time** | 75 min |
+| **Risk** | Low |
+| **Lab files** | [`scripts/mtbf_calc.py`](lab/scripts/mtbf_calc.py), [`manifests/80-distributed/resilient/`](lab/manifests/80-distributed/resilient/) (`train_resilient.py`, `resilient-job.yaml`) |
 
 ---
 
-## 1. The Math of Cluster MTBF at Scale
+## 1. Why this matters
 
-Let single-node MTBF be $T_{node}$ (typically ~3 years or ~26,000 hours for enterprise servers).
+At scale, failure is the normal state. With independent failures, cluster MTBF = component MTBF / N:
 
-For a cluster of $N$ nodes operating simultaneously in a synchronized distributed training job (where one failure stalls the entire synchronous collective AllReduce):
+```bash
+cd "02 Kubernetes/lab"
+python3 scripts/mtbf_calc.py --gpus 2      --gpu-mtbf-h 50000
+python3 scripts/mtbf_calc.py --gpus 16384  --ckpt-s 60 --restart-s 600
+python3 scripts/mtbf_calc.py --gpus 100000 --ckpt-s 60 --restart-s 600
+```
 
-$$\text{Cluster MTBF} = \frac{T_{node}}{N}$$
+| GPUs | Cluster MTBF | Interruptions/day | Optimal ckpt interval | Goodput (60 s ckpt) | Goodput (6 s async ckpt) |
+|---|---|---|---|---|---|
+| 2 (your Sparks) | ~25,000 h | ~0 | — | ~100 % | ~100 % |
+| 16,384 | ~3 h | ~8 | ~19 min | ~84 % | ~91 % |
+| 100,000 | ~0.5 h | ~48 | ~8 min | ~41 % | ~59 % |
 
-### The Failure Wall:
-* **Single Node (1 DGX Spark)**: MTBF $\approx 3\text{ years}$ (Failure is rare).
-* **512 Nodes (4,096 GPUs)**: MTBF $\approx \frac{26,000}{512} \approx 50.7\text{ hours}$ (Failure every 2 days).
-* **3,000 Nodes (24,000 GPUs - Meta Llama-3 Cluster)**: MTBF $\approx \frac{26,000}{3,000} \approx 8.6\text{ hours}$ (Failure ~3 times a day).
-* **12,500 Nodes (100,000 GPUs)**: MTBF $\approx \frac{26,000}{12,500} \approx 2.08\text{ hours}$ (Failure every 120 minutes!).
+(The 16k row matches the order of magnitude reported publicly for frontier training runs: several unexpected interruptions per day.) Two levers dominate: **make checkpoints cheap and non-blocking**, and **make recovery fast and automatic**. Both are rehearsed below.
+
+### 1.1 Failure taxonomy (what actually stops big jobs)
+
+| Class | Examples | Detection | Response |
+|---|---|---|---|
+| GPU hardware | ECC/Xid 48/94/95/79, fallen off bus, thermal | dmesg Xid, DCGM | drain, replace, restart job from checkpoint |
+| Network | link flaps, symbol errors, degraded rails | NIC counters, NCCL timeouts | fabric health gate, reroute, drain node |
+| Host / software | kernel panic, OOM, driver hang, filesystem stalls | node NotReady, watchdogs | reboot / reimage, restart job |
+| **Silent data corruption** | a GPU returns wrong numbers without errors | canaries, loss spikes, cross-replica checksums | quarantine the node, roll back to a good checkpoint |
+| Stragglers | throttling, noisy neighbours | per-rank step-time spread | cordon, replace with a hot spare |
+
+---
+
+## 2. Architecture — HLD
+
+```mermaid
+flowchart TB
+  subgraph JOB["Job resilient-train · batch"]
+    direction LR
+    T["train loop<br/>step N"] -->|"every 50 steps"| AS["dcp.async_save<br/>(blocks ~ms, writes in background)"]
+    T -->|"every 25 steps"| CAN{"SDC canary<br/>fixed GEMM checksum<br/>= reference?"}
+    CAN -- no --> X86["exit 86"]
+  end
+  AS --> PVC[("PVC ckpt · local-nvme<br/>step-N/ + COMPLETE marker<br/>keep newest 3")]
+  PVC -->|"on (re)start: newest COMPLETE"| T
+  KILL["pod killed / node drained / OOM"] -->|"Job controller:<br/>backoffLimit 6<br/>DisruptionTarget → Ignore"| JOB
+  X86 -->|"podFailurePolicy: FailJob"| Q["quarantine node<br/>taint spark.lab/sdc=suspect:NoSchedule"]
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef sec fill:#cf222e,stroke:#82071e,color:#fff
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  class T,AS gpu
+  class PVC store
+  class CAN,X86,Q sec
+  class KILL ctrl
+  style JOB fill:#f4fbe8,stroke:#76b900
+```
+
+---
+
+## 3. LLD
+
+| Mechanism | Implementation in the lab | At scale |
+|---|---|---|
+| Checkpoint format | `torch.distributed.checkpoint` (DCP): sharded, reshardable | same (Megatron/FSDP/TorchTitan all use DCP-style) |
+| Non-blocking save | `dcp.async_save` → wait for the previous save before starting the next | + staging to pinned host memory, multi-tier (local NVMe → object store) |
+| Atomicity | `COMPLETE` marker written only after the save finishes. Resume only from marked dirs | same, or manifest/metadata commit |
+| Retention | keep newest 3 complete | tiered: frequent local, sparse remote |
+| Resume | newest `step-*/COMPLETE` on start | + elastic re-sharding when world size changes |
+| Retry policy | `backoffLimit: 6`. `DisruptionTarget` (drain/preemption) **ignored** | job-level restarts without rescheduling (hot spares) |
+| SDC | deterministic FP32 GEMM checksum vs reference, every 25 steps → exit 86 → `FailJob` | per-node burn-in, cross-replica gradient checksums, loss-spike detectors |
+| Quarantine | manual taint (§5.4). The Vol 04 controller pattern can automate it | remediation controllers + DCGM diag before re-admission |
+
+---
+
+## 4. Integrations
+
+- **Storage (Vol 11, module 08)**: checkpoint PVC on `local-nvme`. Watch etcd fsync (Vol 03) while checkpoints write.
+- **Kueue (Vol 05)**: `DisruptionTarget` pods (preempted by Kueue or drained) don't burn retries.
+- **Controllers (Vol 04)**: turn §5.4's manual quarantine into a controller that watches Jobs failing with exit 86.
+- **01 Ansible `node_drain` / `spark_validate`**: the drain → validate → return loop for a quarantined node.
+
+---
+
+## 5. Lab
+
+### 5.1 Start the resilient job
+
+```bash
+kubectl apply -k manifests/80-distributed/resilient
+kubectl -n batch logs -f job/resilient-train
+```
 
 ```text
-The Checkpoint Trap:
-If Checkpoint Save Time (30 mins) + Crash Detection Time (10 mins) + Restart Time (25 mins) = 65 mins
-And Failure occurs every 120 mins:
--> The cluster spends over 54% of its entire lifetime doing zero productive training!
+canary reference recorded: 4ecd9864353a5b02
+step 25 loss … canary 4ecd9864353a5b02 OK
+step 50 checkpoint started (blocking 31 ms)
+…
 ```
 
----
+The **blocking** time is what the training loop pays per checkpoint. With async save it's milliseconds. The write itself continues in the background.
 
-## 2. Failure Taxonomy in Ultra-Scale AI Datacenters
+### 5.2 Kill it mid-run and watch it resume
 
-Data from production 24k+ GPU runs reveals the following breakdown of failure causes:
-
-```mermaid
-pie title Real-World Failure Distribution in Mega-Clusters
-    "Optical Transceivers / Cable Flapping" : 42
-    "GPU Hardware / HBM ECC Uncorrectable" : 28
-    "Host OS / Kernel Panic / NVMe Drive Drops" : 14
-    "Silent Data Corruption (SDC) / Math Flukes" : 9
-    "Cooling / Liquid Leak / Thermal Throttle" : 7
-```
-
-### 1. Optical Network Flapping (42%)
-* In an InfiniBand or RoCEv2 fabric with over 100,000 optical transceivers, thermal cycling causes micro-expansion. An optical link starts dropping packets intermittently without completely dying, causing massive NCCL collective timeouts.
-
-### 2. Uncorrectable HBM ECC Errors (28%)
-* High-Bandwidth Memory (HBM3/HBM3e) runs at extreme thermal density. Multi-bit errors trigger catastrophic hardware interrupts (**NVIDIA Xid 48 / 63**), instantly terminating the CUDA context.
-
----
-
-## 3. Silent Data Corruption (SDC): The Invisible Training Killer
-
-**Silent Data Corruption (SDC)** is the most dangerous failure mode in modern deep learning:
-* **Definition**: A hardware transistor in an ALU or Tensor Core calculates an incorrect mathematical result (e.g., $1 + 1 = 3$), but **no hardware exception, ECC alert, or kernel error is logged**.
-* **Symptoms**:
-  1. The training loss curve suddenly spikes to $\text{NaN}$ or infinity without explanation.
-  2. Gradient norms diverge across distributed workers.
-  3. The model begins generating repetitive garbage tokens weeks later.
-
-### Detection Mechanism: Mathematical Canaries (Heartbeat Probing)
-Every 100 steps, each GPU runs a micro-benchmark on known static tensor weights:
-
-```python
-import torch
-
-def verify_gpu_integrity(device_id: int):
-    """Canary test running on each worker to catch Silent Data Corruption."""
-    # Deterministic static input
-    x = torch.tensor([[1.0, 2.0], [3.0, 4.0]], device=device_id)
-    # Known deterministic GEMM
-    result = torch.matmul(x, x)
-    expected = torch.tensor([[7.0, 10.0], [15.0, 22.0]], device=device_id)
-    
-    if not torch.allclose(result, expected, atol=1e-5):
-        raise RuntimeError(f"CRITICAL: Silent Data Corruption detected on GPU {device_id}!")
-```
-
----
-
-## 4. Sub-Minute Asynchronous Checkpointing Architecture
-
-Traditional checkpointing halts all training workers, serializes weights from GPU VRAM to CPU RAM, and writes them over NFS to a storage array. At 671B parameters (DeepSeek) or 405B parameters (Llama-3), this takes **25 to 45 minutes**.
-
-### Hyperscaler Solution: Non-Blocking Double-Buffered Async Checkpointing
-
-```mermaid
-sequenceDiagram
-    participant GPU as GPU VRAM (Active Training)
-    participant HostRAM as Host Pinned Memory (Staging Buffer)
-    participant Storage as Distributed NVMe Storage (3FS / Ceph)
-
-    Note over GPU: Step 500 Completes
-    GPU->>HostRAM: Fast CUDA DtoH Copy over PCIe/NVLink (Under 4 seconds!)
-    Note over GPU: Step 501 Starts IMMEDIATELY! (Zero Training Stall)
-    HostRAM->>Storage: Async Background Worker writes to NVMe over Fabric (120 seconds)
-```
-
-1. **In-Memory Snapshotting**: Weights and optimizer states are copied from GPU HBM to host pinned memory in $<5\text{ seconds}$ via local high-speed buses.
-2. **Immediate Training Resume**: Training resumes on the next step immediately.
-3. **Background Flush**: A separate CPU thread streams the pinned buffer to distributed parallel storage (**3FS**, **BeeGFS**, or **GPUDirect Storage**) in the background.
-
----
-
-## 5. In-Flight Auto-Healing & Hot-Spare Replacement in Kubernetes
-
-Traditional Kubernetes setups terminate an entire `MPIJob` or `PyTorchJob` when one pod dies. In hyperscaler clusters, **PyTorch Elastic (Torchrun) + Kubernetes Operators** implement **dynamic rank re-assignment**:
-
-```mermaid
-graph TD
-    subgraph ActiveCluster["Active Training Workers (Ranks 0 - 2047)"]
-        W0["Rank 0"]
-        W1["Rank 1"]
-        WFAIL["Rank 2 (FAILED Xid 79)"]
-        W3["Rank 3"]
-    end
-    
-    subgraph SparePool["Pre-Warmed Hot-Spare Pool"]
-        SPARE["Hot-Spare Pod (Node 513)<br/>Pre-loaded Docker Images & Drivers"]
-    end
-
-    WFAIL -->|"1. Health Monitor catches failure"| K8sOp["AI Cluster Health Operator"]
-    K8sOp -->|"2. Cordon & Drain Bad Node"| WFAIL
-    K8sOp -->|"3. Attach Hot-Spare & Trigger In-Memory Rendezvous"| SPARE
-    SPARE -->|"4. Load In-Flight Weights & Resume within 60s"| ActiveCluster
-```
-
-### Torchrun Dynamic Rendezvous Configuration:
 ```bash
-torchrun \
-  --nnodes=256:260 \                     # Min 256 nodes, Max 260 nodes (Elastic!)
-  --nproc_per_node=8 \
-  --rdzv_backend=c10d \
-  --rdzv_endpoint=etcd-cluster:2379 \
-  --rdzv_conf=read_timeout=30 \
-  pretrain.py
+sleep 20; kubectl -n batch delete pod -l job-name=resilient-train --wait=false
+kubectl -n batch get pods -l job-name=resilient-train -w          # a new pod starts (backoffLimit)
+kubectl -n batch logs -f job/resilient-train | grep -E 'RESUMED|DONE'
+ls /data/k8s/batch/ckpt/                                            # on the Spark: newest 3 step-* + canary.json
+```
+
+Expected: `RESUMED from /ckpt/step-100 at step 100` (or whichever was the newest *complete* checkpoint), then `DONE at step 400`. Lost work per failure ≤ one checkpoint interval.
+
+### 5.3 A drain doesn't count as a failure
+
+```bash
+kubectl -n batch delete job resilient-train; kubectl apply -k manifests/80-distributed/resilient
+sleep 30
+kubectl drain spark-01 --ignore-daemonsets --delete-emptydir-data --pod-selector=job-name=resilient-train --timeout=60s
+kubectl -n batch get job resilient-train -o jsonpath='failed={.status.failed} {"\n"}'   # 0: DisruptionTarget ignored
+kubectl uncordon spark-01
+```
+
+### 5.4 Simulate silent data corruption → fail fast → quarantine
+
+Corrupt the stored reference (a stand-in for the GPU computing a different answer):
+
+```bash
+ssh nvidia@10.10.10.11 "echo '{\"sha\": \"deadbeefdeadbeef\"}' | sudo tee /data/k8s/batch/ckpt/canary.json"
+kubectl -n batch delete job resilient-train; kubectl apply -k manifests/80-distributed/resilient
+kubectl -n batch logs -f job/resilient-train | grep -E 'canary|SDC'
+kubectl -n batch get job resilient-train -o jsonpath='{.status.conditions[?(@.type=="Failed")].reason}{"\n"}'   # PodFailurePolicy
+```
+
+Expected: `SDC SUSPECTED` at the first canary, exit 86, and the Job fails **immediately** with reason `PodFailurePolicy`. There are no retries, because retrying on a lying GPU makes things worse. Quarantine the node and record why:
+
+```bash
+kubectl taint node spark-01 spark.lab/sdc=suspect:NoSchedule
+kubectl annotate node spark-01 spark.lab/quarantine-reason="canary mismatch job resilient-train $(date -Is)"
+# after investigation (DCGM diag / vendor) — and restoring the real reference:
+ssh nvidia@10.10.10.11 'sudo rm /data/k8s/batch/ckpt/canary.json'
+kubectl taint node spark-01 spark.lab/sdc-; kubectl annotate node spark-01 spark.lab/quarantine-reason-
+```
+
+With one node, the taint blocks *all* new scheduling. That's what quarantine means, and why large clusters keep **hot spares** so a job restarts instantly on a replacement node.
+
+### 5.5 Size your own checkpoint policy
+
+Measure the blocking time from §5.1 logs and your restart time (pod kill → `RESUMED` line), then:
+
+```bash
+python3 scripts/mtbf_calc.py --gpus 2 --ckpt-s 0.05 --restart-s 90
+python3 scripts/mtbf_calc.py --gpus 4096 --ckpt-s 0.05 --restart-s 90
 ```
 
 ---
 
-## 6. Automated Triage Runbook & Node Quarantine Operator
+## 6. Verify
 
-Production clusters deploy an automated **Node Problem Detector (NPD)** daemon on every node to catch hardware faults before they crash jobs:
+| Check | Expected |
+|---|---|
+| async save blocking time | tens of ms |
+| pod kill | `RESUMED from … step-N`, then `DONE at step 400` |
+| drain | Job `failed=0` |
+| SDC drill | Job `Failed` with reason `PodFailurePolicy` after one pod |
+| checkpoint dir | exactly 3 `step-*` directories + `canary.json` |
 
-```yaml
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: gpu-health-sentinel
-  namespace: kube-system
-spec:
-  selector:
-    matchLabels:
-      app: gpu-sentinel
-  template:
-    metadata:
-      labels:
-        app: gpu-sentinel
-    spec:
-      hostPID: true
-      containers:
-      - name: sentinel
-        image: nvidia/cuda:12.4.0-base-ubuntu22.04
-        command: ["/bin/bash", "-c"]
-        args:
-          - |
-            while true; do
-              # 1. Check for uncorrectable ECC errors
-              ECC_ERR=$(nvidia-smi --query-gpu=ecc.errors.uncorrected.volatile.total --format=csv,noheader,nounits | tr -d ' ' | grep -v 0)
-              if [ -n "$ECC_ERR" ]; then
-                echo "CRITICAL: ECC Uncorrected Error detected! Tainting node..."
-                kubectl taint nodes "$NODE_NAME" ai.infra/fault=ecc-uncorrected:NoSchedule --overwrite
-                kubectl cordon "$NODE_NAME"
-              fi
-              # 2. Check for PCIe bus degradation (Gen4 falling back to Gen1)
-              PCIE_WIDTH=$(nvidia-smi --query-gpu=pcie.link.width.current --format=csv,noheader,nounits | tr -d ' ')
-              if [ "$PCIE_WIDTH" -lt 16 ]; then
-                echo "CRITICAL: PCIe bus width degraded! Tainting node..."
-                kubectl taint nodes "$NODE_NAME" ai.infra/fault=pcie-degraded:NoSchedule --overwrite
-              fi
-              sleep 10
-            done
-        securityContext:
-          privileged: true
-```
+---
 
-### Result:
-* Bad hardware is isolated in seconds.
-* Healthy jobs are shielded from cascading network timeouts.
-* Hardware repair tickets are automatically dispatched to data center technicians with specific serial numbers and PCIe slot locations.
+## 7. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| resume picks a half-written checkpoint | no completion marker | only trust `COMPLETE` (as the script does) |
+| checkpoints fill the disk | no retention | keep-N pruning of complete checkpoints. Alert on PVC usage |
+| each restart burns retries during maintenance | `DisruptionTarget` not ignored | `podFailurePolicy` rule (lab) |
+| resumed loss jumps | optimizer/RNG/dataloader state not saved | save optimizer + step (lab), plus RNG and dataloader position in real jobs |
+| async save slows training anyway | NVMe saturated / page cache pressure on UMA | smaller or less frequent checkpoints. `ionice`. Watch `SparkUMAPressure` |
+
+---
+
+## 8. Scale-out path
+
+| Lab | Hyperscale |
+|---|---|
+| single-rank DCP to local NVMe | sharded DCP from thousands of ranks → local NVMe → object store. Checkpoint every few minutes |
+| pod-level retries | in-place job restart with hot-spare nodes (seconds, not minutes). Elastic torchrun / TorchFT for membership changes |
+| one GEMM canary | burn-in + periodic canaries on every node, cross-replica checksums, automated quarantine and vendor RMA pipeline |
+| manual taint | remediation controllers (NPD conditions → taint → drain → diag → return) |
+
+---
+
+## 9. Checklist
+
+- [ ] I can estimate cluster MTBF, optimal checkpoint interval and goodput for any GPU count.
+- [ ] My training job survives pod kills and drains, and resumes from the newest *complete* checkpoint.
+- [ ] My SDC canary makes the job fail fast instead of retrying.
+- [ ] I know what quarantine means operationally, and why hot spares exist.

@@ -1,0 +1,53 @@
+# Deploys slice_ledger.py (Volume 04 §5.5): least-privilege RBAC — read pods
+# everywhere, write exactly one ConfigMap.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: slice-ledger, namespace: lab-tools}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: slice-ledger-read-pods}
+rules:
+  - {apiGroups: [""], resources: [pods], verbs: [get, list, watch]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: slice-ledger-read-pods}
+subjects: [{kind: ServiceAccount, name: slice-ledger, namespace: lab-tools}]
+roleRef: {kind: ClusterRole, name: slice-ledger-read-pods, apiGroup: rbac.authorization.k8s.io}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: slice-ledger-write, namespace: lab-tools}
+rules:
+  - {apiGroups: [""], resources: [configmaps], verbs: [create]}
+  - {apiGroups: [""], resources: [configmaps], resourceNames: [gpu-slice-ledger], verbs: [get, update]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: slice-ledger-write, namespace: lab-tools}
+subjects: [{kind: ServiceAccount, name: slice-ledger, namespace: lab-tools}]
+roleRef: {kind: Role, name: slice-ledger-write, apiGroup: rbac.authorization.k8s.io}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: slice-ledger, namespace: lab-tools}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: slice-ledger}}
+  template:
+    metadata: {labels: {app: slice-ledger}}
+    spec:
+      serviceAccountName: slice-ledger
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: controller
+          image: python:3.12-slim
+          command: ["python3", "-u", "/app/slice_ledger.py"]
+          env:
+            - {name: RESYNC_SECONDS, value: "60"}
+            - {name: SLICES_PER_NODE, value: "4"}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 128Mi}}
+          volumeMounts: [{name: app, mountPath: /app}]
+      volumes: [{name: app, configMap: {name: slice-ledger}}]

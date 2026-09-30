@@ -1,0 +1,28 @@
+# BF-15 (RISKY): eat most of the unified memory pool for 2 minutes. On a UMA
+# box this starves the GPU too. Hard-stops after activeDeadlineSeconds.
+apiVersion: batch/v1
+kind: Job
+metadata: {name: bf15-uma, namespace: lab-tools, labels: {breakfix: "15"}}
+spec:
+  activeDeadlineSeconds: 150
+  backoffLimit: 0
+  template:
+    metadata: {labels: {breakfix: "15"}}
+    spec:
+      restartPolicy: Never
+      priorityClassName: spark-preemptible
+      containers:
+        - name: hog
+          image: python:3.12-slim
+          command: ["python3", "-c"]
+          args:
+            - |
+              import time
+              avail = int([l for l in open('/proc/meminfo') if l.startswith('MemAvailable')][0].split()[1]) * 1024
+              target = int(avail * 0.92)
+              print(f"MemAvailable={avail/2**30:.1f} GiB, grabbing {target/2**30:.1f} GiB", flush=True)
+              chunks = []
+              while sum(map(len, chunks)) < target:
+                  chunks.append(bytearray(1 << 30))
+              print("holding", flush=True); time.sleep(120)
+          resources: {requests: {cpu: 100m, memory: 1Gi}, limits: {memory: 110Gi}}

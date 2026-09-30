@@ -1,0 +1,32 @@
+# Docs checks for the rewritten curriculum folders: relative links resolve,
+# no placeholders, every Mermaid diagram renders. Add a folder to the matrix
+# when its practical rewrite lands.
+name: docs
+
+on:
+  pull_request:
+    paths: ["0*/**.md", ".github/scripts/docs_check.py", ".github/workflows/docs-ci.yml"]
+  push:
+    branches: [main]
+    paths: ["0*/**.md"]
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        folder: ["02 Kubernetes"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with: {python-version: "3.12"}
+      - uses: actions/setup-node@v5
+        with: {node-version: "22"}
+      - name: Mermaid CLI
+        run: npm install -g @mermaid-js/mermaid-cli@11
+      - name: Links, placeholders, diagrams
+        env:
+          PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
+        run: python3 .github/scripts/docs_check.py "${{ matrix.folder }}" --render

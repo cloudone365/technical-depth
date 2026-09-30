@@ -1,0 +1,13 @@
+# expect: deny
+# VAP spark-no-nvidia-env-bypass
+apiVersion: v1
+kind: Pod
+metadata: {name: pt-deny-nvidia-env-bypass, namespace: tenant-alpha}
+spec:
+  securityContext: {runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}}
+  containers:
+    - name: c
+      image: nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04
+      securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+      env: [{name: NVIDIA_VISIBLE_DEVICES, value: all}]
+      resources: {limits: {cpu: 50m, memory: 32Mi}}

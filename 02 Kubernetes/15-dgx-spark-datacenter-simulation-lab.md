@@ -1,586 +1,345 @@
-# 15. DGX Spark Data Center Simulation Lab — Step-by-Step Implementation
+# Volume 15 — The DGX Spark Datacenter Simulation: End-to-End Build, Gates & Day-2 Operations
 
-This is the central hands-on implementation guide for partitioning your bare-metal **DGX Spark** host into a dual-tenant, data-center-like environment.
+> **Module 02 · Part IV — NVIDIA platform** · Prev: [14 Container Toolkit & GPU sharing](14-nvidia-container-toolkit-and-gpu-virtualization.md) · Next: [16 GPU & Network Operators](16-nvidia-gpu-operator-and-network-operator.md) · Short path: [00 step-by-step](00-kubernetes-step-by-step-guide.md)
 
-Following your specifications:
-- **No VMware hypervisor**: Direct bare-metal Linux OS execution with zero virtualization tax.
-- **Two isolated environments**: Simulating two independent cluster/tenant zones (`k3s-alpha` and `k3s-beta`).
-- **Strict 5% allocation**: Exactly **5% compute (CPU/RAM)** and **5% storage** allocated to each environment (leaving 90% reserved for host OS stability, background monitoring, and other infrastructure).
-- **GPU acceleration**: Both environments access the NVIDIA GPU simultaneously via **Time-Slicing**.
-
----
-
-## 📑 Table of Contents
-1. [Architecture Overview & Resource Budgeting](#1-architecture-overview--resource-budgeting)
-2. [Step 1: Host OS Preparation & NVIDIA Container Toolkit](#step-1-host-os-preparation--nvidia-container-toolkit)
-3. [Step 2: Install K3s with GPU Runtime Integration](#step-2-install-k3s-with-gpu-runtime-integration)
-4. [Step 3: Deploy the NVIDIA Device Plugin with Time-Slicing](#step-3-deploy-the-nvidia-device-plugin-with-time-slicing)
-5. [Step 4: Provision Dual Tenant Namespaces with 5% Quotas](#step-4-provision-dual-tenant-namespaces-with-5-quotas)
-6. [Step 5: Enforce Storage Isolation (5% Local Path Quotas)](#step-5-enforce-storage-isolation-5-local-path-quotas)
-7. [Step 6: Deploy & Benchmark AI Workloads](#step-6-deploy--benchmark-ai-workloads)
-8. [Step 7: Advanced Architecture — Dual Independent K3s Systemd Slices](#step-7-advanced-architecture--dual-independent-k3s-systemd-slices)
-9. [Verification & Health Checklist](#verification--health-checklist)
+| | |
+|---|---|
+| **You will build** | The whole "AI datacenter in a box" on one Spark: platform, two budgeted tenants, a serving tier behind an API gateway, a gang-scheduled batch tier, observability, backups and a scripted verification gate after every layer. Everything is designed to add spark-02 without rework |
+| **Hardware** | 1 DGX Spark (2 optional) · control node (laptop or spark-01) |
+| **Time** | 4–6 h the first time, ~45 min once practised |
+| **Risk** | Medium. Restarts k3s once (etcd migration) |
+| **Lab files** | the whole [`lab/`](lab/README.md) directory |
 
 ---
 
-## 1. Architecture Overview & Resource Budgeting
+## 1. What "datacenter-like" means on one box
+
+The goal isn't scale. It's the **same shape and the same failure modes** as a production GPU platform, small enough to break and rebuild in an afternoon.
+
+| Datacenter concept | Simulated here by | Volume |
+|---|---|---|
+| Control plane with HA datastore + backups | k3s embedded etcd, 6-hourly snapshots, off-box copy, restore drill | 03 |
+| Identity, RBAC, admission policy, audit | x509/CSR users, tenant ClusterRoles, 4 CEL policies, PSA, audit log | 02 |
+| Tenants with budgets | `tenant-alpha`/`tenant-beta` at 5 % each, GPU-slice limits | 12 |
+| Shared GPU pool with scheduling policy | 4 time-slices, PriorityClasses, Kueue ClusterQueue | 05, 14 |
+| Serving tier behind an API gateway | Traefik (Ingress + Gateway API), mock OpenAI API, vLLM/Triton/SGLang | 09, 21–23 |
+| Batch/training tier | `batch` namespace, Kueue gangs, torchrun Indexed Jobs | 05, 17 |
+| Storage tiers | NVMe local PVs (Delete/Retain), model cache, NFS for 2 nodes | 11 |
+| Observability & alerting | kube-prometheus-stack + host exporters + Grafana dashboard + alerts | 16 |
+| Change safety | server-side dry runs, CI on kind with fake GPUs, break/fix drills | 19, 20 |
+
+---
+
+## 2. HLD — the whole picture
+
+```mermaid
+flowchart TB
+  USER(["Users · SDKs · Open WebUI"]) --> EDGE
+  subgraph SPARK["spark-01 · DGX OS 7 · k3s v1.32 · GB10 · 128 GB UMA"]
+    direction TB
+    subgraph PLATFORM["Platform tier"]
+      direction LR
+      EDGE["Traefik<br/>Ingress + Gateway API<br/>:80/:443"]
+      OBS["Prometheus · Grafana · Alertmanager<br/>+ host node-exporter :9100"]
+      KUEUE["Kueue"]
+      GPUOP["GPU Operator<br/>device plugin ×4 slices · GFD"]
+    end
+    subgraph CP["Control plane (k3s)"]
+      direction LR
+      API["API server<br/>RBAC · CEL policies · APF · audit"]
+      ETCD[("etcd<br/>snapshots /6 h")]
+    end
+    subgraph SERVE["Serving tier · llm-serving · 8 CPU · 96 Gi · 2 slices"]
+      direction LR
+      MOCK["mock-llm ×2<br/>(+ canary)"]
+      VLLM["vLLM"]
+      TRI["Triton ensemble"]
+      QD[("Qdrant")]
+    end
+    subgraph BATCH["Batch tier · batch · Kueue spark-cq (2 slices)"]
+      DDP["torchrun jobs<br/>gang-admitted"]
+    end
+    subgraph TEN["Tenants · 5 % each"]
+      direction LR
+      TA["tenant-alpha<br/>1 CPU · 6 Gi · 1 slice"]
+      TB["tenant-beta<br/>1 CPU · 6 Gi · 1 slice"]
+    end
+    NVME[("NVMe 4 TB<br/>/data/k8s · model-cache")]
+    GB10["GB10 GPU"]
+  end
+  S2["spark-02 (optional)<br/>k3s agent · +4 slices<br/>CX-7 200 GbE"]
+  EDGE --> MOCK & VLLM & TRI
+  VLLM & TRI & DDP & TA & TB --> GB10
+  VLLM & QD --> NVME
+  API <--> ETCD
+  SPARK <-.-> S2
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef obs fill:#fb8500,stroke:#9a5200,color:#000
+  classDef tenant fill:#eaeef2,stroke:#57606a,color:#000
+  classDef ext fill:#24292f,stroke:#000,color:#fff
+  class API,KUEUE ctrl
+  class EDGE net
+  class GB10,GPUOP,S2 gpu
+  class ETCD,NVME,QD store
+  class OBS obs
+  class MOCK,VLLM,TRI,DDP,TA,TB tenant
+  class USER ext
+  style SPARK fill:#e6f4f5,stroke:#0e7c86,stroke-width:2px
+  style PLATFORM fill:#ffffff,stroke:#8c959f
+  style CP fill:#ffffff,stroke:#1f6feb
+  style SERVE fill:#ffffff,stroke:#76b900
+  style BATCH fill:#ffffff,stroke:#8c959f
+  style TEN fill:#ffffff,stroke:#8c959f
+```
+
+---
+
+## 3. LLD — the master tables
+
+### 3.1 Network & ports
+
+| Endpoint | Address | Notes |
+|---|---|---|
+| API server | `https://10.10.10.11:6443` | kubeconfig from 01 Ansible `.cache/` |
+| Traefik | `10.10.10.11:80`, `:443` | hosts `llm.lab.local`, `gw.lab.local` in your laptop's `/etc/hosts` |
+| Grafana (kps) | `http://10.10.10.11:32000` | admin / from Vault |
+| Host Grafana (01 Ansible) | `http://10.10.10.11:3000` | node/GPU view that survives a k8s outage |
+| Pod CIDR / Service CIDR / DNS | 10.42.0.0/16 · 10.43.0.0/16 · 10.43.0.10 | k3s defaults |
+| CX-7 | 192.168.100.0/24, 192.168.101.0/24 | only with spark-02 |
+
+### 3.2 Namespaces, budgets and policies
+
+| Namespace | PSA | Quota | Admission policies | Priority |
+|---|---|---|---|---|
+| `tenant-alpha`, `tenant-beta` | restricted | 1 CPU · 6 Gi · 1 slice · 185 Gi · 10 pods | no-latest, ≤1 slice, no NVIDIA env | interactive |
+| `llm-serving` | baseline | 8 CPU req · 96 Gi lim · 2 slices · 1 Ti | no-latest, readiness required | serving |
+| `batch` | privileged (warn: baseline). RDMA needs hostNetwork/IPC_LOCK | Kueue `spark-cq`: 8 CPU · 64 Gi · 2 slices | no-latest | batch |
+| `lab-tools` | privileged | none (instructor namespace) | — | mixed |
+| `ingress`, `observability` | baseline / privileged | none | — | platform |
+
+### 3.3 Capacity plan (one Spark)
+
+| Consumer | CPU | Memory (UMA) | GPU slices |
+|---|---|---|---|
+| system + kube reserved | 3 | 10 Gi | — |
+| platform (Traefik, kps, Kueue, operators) | ~1.5 | ~8 Gi | — |
+| serving (vLLM 0.30 util + Triton) | 6–8 | 40–60 Gi (engine-bounded) | 2 |
+| batch | ≤ 8 | ≤ 64 Gi (queue-bounded) | ≤ 2 |
+| tenants | 2 | 12 Gi | 2 |
+| **headroom for page cache & spikes** | — | **≥ 20 Gi** | — |
+
+Serving + batch + tenants can oversubscribe the 4 slices by design. Kueue and priorities decide who waits.
+
+---
+
+## 4. Build order with gates
+
+Each step ends with a **gate**: a command that must pass before you continue. When a gate fails, stop and fix it. Later layers hide earlier faults.
+
+```mermaid
+flowchart LR
+  G0["0 · Toolchain<br/>run-local-checks"] --> G1["1 · Base<br/>01 Ansible k3s + GPU Op"]
+  G1 --> G2["2 · Control plane<br/>etcd · audit · encryption"]
+  G2 --> G3["3 · Platform<br/>storage · Traefik · kps · Kueue · KEDA"]
+  G3 --> G4["4 · Tenancy<br/>ns · quotas · RBAC · CEL · APF · netpol"]
+  G4 --> G5["5 · Workloads<br/>networking · ingress · Qdrant · probes"]
+  G5 --> G6["6 · GPU<br/>smoke · baseline · contention"]
+  G6 --> G7["7 · Serving<br/>vLLM · Triton"]
+  G7 --> G8["8 · Batch<br/>Kueue gangs · DDP"]
+  G8 --> G9["9 · Ops<br/>backups · drills · dashboard"]
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  class G0,G1,G2,G3,G4,G5,G9 ctrl
+  class G6,G7,G8 gpu
+```
+
+### Step 0 · Toolchain (control node)
+
+```bash
+git clone https://github.com/cloudone365/technical-depth.git && cd "technical-depth/02 Kubernetes/lab"
+pip install yamllint shellcheck-py pyyaml     # plus kubectl, kubeconform, promtool (see CI workflow)
+tests/run-local-checks.sh
+```
+
+**Gate:** `ALL LOCAL CHECKS PASSED`.
+
+### Step 1 · Base platform (01 Ansible)
+
+```bash
+cd "../../01 Ansible/lab"
+ansible-playbook playbooks/05-k3s.yml && ansible-playbook playbooks/06-gpu-operator.yml
+export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
+cd "../../02 Kubernetes/lab" && scripts/preflight.sh
+```
+
+**Gate:** preflight `0 failed`. `allocatable nvidia.com/gpu=4`.
+
+### Step 2 · Control plane hardening
+
+```bash
+scripts/install-addons.sh k3s-config
+kubectl get secrets -A -o json | kubectl replace -f - >/dev/null
+scripts/etcd-drill.sh status && scripts/etcd-drill.sh snapshot
+```
+
+**Gate:** 1 etcd member, leader, no alarms, ≥ 1 snapshot. `sudo k3s secrets-encrypt status` shows Enabled.
+
+### Step 3 · Platform add-ons
+
+```bash
+scripts/install-addons.sh all          # storage traefik kps kueue keda
+kubectl get pods -A | grep -vE 'Running|Completed|^NAMESPACE' || echo 'all pods Running/Completed'
+```
+
+**Gate:** no pods outside `Running/Completed`. Grafana answers on :32000.
+
+### Step 4–5 · Tenancy, policies and workloads
+
+```bash
+scripts/apply-lab.sh
+scripts/verify.sh platform tenancy admission storage
+```
+
+**Gate:** all PASS.
+
+### Step 6 · GPU
+
+```bash
+scripts/verify.sh gpu
+kubectl apply -f manifests/70-gpu/gemm-solo.yaml && kubectl -n lab-tools logs -f job/gemm-solo
+```
+
+**Gate:** gpu-smoke PASS. Baseline TFLOPS recorded.
+
+### Step 7 · Serving
+
+```bash
+kubectl apply -f manifests/60-storage/model-prefetch-job.yaml && kubectl -n llm-serving wait --for=condition=complete job/model-prefetch --timeout=30m
+kubectl apply -k manifests/90-serving/vllm && kubectl -n llm-serving rollout status deploy/vllm --timeout=30m
+scripts/verify.sh ingress serving
+```
+
+**Gate:** `vLLM answered a chat completion`. Streaming PASS through ingress.
+
+### Step 8 · Batch
+
+```bash
+tests/kueue-gang-test.sh
+kubectl apply -k manifests/80-distributed/base && kubectl -n batch logs -f -l job-name=ddp --prefix
+```
+
+**Gate:** gang test PASS. DDP prints `correctness OK`.
+
+### Step 9 · Operations
+
+```bash
+kubectl apply -k manifests/95-observability
+scripts/verify.sh observability
+scripts/collect-diag.sh                     # know how to produce a bundle before you need one
+scripts/breakfix.sh list                    # then do at least three drills (Vol 19/20)
+```
+
+**Gate:** `verify.sh` all PASS. Dashboard *Spark · Kubernetes* shows data in every row.
+
+---
+
+## 5. Integrations across modules
+
+| Module | Uses this platform for |
+|---|---|
+| 01 Ansible | builds the base (k3s, GPU Operator, Vault, NFS, telemetry) and owns node-level config |
+| 03 DeepSeek · 04 Qwen · 05 NeMo · 06 Gemma | overlays on `90-serving` (model, engine flags, quantisation), RAG on Qdrant, fine-tuning Jobs in `batch` |
+| 07 Nvidia | profiling (nsys/ncu) inside `lab-tools` pods on the same GPU |
+| 08 Storage | benchmarks and caches behind `model-cache` and checkpoint PVCs |
+
+---
+
+## 6. Verify (full gate)
+
+```bash
+scripts/verify.sh
+```
 
 ```text
-+---------------------------------------------------------------------------------------------------+
-|                                 DGX Spark Host (Linux OS Bare-Metal)                              |
-|                          Hardware: Grace CPU + Blackwell GPU (Unified Memory)                     |
-|                                                                                                   |
-|  +---------------------------------------------------------------------------------------------+  |
-|  | K3s Kubernetes Engine (configured with default-runtime = nvidia-container-runtime)           |  |
-|  +---------------------------------------------------------------------------------------------+  |
-|          |                                                                             |          |
-|          v                                                                             v          |
-|  +---------------------------------------------+               +-------------------------------+  |
-|  | Namespace: `k3s-alpha` (Tenant 1)           |               | Namespace: `k3s-beta` (Tenant 2) |
-|  | ├── ResourceQuota: 5% CPU, 5% RAM, 1 GPU    |               | ├── ResourceQuota: 5% CPU, RAM|  |
-|  | ├── Storage: 5% Disk Quota (PVCs)           |               | ├── Storage: 5% Disk Quota    |  |
-|  | └── Workload: PyTorch Training / Fine-tuning|               | └── Workload: Triton Inference|  |
-|  +---------------------------------------------+               +-------------------------------+  |
-|          \                                                                             /          |
-|           +-------------------------------------+-------------------------------------+           |
-|                                                 |                                                 |
-|                                                 v                                                 |
-|                             Host System Reserve: 90% CPU, RAM, NVMe                               |
-|                         (Protects `nvidia-smi`, host cron, ssh, and OS)                           |
-+---------------------------------------------------------------------------------------------------+
+── platform …
+── tenancy …
+── admission …
+── gpu …
+── ingress …
+── storage …
+── serving …
+── observability …
+
+41 passed, 0 warnings, 0 failed
 ```
 
-### Resource Sizing Table (Dynamic Math)
-Run `lscpu`, `free -m`, and `df -h /` on your DGX Spark to confirm exact values. Below is an example based on a typical 64-core Grace CPU with 128GB unified memory and 1TB NVMe:
-
-| Metric | Total Host Available | 5% Allocation per Tenant | Enforcement Mechanism |
-| :--- | :--- | :--- | :--- |
-| **CPU** | 64 Cores (`64000m`) | **3.2 Cores (`3200m`)** | Kubernetes `ResourceQuota` (`limits.cpu: 3200m`) |
-| **Memory** | 128 GiB Unified RAM | **6.4 GiB (`6553Mi`)** | Kubernetes `ResourceQuota` (`limits.memory: 6400Mi`) |
-| **NVMe Disk** | 1,000 GiB (1 TB) | **50 GiB** | StorageClass PVC Quota (`requests.storage: 50Gi`) |
-| **GPU Compute** | 1 Physical Blackwell GPU | **1 Time-Slice (1/10th)** | NVIDIA Device Plugin Time-Slicing ConfigMap |
+(The exact count grows as you deploy more of the optional layers.)
 
 ---
 
-## Step 1: Host OS Preparation & NVIDIA Container Toolkit
+## 7. Day-2 operations
 
-Log into your DGX Spark machine (`dgx-spark-1` via SSH) as `dgxadmin` with `sudo` privileges.
-
-### 1.1 Verify Driver and Kernel Status
-```bash
-# Verify GPU detection
-nvidia-smi
-
-# Verify kernel modules are loaded
-lsmod | grep nvidia
-```
-
-### 1.2 Install NVIDIA Container Toolkit
-If not already installed, add the official repository and install the toolkit:
-```bash
-# 1. Setup repository
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-  sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-
-# 2. Install packages
-sudo apt-get update
-sudo apt-get install -y nvidia-container-toolkit
-
-# 3. Configure Container Device Interface (CDI)
-sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
-nvidia-ctk cdi list
-```
+| Task | Frequency | How |
+|---|---|---|
+| etcd snapshot off-box | daily | Vol 03 §5.7 tarball to the control node |
+| Restore rehearsal | monthly | `scripts/etcd-drill.sh restore …` on a quiet day |
+| Version review | monthly | `versions.env` vs upstream releases. Test in CI (kind) first |
+| k3s upgrade | per release | 01 Ansible `k3s_cluster_version` bump → `05-k3s.yml` → `scripts/verify.sh` |
+| DGX OS / driver upgrade | per NVIDIA release | 01 Ansible `17-dgxos-upgrade.yml` (drain → upgrade → validate) → Vol 12 UMA experiment again |
+| Capacity review | weekly | Grafana *Tenancy* + *UMA* rows. `PodsPendingOnGPU` alert history |
+| Drills | weekly | one `breakfix` scenario, timed |
 
 ---
 
-## Step 2: Install K3s with GPU Runtime Integration
+## 8. Troubleshooting the build
 
-K3s is a lightweight, fully compliant Kubernetes distribution designed for bare-metal edge and single-node clusters. It runs using less than 512MB RAM for the control plane.
-
-### 2.1 Pre-configure containerd to use NVIDIA as Default Runtime
-K3s manages its own embedded `containerd`. We create a configuration template so K3s automatically registers the `nvidia` runtime:
-
-```bash
-sudo mkdir -p /var/lib/rancher/k3s/agent/etc/containerd/
-
-sudo tee /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl << 'EOF'
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
-  runtime_type = "io.containerd.runc.v2"
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
-  BinaryName = "/usr/bin/nvidia-container-runtime"
-
-[plugins."io.containerd.grpc.v1.cri".containerd]
-  default_runtime_name = "runc"
-EOF
-```
-
-### 2.2 Install K3s
-Install K3s with Traefik disabled (saves memory and avoids port conflicts) and local storage enabled:
-```bash
-curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable traefik --write-kubeconfig-mode 644" sh -
-```
-
-### 2.3 Verify K3s Cluster Health
-```bash
-# Check node status
-kubectl get nodes -o wide
-
-# Check core pods
-kubectl get pods -A
-```
+| Gate fails at | Most common cause | Fix |
+|---|---|---|
+| 1 | GPU Operator validator not Running | 01 Ansible Vol 17 troubleshooting. Driver/toolkit on host first |
+| 2 | k3s won't restart after the drop-in | `journalctl -u k3s -n 100`. Typo in YAML → `python3 -c 'import yaml,sys; yaml.safe_load(open(sys.argv[1]))' /etc/rancher/k3s/config.yaml.d/20-k8s-lab.yaml`, fix or remove the drop-in, restart |
+| 3 | `helm-install-*` Job failing | `kubectl -n kube-system logs job/helm-install-<name>`: repo unreachable (proxy/DNS) or bad `valuesContent` |
+| 4 | admission tests fail | a policy binding namespace label missing → re-apply `00-platform` |
+| 6 | gpu-smoke Pending | slices taken → `kubectl get pods -A` with GPU requests. Scale down demos |
+| 7 | vLLM never Ready | `kubectl logs deploy/vllm`: model download, wrong image arch, `--gpu-memory-utilization` too high for free UMA (Vol 21 §9) |
+| 8 | DDP hangs | Kueue not installed → both jobs started partially (Vol 05). NCCL on 1 node needs `BACKEND=gloo` |
 
 ---
 
-## Step 3: Deploy the NVIDIA Device Plugin with Time-Slicing
+## 9. Scale-out path: adding spark-02
 
-By default, Kubernetes assigns 1 physical GPU exclusively to 1 Pod. To allow both `k3s-alpha` and `k3s-beta` to share the GPU, we configure the **NVIDIA Kubernetes Device Plugin with Time-Slicing**.
-
-### 3.1 Create Time-Slicing ConfigMap
-Create a file named `time-slicing-config.yaml`:
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: nvidia-device-plugin-config
-  namespace: kube-system
-data:
-  any: |-
-    version: v1
-    flags:
-      migStrategy: none
-    sharing:
-      timeSlicing:
-        resources:
-          - name: nvidia.com/gpu
-            replicas: 10
-            renameByDefault: false
-            failRequestsGreaterThanOne: false
-```
-*Explanation: This divides the single physical GPU into **10 virtual time-slices**. Each tenant will request 1 slice (10% of scheduling time).*
-
-Apply the ConfigMap:
-```bash
-kubectl apply -f time-slicing-config.yaml
+```mermaid
+flowchart LR
+  subgraph A["spark-01 · server"]
+    A1["control plane · etcd<br/>platform tier"]
+    A2["GB10 · 4 slices"]
+  end
+  subgraph B["spark-02 · agent"]
+    B1["kubelet · flannel"]
+    B2["GB10 · 4 slices"]
+  end
+  A <== "CX-7 QSFP 200 GbE<br/>flannel VXLAN + NCCL/RoCE + NFS-RDMA" ==> B
+  A -. "mgmt 10 GbE" .- B
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  class A2,B2 gpu
+  class A1,B1 ctrl
 ```
 
-### 3.2 Deploy the NVIDIA Device Plugin via DaemonSet
-Create a file named `nvidia-device-plugin.yaml`:
-```yaml
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: nvidia-device-plugin-daemonset
-  namespace: kube-system
-spec:
-  selector:
-    matchLabels:
-      name: nvidia-device-plugin-ds
-  template:
-    metadata:
-      labels:
-        name: nvidia-device-plugin-ds
-    spec:
-      tolerations:
-        - key: CriticalAddonsOnly
-          operator: Exists
-        - key: nvidia.com/gpu
-          operator: Exists
-          effect: NoSchedule
-      containers:
-        - image: nvcr.io/nvidia/k8s-device-plugin:v0.14.5
-          name: nvidia-device-plugin-ctr
-          env:
-            - name: CONFIG_FILE
-              value: /etc/config/any
-          volumeMounts:
-            - name: device-plugin
-              mountPath: /var/lib/kubelet/device-plugins
-            - name: config
-              mountPath: /etc/config
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-      volumes:
-        - name: device-plugin
-          hostPath:
-            path: /var/lib/kubelet/device-plugins
-        - name: config
-          configMap:
-            name: nvidia-device-plugin-config
-```
-
-Apply the DaemonSet:
-```bash
-kubectl apply -f nvidia-device-plugin.yaml
-```
-
-### 3.3 Verify Advertised GPU Slices
-Wait 10 seconds, then inspect your node's allocatable capacity:
-```bash
-kubectl get node -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}'
-```
-*Expected output: `10` (The single GPU is now registered as 10 schedulable slices).*
+1. Cable the QSFP ports. Run 01 Ansible `02-fabric.yml` (CX-7 addressing, MTU 9000) and `11-rdma-perftest.yml` (≥ 180 Gb/s gate).
+2. Uncomment `spark-02` in the inventory and run `05-k3s.yml` (agent join, flannel on CX-7) and `06-gpu-operator.yml`.
+3. `kubectl get nodes` → 2 Ready. Allocatable totals 8 slices. Raise `spark-cq` GPU quota to 4.
+4. Serve weights from NFS (Vol 11 §8) instead of per-node local PVs.
+5. Run `manifests/80-distributed/two-spark` (NCCL over RoCE, Vol 17).
+6. The control plane still has one etcd voter. For real HA you need a third server (Vol 03 §8).
 
 ---
 
-## Step 4: Provision Dual Tenant Namespaces with 5% Quotas
+## 10. Checklist
 
-Now we create the two tenant environments: **`k3s-alpha`** (Tenant 1) and **`k3s-beta`** (Tenant 2).
-
-### 4.1 Create Namespaces
-```bash
-kubectl create namespace k3s-alpha
-kubectl create namespace k3s-beta
-```
-
-### 4.2 Define 5% ResourceQuota for Tenant Alpha
-Create `quota-alpha.yaml`:
-```yaml
-apiVersion: v1
-kind: ResourceQuota
-metadata:
-  name: compute-quota-5pct
-  namespace: k3s-alpha
-spec:
-  hard:
-    # 5% of 64 cores = 3200m (3.2 cores)
-    requests.cpu: "1600m"
-    limits.cpu: "3200m"
-    
-    # 5% of 128GB RAM = 6400Mi (6.4 GiB)
-    requests.memory: "3200Mi"
-    limits.memory: "6400Mi"
-    
-    # 1 GPU Time-Slice
-    requests.nvidia.com/gpu: "1"
-    limits.nvidia.com/gpu: "1"
-    
-    # 5% of 1TB Storage = 50Gi
-    requests.storage: "50Gi"
-    persistentvolumeclaims: "4"
-    
-    # Maximum Pods
-    pods: "5"
----
-apiVersion: v1
-kind: LimitRange
-metadata:
-  name: limits-alpha
-  namespace: k3s-alpha
-spec:
-  limits:
-    - default:
-        cpu: "1000m"
-        memory: "2048Mi"
-        nvidia.com/gpu: "1"
-      defaultRequest:
-        cpu: "500m"
-        memory: "1024Mi"
-        nvidia.com/gpu: "1"
-      max:
-        cpu: "3200m"
-        memory: "6400Mi"
-      type: Container
-```
-
-Apply for `k3s-alpha`:
-```bash
-kubectl apply -f quota-alpha.yaml
-```
-
-### 4.3 Define 5% ResourceQuota for Tenant Beta
-Create `quota-beta.yaml`:
-```yaml
-apiVersion: v1
-kind: ResourceQuota
-metadata:
-  name: compute-quota-5pct
-  namespace: k3s-beta
-spec:
-  hard:
-    requests.cpu: "1600m"
-    limits.cpu: "3200m"
-    requests.memory: "3200Mi"
-    limits.memory: "6400Mi"
-    requests.nvidia.com/gpu: "1"
-    limits.nvidia.com/gpu: "1"
-    requests.storage: "50Gi"
-    persistentvolumeclaims: "4"
-    pods: "5"
----
-apiVersion: v1
-kind: LimitRange
-metadata:
-  name: limits-beta
-  namespace: k3s-beta
-spec:
-  limits:
-    - default:
-        cpu: "1000m"
-        memory: "2048Mi"
-        nvidia.com/gpu: "1"
-      defaultRequest:
-        cpu: "500m"
-        memory: "1024Mi"
-        nvidia.com/gpu: "1"
-      max:
-        cpu: "3200m"
-        memory: "6400Mi"
-      type: Container
-```
-
-Apply for `k3s-beta`:
-```bash
-kubectl apply -f quota-beta.yaml
-```
-
----
-
-## Step 5: Enforce Storage Isolation (5% Local Path Quotas)
-
-K3s comes with Rancher's **Local Path Provisioner** pre-installed. It dynamically allocates storage from the host's `/var/lib/rancher/k3s/storage` directory.
-
-### 5.1 Create Persistent Volume Claims
-Each tenant creates a PVC bounded by their 50Gi (5%) quota.
-
-Create `storage-alpha.yaml`:
-```yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: data-volume-alpha
-  namespace: k3s-alpha
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: local-path
-  resources:
-    requests:
-      storage: 20Gi  # Consumes 20Gi out of the 50Gi quota
-```
-
-Create `storage-beta.yaml`:
-```yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: data-volume-beta
-  namespace: k3s-beta
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: local-path
-  resources:
-    requests:
-      storage: 20Gi  # Consumes 20Gi out of the 50Gi quota
-```
-
-Apply both:
-```bash
-kubectl apply -f storage-alpha.yaml
-kubectl apply -f storage-beta.yaml
-```
-
-Verify storage bindings:
-```bash
-kubectl get pvc -A
-```
-
----
-
-## Step 6: Deploy & Benchmark AI Workloads
-
-Now we deploy active AI workloads into both tenants to prove:
-1. Both workloads access the NVIDIA GPU simultaneously.
-2. Both workloads run within their 5% compute envelope.
-
-### 6.1 Tenant Alpha: PyTorch GPU Tensor Benchmark
-Create `workload-alpha.yaml`:
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: pytorch-benchmark
-  namespace: k3s-alpha
-spec:
-  restartPolicy: Never
-  volumes:
-    - name: storage
-      persistentVolumeClaim:
-        claimName: data-volume-alpha
-  containers:
-    - name: pytorch
-      image: nvcr.io/nvidia/pytorch:24.01-py3
-      volumeMounts:
-        - name: storage
-          mountPath: /data
-      resources:
-        requests:
-          cpu: "1000m"
-          memory: "2048Mi"
-          nvidia.com/gpu: "1"
-        limits:
-          cpu: "2000m"
-          memory: "4096Mi"
-          nvidia.com/gpu: "1"
-      command: ["python3", "-c"]
-      args:
-        - |
-          import torch, time
-          print("=== Tenant Alpha: PyTorch GPU Validation ===")
-          print("Device Name:", torch.cuda.get_device_name(0))
-          print("Allocating 10,000 x 10,000 Float32 Matrix on GPU...")
-          x = torch.randn(10000, 10000, device='cuda')
-          start = time.time()
-          for i in range(100):
-              y = torch.matmul(x, x)
-          torch.cuda.synchronize()
-          elapsed = time.time() - start
-          print(f"100 MatMuls Completed in: {elapsed:.2f} seconds")
-          with open('/data/benchmark_results.txt', 'w') as f:
-              f.write(f"Alpha finished 100 MatMuls in {elapsed:.2f}s on {torch.cuda.get_device_name(0)}\n")
-          print("Results written to persistent volume /data.")
-          time.sleep(300)
-```
-
-Apply Tenant Alpha workload:
-```bash
-kubectl apply -f workload-alpha.yaml
-```
-
-### 6.2 Tenant Beta: NVIDIA CUDA Inference / Stress Workload
-Create `workload-beta.yaml`:
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: cuda-stress
-  namespace: k3s-beta
-spec:
-  restartPolicy: Never
-  volumes:
-    - name: storage
-      persistentVolumeClaim:
-        claimName: data-volume-beta
-  containers:
-    - name: cuda-worker
-      image: nvcr.io/nvidia/k8s/cuda-sample:vectorAdd-cuda11.7.1-ubuntu20.04
-      volumeMounts:
-        - name: storage
-          mountPath: /data
-      resources:
-        requests:
-          cpu: "1000m"
-          memory: "2048Mi"
-          nvidia.com/gpu: "1"
-        limits:
-          cpu: "2000m"
-          memory: "4096Mi"
-          nvidia.com/gpu: "1"
-```
-
-Apply Tenant Beta workload:
-```bash
-kubectl apply -f workload-beta.yaml
-```
-
----
-
-## Step 7: Advanced Architecture — Dual Independent K3s Systemd Slices
-
-If your goal is to simulate **two completely separate physical clusters** (e.g. Cluster 1 on `localhost:6443` and Cluster 2 on `localhost:6444`) rather than namespaces in a single cluster, you can run two separate K3s systemd services restricted by Linux cgroups directly:
-
-```text
-+-----------------------------------------------------------------------------------+
-|                        DGX Spark Host OS Systemd CGroup v2                        |
-|                                                                                   |
-|  [k3s-alpha.service]                      [k3s-beta.service]                      |
-|  - Listen Port: 6443                      - Listen Port: 6444                     |
-|  - CPUQuota=320% (3.2 cores = 5%)         - CPUQuota=320% (3.2 cores = 5%)        |
-|  - MemoryMax=6.4G (5% RAM)                - MemoryMax=6.4G (5% RAM)               |
-|  - DataDir: /var/lib/k3s-alpha (50GB)     - DataDir: /var/lib/k3s-beta (50GB)     |
-+-----------------------------------------------------------------------------------+
-```
-
-### Systemd Drop-in Overrides for 5% Host CGroup Limits:
-
-1. **Create systemd override for Cluster Alpha (`/etc/systemd/system/k3s-alpha.service.d/override.conf`)**:
-   ```ini
-   [Service]
-   # Enforce 5% Host CPU and Memory Ceilings via Linux Kernel cgroups v2
-   CPUAccounting=yes
-   CPUQuota=320%
-   MemoryAccounting=yes
-   MemoryMax=6.4G
-   ```
-
-2. **Create systemd override for Cluster Beta (`/etc/systemd/system/k3s-beta.service.d/override.conf`)**:
-   ```ini
-   [Service]
-   CPUAccounting=yes
-   CPUQuota=320%
-   MemoryAccounting=yes
-   MemoryMax=6.4G
-   ```
-
-3. **Reload systemd**:
-   ```bash
-   sudo systemctl daemon-reload
-   ```
-
-*This guarantees that even if a runaway process inside K3s spawns 1,000 threads, the Linux kernel scheduler strictly caps its CPU execution at 3.2 cores and kills it if memory exceeds 6.4 GB!*
-
----
-
-## Verification & Health Checklist
-
-Run these commands to prove your multi-tenant DGX Spark simulator is operating correctly:
-
-### 1. Verify Pod Statuses Across Both Tenants
-```bash
-kubectl get pods -A -o wide
-```
-*Expected: Both `pytorch-benchmark` in `k3s-alpha` and `cuda-stress` in `k3s-beta` show status `Running` or `Completed`.*
-
-### 2. Inspect Quota Consumption
-```bash
-# Check Tenant Alpha Quota usage:
-kubectl get resourcequota compute-quota-5pct -n k3s-alpha
-
-# Check Tenant Beta Quota usage:
-kubectl get resourcequota compute-quota-5pct -n k3s-beta
-```
-*Output displays exact consumed vs. hard limit values for CPU, Memory, and GPUs.*
-
-### 3. Check Real-Time GPU Utilization During Matrix Multiplication
-```bash
-nvidia-smi
-```
-*You will see the Python process running with active GPU compute memory.*
-
-### 4. Inspect PyTorch Tensor Results
-```bash
-kubectl logs pytorch-benchmark -n k3s-alpha
-```
-*Expected output:*
-```text
-=== Tenant Alpha: PyTorch GPU Validation ===
-Device Name: NVIDIA Blackwell / GB10
-Allocating 10,000 x 10,000 Float32 Matrix on GPU...
-100 MatMuls Completed in: 1.42 seconds
-Results written to persistent volume /data.
-```
-
-### 5. Inspect Persistent Storage File on Host
-```bash
-sudo ls -lh /var/lib/rancher/k3s/storage/pvc*
-sudo cat /var/lib/rancher/k3s/storage/pvc*/benchmark_results.txt
-```
-
----
-
-Proceed to [**16-nvidia-gpu-operator-and-network-operator.md**](16-nvidia-gpu-operator-and-network-operator.md) to explore enterprise cluster automation via Helm, the GPU Operator, and the Network Operator.
+- [ ] Every gate passed in order, and I know which volume to open when one fails.
+- [ ] I can rebuild the whole platform from `lab/` in under an hour.
+- [ ] Backups and a restore rehearsal exist, not just the backups.
+- [ ] I have a written plan (and the inventory change ready) for spark-02.

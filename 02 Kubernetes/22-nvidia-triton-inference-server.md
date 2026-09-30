@@ -1,347 +1,213 @@
-# 22. NVIDIA Triton Inference Server — Multi-Model Pipelines & Dynamic Batching
+# Volume 22 — NVIDIA Triton Inference Server on the Spark: Model Repository, Ensembles, Dynamic Batching, perf_analyzer
 
-While engines like vLLM specialize exclusively in autoregressive text generation for Large Language Models, enterprise AI data centers must serve a diverse array of models simultaneously: **Computer Vision (ResNet/YOLO), Speech Recognition (Whisper), Embeddings (BGE/E5), Recommendation Systems, and LLMs**.
+> **Module 02 · Part VI — Serving** · Prev: [21 vLLM](21-vllm-high-throughput-llm-serving.md) · Next: [23 Alternatives & KServe](23-llm-inference-alternatives-and-kserve.md)
 
-**NVIDIA Triton Inference Server** is the gold standard for high-throughput, multi-framework, multi-GPU model serving in enterprise environments.
-
----
-
-## 📑 Table of Contents
-1. [vLLM vs. NVIDIA Triton: Architectural Scope](#1-vllm-vs-nvidia-triton-architectural-scope)
-2. [Triton Server Architecture & Pluggable Backends](#2-triton-server-architecture--pluggable-backends)
-3. [The Model Repository Directory Specification](#3-the-model-repository-directory-specification)
-4. [Dynamic Batching & Concurrent Model Execution](#4-dynamic-batching--concurrent-model-execution)
-5. [Ensemble Pipelines & Business Logic Scripting (BLS)](#5-ensemble-pipelines--business-logic-scripting-bls)
-6. [Communication Protocols: HTTP, gRPC & C API](#6-communication-protocols-http-grpc--c-api)
-7. [Kubernetes Production Deployment Architecture](#7-kubernetes-production-deployment-architecture)
-8. [Configuring `config.pbtxt` for Maximum GPU Throughput](#8-configuring-configpbtxt-for-maximum-gpu-throughput)
-9. [Production Diagnostics & Troubleshooting Playbook](#9-production-diagnostics--troubleshooting-playbook)
-10. [Hands-On Triton Deployment Lab on DGX Spark](#10-hands-on-triton-deployment-lab-on-dgx-spark)
+| | |
+|---|---|
+| **You will build** | A Triton deployment serving a two-step **ensemble** (tokenise on CPU → score on the GB10), fed from a GitOps-friendly model repository. You'll measure dynamic batching with Triton's own metrics, and load-test it with `perf_analyzer` over gRPC |
+| **Hardware** | spark-01 |
+| **Time** | 75 min |
+| **Risk** | Low |
+| **Lab files** | [`manifests/90-serving/triton/`](lab/manifests/90-serving/triton/) (`triton.yaml`, `model_repository/{preprocess,scorer,pipeline}`) |
 
 ---
 
-## 1. vLLM vs. NVIDIA Triton: Architectural Scope
+## 1. Why this matters on a Spark
 
-| Capability | vLLM Engine | NVIDIA Triton Inference Server |
-| :--- | :--- | :--- |
-| **Primary Domain** | Large Language Models (LLMs) only | **Any Machine Learning Model** (Vision, Audio, NLP, Tabular) |
-| **Supported Frameworks** | PyTorch / Custom CUDA Kernels | **TensorRT, ONNX, PyTorch (LibTorch), OpenVINO, Python, vLLM** |
-| **Multi-Model Concurrency**| Single model per process | **Dozens of different models running concurrently on 1 GPU** |
-| **Pipelining / Ensembles** | Manual code scripting | **Zero-Copy Native Ensembles inside GPU VRAM** |
-| **Protocols** | HTTP / OpenAI REST API | **High-speed binary gRPC**, HTTP/REST, and in-process C API |
-| **Relationship** | Can run as a standalone server | **Can embed vLLM as an internal Triton backend!** |
+vLLM is an LLM engine. Triton is a **general inference server**: many models, many frameworks (TensorRT, TensorRT-LLM, ONNX Runtime, PyTorch, Python, FIL), one process, one API, one metrics endpoint. A realistic AI service needs both. Picture the chat model in vLLM or TensorRT-LLM, with embeddings, rerankers, classifiers, guardrail models and pre/post-processing in Triton.
+
+| Triton feature | What it solves |
+|---|---|
+| Model repository + versions | declarative deploys, A/B by version, hot reload |
+| Dynamic batching | many small requests → one efficient GPU batch |
+| Instance groups | N copies of a model per GPU (or CPU) for concurrency |
+| Ensembles / BLS | multi-step pipelines server-side, no client round trips |
+| HTTP/REST + gRPC (KServe v2 protocol) | same API for every model |
 
 ---
 
-## 2. Triton Server Architecture & Pluggable Backends
-
-Triton is written in optimized C++ and decouples the serving runtime from the underlying ML frameworks via **Backends**:
+## 2. Architecture — HLD
 
 ```mermaid
-graph TD
-    Client["Client Request (gRPC / HTTP)"] --> Core["Triton C++ Core Engine<br/>(Dynamic Batcher & Scheduler)"]
-    
-    subgraph Backends["Pluggable Execution Backends"]
-        B1["TensorRT Backend<br/>(Compiled GPU Engine)"]
-        B2["ONNX Runtime Backend<br/>(Cross-Platform)"]
-        B3["PyTorch (LibTorch) Backend"]
-        B4["Python Backend<br/>(Custom Code & Tokenizers)"]
-        B5["TensorRT-LLM / vLLM Backend<br/>(High-throughput LLMs)"]
-    end
-    
-    Core --> Backends
-    Backends --> GPU["NVIDIA Blackwell / GB10 GPU Hardware"]
+flowchart LR
+  C["client<br/>HTTP :8000 / gRPC :8001"] --> SCHED
+  subgraph TRITON["tritonserver · llm-serving"]
+    direction LR
+    SCHED["request scheduler"] --> ENS["ensemble 'pipeline'"]
+    ENS --> P["preprocess (python)<br/>KIND_CPU × 2<br/>dynamic batching ≤ 2 ms"]
+    P -->|"IDS INT32[16]"| S["scorer (python + torch)<br/>KIND_GPU × 2<br/>preferred batch 16/32"]
+    S -->|"SCORE FP32[1]"| ENS
+    MET["metrics :8002<br/>nv_inference_*"]
+  end
+  REPO[("model repository<br/>ConfigMaps → init container → /repo")] --> TRITON
+  S --> GPU["GB10 slice"]
+  MET --> PROM["Prometheus"]
+  PA["perf_analyzer Job<br/>(SDK image)"] -->|gRPC| C
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef obs fill:#fb8500,stroke:#9a5200,color:#000
+  classDef tenant fill:#eaeef2,stroke:#57606a,color:#000
+  class S,GPU gpu
+  class SCHED,ENS,P ctrl
+  class REPO store
+  class MET,PROM obs
+  class C,PA tenant
+  style TRITON fill:#f4fbe8,stroke:#76b900,stroke-width:2px
 ```
 
 ---
 
-## 3. The Model Repository Directory Specification
+## 3. LLD
 
-Triton serves models out of a structured file system called the **Model Repository**. The directory structure is strictly enforced:
+### 3.1 Repository layout
 
 ```text
-/models/ (Model Repository Root)
-├── text_embedding/
-│   ├── config.pbtxt           <── Model configuration & dynamic batching settings
-│   └── 1/                     <── Version Directory (Numeric)
-│       └── model.onnx         <── Model weights / binary artifact
-├── object_detector/
-│   ├── config.pbtxt
-│   └── 1/
-│       └── model.plan         <── Compiled TensorRT Engine
-└── preprocessing_step/
-    ├── config.pbtxt
-    └── 1/
-        └── model.py           <── Python backend script
+/repo
+├── preprocess/            config.pbtxt   1/model.py   # TEXT (BYTES) → IDS (INT32[16])
+├── scorer/                config.pbtxt   1/model.py   # IDS → SCORE (FP32[1]), torch on cuda
+└── pipeline/              config.pbtxt   1/           # ensemble: preprocess → scorer
 ```
+
+In the lab, the files are kustomize-generated ConfigMaps, which an init container lays out into an `emptyDir`. In production the repository lives on a PVC, S3 or GCS (`--model-repository=s3://…`), and models are TensorRT engines or ONNX files.
+
+### 3.2 Key config
+
+| Model | `max_batch_size` | Batching | Instances | Why |
+|---|---|---|---|---|
+| preprocess | 64 | `max_queue_delay_microseconds: 2000` | 2 × CPU | cheap Python. Batches amortise per-call overhead |
+| scorer | 64 | `preferred_batch_size: [16, 32]`, 2 ms | 2 × GPU 0 | GEMM efficiency needs batches. 2 instances overlap H2D and compute |
+| pipeline | 64 | ensemble scheduling | — | one client call, two model hops |
+
+### 3.3 Ports & metrics
+
+| Port | Protocol | Notes |
+|---|---|---|
+| 8000 | HTTP/REST (KServe v2) | `/v2/health/ready`, `/v2/models/<m>/infer`, `/v2/repository/index` |
+| 8001 | gRPC | Service `appProtocol: kubernetes.io/h2c` (Vol 09 §5.9) |
+| 8002 | Prometheus | `nv_inference_request_success`, `nv_inference_count`, `nv_inference_exec_count`, `nv_inference_queue_duration_us`, `nv_inference_compute_infer_duration_us` |
+
+**Average batch size = `nv_inference_count / nv_inference_exec_count`.** That's the number that proves dynamic batching works.
 
 ---
 
-## 4. Dynamic Batching & Concurrent Model Execution
+## 4. Integrations
 
-In production, client requests arrive unpredictably at random millisecond intervals. Running inference on 1 request at a time wastes 90% of GPU compute capability.
+- **Image choice:** `tritonserver:25.09-pyt-python-py3` ships PyTorch for the Python backend (the scorer uses `torch.cuda`). The plain `-py3` image would fall back to CPU. The SDK image `-py3-sdk` carries `perf_analyzer`.
+- **TensorRT-LLM backend (modules 03–06)**: the same Deployment with the `-trtllm-python-py3` image and an engine built for sm_121.
+- **Guardrails / RAG (module 05)**: rerankers and embedding models are natural Triton tenants next to vLLM.
 
-### Dynamic Batching:
-Triton automatically pauses for a microsecond window (`max_queue_delay_microseconds`), aggregates individual client requests into a single cohesive tensor batch, executes it on the GPU Tensor Cores, and splits the results back to the individual clients:
+---
+
+## 5. Lab
+
+### 5.1 Deploy
+
+```bash
+cd "02 Kubernetes/lab"
+kubectl apply -k manifests/90-serving/triton
+kubectl -n llm-serving logs deploy/triton -c layout
+kubectl -n llm-serving rollout status deploy/triton --timeout=15m     # first pull ≈ 15 GB
+kubectl -n llm-serving logs deploy/triton | grep -E 'successfully loaded|READY|Started'
+```
+
+Expected:
 
 ```text
-Client 1: [Req A] (Arrives at 0.0ms) ──┐
-Client 2: [Req B] (Arrives at 0.3ms) ──┼──> Combined Batch [A, B, C] ──> GPU Executed in 1 pass!
-Client 3: [Req C] (Arrives at 0.8ms) ──┘
+| Model      | Version | Status |
+| pipeline   | 1       | READY  |
+| preprocess | 1       | READY  |
+| scorer     | 1       | READY  |
+I… Started GRPCInferenceService at 0.0.0.0:8001
+I… Started HTTPService at 0.0.0.0:8000
+I… Started Metrics Service at 0.0.0.0:8002
 ```
 
-### Concurrent Model Execution (`instance_group`):
-Triton can run **multiple execution instances of the same model** simultaneously on a single GPU to saturate all compute engines:
-```protobuf
-# config.pbtxt
-instance_group [
-  {
-    count: 2                   # Run 2 parallel instances of this model
-    kind: KIND_GPU
-    gpus: [ 0 ]
-  }
-]
-```
+### 5.2 Talk to it
 
----
-
-## 5. Ensemble Pipelines & Business Logic Scripting (BLS)
-
-In production AI, you rarely run a model in isolation. A real speech-to-intent pipeline requires:
-`Audio File ──> Mel Spectrogram ──> Whisper Model ──> Text Tokens ──> LLM ──> Intent Output`
-
-In traditional microservices, intermediate data travels across the network between 4 different containers, serializing and deserializing JSON at every hop (**Serialization Tax**).
-
-### With Triton Ensembles:
-Triton pipelines models **inside GPU memory with zero network hops and zero CPU copying**:
-
-```text
-[ Input Audio ] ──> [ Preprocessing ] ──(GPU VRAM)──> [ Whisper Model ] ──(GPU VRAM)──> [ Output Text ]
-                     (Python Backend)                  (TensorRT Engine)
-```
-
----
-
-## 6. Communication Protocols: HTTP, gRPC & C API
-
-Triton exposes three distinct interface endpoints:
-1. **HTTP/REST (Port 8000)**: Standard JSON protocol conforming to the KServe v2 Data Plane specification.
-2. **gRPC (Port 8001)**: **Recommended for Production**. Binary protocol using Protocol Buffers. Reduces network latency by up to 5x and enables bidirectional streaming for real-time speech and tokens.
-3. **Metrics (Port 8002)**: Prometheus endpoint exposing real-time GPU compute duration, queue time, and inference counts.
-
----
-
-## 7. Kubernetes Production Deployment Architecture
-
-```mermaid
-graph TD
-    Client["Client App"] -->|gRPC (Port 8001)| Ingress["Ingress / Gateway API<br/>(backend-protocol: GRPC)"]
-    Ingress --> Service["Triton Service (ClusterIP)"]
-    Service --> Pod["Triton Server Pod"]
-    
-    subgraph TritonPod["Triton Pod (k3s-beta)"]
-        Server["tritonserver Daemon"]
-        ModelPVC["Local Path PVC (/models)<br/>Shared Model Repository"]
-        GPU["NVIDIA GPU (nvidia.com/gpu: 1)"]
-        
-        Server --- ModelPVC
-        Server --- GPU
-    end
-```
-
-### Complete Production Manifest (`triton-deployment.yaml`)
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: triton-server
-  namespace: k3s-beta
-  labels:
-    app: triton-server
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: triton-server
-  template:
-    metadata:
-      labels:
-        app: triton-server
-    spec:
-      tolerations:
-        - key: "nvidia.com/gpu"
-          operator: "Exists"
-          effect: "NoSchedule"
-      volumes:
-        - name: model-repo
-          persistentVolumeClaim:
-            claimName: data-volume-beta # Points to /var/lib/rancher/k3s/storage
-        - name: dshm
-          emptyDir:
-            medium: Memory
-            sizeLimit: "2Gi"
-      containers:
-        - name: triton
-          image: nvcr.io/nvidia/tritonserver:24.01-py3
-          command: ["tritonserver"]
-          args:
-            - "--model-repository=/models"
-            - "--strict-model-config=false"
-            - "--log-verbose=0"
-          volumeMounts:
-            - name: model-repo
-              mountPath: /models
-            - name: dshm
-              mountPath: /dev/shm
-          ports:
-            - containerPort: 8000
-              name: http
-            - containerPort: 8001
-              name: grpc
-            - containerPort: 8002
-              name: metrics
-          resources:
-            requests:
-              cpu: "1000m"
-              memory: "3200Mi"
-              nvidia.com/gpu: "1"
-            limits:
-              cpu: "2000m"      # Bounded by 5% DGX compute limit
-              memory: "6400Mi"  # Bounded by 5% DGX memory limit
-              nvidia.com/gpu: "1"
-          readinessProbe:
-            httpGet:
-              path: /v2/health/ready
-              port: 8000
-            initialDelaySeconds: 30
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /v2/health/live
-              port: 8000
-            periodSeconds: 30
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: triton-service
-  namespace: k3s-beta
-spec:
-  type: ClusterIP
-  selector:
-    app: triton-server
-  ports:
-    - name: http
-      port: 8000
-      targetPort: 8000
-    - name: grpc
-      port: 8001
-      targetPort: 8001
-    - name: metrics
-      port: 8002
-      targetPort: 8002
-```
-
----
-
-## 8. Configuring `config.pbtxt` for Maximum GPU Throughput
-
-Every model in Triton requires a `config.pbtxt` file:
-
-```protobuf
-name: "resnet50_onnx"
-platform: "onnxruntime_onnx"
-max_batch_size: 64
-
-input [
-  {
-    name: "input_tensor"
-    data_type: TYPE_FP32
-    dims: [ 3, 224, 224 ]
-  }
-]
-output [
-  {
-    name: "probabilities"
-    data_type: TYPE_FP32
-    dims: [ 1000 ]
-  }
-]
-
-# Enable Dynamic Batching with 2ms window:
-dynamic_batching {
-  max_queue_delay_microseconds: 2000
-  preferred_batch_size: [ 8, 16, 32, 64 ]
-}
-
-# Run 2 concurrent instances on GPU 0:
-instance_group [
-  {
-    count: 2
-    kind: KIND_GPU
-    gpus: [ 0 ]
-  }
-]
-```
-
----
-
-## 9. Production Diagnostics & Troubleshooting Playbook
-
-### Scenario 1: Model Fails to Load (`inference:model_load_failed`)
-- **Symptom**: Pod passes liveness probe but fails readiness probe (`/v2/health/ready` returns 503).
-- **Triage**:
-  ```bash
-  kubectl logs -n k3s-beta -l app=triton-server | grep -E "FAILED|Error"
-  ```
-- **Common Root Causes**:
-  1. `config.pbtxt` input/output dimensions do not match the compiled ONNX/TensorRT graph.
-  2. Missing version subfolder (e.g. placing `model.onnx` directly in `/models/my_model/` instead of `/models/my_model/1/model.onnx`).
-
----
-
-### Scenario 2: gRPC Connection Reset Through Ingress
-- **Symptom**: HTTP queries succeed on port 8000, but client Python gRPC calls fail with `UNAVAILABLE: Socket closed`.
-- **Root Cause**: The Kubernetes Ingress proxy is treating traffic as standard HTTP/1.1 and stripping HTTP/2 headers.
-- **Resolution**: Add the gRPC backend protocol annotation to Ingress:
-  ```yaml
-  nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
-  ```
-
----
-
-## 10. Hands-On Triton Deployment Lab on DGX Spark
-
-Deploy a standalone Triton container that generates synthetic models in-memory to test your GPU integration:
-
-### 1. Launch Triton Test Instance
 ```bash
-kubectl run triton-smoke-test \
-  -n k3s-beta \
-  --image=nvcr.io/nvidia/tritonserver:24.01-py3 \
-  --limits='nvidia.com/gpu=1,cpu=1000m,memory=3Gi' \
-  --restart=Never \
-  -- tritonserver --model-repository=/opt/tritonserver/qa/common/models
+kubectl -n llm-serving port-forward svc/triton 8000 8002 &
+curl -s localhost:8000/v2/health/ready -o /dev/null -w '%{http_code}\n'           # 200
+curl -s -X POST localhost:8000/v2/repository/index | jq -c '.[]'
+curl -s localhost:8000/v2/models/pipeline/config | jq '.ensemble_scheduling.step[].model_name'
+curl -s -X POST localhost:8000/v2/models/pipeline/infer -H 'Content-Type: application/json' -d '{
+  "inputs":[{"name":"TEXT","shape":[2,1],"datatype":"BYTES","data":["unified memory on the spark","two sparks over cx7"]}]}' | jq '.outputs[0]'
 ```
 
-### 2. Verify Health Endpoints Over HTTP
-```bash
-# Wait 20 seconds, then curl server health:
-kubectl exec -it pytorch-benchmark -n k3s-alpha -- curl -s http://triton-smoke-test.k3s-beta.svc.cluster.local:8000/v2/health/ready
-```
-*Expected Output: HTTP 200 OK.*
+Expected: `{"name":"SCORE","datatype":"FP32","shape":[2,1],"data":[0.5…,0.4…]}`.
 
-### 3. Query Prometheus Telemetry
-```bash
-kubectl exec -it pytorch-benchmark -n k3s-alpha -- curl -s http://triton-smoke-test.k3s-beta.svc.cluster.local:8002/metrics | head -n 30
-```
-*Observe real-time telemetry metrics (`nv_inference_request_success`, `nv_gpu_memory_used_bytes`).*
+Confirm the scorer really runs on the GPU:
 
-### 4. Clean Up
 ```bash
-kubectl delete pod triton-smoke-test -n k3s-beta
+ssh nvidia@10.10.10.11 nvidia-smi --query-compute-apps=pid,process_name --format=csv   # a triton_python_backend_stub process
+```
+
+### 5.3 Load test and batching efficiency
+
+```bash
+before=$(curl -s localhost:8002/metrics | awk '/^nv_inference_(count|exec_count)\{model="scorer"/ {print $2}' | paste -sd' ')
+kubectl -n llm-serving patch job triton-perf -p '{"spec":{"suspend":false}}'
+kubectl -n llm-serving logs -f job/triton-perf | grep -E 'Concurrency|Throughput|p99 latency'
+after=$(curl -s localhost:8002/metrics | awk '/^nv_inference_(count|exec_count)\{model="scorer"/ {print $2}' | paste -sd' ')
+echo "$before | $after" | awk '{printf "scorer average batch size during the test: %.1f\n", ($4-$1)/($5-$2)}'
+```
+
+Expected shape: throughput rises with concurrency until the GPU or Python stub saturates, and **average batch size climbs well above 1**. Now set `max_queue_delay_microseconds: 0` in the scorer config, re-apply and repeat. Batch size falls towards 1, and throughput at high concurrency falls with it. That's the latency/throughput trade dynamic batching makes.
+
+### 5.4 Instance groups
+
+Change `count: 2` → `count: 1` for `scorer`, re-apply (`kubectl apply -k …` then `kubectl -n llm-serving rollout restart deploy/triton`), and repeat §5.3. With one instance, compute can't overlap with the Python stub's CPU work, and p99 latency rises at the same concurrency.
+
+### 5.5 gRPC through the gateway
+
+Add the `GRPCRoute` from Vol 09 §5.9, then from your laptop:
+
+```bash
+kubectl -n llm-serving run grpc-test --rm -it --restart=Never --image=nvcr.io/nvidia/tritonserver:25.09-py3-sdk -- \
+  perf_analyzer -m pipeline -u triton:8001 -i grpc --string-data "hello spark" --concurrency-range 4
 ```
 
 ---
 
-Proceed to [**23-llm-inference-alternatives-and-kserve.md**](23-llm-inference-alternatives-and-kserve.md) to explore TensorRT-LLM, HuggingFace TGI, SGLang, and KServe/Ray Serve orchestration on Kubernetes.
+## 6. Verify
+
+| Check | Expected |
+|---|---|
+| `/v2/health/ready` | 200 |
+| repository index | 3 models `READY` |
+| inference | 2 scores returned for 2 inputs |
+| average scorer batch size under load | > 1 (typically several) |
+| `nvidia-smi` on host | Triton Python stub listed as a GPU process |
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Cause | Diagnose | Fix |
+|---|---|---|---|
+| `failed to load 'scorer' … ModuleNotFoundError: torch` | image without PyTorch | model load log | `-pyt-python-py3` image (lab default). The code falls back to CPU otherwise |
+| model `UNAVAILABLE: Invalid argument: … dims` | config dims don't match the tensors the model returns | `/v2/models/<m>/config` | fix `config.pbtxt`. Remember `max_batch_size > 0` adds an implicit batch dim |
+| ensemble error `unable to find … output` | step `output_map` key mismatch | `pipeline/config.pbtxt` | the map key is the *model's* tensor name, the value is the ensemble-internal name |
+| gRPC `UNAVAILABLE` via Traefik | h2c not negotiated | Service `appProtocol` | `kubernetes.io/h2c` |
+| batch size stays 1 | `max_queue_delay` 0, or clients too slow to overlap | metrics ratio | allow 1–5 ms delay. Raise client concurrency |
+| pod Ready but model not | readiness checks server, not model | `/v2/models/pipeline/ready` | use a model-level readiness endpoint in the probe for single-model servers |
+
+---
+
+## 8. Scale-out path
+
+| Lab | Datacenter |
+|---|---|
+| Python toy models | TensorRT engines, ONNX, TensorRT-LLM, FIL for trees |
+| ConfigMap repository | S3/GCS repository, `--model-control-mode=explicit` + load API from CI |
+| 1 pod | replicas behind the gateway. KServe `InferenceService` with the Triton runtime (Vol 23). NVIDIA NIM containers package Triton/TRT-LLM per model |
+| manual perf_analyzer | Model Analyzer sweeps (instances × batch sizes × precisions) in CI |
+
+---
+
+## 9. Checklist
+
+- [ ] I can lay out a Triton repository and explain every field in a `config.pbtxt`.
+- [ ] My ensemble runs CPU and GPU steps server-side in one call.
+- [ ] I proved dynamic batching with `nv_inference_count / nv_inference_exec_count`.
+- [ ] I know when to put a model in Triton rather than vLLM.

@@ -1,374 +1,259 @@
-# 21. vLLM High-Throughput LLM Serving on Kubernetes
+# Volume 21 — vLLM on Kubernetes on a DGX Spark: KV-Cache Budgeting, Probes, Autoscaling & Load Testing
 
-**vLLM** has emerged as the industry-standard open-source inference and serving engine for Large Language Models (LLMs). Delivering up to 24x higher throughput than HuggingFace Transformers, vLLM powers production AI platforms across major tech companies.
+> **Module 02 · Part VI — Serving** · Prev: [20 Workbook](20-hands-on-practice-exercises-workbook.md) · Next: [22 Triton](22-nvidia-triton-inference-server.md)
 
-This guide details the internal mechanics of vLLM, its core breakthrough (**PagedAttention**), KV cache memory management, deployment patterns on Kubernetes, fine-grained tuning parameters, and production troubleshooting playbooks.
-
----
-
-## 📑 Table of Contents
-1. [Why vLLM? The LLM Serving Bottleneck](#1-why-vllm-the-llm-serving-bottleneck)
-2. [Internal Architecture & PagedAttention](#2-internal-architecture--pagedattention)
-3. [KV Cache Math: Memory Budgeting on DGX Spark (GB10)](#3-kv-cache-math-memory-budgeting-on-dgx-spark-gb10)
-4. [Continuous (Dynamic) Batching vs. Static Batching](#4-continuous-dynamic-batching-vs-static-batching)
-5. [Model Quantization: FP8, AWQ & GPTQ](#5-model-quantization-fp8-awq--gptq)
-6. [Kubernetes Production Deployment Architecture](#6-kubernetes-production-deployment-architecture)
-7. [Engine Customization & CLI Argument Reference](#7-engine-customization--cli-argument-reference)
-8. [Autoscaling with Custom GPU Metrics (HPA)](#8-autoscaling-with-custom-gpu-metrics-hpa)
-9. [Production Diagnostics & Troubleshooting Playbook](#9-production-diagnostics--troubleshooting-playbook)
-10. [Hands-On vLLM Deployment Lab on DGX Spark](#10-hands-on-vllm-deployment-lab-on-dgx-spark)
+| | |
+|---|---|
+| **You will build** | A production-shaped vLLM Deployment: shared model cache, startup/readiness/liveness probes, graceful drain, UMA-aware memory flags, metrics and alerts, queue-depth autoscaling with KEDA, and a repeatable benchmark that gives you TTFT/TPOT/throughput for your GB10 |
+| **Hardware** | spark-01 |
+| **Time** | 90 min |
+| **Risk** | Low. The model uses ~36 GiB of UMA at `--gpu-memory-utilization 0.30` |
+| **Lab files** | [`manifests/90-serving/vllm/`](lab/manifests/90-serving/vllm/) (`vllm.yaml`, `vllm-bench.yaml`), [`manifests/60-storage/model-prefetch-job.yaml`](lab/manifests/60-storage/model-prefetch-job.yaml), [`manifests/90-serving/autoscaling.yaml`](lab/manifests/90-serving/autoscaling.yaml), [`manifests/95-observability/rules.yaml`](lab/manifests/95-observability/rules.yaml) |
 
 ---
 
-## 1. Why vLLM? The LLM Serving Bottleneck
+## 1. Why this matters on a Spark
 
-Serving LLMs is fundamentally different from traditional deep learning inference (e.g., image classification with ResNet):
-- **Autoregressive Generation**: Generating a 500-token response requires executing the neural network **500 sequential times**, generating exactly one token per step.
-- **Memory-Bound Computation**: In the decode phase, computation consists of low-arithmetic-intensity Matrix-Vector multiplications. Speed is limited not by Tensor Core TFLOPs, but by **memory bandwidth**.
-- **The KV Cache Bottleneck**: To avoid recomputing past attention keys and values for every new token, the model caches historical Key and Value tensors in GPU memory (**KV Cache**). In traditional serving engines, the KV cache wasted **60% to 80% of GPU memory** due to internal and external memory fragmentation!
+vLLM's throughput comes from **PagedAttention** (the KV cache is paged in fixed blocks, like virtual memory, so it doesn't fragment) and **continuous batching** (new requests join the running batch at every decode step). On a Spark there's one extra rule: `--gpu-memory-utilization` is a fraction of the **whole unified pool** (≈119.7 GiB), the same memory the OS, k3s, page cache and other pods use. On a discrete GPU, 0.90 is normal. Here, 0.90 would starve the whole machine.
 
-vLLM was created by UC Berkeley researchers specifically to eliminate KV cache memory waste.
+| Flag | What it controls | Lab value | Rule of thumb on a Spark |
+|---|---|---|---|
+| `--gpu-memory-utilization` | weights + activations + KV cache ≤ fraction × total | 0.30 | sum over all engines ≤ 0.70 |
+| `--max-model-len` | longest context per sequence | 8192 | only what users need. KV grows linearly |
+| `--max-num-seqs` | concurrent sequences in the batch | 64 | lower → better latency, higher → throughput |
+| `--enable-prefix-caching` | reuse KV for shared prefixes (system prompts, RAG templates) | on | almost always on |
+| `--download-dir` / `HF_HOME` | where weights live | `/models/hf` (PVC) | never inside the container layer |
 
 ---
 
-## 2. Internal Architecture & PagedAttention
+## 2. Architecture — HLD
 
 ```mermaid
-graph TD
-    Client["Client / User"] -->|HTTP / OpenAI API| API["vLLM AsyncLLMEngine"]
-    API --> Tokenizer["Fast HuggingFace Tokenizer"]
-    Tokenizer --> Scheduler["Continuous Batching Scheduler"]
-    Scheduler --> Engine["Execution Engine (PyTorch / CUDA / C++ Kernels)"]
-    
-    subgraph MemoryMgmt["PagedAttention Memory Subsystem"]
-        VM["Virtual KV Cache Blocks (Logical Tokens)"]
-        BlockTable["Block Table (Page Table Translation)"]
-        Physical["Physical GPU Memory Pages (Non-contiguous)"]
-        
-        VM --> BlockTable
-        BlockTable --> Physical
-    end
-    
-    Engine <--> MemoryMgmt
+flowchart LR
+  CL["clients"] --> TR["Traefik<br/>/v1 · streaming-safe"] --> SVC["Service vllm:8000"]
+  subgraph POD["Deployment vllm · llm-serving · priority spark-serving"]
+    direction TB
+    API["OpenAI API server<br/>/v1/chat/completions · /metrics · /health"]
+    SCH["scheduler<br/>continuous batching"]
+    ENG["model executor<br/>CUDA graphs · sm_121"]
+    KV[("paged KV cache<br/>blocks in UMA")]
+    API --> SCH --> ENG --> KV
+  end
+  SVC --> API
+  PVC[("PVC model-cache<br/>/models/hf")] --> ENG
+  PRE["Job model-prefetch"] --> PVC
+  API -->|"/metrics"| PROM["Prometheus"] --> KEDA["KEDA ScaledObject<br/>num_requests_waiting"]
+  KEDA -.->|"replicas"| POD
+  ENG --> GPU["GB10 slice"]
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef obs fill:#fb8500,stroke:#9a5200,color:#000
+  classDef ext fill:#24292f,stroke:#000,color:#fff
+  class ENG,GPU gpu
+  class TR,SVC net
+  class KV,PVC store
+  class PROM,KEDA obs
+  class CL ext
+  style POD fill:#f4fbe8,stroke:#76b900,stroke-width:2px
 ```
 
-### PagedAttention: Virtual Memory for LLMs
-Inspired by traditional OS virtual memory and paging:
-- **Traditional Serving**: Required allocating a single, large, contiguous block of GPU memory for the maximum possible sequence length (e.g. 4,096 tokens) in advance. If the prompt was only 20 tokens, the remaining 4,076 tokens of allocated memory sat completely wasted.
-- **PagedAttention**: Divides the KV cache into fixed-size **physical blocks** (typically 16 or 32 tokens per block).
-  - Memory blocks are allocated dynamically on-demand as new tokens are generated.
-  - Blocks do **not** need to be contiguous in physical GPU memory.
-  - A **Block Table** translates logical token positions to physical memory blocks.
-  - **Memory waste drops from ~70% to under 4%**, allowing 2x to 4x more concurrent requests to run on the exact same GPU!
+---
+
+## 3. LLD
+
+### 3.1 KV-cache math
+
+Per token, per sequence: `2 (K and V) × layers × kv_heads × head_dim × bytes_per_element`.
+
+| Model | Layers | KV heads | Head dim | KV / token (BF16) | 8K context, 1 seq | 64 seqs × 2K tokens |
+|---|---|---|---|---|---|---|
+| Qwen2.5-0.5B-Instruct (lab smoke) | 24 | 2 | 64 | **12 KiB** | 96 MiB | 1.5 GiB |
+| Qwen2.5-7B-Instruct | 28 | 4 | 128 | **56 KiB** | 448 MiB | 7 GiB |
+| Llama-3.1-8B-Instruct | 32 | 8 | 128 | **128 KiB** | 1 GiB | 16 GiB |
+| Qwen2.5-32B-Instruct | 64 | 8 | 128 | **256 KiB** | 2 GiB | 32 GiB |
+
+Budget at `--gpu-memory-utilization 0.30` ≈ 36 GiB: the 0.5B model (≈1 GiB weights) leaves ~34 GiB for KV, which is huge. A 32B model in BF16 (~64 GiB weights) doesn't fit at all. Use FP8 or AWQ-INT4 (~17–35 GiB) and raise the fraction deliberately (modules 03/04). vLLM logs the exact figure at startup: `# GPU blocks: N` / `KV cache size: … tokens`.
+
+### 3.2 Probes and lifecycle
+
+| Mechanism | Setting | Protects against |
+|---|---|---|
+| `startupProbe` | `/health`, 10 s × 180 = 30 min | killing a pod that's still downloading or compiling (drill BF-05) |
+| `readinessProbe` | `/health`, 5 s | routing to a loading or overloaded pod |
+| `livenessProbe` | `/health`, 15 s × 4 | a wedged engine |
+| `preStop: sleep 15` + `terminationGracePeriodSeconds: 120` | — | cutting in-flight streams on rollout (Vol 07 §5.6) |
+| `strategy: Recreate` | — | two copies of the model in UMA during a rollout |
+| `/dev/shm` 8 Gi | memory-backed emptyDir | tensor-parallel and worker IPC |
+
+### 3.3 Metrics you'll use
+
+| Metric | Meaning |
+|---|---|
+| `vllm:num_requests_running` / `vllm:num_requests_waiting` | batch size / queue depth. **Scale on waiting** |
+| `vllm:kv_cache_usage_perc` (older: `gpu_cache_usage_perc`) | KV-cache fill. Near 1.0 → preemptions |
+| `vllm:num_preemptions` | sequences evicted and recomputed |
+| `vllm:time_to_first_token_seconds` | TTFT histogram (prefill + queue) |
+| `vllm:inter_token_latency_seconds` (older: `time_per_output_token_seconds`) | decode speed per token |
+| `vllm:prompt_tokens` / `vllm:generation_tokens` | token throughput counters |
+
+The lab's rules use `A or B` so they work with both metric generations.
 
 ---
 
-## 3. KV Cache Math: Memory Budgeting on DGX Spark (GB10)
+## 4. Integrations
 
-Before deploying a model to a Kubernetes pod, you must calculate its exact memory footprint to avoid **CUDA Out Of Memory** crashes.
-
-### The Memory Equation:
-$$\text{Total VRAM Required} = \text{Model Weights} + \text{Activation Memory} + \text{KV Cache Pool}$$
-
-#### Step 1: Model Weights Memory
-For a 16-bit model (FP16 / BF16), each parameter occupies 2 bytes:
-$$\text{Weight Size} = \text{Parameters} \times 2 \text{ bytes}$$
-- **7B Model (Mistral-7B / Llama-3 8B)**: $\approx 16 \text{ GB}$
-- **70B Model (Llama-3 70B)**: $\approx 140 \text{ GB}$
-
-#### Step 2: KV Cache per Token Formula
-For a model with $L$ layers, $H_{kv}$ key-value attention heads, and hidden head dimension $D$:
-$$\text{KV Bytes per Token} = 2 \times (\text{Key} + \text{Value}) \times L \times H_{kv} \times D \times \text{BytesPerElement}$$
-
-*Example: Llama-3 8B (32 layers, 8 KV heads [Grouped-Query Attention], head dim 128, FP16 = 2 bytes):*
-$$\text{KV Bytes per Token} = 2 \times 32 \times 8 \times 128 \times 2 = 131,072 \text{ bytes} \approx \mathbf{128\text{ KB per token}}$$
-
-#### Step 3: KV Cache for Concurrency
-If your pod handles **20 concurrent users**, each generating sequences of **2,048 tokens**:
-$$\text{Total Tokens} = 20 \times 2,048 = 40,960 \text{ tokens}$$
-$$\text{Total KV Cache} = 40,960 \times 128 \text{ KB} \approx \mathbf{5.24\text{ GB}}$$
-
-*On your DGX Spark, vLLM defaults to reserving 90% of available GPU VRAM (`--gpu-memory-utilization 0.90`), reserving the remainder after weights for the dynamic KV cache pool.*
+- **Storage (Vol 11)**: the prefetch Job fills `model-cache`, and vLLM starts from local NVMe.
+- **Ingress (Vol 09)**: point the Ingress at `vllm:8000` instead of `mock-llm` once you've proven the path with the mock.
+- **Autoscaling**: KEDA reads Prometheus. On one GB10, extra replicas mostly add *queueing* capacity, not compute. `maxReplicaCount: 1` until spark-02 joins.
+- **Modules 03–06**: each model family is a kustomize-style variation of this Deployment (model, quantisation, engine flags, chat template).
 
 ---
 
-## 4. Continuous (Dynamic) Batching vs. Static Batching
+## 5. Lab
 
-- **Static Batching (Legacy)**: Waits for $N$ requests, runs them together. If Request 1 finishes in 10 tokens and Request 2 needs 1,000 tokens, the GPU sits idle waiting for Request 2 before processing any new requests.
-- **Continuous Batching (vLLM)**: Operates at the **iteration level**. As soon as Request 1 finishes at iteration 10, it is ejected immediately, and a new incoming Request 3 is spliced into the batch at iteration 11 without delay!
+### 5.1 Prefetch weights, then deploy
+
+```bash
+cd "02 Kubernetes/lab"
+kubectl -n llm-serving create secret generic hf-token --from-literal=token="${HF_TOKEN:-none}" --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f manifests/60-storage/model-prefetch-job.yaml
+kubectl -n llm-serving wait --for=condition=complete job/model-prefetch --timeout=30m
+sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'      # on the Spark: start the load with a clean page cache
+kubectl apply -k manifests/90-serving/vllm
+kubectl -n llm-serving logs -f deploy/vllm | grep -E 'Loading|weights|KV cache|blocks|CUDA graph|Uvicorn|ERROR'
+```
+
+Expected log landmarks:
 
 ```text
-Static Batching:
-Req 1: [Tok 1-10] ---------------- (Idle / Wasted Compute) -----------------
-Req 2: [Tok 1......................................................1000]
-
-Continuous Batching (vLLM):
-Req 1: [Tok 1-10] -> Completed!
-Req 3:            [Tok 1-500] -----------------------------> Completed!
-Req 2: [Tok 1......................................................1000]
+INFO … Loading weights took 1.9 seconds
+INFO … Model loading took 0.93 GiB and 3.1 seconds
+INFO … Available KV cache memory: 33.4 GiB
+INFO … GPU KV cache size: 2,918,000 tokens
+INFO … Capturing CUDA graphs … took 12 seconds
+INFO:     Uvicorn running on http://0.0.0.0:8000
 ```
 
----
+(Numbers are illustrative. Note yours.)
 
-## 5. Model Quantization: FP8, AWQ & GPTQ
+### 5.2 First request (streaming)
 
-When running large models inside your **5% resource envelope**, quantization reduces memory footprint and increases throughput:
-
-| Format | Bits per Weight | Quality Loss | Blackwell / DGX Spark Support | Best Use Case |
-| :--- | :--- | :--- | :--- | :--- |
-| **BF16 / FP16** | 16-bit | 0% (Baseline) | Native | High-accuracy research |
-| **FP8 (Float8)** | 8-bit | < 0.2% | **Native Hardware Acceleration** (Blackwell Transformer Engine) | **Production Enterprise Standard** |
-| **AWQ** | 4-bit | < 1% | Software Kernels | Fitting 70B models on single nodes |
-| **GPTQ** | 4-bit | ~ 1-2% | Software Kernels | Legacy 4-bit inference |
-
-*To run an FP8 or AWQ model in vLLM, add: `--quantization fp8` or `--quantization awq`.*
-
----
-
-## 6. Kubernetes Production Deployment Architecture
-
-Deploying vLLM in Kubernetes requires coordinating high-speed storage, GPU pass-through, readiness probing, and real-time token streaming:
-
-```mermaid
-graph TD
-    Ingress["Ingress (api.ai.local)<br/>proxy-buffering: off"] --> Service["vLLM Service (ClusterIP: Port 8000)"]
-    Service --> Pod["vLLM Worker Pod"]
-    
-    subgraph PodSubsystem["vLLM Pod Boundary"]
-        Container["vLLM Engine (vllm/vllm-openai:latest)"]
-        PV["Local NVMe PVC<br/>(/root/.cache/huggingface)"]
-        GPU["NVIDIA GPU Allocation<br/>(nvidia.com/gpu: 1)"]
-        
-        Container --- PV
-        Container --- GPU
-    end
-```
-
-### Complete Production Manifest (`vllm-deployment.yaml`)
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: vllm-llama3
-  namespace: k3s-beta
-  labels:
-    app: vllm-llama3
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: vllm-llama3
-  template:
-    metadata:
-      labels:
-        app: vllm-llama3
-    spec:
-      tolerations:
-        - key: "nvidia.com/gpu"
-          operator: "Exists"
-          effect: "NoSchedule"
-      volumes:
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: data-volume-beta # Mounts local high-speed NVMe storage
-        - name: dshm
-          emptyDir:
-            medium: Memory
-            sizeLimit: "4Gi" # Shared memory required for PyTorch inter-process IPC
-      containers:
-        - name: vllm-server
-          image: vllm/vllm-openai:v0.4.2
-          imagePullPolicy: IfNotPresent
-          env:
-            - name: HUGGING_FACE_HUB_TOKEN
-              value: "hf_xxxxxxxxxxxxxxxxxxxxxxxx"
-            - name: HF_HOME
-              value: "/data/huggingface"
-          command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
-          args:
-            - "--model=meta-llama/Meta-Llama-3-8B-Instruct"
-            - "--gpu-memory-utilization=0.85"
-            - "--max-model-len=4096"
-            - "--dtype=bfloat16"
-            - "--port=8000"
-            - "--trust-remote-code"
-          volumeMounts:
-            - name: model-cache
-              mountPath: /data
-            - name: dshm
-              mountPath: /dev/shm
-          ports:
-            - containerPort: 8000
-              name: http
-          resources:
-            requests:
-              cpu: "2000m"
-              memory: "6Gi"
-              nvidia.com/gpu: "1"
-            limits:
-              cpu: "3200m"      # Bounded by 5% DGX compute limit
-              memory: "6400Mi"  # Bounded by 5% DGX memory limit
-              nvidia.com/gpu: "1"
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            initialDelaySeconds: 120 # Model weight loading takes 1-2 minutes
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            periodSeconds: 30
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: vllm-service
-  namespace: k3s-beta
-spec:
-  type: ClusterIP
-  selector:
-    app: vllm-llama3
-  ports:
-    - name: http
-      port: 8000
-      targetPort: 8000
-```
-
----
-
-## 7. Engine Customization & CLI Argument Reference
-
-| Flag | Recommended Value | Impact on Infrastructure & Performance |
-| :--- | :--- | :--- |
-| `--model` | Model name or path | HuggingFace repo ID or local mounted directory path (`/data/models/...`). |
-| `--tensor-parallel-size` (`-tp`) | `1`, `2`, `4`, `8` | Number of GPUs to shard the model weights across using Megatron-LM tensor parallelism. |
-| `--gpu-memory-utilization` | `0.80` to `0.90` | Fraction of total VRAM reserved for weights + KV cache pool. Lower to `0.70` if sharing with other processes. |
-| `--max-model-len` | `2048` to `8192` | Caps context length. **Halving context length saves gigabytes of KV cache memory**. |
-| `--quantization` | `fp8` / `awq` | Compresses weights; cuts VRAM requirement by up to 50%. |
-| `--kv-cache-dtype` | `fp8` / `auto` | Compresses the KV cache itself to FP8, doubling concurrent token capacity! |
-| `--enforce-eager` | Flag (true/false) | Disables CUDA graph capture. Saves ~1.5GB VRAM at the cost of 5% slower execution. |
-
----
-
-## 8. Autoscaling with Custom GPU Metrics (HPA)
-
-Traditional Horizontal Pod Autoscalers (HPA) scale based on CPU usage. In AI serving, CPU usage is irrelevant; **GPU request queue depth** is the scaling signal.
-
-vLLM exposes Prometheus metrics at `/metrics`:
-- `vllm:num_requests_waiting`: Number of requests queued waiting for free KV cache blocks.
-- `vllm:gpu_cache_usage_factor`: Percentage of KV cache pages currently in use (0.0 to 1.0).
-
-```yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: vllm-scaler
-  namespace: k3s-beta
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: vllm-llama3
-  minReplicas: 1
-  maxReplicas: 4
-  metrics:
-    - type: External
-      external:
-        metric:
-          name: vllm_num_requests_waiting
-        target:
-          type: Value
-          averageValue: "5" # Scale up if more than 5 requests are waiting in queue!
-```
-
----
-
-## 9. Production Diagnostics & Troubleshooting Playbook
-
-### Scenario 1: `CUDA out of memory during initialization`
-- **Symptom**: Pod crashes immediately on startup. Logs show:
-  ```text
-  ValueError: The model's max seq len (8192) is larger than the maximum number of tokens that can be stored in KV cache (3420).
-  ```
-- **Root Cause**: The model weights + context length exceed available VRAM.
-- **Resolution**:
-  1. Reduce `--max-model-len` from `8192` to `4096`.
-  2. Reduce `--gpu-memory-utilization` or enable `--enforce-eager`.
-  3. Use an FP8 or AWQ quantized version of the model.
-
----
-
-### Scenario 2: Container Terminated with `Exit Code 137` (OOMKilled)
-- **Symptom**: Pod starts, loads weights, processes 10 requests, then abruptly dies.
-- **Root Cause**: Host CPU RAM limit violated. PyTorch memory leaks or tokenizer RAM usage exceeded `limits.memory: 6400Mi`.
-- **Resolution**:
-  - In your Pod manifest, increase `limits.memory` from `6400Mi` to `8000Mi`, or mount a dedicated `emptyDir` RAM disk for `/dev/shm`.
-
----
-
-### Scenario 3: Broken Streaming Tokens (Tokens Arrive All at Once)
-- **Symptom**: User connects to `/v1/chat/completions` with `"stream": true`, but waits 15 seconds and receives the entire response in a single burst.
-- **Root Cause**: Ingress proxy buffering is enabled, accumulating HTTP chunks before sending.
-- **Resolution**: In your Ingress manifest, add annotation:
-  ```yaml
-  nginx.ingress.kubernetes.io/proxy-buffering: "off"
-  ```
-
----
-
-## 10. Hands-On vLLM Deployment Lab on DGX Spark
-
-Execute these commands to test vLLM with an ultra-lightweight open model (Qwen or TinyLlama) inside your `k3s-beta` namespace:
-
-### 1. Launch a Lightweight vLLM Pod
 ```bash
-kubectl run vllm-tiny \
-  -n k3s-beta \
-  --image=vllm/vllm-openai:latest \
-  --limits='nvidia.com/gpu=1,cpu=2000m,memory=4Gi' \
-  --requests='nvidia.com/gpu=1,cpu=1000m,memory=2Gi' \
-  --restart=Never \
-  -- python3 -m vllm.entrypoints.openai.api_server \
-      --model=TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
-      --gpu-memory-utilization=0.60 \
-      --max-model-len=2048 \
-      --port=8000
+kubectl -n llm-serving port-forward svc/vllm 8000 &
+curl -s localhost:8000/v1/models | jq -r '.data[].id'
+curl -sN localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model":"qwen2.5-0.5b","stream":true,"max_tokens":64,
+  "messages":[{"role":"user","content":"In one sentence: what is unified memory on the DGX Spark?"}]}' \
+  | sed -n 's/^data: //p' | grep -v DONE | jq -rj '.choices[0].delta.content // empty'; echo
 ```
 
-### 2. Follow Logs Until Ready
+### 5.3 Watch UMA during load and restart
+
 ```bash
-kubectl logs vllm-tiny -n k3s-beta -f
-```
-*Wait until you see:*
-```text
-INFO:     Started server process [1]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+scripts/uma-watch.sh llm-serving "$(kubectl -n llm-serving get pod -l app=vllm -o jsonpath='{.items[0].metadata.name}')" 2
 ```
 
-### 3. Send an OpenAI-Compatible Chat Request
+While it runs, restart the Deployment in another terminal (`kubectl -n llm-serving rollout restart deploy/vllm`). `Recreate` frees the old pod's memory before the new one allocates. Change the strategy to `RollingUpdate` and repeat, and MemAvailable dips by roughly *two* engines' worth.
+
+### 5.4 Graceful rollout with streams in flight
+
 ```bash
-kubectl exec -it pytorch-benchmark -n k3s-alpha -- curl -s http://vllm-tiny.k3s-beta.svc.cluster.local:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    "messages": [
-      {"role": "system", "content": "You are a helpful AI infrastructure assistant."},
-      {"role": "user", "content": "Explain Kubernetes in one sentence."}
-    ],
-    "temperature": 0.7,
-    "max_tokens": 50
-  }' | jq .
+( for i in $(seq 5); do curl -sN localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+   -d '{"model":"qwen2.5-0.5b","stream":true,"max_tokens":1500,"messages":[{"role":"user","content":"Count slowly."}]}' \
+   | tail -1 & done; wait ) &
+sleep 3; kubectl -n llm-serving rollout restart deploy/vllm; wait
 ```
 
-### 4. Clean Up
+Expected: each stream ends with `data: [DONE]`. The preStop sleep and 120 s grace let running generations finish before SIGTERM. Streams longer than 120 s would still be cut, so size the grace to your longest generation.
+
+### 5.5 Benchmark
+
 ```bash
-kubectl delete pod vllm-tiny -n k3s-beta
+kubectl apply -f manifests/90-serving/vllm/vllm-bench.yaml
+kubectl -n llm-serving logs -f job/vllm-bench
+```
+
+Record, per concurrency (1 / 8 / 32): **output token throughput**, **mean and P99 TTFT**, **mean and P99 TPOT/ITL**. The shape to expect:
+
+| Concurrency | Throughput | TTFT | TPOT |
+|---|---|---|---|
+| 1 | lowest | lowest | lowest |
+| 8 | ~5–7× higher | slightly up | slightly up |
+| 32 | highest (continuous batching) | up (queueing, prefill contention) | up |
+
+Now repeat with `gemm-contention` at 2 replicas (Vol 14). The drop is what a noisy GPU neighbour costs your SLO.
+
+### 5.6 Observability and alerts
+
+```bash
+curl -s localhost:8000/metrics | grep -E '^vllm:(num_requests_(running|waiting)|kv_cache_usage_perc|gpu_cache_usage_perc|num_preemptions)' | head
+kubectl apply -k manifests/95-observability
+```
+
+In Grafana, row *Serving SLOs*: TTFT p95, TPOT p95, queue and KV cache. Force a `VLLMQueueBacklog` alert by running the benchmark at concurrency 256 with `--max-num-seqs=16`.
+
+### 5.7 Queue-depth autoscaling (KEDA)
+
+```bash
+scripts/install-addons.sh keda
+kubectl apply -f manifests/90-serving/autoscaling.yaml
+kubectl -n llm-serving get scaledobject,hpa
+```
+
+With `maxReplicaCount: 1`, the vLLM ScaledObject only shows the metric (`kubectl get hpa -w` → current/target). The `mock-llm` ScaledObject really scales on in-flight connections at Traefik:
+
+```bash
+seq 400 | xargs -P64 -I{} curl -sN -o /dev/null http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":200}' &
+kubectl -n llm-serving get deploy mock-llm -w        # 2 → up to 6, back after cooldown
 ```
 
 ---
 
-Proceed to [**22-nvidia-triton-inference-server.md**](22-nvidia-triton-inference-server.md) to explore NVIDIA Triton Inference Server, multi-model execution, dynamic batching, and ensemble pipelines.
+## 6. Verify
+
+```bash
+scripts/verify.sh serving
+```
+
+| Check | Expected |
+|---|---|
+| `vLLM answered a chat completion` | PASS |
+| startup log | `KV cache size` line recorded |
+| rollout with 5 streams | 5 × `[DONE]` |
+| benchmark | table for c = 1/8/32 saved |
+| KEDA | `mock-llm` scales out under load and back after the cooldown |
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Cause | Diagnose | Fix |
+|---|---|---|---|
+| `ValueError: … memory … is less than the model` / CUDA OOM at startup | fraction too small for weights + activations, **or** UMA already used by others | log line with requested vs available. `free -g` | raise the fraction carefully, drop page cache, scale down neighbours, quantise |
+| `No available memory for the cache blocks` | weights fit, no room for KV | startup log | raise the fraction, or lower `--max-model-len` |
+| Pod `OOMKilled` (137) | pod memory limit < CPU-side peak (tokenizer, CUDA graphs, host buffers) | `kubectl describe pod`, Vol 12 §5.5 result | raise the limit to measured peak + 20 % |
+| Restarts during first start | liveness fires before load completes | events `Liveness probe failed` | startupProbe (as in the lab) |
+| `no kernel image is available` | wheel/image without sm_121 | image tag | NGC vLLM image for DGX Spark / arm64 |
+| High TTFT, low GPU use | queueing in front (ingress rate limit) or prefill-heavy prompts | `num_requests_waiting` vs running | raise `max-num-seqs`, chunked prefill (default in recent vLLM), prefix caching |
+| Tokens arrive in bursts | buffering proxy | TTFB ≈ total (Vol 09 §5.3) | remove response buffering |
+| `KV cache usage` ~1.0 and preemptions rising | too many long sequences | `vllm:num_preemptions` | lower `max-num-seqs`/`max-model-len`, or add capacity |
+
+---
+
+## 8. Scale-out path
+
+| Lab | 2 Sparks | Datacenter |
+|---|---|---|
+| 1 replica, 1 slice | 2 replicas (one per Spark) behind Traefik, weights on NFS, KEDA `maxReplicaCount: 2` | many replicas, prefix/KV-aware routing (Gateway API Inference Extension, llm-d) |
+| single-GPU model | tensor/pipeline parallel across the CX-7 (`--tensor-parallel-size 2` with Ray, or `--pipeline-parallel-size 2`) for models that don't fit one Spark | TP within NVLink domains, PP/EP across nodes, disaggregated prefill/decode (Vol 24) |
+| KEDA on queue depth | same | + SLO-based scaling and admission control |
+
+---
+
+## 9. Checklist
+
+- [ ] I can compute KV bytes per token for any model from its config and turn that into a context/concurrency budget.
+- [ ] My vLLM pod starts from a pre-filled cache, drains gracefully, and never runs two copies during a rollout.
+- [ ] I have TTFT/TPOT/throughput numbers for three concurrency levels, with and without a GPU neighbour.
+- [ ] Alerts and autoscaling key off queue depth, not GPU utilisation.

@@ -1,256 +1,182 @@
-# 20. Hands-On Practice Exercises & Mastery Workbook — 20 Production Challenges
+# Volume 20 — Hands-On Workbook: 20 Production Challenges on the Spark Platform
 
-This workbook contains **20 comprehensive, hands-on practice exercises** designed to build muscle memory and production expertise across all layers of the Kubernetes and NVIDIA AI infrastructure stack.
+> **Module 02 · Part V — Distributed AI & diagnostics** · Prev: [19 Diagnostics](19-cluster-diagnostics-and-failure-scenarios.md) · Next: [21 vLLM serving](21-vllm-high-throughput-llm-serving.md)
 
----
-
-## 📑 Table of Contents
-1. [Exercise 01: Linux Namespace & cgroup v2 Inspection on Bare-Metal](#exercise-01-linux-namespace--cgroup-v2-inspection-on-bare-metal)
-2. [Exercise 02: Raw etcd Key-Value Inspection via etcdctl](#exercise-02-raw-etcd-key-value-inspection-via-etcdctl)
-3. [Exercise 03: API Priority & Fairness Custom Concurrency Rules](#exercise-03-api-priority--fairness-custom-concurrency-rules)
-4. [Exercise 04: Production RBAC Role for an AI Engineering Team](#exercise-04-production-rbac-role-for-an-ai-engineering-team)
-5. [Exercise 05: Validating Admission Webhook Policy Enforcement](#exercise-05-validating-admission-webhook-policy-enforcement)
-6. [Exercise 06: Tracing Controller Manager Reconciliation Cascades](#exercise-06-tracing-controller-manager-reconciliation-cascades)
-7. [Exercise 07: Advanced GPU Scheduling: Taints & Tolerations](#exercise-07-advanced-gpu-scheduling-taints--tolerations)
-8. [Exercise 08: Distributed Training Gang Scheduling with Kueue](#exercise-08-distributed-training-gang-scheduling-with-kueue)
-9. [Exercise 09: Tracing Virtual Ethernet (veth) Packet Flows on Host](#exercise-09-tracing-virtual-ethernet-veth-packet-flows-on-host)
-10. [Exercise 10: iptables NAT Inspection for a ClusterIP Service](#exercise-10-iptables-nat-inspection-for-a-clusterip-service)
-11. [Exercise 11: CoreDNS Query Tracing & Fixing the ndots:5 AI Latency Bug](#exercise-11-coredns-query-tracing--fixing-the-ndots5-ai-latency-bug)
-12. [Exercise 12: Ingress Layer 7 Path Routing with Real-Time Streaming](#exercise-12-ingress-layer-7-path-routing-with-real-time-streaming)
-13. [Exercise 13: StatefulSet Vector Database with Deterministic Storage](#exercise-13-statefulset-vector-database-with-deterministic-storage)
-14. [Exercise 14: Indexed Job for Sharded AI Dataset Preprocessing](#exercise-14-indexed-job-for-sharded-ai-dataset-preprocessing)
-15. [Exercise 15: High-Speed Local NVMe Storage with WaitForFirstConsumer](#exercise-15-high-speed-local-nvme-storage-with-waitforfirstconsumer)
-16. [Exercise 16: Enforcing Hard 5% Compute and Storage Quotas on a Tenant](#exercise-16-enforcing-hard-5-compute-and-storage-quotas-on-a-tenant)
-17. [Exercise 17: Generating and Validating Host CDI Device Profiles](#exercise-17-generating-and-validating-host-cdi-device-profiles)
-18. [Exercise 18: Configuring NVIDIA Device Plugin with 10 GPU Time-Slices](#exercise-18-configuring-nvidia-device-plugin-with-10-gpu-time-slices)
-19. [Exercise 19: Running a Multi-Tenant PyTorch GPU Matrix Benchmark](#exercise-19-running-a-multi-tenant-pytorch-gpu-matrix-benchmark)
-20. [Exercise 20: Full Disaster Recovery: Restoring etcd from Snapshot](#exercise-20-full-disaster-recovery-restoring-etcd-from-snapshot)
+| | |
+|---|---|
+| **You will build** | Proof that you can operate the platform without the volumes open. Twenty timed challenges, each with a goal, constraints, a success check you can run, and a pointer to the volume with the answer |
+| **Hardware** | spark-01 (ex. 17 optional needs spark-02) |
+| **Time** | 6–8 h total. Do 2–3 per session |
+| **Risk** | as per the referenced volume |
+| **Lab files** | all of [`lab/`](lab/README.md) |
 
 ---
 
-### Exercise 01: Linux Namespace & cgroup v2 Inspection on Bare-Metal
-- **Objective**: Prove that containers are host processes bounded by Linux namespaces and cgroups.
-- **Commands**:
-  ```bash
-  kubectl run inspect-box --image=alpine -- sleep 3600
-  CONTAINER_ID=$(sudo crictl ps --name inspect-box -q)
-  PID=$(sudo crictl inspect $CONTAINER_ID | jq '.info.pid')
-  echo "Host PID is: $PID"
-  sudo ls -l /proc/$PID/ns/
-  cat /sys/fs/cgroup$(cat /proc/$PID/cgroup | cut -d: -f3)/memory.max
-  ```
-- **Validation**: Verify that the process possesses independent `ipc`, `net`, `mnt`, and `pid` namespaces and that `memory.max` reflects host limits. Clean up: `kubectl delete pod inspect-box`.
+## 0. How to use this workbook
+
+```mermaid
+flowchart LR
+  R["Read the goal<br/>+ constraints"] --> T["Start a timer"] --> D["Do it<br/>(no copy-paste from the volume)"] --> C["Run the success check"]
+  C -->|pass| L["Log time + first<br/>useful command"]
+  C -->|fail| H["Hint = the volume §<br/>then retry"] --> D
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  class R,T,D ctrl
+  class C,L gpu
+```
+
+Start from a clean, verified platform:
+
+```bash
+cd "02 Kubernetes/lab"
+tests/run-local-checks.sh && scripts/verify.sh && scripts/breakfix.sh reset all
+```
+
+Progress log (copy into your notes):
+
+| # | Challenge | Target time | Your time | First useful command |
+|---|---|---|---|---|
+| 01–20 | … | … | | |
 
 ---
 
-### Exercise 02: Raw etcd Key-Value Inspection via etcdctl
-- **Objective**: Interrogate the raw persistent key-value store of Kubernetes.
-- **Commands**:
-  ```bash
-  ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 \
-    --cacert=/etc/kubernetes/pki/etcd/ca.crt \
-    --cert=/etc/kubernetes/pki/etcd/server.crt \
-    --key=/etc/kubernetes/pki/etcd/server.key \
-    get /registry/namespaces/default
-  ```
-- **Validation**: Observe the serialized Protobuf representation of the `default` namespace stored at that key.
+## Part A — Control plane
+
+### Ex 01 · Namespaces and cgroups of a running pod (20 min)
+**Goal:** for `lab-tools/echo`, print its PID on the host, its network namespace inode, its cgroup path and its `cpu.max`.
+**Constraints:** host shell only (`nsenter`, `/proc`, `crictl`). No `kubectl exec`.
+**Success check:** `sudo ls -l /proc/<pid>/ns/net` inode equals the one inside the pod (`kubectl exec … -- readlink /proc/1/ns/net`).
+**Answer:** [Vol 01 §5.5](01-kubernetes-core-architecture.md), [Vol 12 §5.2](12-multi-tenancy-resource-quotas-and-cgroups.md), `scripts/cgroup-inspect.sh`.
+
+### Ex 02 · Read a raw key from etcd (15 min)
+**Goal:** show the etcd key for Secret `tenant-alpha/demo` and prove it's encrypted.
+**Success check:** the value starts with `k8s:enc:aescbc:v1:`.
+**Answer:** [Vol 03 §5.3](03-etcd-database-deep-dive.md).
+
+### Ex 03 · APF lane for a noisy CI bot (30 min)
+**Goal:** create ServiceAccount `llm-serving/ci-deployer` its own PriorityLevel (`nominalConcurrencyShares: 5`) and FlowSchema, then prove its LIST flood doesn't slow `kubectl get nodes`.
+**Success check:** `apiserver_flowcontrol_current_inqueue_requests{priority_level="<yours>"}` > 0 during the flood. Admin `get nodes` stays < 200 ms.
+**Answer:** [Vol 02 §3.4, §5.6](02-kube-apiserver-internals.md).
+
+### Ex 04 · RBAC for a read-only auditor (20 min)
+**Goal:** user `carol` (group `auditors`) can `get/list/watch` everything in `tenant-*` except Secrets, and can read nodes.
+**Success check:** `kubectl auth can-i list secrets -n tenant-alpha --as=carol --as-group=auditors` → `no`. `list pods` → `yes`.
+**Answer:** [Vol 02 §5.3–5.4](02-kube-apiserver-internals.md).
+
+### Ex 05 · Write and prove a new CEL policy (30 min)
+**Goal:** in `llm-serving`, every container must set `resources.limits.memory`.
+**Success check:** add `tests/policy/deny-serving-no-memory-limit.yaml` (expect deny) and `allow-…` (expect allow). `scripts/verify.sh admission` passes with your new fixtures.
+**Answer:** [Vol 02 §5.5](02-kube-apiserver-internals.md).
+
+### Ex 06 · Trace a reconciliation cascade (20 min)
+**Goal:** scale `lab-tools/echo` from 3 to 5 and list, in order, every controller that wrote an object and every event emitted.
+**Success check:** your list names deployment-controller → replicaset-controller → default-scheduler → kubelet.
+**Answer:** [Vol 04 §5.2](04-kube-controller-manager-and-controllers.md).
+
+## Part B — Scheduling
+
+### Ex 07 · Dedicated GPU node (20 min)
+**Goal:** taint spark-01 `spark.lab/gpu=dedicated:PreferNoSchedule`, deploy `affinity-demo`, then remove the taint.
+**Success check:** `affinity-demo` pods Running with the toleration visible in their spec.
+**Answer:** [Vol 05 §5.6](05-kube-scheduler-and-ai-batch-scheduling.md).
+
+### Ex 08 · Gang scheduling with Kueue (30 min)
+**Goal:** reproduce the partial-gang deadlock without Kueue, then run the same workload through `batch/train`.
+**Success check:** `tests/kueue-gang-test.sh` → `PASS`.
+**Answer:** [Vol 05 §5.4–5.5](05-kube-scheduler-and-ai-batch-scheduling.md).
+
+## Part C — Networking
+
+### Ex 09 · veth to bridge to route (20 min)
+**Goal:** for a netshoot pod, identify its host veth and capture its traffic on that veth while it curls `echo`.
+**Success check:** `tcpdump -ni <veth>` shows the SYN to a `10.42.x.x:8080` address.
+**Answer:** [Vol 06 §5.2–5.3](06-kubernetes-networking-deep-dive.md).
+
+### Ex 10 · iptables for a ClusterIP (20 min)
+**Goal:** from `iptables-save` alone, predict which pod IPs back `lab-tools/echo`, with each one's probability.
+**Success check:** matches `kubectl get endpointslices -l kubernetes.io/service-name=echo`.
+**Answer:** [Vol 07 §5.1](07-kube-proxy-and-cluster-ip-mechanics.md).
+
+### Ex 11 · Fix the ndots tax for a model server (25 min)
+**Goal:** patch `mock-llm` so an external lookup produces 2 CoreDNS queries instead of ~10.
+**Success check:** CoreDNS log line count from §5.3 of Vol 08.
+**Answer:** [Vol 08 §3.2, §5.3](08-coredns-and-service-discovery.md).
+
+### Ex 12 · Streaming through the gateway (25 min)
+**Goal:** add a new HTTPRoute `api.lab.local` → `mock-llm` with a 900 s request timeout, and prove a 1,000-token stream isn't buffered.
+**Success check:** `curl -w '%{time_starttransfer} %{time_total}'` shows TTFB < 0.5 s and total ≈ 50 s.
+**Answer:** [Vol 09 §5.3–5.4, §5.7](09-ingress-controllers-and-gateway-api.md).
+
+## Part D — Workloads & storage
+
+### Ex 13 · Stateful vector DB survives (25 min)
+**Goal:** insert 100 points into Qdrant, delete `qdrant-0`, then delete the whole StatefulSet (keep PVCs), re-apply it, and count the points.
+**Success check:** `points_count == 100` after both deletions.
+**Answer:** [Vol 10 §5.1](10-advanced-workload-controllers.md).
+
+### Ex 14 · Sharded preprocessing with a bad shard (25 min)
+**Goal:** run the tokenizer with `BAD_SHARD=5`, then re-process only shard 5 after "fixing" it.
+**Success check:** first run `failedIndexes: 5`. Second run completes index 5 only.
+**Answer:** [Vol 10 §5.4](10-advanced-workload-controllers.md).
+
+### Ex 15 · NVMe baseline and a Retain volume (30 min)
+**Goal:** run the fio profiles, save the JSON summary, create a Retain PVC, write a file, delete the PVC and re-bind the PV to a new PVC.
+**Success check:** the file is readable from the new PVC.
+**Answer:** [Vol 11 §5.3–5.4](11-storage-csi-and-high-performance-volumes.md).
+
+### Ex 16 · Tenant budget from first principles (30 min)
+**Goal:** create `tenant-gamma` with a **10 %** budget computed from `kubectl get node -o json` (not hard-coded), with a LimitRange, NetworkPolicies and a RoleBinding for `team-gamma`.
+**Success check:** `scripts/verify.sh tenancy` still passes, and a 3-replica × 1-CPU Deployment in gamma gets exactly 2 pods.
+**Answer:** [Vol 12 §3.1](12-multi-tenancy-resource-quotas-and-cgroups.md).
+
+## Part E — GPU
+
+### Ex 17 · CDI and the GPU leak (25 min)
+**Goal:** regenerate the CDI spec, then demonstrate and close the GPU leak (BF-10) using the hardened runtime settings.
+**Success check:** after hardening, `bf10-leak` can't see the GPU and `gpu-smoke` still can.
+**Answer:** [Vol 14 §5.1, §5.4–5.5](14-nvidia-container-toolkit-and-gpu-virtualization.md).
+
+### Ex 18 · Device-plugin profile per node (20 min)
+**Goal:** switch spark-01 to `whole-gpu`, show allocatable 1, run `gemm-solo`, then switch back.
+**Success check:** allocatable goes 4 → 1 → 4. GEMM TFLOPS equals your baseline.
+**Answer:** [Vol 16 §5.3](16-nvidia-gpu-operator-and-network-operator.md).
+
+### Ex 19 · Multi-tenant GPU contention report (40 min)
+**Goal:** produce a table of per-pod and aggregate TFLOPS for 1, 2, 3 and 4 concurrent pods, plus p95 TTFT of `mock-llm` measured at the same time.
+**Success check:** aggregate stays within ~10 % of the single-pod baseline. You can explain why.
+**Answer:** [Vol 14 §5.3](14-nvidia-container-toolkit-and-gpu-virtualization.md).
+
+## Part F — Disaster recovery
+
+### Ex 20 · Full etcd restore under time pressure (45 min)
+**Goal:** snapshot, create three "doomed" objects (a namespace, a ConfigMap, a Kueue LocalQueue), restore, and prove all three are gone while everything else works.
+**Success check:** `scripts/verify.sh` all PASS after the restore. The three objects are absent.
+**Answer:** [Vol 03 §5.6](03-etcd-database-deep-dive.md).
 
 ---
 
-### Exercise 03: API Priority & Fairness Custom Concurrency Rules
-- **Objective**: Create a custom FlowSchema that isolates heavy batch training queries from interfering with administrative commands.
-- **Commands**:
-  ```bash
-  kubectl get flowschemas -o wide
-  kubectl describe prioritylevelconfiguration workload-low
-  ```
-- **Validation**: Confirm that `workload-low` uses a dedicated concurrency share with queue size limits.
+## Capstone — the 60-minute rebuild
+
+Tear down the 02 layer (keep 01 Ansible's base), then rebuild to green:
+
+```bash
+for d in 95-observability 90-serving/vllm 80-distributed/base 70-gpu 50-workloads 45-controller 40-ingress 30-networking 20-scheduling 16-apf 15-admission 10-tenancy; do
+  kubectl delete -k manifests/$d --ignore-not-found --wait=false; done
+kubectl delete -k manifests/00-platform --wait=true
+# start the clock
+scripts/apply-lab.sh && scripts/verify.sh
+```
+
+**Pass:** `0 failed` within 60 minutes, including one drill of your choice fixed along the way.
 
 ---
 
-### Exercise 04: Production RBAC Role for an AI Engineering Team
-- **Objective**: Grant an engineer permissions to launch training jobs and read logs, while blocking access to secret keys or cluster quotas.
-- **Commands**:
-  ```bash
-  kubectl auth can-i create jobs -n k3s-alpha --as=ai-engineer
-  kubectl auth can-i delete resourcequotas -n k3s-alpha --as=ai-engineer
-  ```
-- **Validation**: First command returns `yes`, second command returns `no`.
+## CI: the workbook for your laptop
 
----
+Everything that doesn't need a GPU is checked on every PR by [`.github/workflows/k8s-lab-ci.yml`](../.github/workflows/k8s-lab-ci.yml). It runs lint, kubeconform, promtool and shellcheck, then builds a kind cluster, fakes a GB10 with `tests/fake-gpu-node.sh`, applies the lab, runs the admission fixtures and the Kueue gang test. Run the same on a laptop with kind:
 
-### Exercise 05: Validating Admission Webhook Policy Enforcement
-- **Objective**: Test how an admission controller intercepts API requests before persistence.
-- **Commands**:
-  ```bash
-  kubectl get validatingwebhookconfigurations
-  ```
-- **Validation**: Review active webhook configurations and confirm timeout parameters.
-
----
-
-### Exercise 06: Tracing Controller Manager Reconciliation Cascades
-- **Objective**: Observe the event cascade from Deployment $\to$ ReplicaSet $\to$ Pod $\to$ Scheduled Node.
-- **Commands**:
-  ```bash
-  kubectl get events -n k3s-alpha --watch &
-  kubectl create deployment cascade-test --image=nginx:alpine -n k3s-alpha
-  ```
-- **Validation**: Observe `ScalingReplicaSet`, `SuccessfulCreate`, `Scheduled`, and `Started` events in real time. Clean up: `kubectl delete deployment cascade-test -n k3s-alpha`.
-
----
-
-### Exercise 07: Advanced GPU Scheduling: Taints & Tolerations
-- **Objective**: Protect a GPU node from running non-GPU workloads.
-- **Commands**:
-  ```bash
-  kubectl taint nodes --all accelerator=gpu:NoSchedule
-  kubectl run cpu-test --image=alpine -- sleep 60
-  kubectl get pod cpu-test
-  ```
-- **Validation**: Verify `cpu-test` is stuck in `Pending` due to `untolerated taint`. Clean up: `kubectl delete pod cpu-test` and remove taint with `-`.
-
----
-
-### Exercise 08: Distributed Training Gang Scheduling with Kueue
-- **Objective**: Understand all-or-nothing scheduling for distributed PyTorch.
-- **Commands**:
-  ```bash
-  kubectl get clusterqueues,resourceflavors
-  ```
-- **Validation**: Verify that the cluster queue monitors total GPU availability before releasing jobs.
-
----
-
-### Exercise 09: Tracing Virtual Ethernet (veth) Packet Flows on Host
-- **Objective**: Match a Pod's `eth0` interface with its physical host peer interface.
-- **Commands**:
-  ```bash
-  CONTAINER_ID=$(sudo crictl ps --name pytorch -q)
-  PID=$(sudo crictl inspect $CONTAINER_ID | jq '.info.pid')
-  sudo nsenter -t $PID -n ip link show eth0
-  ```
-- **Validation**: Find the peer interface index and match it against `ip link show` on the host OS.
-
----
-
-### Exercise 10: iptables NAT Inspection for a ClusterIP Service
-- **Objective**: Inspect the random probability balancing rules generated by `kube-proxy`.
-- **Commands**:
-  ```bash
-  sudo iptables -t nat -L KUBE-SERVICES -n -v | head -n 30
-  ```
-- **Validation**: Locate the virtual ClusterIP address and trace the DNAT jump target.
-
----
-
-### Exercise 11: CoreDNS Query Tracing & Fixing the ndots:5 AI Latency Bug
-- **Objective**: Prove that external API requests execute 4 sequential queries under `ndots:5`.
-- **Commands**:
-  ```bash
-  kubectl exec -it pytorch-benchmark -n k3s-alpha -- cat /etc/resolv.conf
-  ```
-- **Validation**: Identify `options ndots:5` and verify that domains with trailing dots bypass local search paths.
-
----
-
-### Exercise 12: Ingress Layer 7 Path Routing with Real-Time Streaming
-- **Objective**: Configure an Ingress route that disables proxy buffering for real-time LLM token streaming.
-- **Commands**:
-  ```bash
-  kubectl get ingress -A
-  ```
-- **Validation**: Verify that `proxy-buffering: "off"` is present in the ingress annotations.
-
----
-
-### Exercise 13: StatefulSet Vector Database with Deterministic Storage
-- **Objective**: Deploy a 2-node vector database ensuring each replica gets an independent persistent volume.
-- **Commands**:
-  ```bash
-  kubectl get statefulset -n k3s-alpha
-  kubectl get pvc -n k3s-alpha -l app=vector-db
-  ```
-- **Validation**: Confirm PVC names match `data-vector-db-0` and `data-vector-db-1`.
-
----
-
-### Exercise 14: Indexed Job for Sharded AI Dataset Preprocessing
-- **Objective**: Run parallel data workers where each worker automatically knows its shard index.
-- **Commands**:
-  ```bash
-  kubectl apply -f data-tokenizer-job.yaml
-  kubectl logs -l job-name=dataset-tokenizer -n k3s-alpha --tail=20
-  ```
-- **Validation**: Confirm that logs from different pods show distinct `JOB_COMPLETION_INDEX` values (`0`, `1`, `2`, `3`).
-
----
-
-### Exercise 15: High-Speed Local NVMe Storage with WaitForFirstConsumer
-- **Objective**: Enforce that a PVC is only bound to physical storage once the Pod's GPU node is scheduled.
-- **Commands**:
-  ```bash
-  kubectl get storageclass local-path -o yaml | grep volumeBindingMode
-  ```
-- **Validation**: Confirm output shows `volumeBindingMode: WaitForFirstConsumer`.
-
----
-
-### Exercise 16: Enforcing Hard 5% Compute and Storage Quotas on a Tenant
-- **Objective**: Verify that `k3s-alpha` cannot exceed 3.2 CPU cores, 6.4 GB RAM, and 50 GB storage.
-- **Commands**:
-  ```bash
-  kubectl get resourcequota compute-quota-5pct -n k3s-alpha
-  ```
-- **Validation**: Inspect `USED` vs `HARD` limits. Confirm that any pod exceeding the limit is rejected with `exceeded quota`.
-
----
-
-### Exercise 17: Generating and Validating Host CDI Device Profiles
-- **Objective**: Interrogate the Container Device Interface (CDI) for NVIDIA accelerators.
-- **Commands**:
-  ```bash
-  sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
-  nvidia-ctk cdi list
-  ```
-- **Validation**: Confirm `nvidia.com/gpu=0` is registered.
-
----
-
-### Exercise 18: Configuring NVIDIA Device Plugin with 10 GPU Time-Slices
-- **Objective**: Divide 1 physical Blackwell GPU into 10 schedulable time-slices.
-- **Commands**:
-  ```bash
-  kubectl get node -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}'
-  ```
-- **Validation**: Output returns `10`.
-
----
-
-### Exercise 19: Running a Multi-Tenant PyTorch GPU Matrix Benchmark
-- **Objective**: Execute a 10,000 x 10,000 matrix multiplication on the GPU from inside the container.
-- **Commands**:
-  ```bash
-  kubectl logs pytorch-benchmark -n k3s-alpha
-  ```
-- **Validation**: Verify that output reports `100 MatMuls Completed in: X.XX seconds` on `NVIDIA Blackwell / GB10`.
-
----
-
-### Exercise 20: Full Disaster Recovery: Restoring etcd from Snapshot
-- **Objective**: Take a point-in-time snapshot and verify its integrity hash.
-- **Commands**:
-  ```bash
-  ETCDCTL_API=3 etcdctl snapshot save /backup/etcd-test.db \
-    --endpoints=https://127.0.0.1:2379 \
-    --cacert=/etc/kubernetes/pki/etcd/ca.crt \
-    --cert=/etc/kubernetes/pki/etcd/server.crt \
-    --key=/etc/kubernetes/pki/etcd/server.key
-  
-  ETCDCTL_API=3 etcdctl snapshot status /backup/etcd-test.db -w table
-  ```
-- **Validation**: Output displays valid SHA-256 hash, revision number, and total keys stored.
-
----
-
-🎉 **Mastery Complete!** You have now completed the entire 20-volume curriculum from Kubernetes core internals to enterprise NVIDIA AI supercomputing!
+```bash
+kind create cluster --name spark-sim --image kindest/node:v1.32.2
+tests/fake-gpu-node.sh
+API=1 tests/run-local-checks.sh
+```

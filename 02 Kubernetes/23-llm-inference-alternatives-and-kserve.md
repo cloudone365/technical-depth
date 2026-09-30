@@ -1,216 +1,215 @@
-# 23. LLM Inference Alternatives & KServe — TensorRT-LLM, TGI, SGLang & Ray Serve
+# Volume 23 — Choosing an Inference Engine & Platform: SGLang, TensorRT-LLM, llama.cpp/Ollama, KServe
 
-While **vLLM** and **NVIDIA Triton** dominate production deployments, the AI inference landscape is rapidly evolving. Infrastructure engineers must understand alternative engines (**TensorRT-LLM**, **HuggingFace TGI**, **SGLang**) and the higher-level cloud-native orchestrators (**KServe** and **Ray Serve**) that manage model autoscaling, canary rollouts, and scale-to-zero.
+> **Module 02 · Part VI — Serving** · Prev: [22 Triton](22-nvidia-triton-inference-server.md) · Next: [24 Disaggregated prefill/decode](24-disaggregated-prefill-and-decode-serving.md)
 
----
-
-## 📑 Table of Contents
-1. [The State of Modern LLM Serving Engines](#1-the-state-of-modern-llm-serving-engines)
-2. [NVIDIA TensorRT-LLM: The Peak Performance Compiler](#2-nvidia-tensorrt-llm-the-peak-performance-compiler)
-3. [Hugging Face TGI (Text Generation Inference)](#3-hugging-face-tgi-text-generation-inference)
-4. [SGLang: RadixAttention & Structured JSON Generation](#4-sglang-radixattention--structured-json-generation)
-5. [Ollama & llama.cpp: The Local GGUF Engine](#5-ollama--llamacpp-the-local-gguf-engine)
-6. [Cloud-Native Model Orchestration: KServe](#6-cloud-native-model-orchestration-kserve)
-7. [Python-Native Scaling: Ray Serve & KubeRay](#7-python-native-scaling-ray-serve--kuberay)
-8. [The Definitive AI Serving Decision Matrix](#8-the-definitive-ai-serving-decision-matrix)
-9. [Production Diagnostics: Cold Starts & Scale-to-Zero](#9-production-diagnostics-cold-starts--scale-to-zero)
-10. [Hands-On SGLang / RadixAttention Benchmark Lab](#10-hands-on-sglang--radixattention-benchmark-lab)
+| | |
+|---|---|
+| **You will build** | SGLang side by side with vLLM on the same model and hardware, a measured prefix-cache speed-up with a portable TTFT probe, the same model served through **KServe** in RawDeployment mode, and a decision matrix grounded in your own numbers |
+| **Hardware** | spark-01. Engines run one at a time (UMA budget) |
+| **Time** | 90 min |
+| **Risk** | Low. KServe installs cert-manager and webhooks |
+| **Lab files** | [`manifests/90-serving/sglang/`](lab/manifests/90-serving/sglang/sglang.yaml), [`kserve/`](lab/manifests/90-serving/kserve/inferenceservice.yaml), [`scripts/ttft_probe.py`](lab/scripts/ttft_probe.py), [`scripts/install-addons.sh`](lab/scripts/install-addons.sh) `kserve` |
 
 ---
 
-## 1. The State of Modern LLM Serving Engines
+## 1. The engine landscape (as of the lab's pinned versions)
+
+| Engine | Strength | Weakness | On a Spark |
+|---|---|---|---|
+| **vLLM** | broadest model support, PagedAttention, continuous batching, OpenAI API, huge community | tuning surface is large | NGC `nvcr.io/nvidia/vllm` for arm64/sm_121 (Vol 21) |
+| **SGLang** | RadixAttention (automatic prefix reuse across requests), fast structured/JSON output, strong for agents and multi-turn | fewer exotic models | `lmsysorg/sglang:spark` build |
+| **TensorRT-LLM** | peak performance: compiled engines, FP8/FP4 kernels, in-flight batching | build step per model/GPU/precision. Less flexible | via Triton TRT-LLM backend or `trtllm-serve` (modules 03–06) |
+| **llama.cpp / Ollama** | GGUF quantisation, tiny footprint, trivial UX | lower throughput under concurrency, fewer serving features | great for dev boxes and single users. Ollama ships arm64 + CUDA |
+| **Hugging Face TGI** | mature, simple | development has slowed relative to vLLM/SGLang (check upstream status) | not used in this lab |
+| **NVIDIA NIM** | pre-built, validated containers per model (TRT-LLM/vLLM inside) + OpenAI API | licence/entitlement, fixed model list | check the NIM catalogue for DGX Spark support per model |
+
+Platforms around the engines:
+
+| Platform | Adds | Lab |
+|---|---|---|
+| plain Deployment + Service + Ingress | nothing, which is the point | Vol 21 |
+| **KServe** (RawDeployment) | `InferenceService` CRD, runtimes, storage initializers, canary, autoscaling hooks | §5.4 |
+| Ray Serve / KubeRay | Python-native composition, multi-node TP/PP with Ray | module 03 (DeepSeek multi-node) |
+| llm-d / Dynamo | distributed, KV-aware, disaggregated serving at scale | Vol 24 §8 |
+
+---
+
+## 2. Architecture — HLD
 
 ```mermaid
-graph TD
-    User["Inference Workload Request"] --> Router{"What is the Primary Objective?"}
-    
-    Router -->|Absolute Peak GPU TFLOPs| TRT["NVIDIA TensorRT-LLM<br/>(Ahead-of-Time Compiled Engine)"]
-    Router -->|Fast Setup & Production Standard| VLLM["vLLM<br/>(PagedAttention & OpenAI API)"]
-    Router -->|Multi-Turn Chat & Shared System Prompts| SGL["SGLang<br/>(RadixAttention Tree Cache)"]
-    Router -->|Enterprise Multi-Modal & Vision| TRITON["NVIDIA Triton<br/>(Ensembles & Multi-Frameworks)"]
-    Router -->|Hugging Face Ecosystem Native| TGI["HuggingFace TGI<br/>(Rust + FlashAttention)"]
-    Router -->|Edge / Single Laptop / CPU| OLL["Ollama / llama.cpp<br/>(GGUF Quantization)"]
+flowchart TB
+  subgraph SAME["same GB10 · same model · one engine at a time"]
+    direction LR
+    V["vLLM<br/>APC (automatic prefix cache)<br/>hash of full blocks"]
+    SG["SGLang<br/>RadixAttention<br/>radix tree of token prefixes"]
+    KS["KServe InferenceService<br/>→ Deployment (vLLM runtime)"]
+  end
+  PROBE["ttft_probe.py<br/>shared vs unique prefix"] --> V & SG & KS
+  subgraph KSERVE["KServe control plane (RawDeployment)"]
+    CTRL["kserve-controller"] --> SR["ServingRuntime vllm-spark"]
+    CTRL --> ISVC["InferenceService qwen-small<br/>storageUri hf://…"]
+    CM["cert-manager<br/>(webhook certs)"]
+  end
+  ISVC -.-> KS
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef tenant fill:#eaeef2,stroke:#57606a,color:#000
+  class V,SG,KS gpu
+  class CTRL,SR,ISVC,CM ctrl
+  class PROBE tenant
+  style SAME fill:#f4fbe8,stroke:#76b900
+  style KSERVE fill:#f6f8fa,stroke:#1f6feb
 ```
 
----
+### 2.1 Prefix caching: why it matters for agents and RAG
 
-## 2. NVIDIA TensorRT-LLM: The Peak Performance Compiler
+Every request in a RAG or agent workflow repeats the same long system prompt, tool schema and few-shot examples. With prefix caching, the KV for that shared prefix is computed **once** and reused, so TTFT drops from "prefill the whole prompt" to "prefill only the new part".
 
-Developed directly by NVIDIA, **TensorRT-LLM** is an open-source library that compiles and optimizes LLM neural network graphs specifically for Tensor Cores.
-
-### Key Architectural Features:
-- **Kernel Fusion**: Merges attention, layer norm, and activation kernels into single monolithic GPU operations, eliminating memory read/write cycles.
-- **In-Flight Batching**: Continuously updates batches token-by-token.
-- **FP8 & FP4 Native Blackwell Acceleration**: Leverages 2nd-gen Transformer Engine hardware directly.
-- **C++ Runtime Engine**: Zero Python runtime overhead in the critical inference path.
-
-### Trade-Off:
-- **Compilation Overhead**: You cannot just run `trt-llm --model llama3`. You must first run an **Ahead-of-Time (AOT) build phase** that compiles the model weights into a binary `.plan` file matching the exact target GPU architecture.
-- Best for long-running, static enterprise deployments where extracting the last 20% of GPU throughput justifies the compilation step.
+| | vLLM APC | SGLang RadixAttention |
+|---|---|---|
+| Granularity | full KV blocks (e.g. 16 tokens), hash-matched | any token prefix, radix tree |
+| Eviction | LRU of free blocks | LRU of tree nodes |
+| Best at | identical prefixes | branching conversations, tree-of-thought, many partial overlaps |
 
 ---
 
-## 3. Hugging Face TGI (Text Generation Inference)
+## 3. LLD
 
-Created by Hugging Face, **TGI** is written in **Rust** (for high-concurrency web serving) and Python/C++ (for CUDA kernels).
+| Setting | vLLM | SGLang | KServe (vllm-spark runtime) |
+|---|---|---|---|
+| memory flag | `--gpu-memory-utilization=0.30` | `--mem-fraction-static=0.30` | `--gpu-memory-utilization=0.25` |
+| port | 8000 | 30000 | 8080 (container) → Service 80 |
+| health | `/health` | `/health` | `/v1/models` via KServe readiness |
+| metrics | `/metrics` (`vllm:*`) | `/metrics` with `--enable-metrics` (`sglang:*`) | runtime's own |
+| weights | PVC `model-cache` | PVC `model-cache` | storage-initializer downloads to an emptyDir (`hf://`) |
 
-### Key Features:
-- Native integration with the Hugging Face Hub.
-- Built-in token streaming via Server-Sent Events (SSE).
-- Dynamic watermark injection for generated text detection.
-- Distributed Tensor Parallelism across GPUs.
+---
+
+## 4. Integrations
+
+- **UMA budget:** never run vLLM, SGLang and KServe's vLLM at once. The manifests start SGLang at `replicas: 0`. Scale one down before scaling another up.
+- **Gateway (Vol 09):** add an `HTTPRoute` rule per engine (`/sglang/v1` → `sglang:30000`) to A/B engines behind one hostname.
+- **Modules 03/04** use SGLang for DeepSeek/Qwen structured output and tool calling. The probe here is their baseline.
+
+---
+
+## 5. Lab
+
+### 5.1 Baseline: vLLM prefix-cache effect
 
 ```bash
-docker run --gpus all -p 8080:80 \
-  -v $PWD/data:/data \
-  ghcr.io/huggingface/text-generation-inference:2.0 \
-  --model-id meta-llama/Meta-Llama-3-8B-Instruct
+cd "02 Kubernetes/lab"
+kubectl -n llm-serving port-forward svc/vllm 8000 &
+python3 scripts/ttft_probe.py --url http://localhost:8000 --model qwen2.5-0.5b -n 10
+kill %1
 ```
 
----
+Record `shared prefix median`, `unique prefix median` and the speed-up.
 
-## 4. SGLang: RadixAttention & Structured JSON Generation
+### 5.2 Swap to SGLang
 
-**SGLang** (Structured Generation Language) is the newest high-performance serving engine from LMSYS (the creators of Chatbot Arena).
-
-### The Breakthrough: RadixAttention
-In multi-turn chat applications or agent workflows, users share the same system prompts, tool definitions, and few-shot examples.
-- **vLLM / TGI**: Recompute or discard the prompt KV cache between turns.
-- **SGLang RadixAttention**: Maintains a **Radix Tree** of KV cache blocks in GPU memory across requests:
-  - If a user sends a prompt starting with the same 500-token system instructions as a previous user, **SGLang achieves a 100% KV cache hit rate**.
-  - **Prompt processing latency drops from 200ms to 0ms!**
-
-```text
-Radix Tree in GPU Memory:
-[System Prompt: "You are an AI assistant..."] (Cached permanently)
-       ├── User A: ["What is Kubernetes?"] ────> Fast Output!
-       └── User B: ["Explain NVLink."]     ────> Fast Output!
-```
-
----
-
-## 5. Ollama & llama.cpp: The Local GGUF Engine
-
-For local development or resource-constrained edge systems:
-- Written in pure C/C++ without external Python dependencies.
-- Uses **GGUF** (GPT-Generated Unified Format) quantization: 2-bit, 4-bit, 5-bit, 6-bit, 8-bit.
-- Runs on pure CPU, Apple Silicon (Metal), or NVIDIA CUDA.
-- Great for local testing, but lacks continuous dynamic batching for thousands of concurrent users.
-
----
-
-## 6. Cloud-Native Model Orchestration: KServe
-
-Managing bare Kubernetes Deployments for models has major drawbacks:
-- Pods consume expensive GPUs even when nobody is sending requests.
-- No native traffic splitting (canary rollouts: 90% traffic to Llama-3-v1, 10% to Llama-3-v2).
-
-**KServe** (formerly KFServing) solves this using Kubernetes CRDs:
-- Built on top of **Knative** (serverless autoscaling) and **Istio** (service mesh).
-- **Scale-to-Zero**: If no traffic arrives for 10 minutes, KServe terminates the GPU pod, freeing the GPU for other jobs. When a request arrives, Knative holds the HTTP request in a queue while automatically spinning the GPU pod back up!
-
-### KServe InferenceService Manifest:
-```yaml
-apiVersion: serving.kserve.io/v1beta1
-kind: InferenceService
-metadata:
-  name: llama3-kserve
-  namespace: k3s-beta
-spec:
-  predictor:
-    model:
-      modelFormat:
-        name: vLLM
-      storageUri: "pvc://data-volume-beta/models/llama3"
-      resources:
-        limits:
-          nvidia.com/gpu: 1
-```
-
----
-
-## 7. Python-Native Scaling: Ray Serve & KubeRay
-
-In complex agentic AI systems, a single user prompt may trigger an embedding lookup, vector search, multi-agent reasoning loops, and safety checks.
-
-**Ray Serve** (orchestrated on Kubernetes via the **KubeRay Operator**) allows developers to define distributed AI pipelines in pure Python:
-
-```python
-import ray
-from ray import serve
-from vllm import AsyncLLMEngine
-
-@serve.deployment(num_replicas=2, ray_actor_options={"num_gpus": 1})
-class LlamaDeployment:
-    def __init__(self):
-        self.engine = AsyncLLMEngine(...)
-
-    async def __call__(self, request):
-        return await self.engine.generate(...)
-```
-*KubeRay automatically provisions and scales Kubernetes pods to match Ray cluster demands.*
-
----
-
-## 8. The Definitive AI Serving Decision Matrix
-
-| Engine | Primary Strength | Startup Time | Multi-Model on 1 GPU | Peak Throughput | Complexity |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **vLLM** | Production Standard, PagedAttention | Instant (Seconds) | ❌ 1 model | High (90%) | Low |
-| **NVIDIA Triton**| Enterprise Multi-Modal, Ensembles | Fast | ✅ **Dozens** | Very High (95%)| Moderate |
-| **TensorRT-LLM** | **Absolute Maximum TFLOPs** | Slow (Build step) | ❌ 1 model | **Peak (100%)** | High |
-| **SGLang** | **Best for Agents & Long Prompts** | Instant | ❌ 1 model | Very High (95%)| Low |
-| **Hugging Face TGI**| Hub Native, Rust Gateway | Fast | ❌ 1 model | High (90%) | Low |
-| **KServe / Knative**| **Scale-to-Zero & Multi-Cloud** | Depends on engine| N/A (Orchestrator)| N/A | High |
-
----
-
-## 9. Production Diagnostics: Cold Starts & Scale-to-Zero
-
-### The Problem: The 50GB Weight Download Trap
-When an autoscaler scales a model pod from 0 to 1 replica:
-1. Pod schedules onto node.
-2. Container starts and attempts to pull 50GB of model weights from Hugging Face or S3 across the internet.
-3. Download takes 15 minutes.
-4. **Client request times out with HTTP 504 Gateway Timeout!**
-
-### Production Architecture Solution:
-1. **Pre-populate weights on High-Speed Local NVMe Storage**: Store weights in `/var/lib/rancher/k3s/storage/models/`.
-2. **Mount via PVC with `volumeBindingMode: Immediate`**: Ensure storage is local and pre-cached.
-3. Pod starts in **< 15 seconds** because weights are read directly from local NVMe at 5 GB/s!
-
----
-
-## 10. Hands-On SGLang / RadixAttention Benchmark Lab
-
-Deploy a lightweight SGLang server and verify its RadixAttention prompt cache speedup on your DGX Spark:
-
-### 1. Launch SGLang Server Pod
 ```bash
-kubectl run sglang-test \
-  -n k3s-beta \
-  --image=lmsysorg/sglang:latest \
-  --limits='nvidia.com/gpu=1,cpu=2000m,memory=4Gi' \
-  --restart=Never \
-  -- python3 -m sglang.launch_server \
-      --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
-      --port 30000 \
-      --mem-fraction-static 0.6
+kubectl -n llm-serving scale deploy vllm --replicas=0
+kubectl apply -k manifests/90-serving/sglang
+kubectl -n llm-serving scale deploy sglang --replicas=1
+kubectl -n llm-serving rollout status deploy/sglang --timeout=30m
+kubectl -n llm-serving logs deploy/sglang | grep -E 'max_total_num_tokens|Uvicorn|ready|ERROR'
+kubectl -n llm-serving port-forward svc/sglang 30000 &
+python3 scripts/ttft_probe.py --url http://localhost:30000 --model qwen2.5-0.5b -n 10
+curl -s localhost:30000/metrics | grep -E '^sglang:(cache_hit_rate|num_running_reqs|gen_throughput)' ; kill %1
 ```
 
-### 2. Follow Logs Until Engine is Active
+### 5.3 Structured output (JSON schema)
+
+Both engines accept OpenAI-style `response_format` with a JSON schema:
+
 ```bash
-kubectl logs sglang-test -n k3s-beta -f
+kubectl -n llm-serving port-forward svc/sglang 30000 &
+curl -s localhost:30000/v1/chat/completions -H 'Content-Type: application/json' -d '{
+ "model":"qwen2.5-0.5b","max_tokens":128,
+ "messages":[{"role":"user","content":"Describe the DGX Spark GPU."}],
+ "response_format":{"type":"json_schema","json_schema":{"name":"gpu","schema":{
+   "type":"object","properties":{"name":{"type":"string"},"memory_gb":{"type":"integer"},"unified":{"type":"boolean"}},
+   "required":["name","memory_gb","unified"]}}}}' | jq -r '.choices[0].message.content' | jq .
+kill %1
 ```
 
-### 3. Send Consecutive Prompts with Shared System Instruction
-Observe how the second query executes with **zero prompt processing latency** thanks to the Radix Tree cache!
+Expected: valid JSON with exactly those three keys, **every time**. The engine constrains decoding to the schema. That's the foundation for tool calling (modules 03/04/06).
 
-### 4. Clean Up
+### 5.4 The same model through KServe (RawDeployment)
+
 ```bash
-kubectl delete pod sglang-test -n k3s-beta
+kubectl -n llm-serving scale deploy sglang --replicas=0
+scripts/install-addons.sh kserve                      # cert-manager + KServe + cluster runtimes, RawDeployment default
+kubectl apply -k manifests/90-serving/kserve
+kubectl -n llm-serving get inferenceservice qwen-small -w      # READY True
+kubectl -n llm-serving get deploy,svc,hpa -l serving.kserve.io/inferenceservice=qwen-small
+kubectl -n llm-serving port-forward svc/qwen-small-predictor 8080:80 &
+curl -s localhost:8080/v1/models | jq -r '.data[].id'
+python3 scripts/ttft_probe.py --url http://localhost:8080 --model qwen-small -n 5; kill %1
 ```
+
+What KServe generated for you: a Deployment with a storage-initializer init container (it downloads `hf://Qwen/Qwen2.5-0.5B-Instruct` to `/mnt/models`), a Service and an HPA. Compare it with your hand-written Vol 21 manifest. Deleting the `InferenceService` removes all of it.
+
+### 5.5 (Optional) GGUF with Ollama, outside Kubernetes
+
+For a quick single-user comparison on the host:
+
+```bash
+docker run -d --gpus=all -p 11434:11434 -v ollama:/root/.ollama --name ollama ollama/ollama
+docker exec ollama ollama run qwen2.5:0.5b "One sentence about unified memory."
+python3 scripts/ttft_probe.py --url http://localhost:11434 --model qwen2.5:0.5b -n 5   # Ollama speaks the OpenAI API at /v1
+docker rm -f ollama
+```
+
+### 5.6 Fill in your decision matrix
+
+| | vLLM | SGLang | KServe+vLLM | Ollama |
+|---|---|---|---|---|
+| cold TTFT (ms) | | | | |
+| shared-prefix TTFT (ms) | | | | |
+| throughput @32 (tok/s, `vllm bench serve` against each) | | | | |
+| JSON-schema reliability | | | | |
+| ops effort (1–5) | | | | |
 
 ---
 
-You have completed the deep dive into **vLLM**, **NVIDIA Triton**, **TensorRT-LLM**, **SGLang**, and **KServe**! Both your `Kubernetes/README.md` and root `docs/README.md` have been updated with these advanced AI serving guides.
+## 6. Verify
+
+| Check | Expected |
+|---|---|
+| prefix-cache speed-up (vLLM and SGLang) | shared-prefix TTFT clearly below unique-prefix TTFT |
+| JSON-schema output | parses, has all required keys |
+| `inferenceservice/qwen-small` | `READY True`, `/v1/models` lists `qwen-small` |
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Cause | Diagnose | Fix |
+|---|---|---|---|
+| SGLang OOM at start | another engine still holds UMA | `kubectl -n llm-serving get pods`, `free -g` | scale the other engine to 0, drop caches |
+| SGLang image `exec format error` / no sm_121 kernels | wrong tag | image manifest | use the Spark build tag. Check release notes |
+| no prefix speed-up | prefix caching off, or the prompt isn't *identical* (timestamps, request IDs in the system prompt) | engine flags, prompt diff | move variable content *after* the shared prefix |
+| `InferenceService` not Ready: storage-initializer error | HF download blocked / no token for gated models | `kubectl logs <pod> -c storage-initializer` | HF token secret + `serviceAccount` with the secret. Or `pvc://model-cache/…` storageUri |
+| KServe webhook errors on apply | cert-manager not ready | `kubectl -n cert-manager get pods` | wait for cert-manager, then re-apply |
+| Ollama slow under concurrency | single-request-optimised engine | ttft_probe with parallel clients | use vLLM/SGLang for shared services |
+
+---
+
+## 8. Scale-out path
+
+| Lab | Datacenter |
+|---|---|
+| one engine at a time on one GPU | an engine per model pool. Heterogeneous pools (TRT-LLM for top traffic, vLLM for long tail) |
+| KServe RawDeployment | KServe with LLMInferenceService / llm-d integration, or NVIDIA Dynamo, for disaggregated, KV-aware routing |
+| manual matrix | continuous benchmark in CI (same prompts, same SLOs) gating engine/image upgrades |
+
+---
+
+## 9. Checklist
+
+- [ ] I measured prefix-cache benefit on two engines with the same probe.
+- [ ] I produced schema-valid JSON reliably through constrained decoding.
+- [ ] I deployed the same model as a hand-written Deployment and as a KServe `InferenceService`, and can explain the difference.
+- [ ] My engine choice is backed by numbers from my Spark.

@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: llm-serving
+resources: [triton.yaml]
+configMapGenerator:
+  - name: triton-preprocess
+    files: [model_repository/preprocess/config.pbtxt, model_repository/preprocess/1/model.py]
+  - name: triton-scorer
+    files: [model_repository/scorer/config.pbtxt, model_repository/scorer/1/model.py]
+  - name: triton-pipeline
+    files: [model_repository/pipeline/config.pbtxt]
+generatorOptions:
+  disableNameSuffixHash: true

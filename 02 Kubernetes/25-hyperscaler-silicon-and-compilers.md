@@ -1,148 +1,201 @@
-# 25. Hyperscaler Silicon & Compilers — Google TPU, AWS Trainium vs. NVIDIA Blackwell
+# Volume 25 — Accelerators & Compilers Beyond the GPU: TPU, Trainium, Blackwell, and What Compilers Buy You
 
-While NVIDIA GPUs (Hopper, Blackwell) dominate enterprise data centers, the largest frontier AI labs (Google, Anthropic, Amazon) design and deploy proprietary **Application-Specific Integrated Circuits (ASICs)** to escape the "NVIDIA tax" and build custom network fabrics.
+> **Module 02 · Part VII — Hyperscale** · Prev: [24 Disaggregated P/D](24-disaggregated-prefill-and-decode-serving.md) · Next: [26 Ultra-scale resilience](26-ultra-scale-cluster-resilience-and-fault-tolerance.md)
 
-This guide provides an architectural comparison of **Google TPUs**, **AWS Trainium**, and **NVIDIA Blackwell**, covering their hardware silicon design, compiler toolchains (**XLA vs. Triton/CUDA**), and cloud-native Kubernetes orchestration.
-
----
-
-## 📑 Table of Contents
-1. [Silicon Taxonomy: General Purpose GPU vs. Domain-Specific ASIC](#1-silicon-taxonomy-general-purpose-gpu-vs-domain-specific-asic)
-2. [Google Cloud TPU Architecture (v4, v5p, v6e Trillium)](#2-google-cloud-tpu-architecture-v4-v5p-v6e-trillium)
-3. [Google Optical Circuit Switches (OCS) & Dynamic Reconfigurability](#3-google-optical-circuit-switches-ocs--dynamic-reconfigurability)
-4. [Software Toolchains: JAX + XLA vs. PyTorch + CUDA/Triton](#4-software-toolchains-jax--xla-vs-pytorch--cudatriton)
-5. [AWS Trainium2 & The Neuron SDK Ecosystem](#5-aws-trainium2--the-neuron-sdk-ecosystem)
-6. [Kubernetes Orchestration: Scheduling TPU Slices vs. GPU Pods](#6-kubernetes-orchestration-scheduling-tpu-slices-vs-gpu-pods)
-7. [Comprehensive Comparison Matrix: NVIDIA vs. Google vs. AWS](#7-comprehensive-comparison-matrix-nvidia-vs-google-vs-aws)
+| | |
+|---|---|
+| **You will build** | A measured answer, on your GB10, to "what does a compiler buy me?" (eager vs `torch.compile` vs max-autotune, with the generated kernels), plus a practical map of how Kubernetes schedules GPUs, TPU slices and Trainium devices, so you can read or port manifests between clouds |
+| **Hardware** | spark-01 |
+| **Time** | 60 min |
+| **Risk** | None |
+| **Lab files** | [`manifests/70-gpu/compile_compare.py`](lab/manifests/70-gpu/compile_compare.py), [`compile-compare.yaml`](lab/manifests/70-gpu/compile-compare.yaml) |
 
 ---
 
-## 1. Silicon Taxonomy: General Purpose GPU vs. Domain-Specific ASIC
+## 1. Why this matters
 
-```text
-NVIDIA GPU (Streaming Multiprocessor - SM):
-+---------------------------------------------------------------------------------+
-| Instruction Cache | Warp Schedulers | Register Files (Huge, flexible)           |
-| [INT32 ALU] [FP32 ALU] [FP64 ALU] [Tensor Cores (Dense/Sparse GEMM)] [SFU]     |
-| L1 Cache / Shared Memory (Programmable)                                         |
-+---------------------------------------------------------------------------------+
--> Highly flexible: Runs graphics, ray tracing, physics, crypto, and general compute.
+Your Spark runs the same software stack as NVIDIA's datacenter systems (CUDA, cuDNN, NCCL, TensorRT, Triton). Hyperscalers also run their own silicon behind different compilers. Kubernetes hides some of the differences, but not all. Two practical skills transfer:
 
-Google TPU / AWS Trainium (Systolic Array / Matrix Multiply Unit - MXU):
-+---------------------------------------------------------------------------------+
-| Fixed Dataflow Systolic Array: 128x128 or 256x256 Multiply-Accumulate units      |
-| Weights remain stationary in registers; activations stream through horizontally |
-| Minimal instruction decoding overhead; near 100% silicon dedicated to math      |
-+---------------------------------------------------------------------------------+
--> Specialized ASIC: Does only matrix multiplications and vector reductions with maximum energy efficiency.
-```
+1. **Reading an accelerator from its programming model**: who fuses the kernels, who schedules memory, what the unit of allocation is.
+2. **Recognising compiler effects in your own numbers**: why the same model is 1.3–2× faster after compilation, and what it costs (compile time, recompiles, cold starts).
+
+| | NVIDIA Blackwell (GB10, B200, GB200) | Google TPU (v5e/v5p/Trillium/…) | AWS Trainium2 / Inferentia2 |
+|---|---|---|---|
+| Core | SMs + tensor cores, SIMT | systolic MXUs + vector/scalar units | NeuronCores (tensor/vector/scalar/GPSIMD engines) |
+| Memory | HBM (datacenter) / **LPDDR5x UMA (GB10)** | HBM per chip | HBM per chip |
+| Scale-up | NVLink / NVSwitch (GB10: C2C on package only) | ICI torus + optical circuit switches | NeuronLink |
+| Primary stack | CUDA → cuBLAS/cuDNN/CUTLASS, Triton, TensorRT(-LLM); PyTorch eager or `torch.compile` | JAX/PyTorch-XLA → XLA (HLO) → TPU executable | PyTorch/JAX → Neuron compiler (neuronx-cc) |
+| Compile model | optional (eager works) | **required** (whole-graph) | **required** (ahead-of-time graphs) |
+| K8s resource | `nvidia.com/gpu` (or MIG/DRA) | `google.com/tpu` + topology node selectors | `aws.amazon.com/neuron` / `neuroncore` |
 
 ---
 
-## 2. Google Cloud TPU Architecture (v4, v5p, v6e Trillium)
-
-Google trains and serves **Gemini 1.5/2.0** on its proprietary Tensor Processing Unit (TPU) infrastructure:
-
-### Evolution of Google TPU Generations:
-* **TPU v4**: 275 TFLOPs (BF16), 32 GB HBM2, 3D Torus interconnect (4,096 chips per Pod).
-* **TPU v5p (Flagship Trainer)**: 459 TFLOPs (BF16), 95 GB HBM3 (2.76 TB/s bandwidth), 8,960 chips per Pod. Built for massive multimodal foundation model training.
-* **TPU v6e (Trillium - 6th Gen)**: 4x compute efficiency improvement over v5e, 32 GB HBM, optimized for FP8 and inference serving.
-
-### Key Silicon Innovation: The Systolic Array
-Instead of reading and writing to register files for every multiplication, data flows through a grid of ALU cells like blood pumped through a heart (systolic). Results accumulate as they pass through adjacent cells, reducing register-file memory power by **up to 70%**.
-
----
-
-## 3. Google Optical Circuit Switches (OCS) & Dynamic Reconfigurability
-
-Unlike NVIDIA SuperPODs which rely on fixed, electrical **InfiniBand Fat-Tree Clos switches** with expensive optical transceivers at every hop, Google connects TPUs using **Optical Circuit Switches (OCS)**.
+## 2. Architecture — HLD
 
 ```mermaid
-graph LR
-    subgraph OCS["Google Optical Circuit Switch (MEMS Mirrors)"]
-        M1["Micro-Electro-Mechanical Mirror Array"]
-    end
-    
-    TPU_Rack1["TPU Pod Rack A"] <====>|"Direct Light Paths (Zero Packet Switching Latency)"| OCS
-    OCS <====> TPU_Rack2["TPU Pod Rack B"]
-    OCS <====> TPU_Rack3["TPU Pod Rack C"]
+flowchart LR
+  subgraph FW["Framework"]
+    PT["PyTorch model"]
+    JX["JAX model"]
+  end
+  subgraph NV["NVIDIA path (this Spark)"]
+    E["eager: op-by-op kernels<br/>cuBLAS / cuDNN"]
+    I["torch.compile → TorchInductor<br/>fused Triton kernels + CUDA graphs"]
+    TRT["TensorRT / TRT-LLM<br/>AOT engines"]
+  end
+  subgraph XLA["XLA path"]
+    H["HLO graph"] --> XG["XLA:GPU (NVIDIA)"]
+    H --> XT["XLA:TPU"]
+  end
+  subgraph NX["Neuron path"]
+    NC["neuronx-cc → NEFF"]
+  end
+  PT --> E & I & TRT
+  PT -. "torch-xla" .-> H
+  JX --> H
+  PT -. "torch-neuronx" .-> NC
+  E & I & TRT & XG --> GB10["GB10"]
+  XT --> TPU["TPU slice"]
+  NC --> TRN["Trainium"]
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef ext fill:#24292f,stroke:#000,color:#fff
+  class E,I,TRT,XG,GB10 gpu
+  class H,NC ctrl
+  class TPU,TRN ext
 ```
 
-### Advantages of OCS:
-1. **Dynamic Topology Reconfiguration**: A cluster can instantly rewire itself from a 3D Torus (ideal for AllReduce in Data Parallelism) to a ring or twisted torus (ideal for Pipeline Parallelism).
-2. **Instant Fault Isolation**: If an optical transceiver or fiber breaks, the MEMS mirrors pivot in milliseconds to route light around the failed node, preventing multi-hour training stalls.
-3. **50x Lower Switching Power**: Photons pass through mirrors without converting back to electrical signals ($O \to E \to O$).
-
 ---
 
-## 4. Software Toolchains: JAX + XLA vs. PyTorch + CUDA/Triton
+## 3. LLD
 
-| Feature | NVIDIA Ecosystem (PyTorch + CUDA/Triton) | Google Ecosystem (JAX + XLA) |
-| :--- | :--- | :--- |
-| **Execution Paradigm**| Imperative / Eager by default (with `torch.compile`) | Fully Functional & Declarative (`jit`, `grad`, `vmap`) |
-| **Compiler Backend** | NVCC, CUDA Drivers, OpenAI Triton JIT | **XLA (Accelerated Linear Algebra)** |
-| **Distributed Model** | PyTorch Distributed (`torch.distributed`, NCCL) | **SPMD (Single Program, Multiple Data)** via `jax.experimental.shard_map` |
-| **Graph Optimization**| Dynamic graph capture, manual kernel tuning | Ahead-of-Time (AOT) whole-graph fusion & memory scheduling |
-| **Memory Management** | PyTorch Caching Allocator (susceptible to fragmentation) | XLA Buffer Allocation (exact static compile-time memory plan) |
+### 3.1 What the compiler changes in the lab benchmark
 
----
+The benchmark block is `Linear(D→4D) → GELU → Linear(4D→D) + residual → RMSNorm`, BF16, B=8, T=1024, D=4096.
 
-## 5. AWS Trainium2 & The Neuron SDK Ecosystem
+| Mode | Kernels per forward (approx.) | What changes |
+|---|---|---|
+| eager | ~8–10 (2 GEMMs + each elementwise op + reductions) | each op reads/writes memory. Launch overhead per op |
+| `torch.compile` (default) | ~4 (2 GEMMs + 1–2 fused Triton kernels) | GELU, residual and norm fused: fewer memory round trips |
+| `mode="max-autotune"` | same or fewer, + CUDA graphs | autotuned GEMM/Triton configs. Launch overhead gone |
 
-To avoid reliance on NVIDIA, Amazon Web Services developed **AWS Trainium** and **AWS Inferentia**:
+On a **memory-bandwidth-limited** part like GB10 (≈273 GB/s shared), fusion that removes memory traffic matters proportionally more than on an HBM GPU.
 
-* **Trainium2 (Trn2)**: 4x faster training performance than Trn1, deployed in **UltraClusters of up to 100,000 chips** (65 Exaflops of aggregate compute).
-* **NeuronCore-v2**: Custom compute engine featuring dedicated Matrix Engines, Vector Engines, and Scalar Engines.
-* **AWS Neuron SDK**: Integrates directly with PyTorch via `torch-neuronx`, compiling operations into native Neuron execution graphs.
-* **Elastic Fabric Adapter (EFA)**: AWS's proprietary OS-bypass network interface providing up to 800 Gbps network bandwidth per node.
+### 3.2 Scheduling other accelerators in Kubernetes (reference)
 
----
-
-## 6. Kubernetes Orchestration: Scheduling TPU Slices vs. GPU Pods
-
-In Kubernetes, managing TPUs differs fundamentally from GPUs due to the rigid physical Torus interconnect.
-
-### NVIDIA GPU Scheduling:
-GPUs can be scheduled independently (1 GPU on Node A, 2 GPUs on Node B):
 ```yaml
+# Google TPU slice (GKE): topology is part of scheduling
+nodeSelector:
+  cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+  cloud.google.com/gke-tpu-topology: 2x4
 resources:
-  limits:
-    nvidia.com/gpu: "2"
+  limits: {google.com/tpu: 8}        # all chips of the host in the slice
+---
+# AWS Trainium (EKS + Neuron device plugin)
+resources:
+  limits: {aws.amazon.com/neuron: 1}  # or aws.amazon.com/neuroncore: 2
+---
+# NVIDIA (this lab)
+resources:
+  limits: {nvidia.com/gpu: 1}         # a time-slice of the GB10
 ```
 
-### Google TPU Slice Scheduling:
-TPUs are allocated as **atomic multi-host Slices** (e.g., `2x2x2` = 8 chips, `4x4x4` = 64 chips). You cannot schedule fractional nodes on a torus without breaking the ring topology:
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: tpu-training-worker
-spec:
-  nodeSelector:
-    cloud.google.com/gke-tpu-topology: "2x2x4" # 16 TPU v5p chips in 3D Torus
-    cloud.google.com/gke-tpu-accelerator: "tpu-v5p-slice"
-  containers:
-  - name: jax-worker
-    image: gcr.io/google-samples/jax-tpu:latest
-    resources:
-      limits:
-        google.com/tpu: "4" # Chips per host in the slice
-```
+| Concern | GPU (lab) | TPU | Trainium |
+|---|---|---|---|
+| multi-host job | NCCL over IB/RoCE. Gang via Kueue/JobSet | a *slice* is gang-allocated by the platform. JobSet + `TPU_WORKER_HOSTNAMES` | Neuron collectives over EFA. Gang via Kueue/JobSet |
+| sharing | time-slicing / MPS / MIG | whole hosts per slice | per NeuronCore |
+| image | CUDA arm64/x86 | JAX/PyTorch-XLA for TPU | Neuron SDK DLCs |
 
 ---
 
-## 7. Comprehensive Comparison Matrix
+## 4. Integrations
 
-| Specification | NVIDIA Grace Blackwell (GB200 / GB10) | Google Cloud TPU v5p | AWS Trainium2 |
-| :--- | :--- | :--- | :--- |
-| **Silicon Category** | GPU + ARM CPU (Coherent Memory) | Custom Systolic ASIC | Custom Domain ASIC |
-| **Primary Language** | Python (PyTorch, Triton, CUDA C++) | Python (JAX, Flax, PyTorch/XLA) | Python (PyTorch via NeuronX) |
-| **Peak FP8 Compute** | **20 PFLOPs (GB200 NVL72)** | 918 TFLOPs per chip | ~1.3 PFLOPs per chip |
-| **Interconnect Tech** | NVLink 5 (1.8 TB/s per GPU) | Optical Circuit Switch (OCS) 3D Torus | NeuronLink-v2 (800 Gbps EFA) |
-| **Memory Architecture**| 900 GB/s NVLink-C2C Unified RAM | 95 GB HBM3 (2.76 TB/s) | 96 GB HBM3 |
-| **Scale Envelope** | 576 GPUs per NVLink Domain | 8,960 chips per Pod | 100,000 chips per UltraCluster |
-| **Portability** | Universal (On-Prem, Azure, AWS, GCP, OCI) | Google Cloud Platform Exclusive | Amazon Web Services Exclusive |
+- **Module 06 Gemma** uses JAX/XLA and MaxText on NVIDIA. The XLA:GPU path above runs on your Spark with NVIDIA's JAX containers.
+- **Module 07 Nvidia** goes inside the kernels (SASS, Nsight Compute). Point it at the fused kernels this volume generates.
+- **Serving (Vol 21–23)**: vLLM and SGLang already use CUDA graphs and `torch.compile` internally. That's part of their startup time ("Capturing CUDA graphs").
 
-### Architectural Takeaway:
-* Choose **NVIDIA GPUs (DGX Spark)** when you need maximum developer velocity, open-source software compatibility (vLLM, DeepSeek, FlashAttention), and multi-cloud freedom.
-* Study **Google TPUs & XLA** to understand how whole-graph compilation and optical switching allow frontier labs to scale beyond electrical switch limitations.
+---
+
+## 5. Lab
+
+### 5.1 Eager vs compiled on the GB10
+
+```bash
+cd "02 Kubernetes/lab"
+kubectl apply -k manifests/70-gpu
+kubectl apply -f manifests/70-gpu/compile-compare.yaml
+kubectl -n lab-tools logs -f job/compile-compare
+```
+
+Expected shape (numbers illustrative, so record yours):
+
+```text
+device=NVIDIA GB10 cc=(12, 1) torch=2.9.0a0+…
+           eager:   14.80 ms/iter     74.3 TFLOPS
+ compile-default:   12.10 ms/iter     90.9 TFLOPS
+     compile-max:   11.60 ms/iter     94.8 TFLOPS
+compile time: default 35s, max-autotune 180s
+```
+
+### 5.2 See the generated kernels
+
+```bash
+kubectl -n lab-tools delete job compile-compare
+kubectl apply -f manifests/70-gpu/compile-compare.yaml --dry-run=client -o json \
+  | jq '.spec.template.spec.containers[0].env[0].value="output_code"' | kubectl apply -f -
+kubectl -n lab-tools logs job/compile-compare | grep -E '^def triton_|@triton.jit' | head
+kubectl -n lab-tools logs job/compile-compare | grep -A25 'def triton_' | head -40
+```
+
+Look for one kernel that loads the GEMM output, applies `tanh`-GELU, adds the residual and computes the RMS reduction. That's fusion made visible.
+
+### 5.3 The cost side: cold starts and recompiles
+
+Change `T` (sequence length) between calls and compilation reruns for each new shape unless you mark it dynamic:
+
+```bash
+kubectl -n lab-tools run recompile --rm -i --restart=Never --image=nvcr.io/nvidia/pytorch:25.09-py3 \
+  --overrides='{"spec":{"containers":[{"name":"recompile","image":"nvcr.io/nvidia/pytorch:25.09-py3","stdin":true,"command":["python3","-c","import torch,time\nm=torch.compile(torch.nn.Linear(1024,1024).cuda())\nfor T in (128,256,512,1024):\n  t=time.time(); m(torch.randn(T,1024,device=\"cuda\")); torch.cuda.synchronize(); print(T, round(time.time()-t,2), \"s\")"],"resources":{"limits":{"nvidia.com/gpu":"1","memory":"8Gi"}}}]}}'
+```
+
+Expected: the first two or three shapes take seconds each (compile), and then PyTorch switches to a dynamic-shape graph, so later shapes are fast. In serving, this is why engines pre-compile or capture graphs for a fixed set of batch sizes at startup.
+
+---
+
+## 6. Verify
+
+| Check | Expected |
+|---|---|
+| compile-compare | compiled modes faster than eager. Numbers recorded |
+| generated code | at least one fused `triton_` kernel containing GELU + reduction |
+| recompile probe | first shapes slow, later shapes fast |
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `torch.compile` errors about Triton / `sm_121` | Triton in the image lacks Blackwell (sm_120/121) support | use the NGC PyTorch image for DGX Spark (25.09+) |
+| max-autotune takes very long | exhaustive GEMM/Triton config search | cache: set `TORCHINDUCTOR_CACHE_DIR` to a PVC so pods reuse results |
+| compiled slower than eager | graph breaks (Python side effects), tiny shapes | `TORCH_LOGS=graph_breaks`. Compile larger regions |
+| out of memory during compile | autotune benchmarks many configs | smaller batch while tuning. Leave UMA headroom |
+
+---
+
+## 8. Scale-out path
+
+| On the Spark | In a hyperscaler/datacenter |
+|---|---|
+| `torch.compile` per pod | shared compile caches (PVC/object store), AOT-compiled artefacts (TensorRT engines, AOTInductor, XLA executables) baked into images |
+| `nvidia.com/gpu` | TPU slices with topology-aware placement, Trainium NeuronCores, NVIDIA MIG/DRA. Kueue ResourceFlavors per accelerator type |
+| one arch (sm_121) | CI builds per target (sm_90, sm_100, sm_121, TPU, Neuron) with per-target numerical tests |
+
+---
+
+## 9. Checklist
+
+- [ ] I measured eager vs compiled on the GB10 and can explain the gap in terms of kernels and memory traffic.
+- [ ] I found a fused kernel in the generated code.
+- [ ] I can read a TPU or Trainium pod spec and map it to the GPU equivalent.
+- [ ] I know the operational costs of compilation (cold start, recompiles, caches).

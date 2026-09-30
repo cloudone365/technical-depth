@@ -1,0 +1,16 @@
+# BF-01: a Deployment that asks for more than tenant-alpha's 5 % budget.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: bf01-big, namespace: tenant-alpha, labels: {breakfix: "01"}}
+spec:
+  replicas: 3
+  selector: {matchLabels: {app: bf01}}
+  template:
+    metadata: {labels: {app: bf01}}
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: app
+          image: registry.k8s.io/pause:3.10
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 500m, memory: 1Gi}, limits: {cpu: 500m, memory: 1Gi}}

@@ -1,0 +1,74 @@
+# NVMe benchmark from inside a pod (Volume 11). Four profiles that map to real
+# AI I/O: weight load (seq read 1M), checkpoint write (seq write 1M),
+# dataloader (rand read 128k), metadata-ish (rand read 4k).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: fio-scratch, namespace: lab-tools}
+spec:
+  storageClassName: local-nvme
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 64Gi}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: fio-profiles, namespace: lab-tools}
+data:
+  ai.fio: |
+    [global]
+    ioengine=libaio
+    direct=1
+    size=16G
+    runtime=45
+    time_based=1
+    group_reporting=1
+    directory=/scratch
+    filename=fio.dat
+
+    [weights-seqread-1m]
+    rw=read
+    bs=1M
+    iodepth=32
+    numjobs=4
+
+    [checkpoint-seqwrite-1m]
+    stonewall
+    rw=write
+    bs=1M
+    iodepth=32
+    numjobs=4
+
+    [dataloader-randread-128k]
+    stonewall
+    rw=randread
+    bs=128k
+    iodepth=64
+    numjobs=4
+
+    [small-randread-4k]
+    stonewall
+    rw=randread
+    bs=4k
+    iodepth=128
+    numjobs=4
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: fio-ai, namespace: lab-tools}
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: fio
+          image: docker.io/xridge/fio:3.38
+          command: ["sh", "-c", "fio /profiles/ai.fio --output-format=normal,json | tee /scratch/result.all"]   # human text + one JSON document
+          resources: {requests: {cpu: "4", memory: 1Gi}, limits: {memory: 2Gi}}
+          volumeMounts:
+            - {name: scratch, mountPath: /scratch}
+            - {name: profiles, mountPath: /profiles}
+      volumes:
+        - name: scratch
+          persistentVolumeClaim: {claimName: fio-scratch}
+        - name: profiles
+          configMap: {name: fio-profiles}

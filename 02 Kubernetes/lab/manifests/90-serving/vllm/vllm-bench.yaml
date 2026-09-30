@@ -1,0 +1,33 @@
+# Load test with vLLM's own benchmark client (Volume 21 §5.5). Reports
+# throughput, TTFT, TPOT/ITL percentiles for a fixed synthetic workload.
+#   kubectl apply -f vllm-bench.yaml && kubectl -n llm-serving logs -f job/vllm-bench
+apiVersion: batch/v1
+kind: Job
+metadata: {name: vllm-bench, namespace: llm-serving}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: bench
+          image: nvcr.io/nvidia/vllm:25.09-py3
+          command: ["bash", "-c"]
+          args:
+            - |
+              for c in 1 8 32; do
+                echo "=== max-concurrency $c"
+                vllm bench serve --backend openai-chat --endpoint /v1/chat/completions \
+                  --base-url http://vllm:8000 --model qwen2.5-0.5b --tokenizer "$MODEL" \
+                  --dataset-name random --random-input-len 1024 --random-output-len 256 \
+                  --num-prompts 128 --max-concurrency "$c" --percentile-metrics ttft,tpot,itl,e2el \
+                  2>&1 | grep -E 'throughput|TTFT|TPOT|ITL|E2EL|Successful'
+              done
+          env:
+            - {name: MODEL, value: Qwen/Qwen2.5-0.5B-Instruct}
+            - {name: HF_HOME, value: /models/hf}
+          resources: {requests: {cpu: "2", memory: 4Gi}, limits: {memory: 8Gi}}
+          volumeMounts: [{name: models, mountPath: /models, readOnly: true}]
+      volumes:
+        - {name: models, persistentVolumeClaim: {claimName: model-cache, readOnly: true}}

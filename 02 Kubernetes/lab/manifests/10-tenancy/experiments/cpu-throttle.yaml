@@ -1,0 +1,17 @@
+# A 4-thread CPU burner capped at 200m (Volume 12 §5.3): watch nr_throttled climb.
+apiVersion: v1
+kind: Pod
+metadata: {name: cpu-throttle, namespace: lab-tools}
+spec:
+  containers:
+    - name: burn
+      image: python:3.12-slim
+      command: ["python3", "-c"]
+      args:
+        - |
+          import multiprocessing as mp, time
+          def spin():
+              while True: pass
+          for _ in range(4): mp.Process(target=spin, daemon=True).start()
+          while True: time.sleep(60)
+      resources: {requests: {cpu: 200m, memory: 64Mi}, limits: {cpu: 200m, memory: 128Mi}}

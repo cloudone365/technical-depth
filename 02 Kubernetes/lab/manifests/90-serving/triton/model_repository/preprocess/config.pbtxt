@@ -1,0 +1,8 @@
+# Python-backend model: text -> fixed-length token ids (toy tokenizer)
+name: "preprocess"
+backend: "python"
+max_batch_size: 64
+input [ { name: "TEXT", data_type: TYPE_STRING, dims: [ 1 ] } ]
+output [ { name: "IDS", data_type: TYPE_INT32, dims: [ 16 ] } ]
+dynamic_batching { max_queue_delay_microseconds: 2000 }
+instance_group [ { count: 2, kind: KIND_CPU } ]

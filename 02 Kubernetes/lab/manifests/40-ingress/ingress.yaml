@@ -1,0 +1,24 @@
+# Classic Ingress → mock-llm with streaming-safe settings (Volume 09).
+# Test: curl -N http://llm.lab.local/v1/chat/completions ... (see volume).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: llm
+  namespace: llm-serving
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+    traefik.ingress.kubernetes.io/router.middlewares: llm-serving-llm-body-limit@kubernetescrd,llm-serving-llm-ratelimit@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: llm.lab.local
+      http:
+        paths:
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service: {name: mock-llm, port: {number: 8000}}
+          - path: /health
+            pathType: Exact
+            backend:
+              service: {name: mock-llm, port: {number: 8000}}

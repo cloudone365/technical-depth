@@ -1,273 +1,325 @@
-# 01. Kubernetes Core Architecture & Pod Lifecycle
+# Volume 01 — Kubernetes Core Architecture & Pod Lifecycle on a DGX Spark
 
-This guide provides an architectural deep dive into Kubernetes internal mechanics, component decoupling, and the end-to-end lifecycle of a Pod from API submission to container execution on physical hardware.
+> **Module 02 · Part I — Control plane** · Next: [02 API server internals](02-kube-apiserver-internals.md) · Guide: [00 step-by-step](00-kubernetes-step-by-step-guide.md)
 
----
-
-## 📑 Table of Contents
-1. [Deconstructing Kubernetes Architecture](#1-deconstructing-kubernetes-architecture)
-2. [The Control Plane Subsystem](#2-the-control-plane-subsystem)
-3. [The Worker Node Subsystem](#3-the-worker-node-subsystem)
-4. [Container Runtime Architecture: CRI, containerd & runc](#4-container-runtime-architecture-cri-containerd--runc)
-5. [End-to-End Pod Lifecycle: What Happens When You Run `kubectl apply`?](#5-end-to-end-pod-lifecycle-what-happens-when-you-run-kubectl-apply)
-6. [Architectural Sequence Diagram](#6-architectural-sequence-diagram)
-7. [Production Failure & Diagnostic Scenarios](#7-production-failure--diagnostic-scenarios)
-8. [Hands-On Architectural Inspection Labs](#8-hands-on-architectural-inspection-labs)
+| | |
+|---|---|
+| **You will build** | A mental model you can check against the real processes, sockets and files. You'll trace one `kubectl apply` from your laptop to a running container on the GB10 node, and read each hop's evidence. |
+| **Hardware** | spark-01 running k3s from the 01 Ansible lab (`playbooks/05-k3s.yml`, `06-gpu-operator.yml`) |
+| **Time** | 60 min |
+| **Risk** | None. Read-only apart from one test pod |
+| **Lab files** | [`lab/scripts/preflight.sh`](lab/scripts/preflight.sh), [`lab/manifests/70-gpu/gpu-smoke.yaml`](lab/manifests/70-gpu/gpu-smoke.yaml) |
 
 ---
 
-## 1. Deconstructing Kubernetes Architecture
+## 1. Why this matters on a Spark
 
-Kubernetes is a declarative, distributed, active-reconciliation platform. Unlike imperative orchestration systems that execute sequential scripts, Kubernetes continuously computes the delta between:
-- **Desired State**: Stored immutably as JSON documents in `etcd`.
-- **Observed State**: Reported periodically by worker node agents (`kubelet`).
+Kubernetes is a set of **control loops that share one database**. Every component watches the API server for objects, compares desired state (`spec`) with observed state (`status`) and acts on the difference. Almost every failure you'll debug later breaks one of those loops. Examples: a scheduler that can't find a node, a kubelet that can't start a container, a controller that can't write status. So the first skill is knowing which loop owns which step, and where each loop leaves evidence.
 
-```text
-+-----------------------------------------------------------------------------------+
-|                              Kubernetes Cluster Boundary                          |
-|                                                                                   |
-|  +-----------------------------------------------------------------------------+  |
-|  |                             Control Plane (Master)                          |  |
-|  |                                                                             |  |
-|  |      [ kube-apiserver ] <=========> [ etcd Key-Value Store (v3) ]           |  |
-|  |             ^                                                               |  |
-|  |             |                                                               |  |
-|  |      +------+------+                                                        |  |
-|  |      |             |                                                        |  |
-|  |      v             v                                                        |  |
-|  | [ kube-scheduler ] [ kube-controller-manager ]                              |  |
-|  +-----------------------------------------------------------------------------+  |
-|         |                                                             |           |
-|         | mTLS (Port 10250)                                           | mTLS      |
-|         v                                                             v           |
-|  +-------------------------------+             +-------------------------------+  |
-|  |     Worker Node 1 (DGX)       |             |     Worker Node 2 (DGX)       |  |
-|  | [ kubelet ]                   |             | [ kubelet ]                   |  |
-|  | [ kube-proxy ]                |             | [ kube-proxy ]                |  |
-|  | [ containerd (CRI) ]          |             | [ containerd (CRI) ]          |  |
-|  | [ NVIDIA Device Plugin ]      |             | [ NVIDIA Device Plugin ]      |  |
-|  | ─── Pod A   ─── Pod B         |             | ─── Pod C   ─── Pod D         |  |
-|  +-------------------------------+             +-------------------------------+  |
-+-----------------------------------------------------------------------------------+
+On a DGX Spark, three things differ from a textbook cluster:
+
+| Textbook cluster | DGX Spark lab (k3s) | Consequence |
+|---|---|---|
+| 3+ control-plane VMs, separate workers | **One node** is server *and* worker | A runaway pod competes with etcd and the API server for CPU, memory and NVMe. Kubelet reservations (§3.3) matter |
+| Each component is its own binary or static pod | **One `k3s` process** embeds apiserver, scheduler, controller-manager, kubelet, kube-proxy and flannel. containerd runs as a child process | `ps` shows 2 processes, not 7. Logs are all in `journalctl -u k3s` |
+| GPU memory is separate from host RAM | **128 GB unified memory** shared by CPU and GB10 | A pod's memory limit doesn't cap its CUDA allocations (Vol 12 proves this). Node memory pressure also starves the GPU |
+| x86-64 | **aarch64** (Grace: 10× Cortex-X925 + 10× Cortex-A725) | Every image needs an `arm64` manifest. `exec format error` means you pulled an amd64-only image |
+
+---
+
+## 2. Architecture — HLD
+
+```mermaid
+flowchart TB
+  subgraph LAPTOP["Control node"]
+    KC["kubectl<br/>KUBECONFIG"]
+  end
+  subgraph SPARK["spark-01 · 10.10.10.11 · DGX OS 7 (Ubuntu 24.04 arm64)"]
+    direction TB
+    subgraph K3S["k3s server process (one binary)"]
+      direction LR
+      API["kube-apiserver<br/>:6443"]
+      SCH["kube-scheduler"]
+      CM["kube-controller-manager"]
+      KL["kubelet :10250"]
+      KP["kube-proxy<br/>iptables"]
+      FL["flannel<br/>VXLAN :8472/udp"]
+    end
+    ETCD[("etcd :2379<br/>/var/lib/rancher/k3s/server/db")]
+    CTRD["containerd<br/>/run/k3s/containerd/containerd.sock"]
+    NVR["nvidia-container-runtime<br/>(default runtime)"]
+    RUNC["runc → container processes"]
+    GB10["GB10 GPU<br/>/dev/nvidia*"]
+  end
+  KC -->|"HTTPS + client cert"| API
+  API <--> ETCD
+  SCH -->|"watch Pods w/o nodeName<br/>POST binding"| API
+  CM -->|"watch/patch Deployments, RS, Jobs…"| API
+  KL -->|"watch Pods on spark-01<br/>PATCH status"| API
+  KP -->|"watch Services/EndpointSlices"| API
+  KL -->|CRI gRPC| CTRD --> NVR --> RUNC
+  NVR -.->|"inject devices + libs"| GB10
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef node fill:#0e7c86,stroke:#064e54,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef ext fill:#24292f,stroke:#000,color:#fff
+  class API,SCH,CM ctrl
+  class KL,CTRD,RUNC node
+  class KP,FL net
+  class ETCD store
+  class GB10,NVR gpu
+  class KC ext
+  style SPARK fill:#e6f4f5,stroke:#0e7c86,stroke-width:2px
+  style K3S fill:#ffffff,stroke:#8c959f
+  style LAPTOP fill:#f6f8fa,stroke:#57606a
 ```
 
----
-
-## 2. The Control Plane Subsystem
-
-### 2.1 `kube-apiserver`
-The central nervous system of Kubernetes. It is the **only** component in the entire cluster that communicates directly with `etcd`. All other components (scheduler, controller-manager, kubelet, kubectl) communicate exclusively with the API server over secure HTTPS/mTLS.
-- **Stateless**: Can be horizontally scaled behind a Layer 4/Layer 7 load balancer.
-- **Pipeline Processing**: Every request traverses Authentication -> Authorization -> Mutation Webhooks -> Schema Validation -> Validation Webhooks -> Storage in etcd.
-
-### 2.2 `etcd`
-A distributed, consistent, transactional key-value database implementing the **Raft consensus algorithm**.
-- Stores the entire cluster state under the `/registry` keyspace (e.g. `/registry/pods/default/my-pod`).
-- Uses MVCC (Multi-Version Concurrency Control): Edits do not overwrite records in place; they create new revisions with monotonic sequence IDs, enabling change notifications via the `Watch` API.
-
-### 2.3 `kube-scheduler`
-A specialized loop that watches for Pods with `spec.nodeName == ""` (unscheduled pods).
-- Executes a two-phase filtering and scoring algorithm:
-  1. **Filtering (Predicates)**: Discards nodes lacking resources (insufficient CPU, RAM, or `nvidia.com/gpu`), nodes with conflicting taints, or nodes with unfulfilled nodeAffinity.
-  2. **Scoring (Priorities)**: Ranks surviving candidate nodes to optimize for balanced resource utilization, image locality, and topology spread.
-- Updates the Pod specification with `spec.nodeName = <selected-node>` via a `Binding` API call.
-
-### 2.4 `kube-controller-manager`
-A monolithic binary packing dozens of distinct control loops into a single process. Each controller continuously executes the **Reconciliation Loop**:
-$$\text{Delta} = \text{Desired State (Spec)} - \text{Observed State (Status)}$$
-If $\text{Delta} \neq 0$, the controller issues API calls to drive the cluster toward the desired state.
-- **Node Controller**: Detects node crashes (heartbeat timeout via NodeLease).
-- **Deployment Controller**: Reconciles Deployments into ReplicaSets.
-- **ReplicaSet Controller**: Reconciles ReplicaSets into Pods.
-- **EndpointSlice Controller**: Keeps Service backend IP addresses synchronized with active Pod IPs.
+Rule of thumb: **only the API server talks to etcd.** Every other component is a client of the API server and uses *watches* (long-lived HTTP streams), not polling.
 
 ---
 
-## 3. The Worker Node Subsystem
+## 3. LLD — what runs where
 
-### 3.1 `kubelet`
-The primary daemon running on every worker node.
-- Registers the node with the control plane, reporting its capacity (CPU cores, memory, allocatable storage, and custom resources like `nvidia.com/gpu`).
-- Maintains a local cache of Pods assigned to this node (`PodWorker` goroutines).
-- Communicates with the local container runtime via gRPC over the **CRI (Container Runtime Interface)** Unix socket.
-- Executes periodic Liveness, Readiness, and Startup probes.
-- Issues NodeLease renewals (every 10 seconds) to notify the control plane that the node is healthy.
+### 3.1 Processes, ports, paths
 
-### 3.2 `kube-proxy`
-The node-level network programmer. It watches Services and Endpoints/EndpointSlices and programs local kernel packet filtering rules (`iptables` chains or `IPVS` hash tables) to direct virtual Service IPs to backend Pod IPs.
+| Component | Where in k3s | Listens | Key paths / evidence |
+|---|---|---|---|
+| kube-apiserver | `k3s server` goroutine | `:6443` (TLS) | certs `/var/lib/rancher/k3s/server/tls/`, audit log `/var/log/k3s/audit.log` (Vol 02) |
+| etcd (after [Vol 03](03-etcd-database-deep-dive.md)) | embedded | `127.0.0.1:2379`, `:2380`, metrics `:2381` | `/var/lib/rancher/k3s/server/db/etcd/` (SQLite `state.db` before migration) |
+| kube-scheduler | embedded | `:10259` metrics | leader Lease `kube-system/kube-scheduler` |
+| kube-controller-manager | embedded | `:10257` metrics | leader Lease `kube-system/kube-controller-manager` |
+| kubelet | embedded | `:10250` (API), `:10248` healthz | `/var/lib/kubelet/pods/<uid>/`, config from `kubelet-arg` |
+| kube-proxy | embedded | `:10249` metrics | iptables chains `KUBE-SERVICES`, `KUBE-SVC-*` (Vol 07) |
+| flannel | embedded | `8472/udp` VXLAN | `flannel.1`, `cni0` bridge, `/run/flannel/subnet.env` (Vol 06) |
+| containerd | child process | unix socket | `/run/k3s/containerd/containerd.sock`, config `/var/lib/rancher/k3s/agent/etc/containerd/config.toml` |
+| nvidia runtime | containerd runtime handler | — | `default_runtime_name = "nvidia"` in the containerd config (01 Ansible `default-runtime: nvidia`) |
+| Auto-deploy manifests | k3s deploy controller | — | `/var/lib/rancher/k3s/server/manifests/*.yaml` (CoreDNS, local-path, …) |
 
----
+### 3.2 Objects you'll see in `kube-system`
 
-## 4. Container Runtime Architecture: CRI, containerd & runc
+| Object | Purpose | Comes from |
+|---|---|---|
+| `deploy/coredns` | Cluster DNS `10.43.0.10` | k3s auto-deploy |
+| `deploy/local-path-provisioner` | Local PVs on NVMe | k3s auto-deploy |
+| `svclb-*` DaemonSet | k3s servicelb (klipper) for `LoadBalancer` Services | k3s (Traefik's LB in Vol 09) |
+| `runtimeclass/nvidia` | Explicit GPU runtime | k3s detects nvidia-container-runtime |
+| namespace `gpu-operator` | NFD, GFD, device plugin, validator | 01 Ansible Vol 17 |
 
-Modern Kubernetes decouples the container engine from Kubernetes core via the **Container Runtime Interface (CRI)**:
+### 3.3 Capacity vs allocatable on a GB10
 
-```text
-+-----------------------------------------------------------------------------------+
-| Kubelet                                                                           |
-|   │ gRPC over /run/containerd/containerd.sock (CRI API)                           |
-v   v                                                                               |
-| containerd Daemon                                                                 |
-|   │ Fetches OCI images, unpacks rootfs layers, sets up overlayfs                  |
-|   │ Manages CNI network namespace plugins                                         |
-v   v                                                                               |
-| containerd-shim (one process per pod/container)                                  |
-|   │ Decouples daemon restarts from container lifecycle                           |
-|   │ Holds PTY, stdout/stderr pipes, and exit codes open                           |
-v   v                                                                               |
-| runc (Low-level OCI Runtime) / nvidia-container-runtime                           |
-|   │ Invokes Linux syscalls: `clone()` (namespaces), `unshare()`, `setns()`        |
-|   │ Configures `/sys/fs/cgroup/` (limits CPU, RAM, block I/O)                     |
-|   │ Injects NVIDIA device nodes (`/dev/nvidia*`)                                  |
-|   │ Executes `execve()` to launch container PID 1                                 |
-+-----------------------------------------------------------------------------------+
-```
+The 01 Ansible lab starts kubelet with `system-reserved=cpu=2,memory=8Gi`, `kube-reserved=cpu=1,memory=2Gi` and `eviction-hard=memory.available<4Gi`:
 
----
-
-## 5. End-to-End Pod Lifecycle: What Happens When You Run `kubectl apply`?
-
-Trace the lifecycle of a GPU workload from command execution to running code:
-
-```bash
-kubectl apply -f pytorch-train.yaml
-```
-
-1. **Client-side Parsing**: `kubectl` parses YAML into a JSON payload, validates the client-side schema against OpenAPI specs, attaches client certificate credentials (`~/.kube/config`), and sends an `HTTP POST` request to `/api/v1/namespaces/default/pods`.
-2. **Authentication & Authorization**: `kube-apiserver` verifies the client's mTLS certificate or Bearer Token. It queries RBAC policies to verify if the user has `create` permissions on `pods`.
-3. **Admission Controllers**:
-   - **Mutating Webhooks**: Inject default parameters (e.g. Istio sidecars, security contexts, default `LimitRange` requests).
-   - **Validating Webhooks**: Confirm syntax, verify resource limits, and enforce security policies (rejecting privileged pods if prohibited).
-4. **ETCD Persistence**: The validated Pod is serialized and committed to `etcd` under `/registry/pods/default/pytorch-train` via Raft quorum consensus. The API server returns `HTTP 201 Created` to `kubectl`.
-5. **Scheduler Detection**: `kube-scheduler` watches the API server via an HTTP chunked stream (`Watch`). It detects a new Pod where `spec.nodeName` is empty.
-6. **Filtering & Scoring**:
-   - Filter: Node 1 has `nvidia.com/gpu: 1` available; Node 2 has `nvidia.com/gpu: 0`. Node 2 is discarded.
-   - Score: Node 1 scores highest.
-   - Scheduler posts a `Binding` object: `spec.nodeName = dgx-spark-1`.
-7. **Kubelet Acquisition**: The `kubelet` on `dgx-spark-1` has an active `Watch` on pods assigned to its hostname. It detects the assignment and spawns a `PodWorker`.
-8. **CRI Sandbox Creation**:
-   - `kubelet` calls `RunPodSandbox` over CRI gRPC to `containerd`.
-   - `containerd` creates the network namespace and invokes the **CNI plugin** (Flannel/Calico/Cilium) to allocate an IP address and attach a virtual ethernet pair (`veth`).
-9. **CSI Volume Attachment**:
-   - `kubelet` mounts requested `PersistentVolumes` and projected volumes (Secrets, ConfigMaps, ServiceAccount tokens) into host mount directories.
-10. **Container Execution**:
-    - `kubelet` calls `CreateContainer` and `StartContainer`.
-    - `containerd` launches `nvidia-container-runtime`.
-    - NVIDIA hook exposes `/dev/nvidia0` and `/dev/nvidia-uvm` to the container.
-    - Application entrypoint process starts (`python3 train.py`).
-11. **Status Update**: `kubelet` observes container PID start, collects container ID, and sends a patch request updating `status.phase = Running` to the API server.
+| | CPU | Memory | Why |
+|---|---|---|---|
+| Capacity | 20 | ≈119.7 GiB | What the kernel reports (part of the 128 GB is firmware/carve-outs) |
+| − system-reserved | 2 | 8 Gi | DGX OS, DGX Dashboard, sshd, journald |
+| − kube-reserved | 1 | 2 Gi | the k3s process itself (apiserver + etcd live here!) |
+| − eviction threshold | — | 4 Gi | kubelet starts evicting below this |
+| **Allocatable** | **17** | **≈105.7 GiB** | What the scheduler hands out, **CPU and GPU combined** |
 
 ---
 
-## 6. Architectural Sequence Diagram
+## 4. Pod lifecycle — the sequence
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    actor User as Engineer (kubectl)
-    participant API as kube-apiserver
-    participant ETCD as etcd Store
-    participant Sched as kube-scheduler
-    participant Klet as kubelet (DGX)
-    participant CRI as containerd / CRI
-    participant CNI as CNI Network Plugin
-
-    User->>API: POST /api/v1/namespaces/default/pods
-    API->>API: Authenticate + Authorize + Mutate + Validate
-    API->>ETCD: Commit Pod Object (Raft quorum)
-    ETCD-->>API: Written (Revision 1042)
-    API-->>User: HTTP 201 Created (Pending)
-
-    Sched->>API: Watch Pods (nodeName == "")
-    API-->>Sched: Notify: pytorch-train is unscheduled
-    Sched->>Sched: Execute Filter (Check GPUs) & Score Algorithms
-    Sched->>API: POST /binding (nodeName = "dgx-spark-1")
-    API->>ETCD: Update Pod.spec.nodeName
-    
-    Klet->>API: Watch Pods (nodeName == "dgx-spark-1")
-    API-->>Klet: Notify: Pod assigned to you
-    Klet->>CRI: RunPodSandbox (Create Pod infrastructure)
-    CRI->>CNI: Setup Network Namespace & Allocate IP
-    CNI-->>CRI: IP Allocated (10.42.0.45)
-    Klet->>CRI: PullImage (nvcr.io/nvidia/pytorch:24.01-py3)
-    Klet->>CRI: CreateContainer (Inject GPU devices & mounts)
-    Klet->>CRI: StartContainer (Launch PID 1)
-    Klet->>API: PATCH Pod status.phase = Running
-    API->>ETCD: Commit Updated Status
+  autonumber
+  box rgb(246,248,250) Client
+    participant U as kubectl
+  end
+  box rgb(221,234,255) Control plane · k3s
+    participant A as kube-apiserver
+    participant E as etcd
+    participant S as scheduler
+  end
+  box rgb(230,244,245) Node · spark-01
+    participant K as kubelet
+    participant C as containerd
+    participant N as nvidia runtime + runc
+  end
+  U->>A: POST /api/v1/namespaces/tenant-beta/pods
+  A->>A: authn → authz (RBAC) → mutating adm. → schema → validating adm. (PSA, VAP, quota)
+  A->>E: write /registry/pods/tenant-beta/gpu-smoke
+  A-->>U: 201 Created (phase Pending, no nodeName)
+  S->>A: watch event: unscheduled pod
+  S->>S: filter (resources, taints, affinity) → score
+  S->>A: POST pods/gpu-smoke/binding (nodeName=spark-01)
+  K->>A: watch event: pod bound to me
+  K->>K: admit (device plugin allocates nvidia.com/gpu slice)
+  K->>C: RunPodSandbox (pause container, netns via flannel CNI)
+  K->>C: PullImage (arm64 manifest) + CreateContainer + StartContainer
+  C->>N: OCI create with NVIDIA_VISIBLE_DEVICES → hook injects /dev/nvidia*, libcuda
+  N-->>K: running
+  K->>A: PATCH pods/gpu-smoke/status (Running → Succeeded)
 ```
 
----
-
-## 7. Production Failure & Diagnostic Scenarios
-
-### Scenario 1: Pod Stuck in `Pending` Indefinitely
-- **Root Cause**: The `kube-scheduler` cannot find any node satisfying the Pod's constraints.
-- **Triage Command**:
-  ```bash
-  kubectl describe pod <pod-name>
-  ```
-- **Diagnostic Output**:
-  ```text
-  Events:
-    Type     Reason            Age   From               Message
-    ----     ------            ----  ----               -------
-    Warning  FailedScheduling  12s   default-scheduler  0/1 nodes are available: 1 Insufficient nvidia.com/gpu.
-  ```
-- **Resolution**:
-  1. Inspect available GPU capacity on nodes:
-     ```bash
-     kubectl get nodes -o custom-columns=NAME:.metadata.name,GPU_ALLOCATABLE:.status.allocatable.'nvidia\.com/gpu'
-     ```
-  2. If the physical GPU is fully allocated, enable **GPU Time-Slicing** in the NVIDIA Device Plugin (see Guide 03).
+Each numbered step leaves evidence you can read. §5 does exactly that.
 
 ---
 
-### Scenario 2: Node State is `NotReady`
-- **Root Cause**: `kubelet` has stopped reporting node heartbeats (`NodeLease`) to the API server due to process crash, network partition, or disk saturation.
-- **Triage Commands**:
-  ```bash
-  # 1. Inspect Node status on control plane
-  kubectl describe node dgx-spark-1
-  
-  # 2. SSH into the node and inspect kubelet daemon logs
-  sudo journalctl -u kubelet -n 100 --no-pager
-  
-  # 3. Check container runtime status
-  sudo systemctl status containerd
-  ```
-- **Common Resolutions**:
-  - `containerd` hung on zombie process: `sudo systemctl restart containerd && sudo systemctl restart kubelet`.
-  - Root disk full (DiskPressure taint): `df -h /` and prune stale images via `crictl rmi --prune`.
+## 5. Lab — trace a pod end to end
 
----
-
-## 8. Hands-On Architectural Inspection Labs
-
-### Lab 1: Trace the Raw etcd Storage of a Pod
-Inspect how Kubernetes objects are actually serialized inside `etcd`.
+### Step 1 · Preflight
 
 ```bash
-# If using K3s, install etcdctl or query the sqlite/k3s datastore:
-sudo k3s kubectl get pod pytorch-benchmark -n k3s-alpha -o json
+cd "02 Kubernetes/lab"
+scripts/preflight.sh
 ```
-Notice how every detail (annotations, default service account tokens, status conditions) is stored as a single schema object.
 
-### Lab 2: Inspect Low-Level CRI State via `crictl`
-The `crictl` utility communicates directly with `containerd` via the CRI socket, bypassing the Kubernetes API server entirely.
+Expected (abridged):
+
+```text
+[PASS] arch aarch64
+[PASS] 20 CPU cores (10 X925 + 10 A725)
+[PASS] MemTotal 119 GiB (unified CPU+GPU pool)
+[PASS] cgroup v2
+[PASS] GPU NVIDIA GB10, compute capability 12.1
+[PASS] k3s service active
+[PASS] API server /readyz (KUBECONFIG=…/kubeconfig-spark-lab.yaml)
+[PASS] spark-01 allocatable nvidia.com/gpu=4 (time-slices)
+```
+
+### Step 2 · See that k3s really is one process
 
 ```bash
-# List all running CRI pods on the host:
-sudo crictl pods
-
-# List running containers:
-sudo crictl ps
-
-# Inspect low-level Linux process metadata of a container:
-CONTAINER_ID=$(sudo crictl ps --name pytorch -q)
-sudo crictl inspect $CONTAINER_ID | jq '.info.pid, .info.runtimeSpec.linux.namespaces'
+ssh nvidia@10.10.10.11
+ps -eo pid,rss,cmd | grep -E '[k]3s server|[c]ontainerd ' | cut -c1-120
+sudo ss -ltnp | grep -E ':(6443|10250|10257|10259|2379) '
 ```
-*Observe the host PID allocated to the container and the isolated Linux namespaces assigned by the kernel.*
+
+Expected: one `k3s server` (RSS roughly 600 MB–1.2 GB) and one `containerd` owned by it. Every control-plane port belongs to the k3s PID.
+
+### Step 3 · Ask the API server how healthy it is
+
+```bash
+kubectl get --raw='/readyz?verbose' | tail -8
+kubectl get --raw='/livez?verbose' | grep -v '^\[+\]' || echo "all livez checks OK"
+kubectl get lease -n kube-system        # scheduler + controller-manager leader leases
+```
+
+Expected: `readyz check passed`, and Leases `kube-scheduler` and `kube-controller-manager` with a `HOLDER` of the form `spark-01_<uuid>`.
+
+### Step 4 · Watch a pod walk through its lifecycle
+
+Terminal A:
+
+```bash
+kubectl -n tenant-beta get events -w --field-selector involvedObject.name=gpu-smoke
+```
+
+Terminal B:
+
+```bash
+kubectl apply -k manifests/00-platform && kubectl apply -k manifests/10-tenancy   # namespaces + quotas
+kubectl apply -f manifests/70-gpu/gpu-smoke.yaml
+kubectl -n tenant-beta get pod gpu-smoke -w -o wide
+```
+
+Expected event order, which matches the sequence diagram:
+
+```text
+Normal  Scheduled  pod/gpu-smoke  Successfully assigned tenant-beta/gpu-smoke to spark-01
+Normal  Pulling    pod/gpu-smoke  Pulling image "nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04"
+Normal  Pulled     pod/gpu-smoke  Successfully pulled image … in 14.2s
+Normal  Created    pod/gpu-smoke  Created container: smi
+Normal  Started    pod/gpu-smoke  Started container smi
+```
+
+```bash
+kubectl -n tenant-beta logs gpu-smoke
+```
+
+```text
+GPU 0: NVIDIA GB10 (UUID: GPU-xxxxxxxx-…)
+name, compute_cap, driver_version, memory.total [MiB]
+NVIDIA GB10, 12.1, 580.xx, [N/A]
+```
+
+`memory.total` reads `[N/A]` / "Not Supported". That's expected on a UMA GPU: there is no separate framebuffer to report.
+
+### Step 5 · Find the same pod one layer down (CRI)
+
+```bash
+sudo k3s crictl pods --name gpu-smoke
+POD=$(sudo k3s crictl pods --name gpu-smoke -q | head -1)
+sudo k3s crictl inspectp "$POD" | jq '.info.runtimeSpec.linux.namespaces, .status.network'
+sudo k3s crictl ps -a --pod "$POD"
+```
+
+The **sandbox** (the `pause` container) owns the network namespace. The `smi` container joins it. That's why every container in a pod shares one IP.
+
+### Step 6 · …and in the OCI spec: where the GPU came from
+
+```bash
+CID=$(sudo k3s crictl ps -a --pod "$POD" -q | head -1)
+sudo k3s crictl inspect "$CID" | jq -r '.info.runtimeType, (.info.config.envs[]? | select(.key|test("NVIDIA")) | "\(.key)=\(.value)")'
+```
+
+Expected: runtime `io.containerd.runc.v2` with the `nvidia` handler, and `NVIDIA_VISIBLE_DEVICES=GPU-<uuid>` set **by the device plugin** because the pod asked for `nvidia.com/gpu: 1`. Keep this in mind. [Break/fix 10](lab/breakfix/10-gpu-leak.yaml) shows what happens when a pod gets this variable *without* asking.
+
+### Step 7 · Read the object as the API server stored it
+
+```bash
+kubectl get --raw /api/v1/namespaces/tenant-beta/pods/gpu-smoke | jq '.metadata.managedFields[].manager'
+```
+
+Managers such as `kubectl-client-side-apply`, `kubelet` and `k3s` show which loop wrote which fields. After [Volume 03](03-etcd-database-deep-dive.md) migrates k3s to etcd, you'll read the raw etcd key too.
 
 ---
 
-Proceed to [**02-kube-apiserver-internals.md**](02-kube-apiserver-internals.md) for a deep dive into API Server authentication, admission controllers, Webhooks, and API Priority & Fairness.
+## 6. Verify
+
+| Check | Command | Expected |
+|---|---|---|
+| Control plane healthy | `kubectl get --raw /readyz` | `ok` |
+| Node Ready + GPU advertised | `kubectl get node spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}'` | `4` |
+| Pod completed on GPU | `kubectl -n tenant-beta get pod gpu-smoke` | `Completed` |
+| Scripted | `scripts/verify.sh platform gpu` | all `[PASS]` |
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Likely cause | Diagnose | Fix |
+|---|---|---|---|
+| Pod `Pending`, event `0/1 nodes are available: 1 Insufficient nvidia.com/gpu` | All time-slices taken | `kubectl describe node spark-01 \| grep -A10 'Allocated resources'` | Free a slice, queue with Kueue (Vol 05) |
+| Pod `Pending`, **no events at all** | Scheduler not running / not leader | `kubectl get lease -n kube-system kube-scheduler -o yaml` (renewTime stale?), `journalctl -u k3s \| grep -i scheduler` | `sudo systemctl restart k3s` |
+| `ContainerCreating` for minutes | Large image pull (NGC PyTorch ≈ 10 GB) or CNI failure | `kubectl describe pod` → `Pulling` vs `FailedCreatePodSandBox` | Pre-pull (`sudo k3s crictl pull …`), check flannel (Vol 06) |
+| `exec format error` in logs | amd64-only image on aarch64 | `docker manifest inspect <img> \| jq '.manifests[].platform'` | Use an arm64 or multi-arch tag |
+| Node `NotReady` | kubelet can't reach apiserver, PLEG unhealthy, disk/memory pressure | `kubectl describe node` → Conditions; `journalctl -u k3s -p err --since -10m` | Fix pressure. Restart k3s |
+| `Unable to connect to the server: x509` | kubeconfig for another cluster or rotated CA | `kubectl config view --minify` | Re-fetch the kubeconfig (01 Ansible `playbooks/05-k3s.yml`) |
+| Everything slow, API timeouts | etcd fsync latency (NVMe saturated by a checkpoint or fio) | `EtcdSlowFsync` alert, Vol 03 §7 | Move heavy I/O off peak, `ionice` the job |
+
+**Drill:** `scripts/breakfix.sh inject 13` taints the node. Work out why new pods stay Pending using only `describe` output.
+
+---
+
+## 8. Scale-out path
+
+```mermaid
+flowchart LR
+  A["Today<br/>1 × Spark<br/>server + worker"] --> B["+ spark-02<br/>k3s agent<br/>(01 Ansible k3s_agent group)"]
+  B --> C["3 servers<br/>embedded etcd HA<br/>(quorum 2 of 3)"]
+  C --> D["Datacenter<br/>dedicated CP nodes<br/>GPU workers in pools"]
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  class A,B gpu
+  class C,D ctrl
+```
+
+| Step | What changes | What stays the same |
+|---|---|---|
+| Add spark-02 | Uncomment `spark-02` in `inventory/hosts.yml` and re-run `playbooks/05-k3s.yml`. Flannel then runs over the CX-7 link | All manifests. The scheduler now has 8 GPU slices |
+| 3 servers | `server: https://10.10.10.11:6443` + `cluster-init` on the first. You need a third machine for etcd quorum (2 Sparks can't form a safe quorum) | Workloads |
+| Datacenter | Control plane on small CPU nodes, GPU nodes tainted `nvidia.com/gpu=present:NoSchedule`, OIDC auth, external etcd or managed control plane | The loops, the objects, the debugging method in this volume |
+
+---
+
+## 9. Checklist
+
+- [ ] I can name the component that writes each of: `nodeName`, container `state`, ReplicaSet `replicas`.
+- [ ] I can show, with commands, that a pod's containers share one network namespace.
+- [ ] I know why `memory.total` is N/A for the GB10 and where allocatable memory comes from.
+- [ ] I found `NVIDIA_VISIBLE_DEVICES` in the container spec and know who set it.

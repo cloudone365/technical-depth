@@ -1,0 +1,34 @@
+# 3 replicas behind a ClusterIP + a headless Service (Volume 07, 08).
+# agnhost 'serve-hostname' answers with the pod name, so you can *see*
+# kube-proxy's load-balancing decisions.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: echo, namespace: lab-tools}
+spec:
+  replicas: 3
+  selector: {matchLabels: {app: echo}}
+  template:
+    metadata: {labels: {app: echo}}
+    spec:
+      containers:
+        - name: echo
+          image: registry.k8s.io/e2e-test-images/agnhost:2.53
+          args: ["serve-hostname", "--http=true", "--port=8080"]
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /, port: 8080}, periodSeconds: 2}
+          resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {memory: 64Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: echo, namespace: lab-tools}
+spec:
+  selector: {app: echo}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: echo-headless, namespace: lab-tools}
+spec:
+  clusterIP: None                 # DNS returns every ready pod IP; no kube-proxy rules
+  selector: {app: echo}
+  ports: [{name: http, port: 8080, targetPort: http}]

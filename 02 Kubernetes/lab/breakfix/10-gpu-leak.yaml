@@ -1,0 +1,12 @@
+# BF-10: requests NO GPU, still sees the GB10 (default runtime = nvidia and the
+# CUDA base image sets NVIDIA_VISIBLE_DEVICES=all).
+apiVersion: v1
+kind: Pod
+metadata: {name: bf10-leak, namespace: lab-tools, labels: {breakfix: "10"}}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04
+      command: ["nvidia-smi", "-L"]
+      resources: {limits: {memory: 64Mi}}

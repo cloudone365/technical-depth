@@ -1,0 +1,15 @@
+# BF-14: Deployment "succeeds" but no pod ever appears.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: bf14-latest, namespace: tenant-beta, labels: {breakfix: "14"}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: bf14}}
+  template:
+    metadata: {labels: {app: bf14}}
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: app
+          image: registry.k8s.io/pause:latest
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
