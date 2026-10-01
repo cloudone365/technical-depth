@@ -197,7 +197,7 @@ nfs_rdma_tcp_fallback: true
 ```bash
 cd "01 Ansible/lab"
 ansible-playbook playbooks/09-nfs-rdma.yml -K
-ssh nvidia@10.10.10.12 'nfsstat -m | grep -A1 /mnt/models; cat /proc/fs/nfsd/portlist 2>/dev/null'
+ssh nvidia@192.168.0.101 'nfsstat -m | grep -A1 /mnt/models; cat /proc/fs/nfsd/portlist 2>/dev/null'
 # Expect: proto=rdma,port=20049 on the client; "rdma 20049" in the server portlist
 ```
 

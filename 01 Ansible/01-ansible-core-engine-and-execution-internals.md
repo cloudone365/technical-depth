@@ -46,7 +46,7 @@ ANSIBLE_PIPELINING=0 ANSIBLE_KEEP_REMOTE_FILES=1 \
   ansible spark-01 -m ansible.builtin.stat -a path=/etc/dgx-release -vvv 2>&1 | grep -o '/home/nvidia/.ansible/tmp/[^ /]*' | head -1
 # → /home/nvidia/.ansible/tmp/ansible-tmp-1727630000.12-4242-1234
 
-ssh nvidia@10.10.10.11
+ssh nvidia@192.168.0.100
 cd ~/.ansible/tmp/ansible-tmp-*/
 python3 AnsiballZ_stat.py explode        # unpacks the module into ./debug_dir
 ls debug_dir/ansible/modules/            # stat.py — the real module source
@@ -224,7 +224,7 @@ spark (2)[f:10]# cd spark-01
 
 | Symptom | Layer | Diagnose | Fix |
 |---|---|---|---|
-| `Failed to connect to the host via ssh: ... Connection timed out` | Network | `nc -vz 10.10.10.11 22` | Mgmt cabling or IP. Remember that Ansible uses `ansible_host`, not DNS |
+| `Failed to connect to the host via ssh: ... Connection timed out` | Network | `nc -vz 192.168.0.100 22` | Mgmt cabling or IP. Remember that Ansible uses `ansible_host`, not DNS |
 | `Shared connection to ... closed` mid-task | SSH | `-vvvv`; check whether the task is long | Use `async`; `ServerAliveInterval=30` is already in `ansible.cfg` |
 | `MODULE FAILURE ... See stdout/stderr for the exact error` | Python on target | `KEEP_REMOTE_FILES=1`, then `explode`/`execute` | Usually a missing Python lib on the Spark (e.g. `python3-apt`) |
 | `The conditional check ... failed. The error was: ... is undefined` | Your logic | Add a debug task: `var=hostvars[inventory_hostname]` | Add `default()` or fix the variable scope (host_vars vs group_vars) |

@@ -117,7 +117,7 @@ Quorum is ⌊n/2⌋+1. **1 member tolerates 0 failures, 2 members tolerate 0, an
 | With | How |
 |---|---|
 | Vol 02 secrets encryption | Proven in §5.3 by reading the raw key |
-| Prometheus (Vol 16) | `kubeEtcd.endpoints: [10.10.10.11]` port 2381 in [`addons/kube-prometheus-stack.yaml`](lab/addons/kube-prometheus-stack.yaml). Two alert rules in [`rules.yaml`](lab/manifests/95-observability/rules.yaml) |
+| Prometheus (Vol 16) | `kubeEtcd.endpoints: [192.168.0.100]` port 2381 in [`addons/kube-prometheus-stack.yaml`](lab/addons/kube-prometheus-stack.yaml). Two alert rules in [`rules.yaml`](lab/manifests/95-observability/rules.yaml) |
 | Off-box backup | §5.7 pulls snapshots + token + encryption config to the control node. In production use k3s's `etcd-s3-*` options (MinIO from module 08 works) |
 | Storage module (08) | fsync latency is a storage QoS problem. The checkpoint-write patterns in 08 are what hurt etcd |
 
@@ -142,7 +142,7 @@ Expected (abridged):
 ```text
 +------------------+---------+----------+---------------------------+
 |        ID        | STATUS  |   NAME   |        PEER ADDRS         |
-| 3a1f…            | started | spark-01-… | https://10.10.10.11:2380 |
+| 3a1f…            | started | spark-01-… | https://192.168.0.100:2380 |
 +----------------------------+---------+--------+---------+-----------+-----------+
 |          ENDPOINT          | DB SIZE | IS LEADER | RAFT TERM | RAFT INDEX |
 | https://127.0.0.1:2379     |  12 MB  |   true    |     2     |   48211    |
@@ -239,7 +239,7 @@ From the control node, pull everything a restore on *new* hardware needs (snapsh
 
 ```bash
 mkdir -p ~/spark-backups
-ssh nvidia@10.10.10.11 'sudo tar czf - -C /var/lib/rancher/k3s/server db/snapshots token cred/encryption-config.json' \
+ssh nvidia@192.168.0.100 'sudo tar czf - -C /var/lib/rancher/k3s/server db/snapshots token cred/encryption-config.json' \
   > ~/spark-backups/k3s-$(date +%F).tgz
 tar tzf ~/spark-backups/k3s-$(date +%F).tgz | head
 ```
@@ -284,7 +284,7 @@ flowchart LR
 ```
 
 - **Don't make spark-02 a second server** with only two machines. A 2-member etcd *halves* your availability, because either member failing loses quorum.
-- For real HA, the third voter can be any small Linux box (a NUC, or a VM on the control node) running `k3s server --server https://10.10.10.11:6443`, tainted `node-role.kubernetes.io/control-plane:NoSchedule`.
+- For real HA, the third voter can be any small Linux box (a NUC, or a VM on the control node) running `k3s server --server https://192.168.0.100:6443`, tainted `node-role.kubernetes.io/control-plane:NoSchedule`.
 - Production: snapshots every hour to object storage (`etcd-s3: true`, `etcd-s3-bucket`), a quarterly restore rehearsal on a scratch cluster, and a 99th-percentile fsync SLO under 10 ms on dedicated disks.
 
 ---

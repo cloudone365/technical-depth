@@ -143,7 +143,7 @@ flowchart LR
 
 | Item | Value |
 |---|---|
-| Nodes | spark-01 `10.10.10.11` (k3s server). Optional spark-02 `10.10.10.12` (agent) |
+| Nodes | spark-01 `192.168.0.100` (k3s server). Optional spark-02 `192.168.0.101` (agent) |
 | CX-7 | `192.168.100.0/24` + `192.168.101.0/24`, MTU 9000 |
 | Pods / Services / DNS | `10.42.0.0/16` / `10.43.0.0/16` / `10.43.0.10` |
 | Entry points | API `:6443` · Traefik `:80/:443` · Grafana `:32000` (kps), `:3000` (host) |

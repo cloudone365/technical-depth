@@ -35,12 +35,12 @@ flowchart LR
   subgraph S1["spark-01"]
     A1["enp1s0f1np1<br/>192.168.100.11/24<br/>rocep1s0f1"]
     B1["enP2p1s0f1np1<br/>192.168.101.11/24<br/>roceP2p1s0f1"]
-    M1["enP7s7 10GbE<br/>10.10.10.11 (mgmt)"]
+    M1["enP7s7 10GbE<br/>192.168.0.100 (mgmt)"]
   end
   subgraph S2["spark-02"]
     A2["enp1s0f1np1<br/>192.168.100.12/24"]
     B2["enP2p1s0f1np1<br/>192.168.101.12/24"]
-    M2["enP7s7<br/>10.10.10.12"]
+    M2["enP7s7<br/>192.168.0.101"]
   end
   A1 === |"QSFP cage 1 (one cable)"| A2
   B1 === |"same cable, 2nd PCIe root"| B2
@@ -78,7 +78,7 @@ To model a ring in this lab, give each host **two** `cx7_interfaces` groups on d
 ### 3.1 Cable and discover
 
 ```bash
-ssh nvidia@10.10.10.11 ibdev2netdev
+ssh nvidia@192.168.0.100 ibdev2netdev
 # rocep1s0f1 port 1 ==> enp1s0f1np1 (Up)
 # roceP2p1s0f1 port 1 ==> enP2p1s0f1np1 (Up)
 ```

@@ -138,7 +138,7 @@ kubectl uncordon spark-01
 Corrupt the stored reference (a stand-in for the GPU computing a different answer):
 
 ```bash
-ssh nvidia@10.10.10.11 "echo '{\"sha\": \"deadbeefdeadbeef\"}' | sudo tee /data/k8s/batch/ckpt/canary.json"
+ssh nvidia@192.168.0.100 "echo '{\"sha\": \"deadbeefdeadbeef\"}' | sudo tee /data/k8s/batch/ckpt/canary.json"
 kubectl -n batch delete job resilient-train; kubectl apply -k manifests/80-distributed/resilient
 kubectl -n batch logs -f job/resilient-train | grep -E 'canary|SDC'
 kubectl -n batch get job resilient-train -o jsonpath='{.status.conditions[?(@.type=="Failed")].reason}{"\n"}'   # PodFailurePolicy
@@ -150,7 +150,7 @@ Expected: `SDC SUSPECTED` at the first canary, exit 86, and the Job fails **imme
 kubectl taint node spark-01 spark.lab/sdc=suspect:NoSchedule
 kubectl annotate node spark-01 spark.lab/quarantine-reason="canary mismatch job resilient-train $(date -Is)"
 # after investigation (DCGM diag / vendor) — and restoring the real reference:
-ssh nvidia@10.10.10.11 'sudo rm /data/k8s/batch/ckpt/canary.json'
+ssh nvidia@192.168.0.100 'sudo rm /data/k8s/batch/ckpt/canary.json'
 kubectl taint node spark-01 spark.lab/sdc-; kubectl annotate node spark-01 spark.lab/quarantine-reason-
 ```
 

@@ -32,7 +32,7 @@ vault_config_approles:
     token_max_ttl: 1h
     secret_id_ttl: 24h        # AWX/cron must refresh; stolen secret_ids expire
     secret_id_num_uses: 0
-    token_bound_cidrs: ""     # e.g. "10.10.10.0/24" to pin to the mgmt network
+    token_bound_cidrs: ""     # e.g. "192.168.0.0/24" to pin to the mgmt network
 
 vault_config_ssh_role:
   name: ansible

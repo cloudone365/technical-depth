@@ -77,7 +77,7 @@ ansible-playbook playbooks/04-telemetry.yml -K
 ## Step 5 · CX-7 fabric (45 min, 2 Sparks) → [11](11-infiniband-fabric-automation-and-opensm.md)
 
 ```bash
-ssh nvidia@10.10.10.11 ibdev2netdev           # confirm names → host_vars
+ssh nvidia@192.168.0.100 ibdev2netdev           # confirm names → host_vars
 ansible-playbook playbooks/02-fabric.yml -K
 ```
 
@@ -104,7 +104,7 @@ ansible-playbook playbooks/09-nfs-rdma.yml -K
 
 ```bash
 ansible-playbook playbooks/08-vault.yml -K
-export VAULT_ADDR=https://10.10.10.11:8200 VAULT_CACERT=$PWD/.cache/spark-lab-ca.crt
+export VAULT_ADDR=https://192.168.0.100:8200 VAULT_CACERT=$PWD/.cache/spark-lab-ca.crt
 export VAULT_TOKEN=$(jq -r .root_token .cache/vault-init.json)
 vault kv put kv/spark-lab/ngc api_key=nvapi-...
 ansible-playbook playbooks/19-vault-integration.yml -e vault_issue_secret_id=true -l localhost

@@ -83,7 +83,7 @@ class InventoryModule(BaseInventoryPlugin, Constructable):
         want_if = self.get_option("interface")
         group = self.inventory.add_group(self.get_option("group"))
 
-        # '=;iface;IPv4;service name;_ssh._tcp;local;host.local;10.10.10.11;22;"txt"'
+        # '=;iface;IPv4;service name;_ssh._tcp;local;host.local;192.168.0.100;22;"txt"'
         for line in self._capture().splitlines():
             f = line.split(";")
             if len(f) < 9 or f[0] != "=" or f[2] != "IPv4":

@@ -446,7 +446,7 @@ sha256sum /var/lib/libvirt/images/iso/bcm11-arm64.iso   <span class="c"># compar
 virt-viewer --connect qemu:///system bcm-head
 
 <span class="c"># Or from your laptop over SSH (Linux/macOS with virt-manager installed)</span>
-virt-manager -c qemu+ssh://&lt;spark-user&gt;@&lt;spark-ip&gt;/system</code></pre>
+virt-manager -c qemu+ssh://&lt;spark-user&gt;@192.168.0.100/system</code></pre>
 <p>A blank screen at boot usually means the VM has no display device the firmware likes; see <a href="#trouble">troubleshooting</a>. The ISO's boot menu also offers a text installer, which works over the serial console with <code>virsh console bcm-head</code>.</p>
 
 <h3>Confirm it is fenced</h3>
@@ -491,7 +491,7 @@ sudo virsh change-media bcm-head sdb --eject --config</code></pre>
 ssh root@192.168.122.10
 
 <span class="c"># From your laptop, jumping through the Spark</span>
-ssh -J &lt;spark-user&gt;@&lt;spark-ip&gt; root@192.168.122.10</code></pre>
+ssh -J &lt;spark-user&gt;@192.168.0.100 root@192.168.122.10</code></pre>
 
 <h3>Activate the licence</h3>
 <pre><code>request-license
@@ -513,7 +513,7 @@ ss -ulpn | grep -E ':67|:69'</code></pre>
 
 <h3>Reach Base View (the web GUI)</h3>
 <pre><code><span class="c"># On your laptop: forward a local port through the Spark</span>
-ssh -L 8081:192.168.122.10:8081 &lt;spark-user&gt;@&lt;spark-ip&gt;
+ssh -L 8081:192.168.122.10:8081 &lt;spark-user&gt;@192.168.0.100
 <span class="c"># Then browse to https://localhost:8081/base-view and log in as root</span></code></pre>
 </section>
 

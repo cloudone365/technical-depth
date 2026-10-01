@@ -215,7 +215,7 @@ spec:
 ```bash
 kubectl apply -f ts-demo.yaml && kubectl get pods -l app=ts-demo -o wide
 kubectl scale deploy ts-demo --replicas=5     # 5th pod stays Pending: only 4 slices per node
-ssh nvidia@10.10.10.11 nvidia-smi              # 4 processes sharing one GPU
+ssh nvidia@192.168.0.100 nvidia-smi              # 4 processes sharing one GPU
 ```
 
 > **Always set a `memory` limit on GPU pods on a Spark.** Kubernetes can't account for GPU memory on a time-sliced UMA GPU, but the container memory limit plus the kubelet reserve from Volume 16 bound how much of the shared pool a pod's host-side allocations take. Whether CUDA allocations count against the pod's cgroup is something to verify on your node with the probe from Volume 08. Treat it as an experiment, not an assumption.

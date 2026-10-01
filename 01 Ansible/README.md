@@ -13,14 +13,14 @@ flowchart LR
   subgraph CTL["Control node"]
     ANS["ansible-core 2.18 · collections<br/>lab/ (git) · .cache/ (secrets, kubeconfig, reports)"]
   end
-  subgraph S1["spark-01 · 10.10.10.11"]
+  subgraph S1["spark-01 · 192.168.0.100"]
     direction TB
     S1A["k3s server · GPU Operator · AWX"]
     S1B["slurmctld + slurmd"]
     S1C["Vault · Prometheus · Grafana · Loki · ARA"]
     S1D["NFS/RDMA server /srv/models"]
   end
-  subgraph S2["spark-02 · 10.10.10.12"]
+  subgraph S2["spark-02 · 192.168.0.101"]
     direction TB
     S2A["k3s agent · slurmd"]
     S2B["NFS/RDMA client /mnt/models"]

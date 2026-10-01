@@ -75,7 +75,7 @@ flowchart LR
     M2["enP7s7"]
   end
   C1 <== "① compute fabric: 1 rail, 0 switches<br/>192.168.100/101.0/24 · RoCE v2 · MTU 9000" ==> C2
-  M1 <-->|"②③ frontend: 10.10.10.0/24<br/>API, pulls, NFS-TCP"| SW["home/lab switch"] <--> M2
+  M1 <-->|"②③ frontend: 192.168.0.0/24<br/>API, pulls, NFS-TCP"| SW["home/lab switch"] <--> M2
   classDef gpu fill:#76b900,stroke:#3d6000,color:#000
   classDef net fill:#8250df,stroke:#4c2889,color:#fff
   class G1,G2 gpu
@@ -135,7 +135,7 @@ In a node with 8 GPUs and 8 NICs, NIC *i* sits next to GPU *i* (same PCIe switch
 ### 5.1 Inventory the CX-7 (1 Spark)
 
 ```bash
-ssh nvidia@10.10.10.11
+ssh nvidia@192.168.0.100
 ibdev2netdev                               # rocep1s0f1 port 1 ==> enp1s0f1np1 (Up) …
 for i in enp1s0f1np1 enP2p1s0f1np1; do ethtool $i | grep -E 'Speed|Link detected'; ip -br link show $i; done
 rdma link show
@@ -160,7 +160,7 @@ Exercise: how many optical transceivers does the 127-node design need, if every 
 
 ```bash
 cd "../../01 Ansible/lab" && ansible-playbook playbooks/11-rdma-perftest.yml     # host RDMA baseline
-ssh nvidia@10.10.10.11 'ethtool -S enp1s0f1np1 | grep -E "crc|symbol|discard|pause|cnp|link_down" | grep -v ": 0$"'
+ssh nvidia@192.168.0.100 'ethtool -S enp1s0f1np1 | grep -E "crc|symbol|discard|pause|cnp|link_down" | grep -v ": 0$"'
 ```
 
 Then run the NCCL job (Vol 17 §5.5) and diff the counters before and after. PFC pause counters rising only during the run, and discards staying at 0, is healthy lossless behaviour.
@@ -169,10 +169,10 @@ Then run the NCCL job (Vol 17 §5.5) and diff the counters before and after. PFC
 
 ```bash
 # take ONE logical half down on spark-02 for the duration of a run
-ssh nvidia@10.10.10.12 'sudo ip link set enP2p1s0f1np1 down'
+ssh nvidia@192.168.0.101 'sudo ip link set enP2p1s0f1np1 down'
 kubectl delete -k manifests/80-distributed/two-spark --ignore-not-found; kubectl apply -k manifests/80-distributed/two-spark
 kubectl -n batch logs -l job-name=ddp --prefix | grep -E 'NET/IB|busbw|1073741824|WARN' | head
-ssh nvidia@10.10.10.12 'sudo ip link set enP2p1s0f1np1 up'
+ssh nvidia@192.168.0.101 'sudo ip link set enP2p1s0f1np1 up'
 ```
 
 Expected: NCCL warns about the missing HCA or uses only one device, and large-message busbw drops to roughly **half**. That's the signature of a degraded rail or a half-seated cable. It's also why fabric health checks run *before* a job is admitted in large clusters.

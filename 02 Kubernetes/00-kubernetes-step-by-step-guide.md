@@ -114,7 +114,7 @@ kubectl apply -f manifests/30-networking/coredns-custom.yaml && kubectl -n kube-
 
 ```bash
 kubectl apply -k manifests/40-ingress
-echo "10.10.10.11 llm.lab.local gw.lab.local" | sudo tee -a /etc/hosts      # on the laptop
+echo "192.168.0.100 llm.lab.local gw.lab.local" | sudo tee -a /etc/hosts      # on the laptop
 scripts/verify.sh ingress
 ```
 
@@ -161,7 +161,7 @@ scripts/breakfix.sh inject 10                                       # the GPU le
 
 ```bash
 kubectl apply -k manifests/95-observability
-scripts/verify.sh observability      # Grafana http://10.10.10.11:32000 → "Spark · Kubernetes"
+scripts/verify.sh observability      # Grafana http://192.168.0.100:32000 → "Spark · Kubernetes"
 ```
 
 ✅ Every dashboard row has data. One alert seen firing (drill 02).

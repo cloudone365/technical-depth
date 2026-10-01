@@ -48,7 +48,7 @@ Manual configuration is like assembling a mechanical Swiss watch by hand in a di
                │ Agentless SSH (Port 22)
                ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│ NVIDIA DGX Spark Host (10.0.0.50)                                      │
+│ NVIDIA DGX Spark Host (192.168.0.100)                                  │
 │  Phase 1: Hardware Audit (Validate Grace ARM64 + GB10 GPU)             │
 │  Phase 2: Install CUDA Drivers & NVIDIA Container Toolkit              │
 │  Phase 3: Format & Mount PCIe Gen5 NVMe (/data with noatime)           │
@@ -134,7 +134,7 @@ ansible-dgx-stack/
 ### `inventory.ini`:
 ```ini
 [dgx_spark]
-dgx-spark-01 ansible_host=10.0.0.50 ansible_user=root ansible_ssh_private_key_file=~/.ssh/id_ed25519
+dgx-spark-01 ansible_host=192.168.0.100 ansible_user=root ansible_ssh_private_key_file=~/.ssh/id_ed25519
 
 [dgx_spark:vars]
 ansible_python_interpreter=/usr/bin/python3
@@ -343,7 +343,7 @@ ansible-playbook -i inventory.ini deploy-dgx-spark-ai.yml --check --diff
 * **Remediation**:
   1. Copy your SSH key to the target:
      ```bash
-     ssh-copy-id -i ~/.ssh/id_ed25519.pub root@10.0.0.50
+     ssh-copy-id -i ~/.ssh/id_ed25519.pub root@192.168.0.100
      ```
   2. Verify `/etc/ssh/sshd_config` contains `PermitRootLogin prohibit-password` or `yes`.
 
@@ -351,7 +351,7 @@ ansible-playbook -i inventory.ini deploy-dgx-spark-ai.yml --check --diff
 * **Root Cause**: vLLM crashed during initialization due to a CUDA OOM or invalid model path.
 * **Remediation**: Inspect live systemd journal logs on the target node:
   ```bash
-  ssh root@10.0.0.50 "journalctl -u vllm.service -n 50 --no-pager"
+  ssh root@192.168.0.100 "journalctl -u vllm.service -n 50 --no-pager"
   ```
 
 ---

@@ -276,8 +276,8 @@ cat .cache/drift/check-*.md | tail -20
 ### 4.2 Create drift on purpose, then watch it
 
 ```bash
-ssh nvidia@10.10.10.12 'sudo sysctl -w vm.swappiness=60 && sudo sed -i "s/^vm.swappiness.*/vm.swappiness = 60/" /etc/sysctl.d/90-spark.conf'
-ssh nvidia@10.10.10.12 'sudo apt-mark unhold $(apt-mark showhold | grep -m1 nvidia)'
+ssh nvidia@192.168.0.101 'sudo sysctl -w vm.swappiness=60 && sudo sed -i "s/^vm.swappiness.*/vm.swappiness = 60/" /etc/sysctl.d/90-spark.conf'
+ssh nvidia@192.168.0.101 'sudo apt-mark unhold $(apt-mark showhold | grep -m1 nvidia)'
 tools/drift-cycle.sh; echo "exit=$?"          # → 2, spark-02 listed with both tasks
 ```
 

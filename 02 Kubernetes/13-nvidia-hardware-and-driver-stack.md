@@ -128,7 +128,7 @@ flowchart TB
 ### 5.1 Host inventory
 
 ```bash
-ssh nvidia@10.10.10.11
+ssh nvidia@192.168.0.100
 nvidia-smi
 nvidia-smi --query-gpu=name,compute_cap,driver_version,pstate,temperature.gpu,power.draw,clocks.sm,clocks.max.sm --format=csv
 lscpu | grep -E 'Model name|^CPU\(s\)|Thread|Socket'

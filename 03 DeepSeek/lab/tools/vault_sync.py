@@ -6,7 +6,7 @@ Runs as a CronJob with its own ServiceAccount:
   2. read each mapped KV v2 path
   3. create or replace the target Kubernetes Secret through the API server
 Stdlib only. Config (env):
-  VAULT_ADDR      https://10.10.10.11:8200          VAULT_CACERT  /vault-ca/ca.crt
+  VAULT_ADDR      https://192.168.0.100:8200          VAULT_CACERT  /vault-ca/ca.crt
   VAULT_ROLE      deepseek-serving                   VAULT_AUTH_PATH kubernetes
   SYNC_MAP        JSON: [{"vault": "kv/data/spark-lab/deepseek/hf", "secret": "hf-token", "keys": {"token": "token"}}]
 """
@@ -29,7 +29,7 @@ def req(url, method="GET", body=None, headers=None, ctx=None):
 
 
 def main():
-    vault = os.environ.get("VAULT_ADDR", "https://10.10.10.11:8200")
+    vault = os.environ.get("VAULT_ADDR", "https://192.168.0.100:8200")
     vctx = ssl.create_default_context(cafile=os.environ.get("VAULT_CACERT", "/vault-ca/ca.crt"))
     kctx = ssl.create_default_context(cafile=f"{SA}/ca.crt")
     jwt = open(f"{SA}/token").read().strip()

@@ -103,10 +103,10 @@ flowchart TB
 
 | Endpoint | Address | Notes |
 |---|---|---|
-| API server | `https://10.10.10.11:6443` | kubeconfig from 01 Ansible `.cache/` |
-| Traefik | `10.10.10.11:80`, `:443` | hosts `llm.lab.local`, `gw.lab.local` in your laptop's `/etc/hosts` |
-| Grafana (kps) | `http://10.10.10.11:32000` | admin / from Vault |
-| Host Grafana (01 Ansible) | `http://10.10.10.11:3000` | node/GPU view that survives a k8s outage |
+| API server | `https://192.168.0.100:6443` | kubeconfig from 01 Ansible `.cache/` |
+| Traefik | `192.168.0.100:80`, `:443` | hosts `llm.lab.local`, `gw.lab.local` in your laptop's `/etc/hosts` |
+| Grafana (kps) | `http://192.168.0.100:32000` | admin / from Vault |
+| Host Grafana (01 Ansible) | `http://192.168.0.100:3000` | node/GPU view that survives a k8s outage |
 | Pod CIDR / Service CIDR / DNS | 10.42.0.0/16 · 10.43.0.0/16 · 10.43.0.10 | k3s defaults |
 | CX-7 | 192.168.100.0/24, 192.168.101.0/24 | only with spark-02 |
 

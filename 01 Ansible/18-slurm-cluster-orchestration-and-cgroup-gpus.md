@@ -284,7 +284,7 @@ Design choices:
 ```bash
 cd "01 Ansible/lab"
 ansible-playbook playbooks/07-slurm.yml -K
-ssh nvidia@10.10.10.11
+ssh nvidia@192.168.0.100
 sinfo -N -o "%N %T %G %m %c"          # spark-01 idle gpu:gb10:1 106496 20
 scontrol show node spark-01 | grep -E 'Gres|RealMemory|State'
 ```

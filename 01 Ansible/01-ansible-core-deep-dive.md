@@ -55,7 +55,7 @@ Ansible is **agentless**. Nothing runs on the Spark between plays. Each task is 
 | Managed-node user | `nvidia` (same on every Spark) | NVIDIA's multi-Spark playbooks and MPI assume identical usernames |
 | Privilege | `become: true` via `sudo` (group_vars/spark.yml) | Everything we configure is root-owned |
 | Python on target | `/usr/bin/python3` pinned in `ansible.cfg` | Avoids interpreter discovery warnings; DGX OS ships 3.12 |
-| Mgmt network | `enP7s7` 10GbE, `10.10.10.0/24` | Ansible/SSH traffic never rides the CX-7 fabric |
+| Mgmt network | `enP7s7` 10GbE, `192.168.0.0/24` | Ansible/SSH traffic never rides the CX-7 fabric |
 | Fabric | CX-7 `enp1s0f1np1` / `enP2p1s0f1np1`, `192.168.100/101.0/24` | Workload traffic only (NCCL, NFS/RDMA, flannel) |
 | Fact cache | `jsonfile` in `lab/.cache/facts`, 2 h | Ad-hoc runs and drift reports reuse facts |
 | Run log | `lab/.cache/ansible.log` | Free audit trail (Volume 23) |
@@ -151,9 +151,9 @@ context                 = 3
 
 ```bash
 ssh-keygen -t ed25519 -C "ansible@control"          # if you don't have a key
-ssh-copy-id nvidia@10.10.10.11
-ssh-copy-id nvidia@10.10.10.12                        # second Spark, if any
-ssh nvidia@10.10.10.11 'hostname; uname -m; cat /etc/dgx-release | head -3'
+ssh-copy-id nvidia@192.168.0.100
+ssh-copy-id nvidia@192.168.0.101                        # second Spark, if any
+ssh nvidia@192.168.0.100 'hostname; uname -m; cat /etc/dgx-release | head -3'
 ```
 
 Expected: `aarch64` and a `DGX_*` release line. If `/etc/dgx-release` is missing, you're not on DGX OS. The lab still runs, but the version checks in `spark_validate` will warn.
@@ -163,7 +163,7 @@ Expected: `aarch64` and a `DGX_*` release line. If `/etc/dgx-release` is missing
 Find the real CX-7 interface names **on each Spark** before editing host_vars:
 
 ```bash
-ssh nvidia@10.10.10.11 ibdev2netdev
+ssh nvidia@192.168.0.100 ibdev2netdev
 # rocep1s0f0 port 1 ==> enp1s0f0np0 (Down)
 # rocep1s0f1 port 1 ==> enp1s0f1np1 (Up)       <- cable is in this cage
 # roceP2p1s0f0 port 1 ==> enP2p1s0f0np0 (Down)
@@ -180,7 +180,7 @@ Each physical QSFP cage shows up as **two** netdevs (`enp1s0f1np1` and `enP2p1s0
 #   Single-Spark mode: delete spark-02 (or leave it commented) — every playbook
 #   works on one node; 2-node sections are skipped automatically.
 #
-#   Management network (10GbE RJ-45, enP7s7) : 10.10.10.0/24
+#   Management network (10GbE RJ-45, enP7s7) : 192.168.0.0/24
 #   CX-7 fabric (QSFP, direct cable)          : 192.168.100.0/24 + 192.168.101.0/24
 all:
   children:
@@ -194,9 +194,9 @@ all:
     spark:
       hosts:
         spark-01:
-          ansible_host: 10.10.10.11
+          ansible_host: 192.168.0.100
         spark-02:
-          ansible_host: 10.10.10.12
+          ansible_host: 192.168.0.101
 
     # ---- functional groups (a host can be in several) -------------------
     k3s_server:
@@ -683,7 +683,7 @@ ansible-playbook playbooks/01-baseline.yml -K                  # again → chang
 
 | Symptom | Likely cause | Diagnose | Fix |
 |---|---|---|---|
-| `UNREACHABLE! ... Permission denied (publickey)` | Key not on the Spark, or the wrong user | `ssh -v nvidia@10.10.10.11` | `ssh-copy-id`; check `remote_user` in `ansible.cfg` |
+| `UNREACHABLE! ... Permission denied (publickey)` | Key not on the Spark, or the wrong user | `ssh -v nvidia@192.168.0.100` | `ssh-copy-id`; check `remote_user` in `ansible.cfg` |
 | `Missing sudo password` | `become` without `-K` | — | Add `-K`, or configure `NOPASSWD` for the automation user |
 | `Timeout (12s) waiting for privilege escalation prompt` | sudo is slow because of a DNS lookup of the hostname | `time sudo true` on the Spark | Add the hostname to `/etc/hosts` |
 | `/usr/bin/python3: not found` | Minimal image, or a container target | `ansible host -m raw -a 'which python3'` | Bootstrap with the `raw` module (see the Molecule `prepare.yml`) |

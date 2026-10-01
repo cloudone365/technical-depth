@@ -32,12 +32,12 @@ flowchart LR
     direction TB
     K8S["kubernetes cluster.local<br/>→ Services, pods, headless"]
     CUST["import /etc/coredns/custom/*.override<br/>(log, …)"]
-    LAB["lab.local:53 → forward 10.10.10.1<br/>(*.server from coredns-custom)"]
+    LAB["lab.local:53 → forward 192.168.0.1<br/>(*.server from coredns-custom)"]
     FWD["forward . /etc/resolv.conf<br/>(host upstream)"]
     CACHE["cache 30"]
   end
   CD --- CF
-  FWD --> UP["site DNS 10.10.10.1 → internet"]
+  FWD --> UP["site DNS 192.168.0.1 → internet"]
   LAB --> UP
   classDef net fill:#8250df,stroke:#4c2889,color:#fff
   classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
@@ -97,7 +97,7 @@ Three fixes, in order of preference:
 
 ## 4. Integrations
 
-- **01 Ansible site DNS (`dns_servers: [10.10.10.1, …]`)**: the `lab.local` forward zone lets pods resolve `spark-02.lab.local` and your NAS by name.
+- **01 Ansible site DNS (`dns_servers: [192.168.0.1, …]`)**: the `lab.local` forward zone lets pods resolve `spark-02.lab.local` and your NAS by name.
 - **Model downloads (Vol 21, modules 03–06)**: set `HF_ENDPOINT`/`HF_HUB_*` and any registry mirrors as FQDNs.
 - **Prometheus (Vol 16)**: CoreDNS exposes `coredns_dns_requests_total{type}` and `coredns_dns_responses_total{rcode}`. An NXDOMAIN ratio > 50 % is the ndots tax showing up in a graph.
 

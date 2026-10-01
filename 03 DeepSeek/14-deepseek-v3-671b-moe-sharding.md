@@ -141,14 +141,14 @@ How many 8-GPU H200 nodes would V3 FP8 need with 128K context for 32 concurrent 
 kubectl get nodes -o wide                                              # spark-01 + spark-02 Ready
 kubectl apply --server-side -f https://github.com/kubernetes-sigs/lws/releases/download/v0.7.0/manifests.yaml
 kubectl apply -f k8s/multinode/namespace.yaml
-ssh nvidia@10.10.10.12 'mount | grep /mnt/models'                       # NFS-RDMA from spark-01
+ssh nvidia@192.168.0.101 'mount | grep /mnt/models'                       # NFS-RDMA from spark-01
 ```
 
 ### 5.3 70B with tensor parallelism over CX-7
 
 ```bash
 # weights into the shared export once (on spark-01; `hf` comes from: pip install --user "huggingface_hub[cli]")
-ssh nvidia@10.10.10.11 'hf download RedHatAI/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic --cache-dir /srv/models/hf'
+ssh nvidia@192.168.0.100 'hf download RedHatAI/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic --cache-dir /srv/models/hf'
 kubectl apply -f k8s/multinode/lws-vllm-70b.yaml
 kubectl -n llm-multinode get pods -o wide -w                           # vllm-70b-0 (leader, spark-01), vllm-70b-0-1 (worker, spark-02)
 kubectl -n llm-multinode logs -f vllm-70b-0 | grep -E 'NCCL INFO (NET/IB|Using network)|tensor_parallel|Uvicorn'
@@ -160,12 +160,12 @@ Then from spark-01: `curl -s 192.168.100.11:8000/v1/models`, and run the eval ha
 
 ```bash
 # 1. build llama.cpp for sm_121 on BOTH Sparks and import into k3s
-for h in 10.10.10.11 10.10.10.12; do
+for h in 192.168.0.100 192.168.0.101; do
   scp k8s/llamacpp/Dockerfile nvidia@$h:/tmp/ && ssh nvidia@$h \
    'cd /tmp && docker build -t spark-local/llama.cpp:server-sm121 . && docker save spark-local/llama.cpp:server-sm121 | sudo k3s ctr images import -'
 done
 # 2. weights (~131 GB) into the share
-ssh nvidia@10.10.10.11 'sudo mkdir -p /srv/models/gguf && sudo chown nvidia /srv/models/gguf && \
+ssh nvidia@192.168.0.100 'sudo mkdir -p /srv/models/gguf && sudo chown nvidia /srv/models/gguf && \
   hf download unsloth/DeepSeek-R1-GGUF --include "DeepSeek-R1-UD-IQ1_S/*" --local-dir /srv/models/gguf'
 # 3. run
 kubectl -n llm-multinode scale lws vllm-70b --replicas=0 2>/dev/null

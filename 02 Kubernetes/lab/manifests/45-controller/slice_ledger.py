@@ -10,7 +10,7 @@ It does what every controller does, with nothing hidden behind a library:
   5. periodic resync      → reconcile even without events (drift protection)
 
 Runs in-cluster with its ServiceAccount token, or locally with
-API_SERVER=https://10.10.10.11:6443 TOKEN=… CA_FILE=… .
+API_SERVER=https://192.168.0.100:6443 TOKEN=… CA_FILE=… .
 """
 import json
 import os

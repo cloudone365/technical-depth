@@ -141,7 +141,7 @@ spec:
 kubectl apply -f awx.yaml
 kubectl -n awx logs -f deploy/awx-operator-controller-manager -c awx-manager | grep -E 'PLAY RECAP|failed=[1-9]'
 kubectl -n awx get pods -w      # awx-web, awx-task, awx-postgres-15-0 → Running
-curl -s http://10.10.10.11:30080/api/v2/ping/ | jq .version
+curl -s http://192.168.0.100:30080/api/v2/ping/ | jq .version
 ```
 
 ### 3.4 Configure AWX *as code*
@@ -150,7 +150,7 @@ Clicking through the UI can't be reviewed or rebuilt. Use the `awx.awx` collecti
 
 ```bash
 ansible-galaxy collection install awx.awx -p ./collections
-export CONTROLLER_HOST=http://10.10.10.11:30080 CONTROLLER_USERNAME=admin
+export CONTROLLER_HOST=http://192.168.0.100:30080 CONTROLLER_USERNAME=admin
 export CONTROLLER_PASSWORD=$(kubectl -n awx get secret awx-admin-password -o jsonpath='{.data.password}' | base64 -d)
 ```
 
@@ -295,8 +295,8 @@ additional_build_steps:
 ```bash
 pip install ansible-builder
 cd "01 Ansible/lab"
-ansible-builder build -t 10.10.10.11:5000/spark-ee:1.0 -f ee/execution-environment.yml --container-runtime docker
-docker run --rm 10.10.10.11:5000/spark-ee:1.0 ansible-galaxy collection list | grep -E 'hashi_vault|kubernetes.core'
+ansible-builder build -t 192.168.0.100:5000/spark-ee:1.0 -f ee/execution-environment.yml --container-runtime docker
+docker run --rm 192.168.0.100:5000/spark-ee:1.0 ansible-galaxy collection list | grep -E 'hashi_vault|kubernetes.core'
 # push to a local registry (or GHCR), then in AWX: Execution Environments → add, set as default for the org
 ```
 
@@ -330,13 +330,13 @@ docker run --rm 10.10.10.11:5000/spark-ee:1.0 ansible-galaxy collection list | g
 | Job stuck `pending` | `kubectl -n awx get pods \| grep automation-job`; `awx-task` logs | Capacity: the instance group shows 0 capacity; raise `task_resource_requirements` or wait for running jobs |
 | Job fails instantly: `ERROR! the role 'spark_facts' was not found` | Job output → working directory | AWX runs from the project root, so `lab/ansible.cfg` (and its `roles_path`) is **not** read. The lab ships `playbooks/roles → ../roles` so role lookup works relative to the playbook. Set other settings via the job template's env or `AWX_TASK_ENV` |
 | `couldn't resolve module/action 'community.docker...'` | EE collection list | Build and use the custom EE (§3.6), or add `collections/requirements.yml` to the project |
-| Job can't reach 10.10.10.x | `kubectl exec` into a job pod → `nc -vz 10.10.10.12 22` | Pod network → mgmt LAN routing; the k3s node must be able to route to it (it's on the same LAN, so check host firewalls) |
+| Job can't reach 192.168.0.x | `kubectl exec` into a job pod → `nc -vz 192.168.0.101 22` | Pod network → mgmt LAN routing; the k3s node must be able to route to it (it's on the same LAN, so check host firewalls) |
 | Job succeeds in AWX but the handlers didn't restart services | Job output shows `changed` but no `RUNNING HANDLER` | The job type was **Check**. The drift template is intentionally check-only |
 
 ## 7. Validation
 
 ```bash
-curl -s http://10.10.10.11:30080/api/v2/ping/ | jq '{version, active_node}'
+curl -s http://192.168.0.100:30080/api/v2/ping/ | jq '{version, active_node}'
 kubectl -n awx top pods                     # within the §1.3 budget
 ```
 
