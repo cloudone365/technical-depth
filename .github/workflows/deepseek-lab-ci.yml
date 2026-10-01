@@ -52,6 +52,9 @@ jobs:
           for c in traefik.io_middlewares traefik.io_ingressroutes; do
             kubectl apply --server-side -f "https://raw.githubusercontent.com/traefik/traefik-helm-chart/v${TRAEFIK_CHART_VERSION}/traefik/crds/${c}.yaml"
           done
+          # webhooks must be serving before apply-lab.sh creates Kueue/LWS objects
+          kubectl -n kueue-system rollout status deploy/kueue-controller-manager --timeout=5m
+          kubectl -n lws-system rollout status deploy/lws-controller-manager --timeout=5m
           scripts/apply-lab.sh
       - name: All 03 checks (incl. RAG on real Qdrant and server-side dry-run)
         run: QDRANT=/tmp/qdrant API=1 ../../02\ Kubernetes/lab/tests/ci-run.sh tests/run-local-checks.sh
