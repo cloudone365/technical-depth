@@ -16,8 +16,9 @@ spec:
           args:
             - |
               set -e
-              python3 /tools/mla_attention_demo.py --v3 --tokens 256
+              python3 /tools/mla_attention_demo.py --v3 --tokens 256 --decode-bench 8192 --batch 8
               python3 /tools/fp8_blockscale.py --gemm --n 8192
+              python3 /tools/grouped_gemm_bench.py --experts 64 --tokens 8192 --dim 2048 --ffn 1408
               pip install --quiet transformers==4.56.2 accelerate==1.10.1
               python3 /tools/moe_router_probe.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --out /tmp/loads.json
           env: [{name: HF_HOME, value: /models/hf}]

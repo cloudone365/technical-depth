@@ -27,16 +27,17 @@ def ring_attention(q, k, v, rank, world):
     """q,k,v: (heads, chunk, dim) for this rank's chunk of the sequence."""
     H, C, D = q.shape
     scale = 1 / math.sqrt(D)
-    m = torch.full((H, C, 1), float("-inf"), dtype=q.dtype)          # running max
-    l = torch.zeros((H, C, 1), dtype=q.dtype)                       # running denominator
-    o = torch.zeros_like(q)                                          # running numerator
-    q_pos = torch.arange(rank * C, (rank + 1) * C)
+    dev = q.device
+    m = torch.full((H, C, 1), float("-inf"), dtype=q.dtype, device=dev)   # running max
+    l = torch.zeros((H, C, 1), dtype=q.dtype, device=dev)                 # running denominator
+    o = torch.zeros_like(q)                                                # running numerator
+    q_pos = torch.arange(rank * C, (rank + 1) * C, device=dev)
     kv = torch.stack([k, v])
     for step in range(world):
         src = (rank - step) % world                                  # whose K/V we hold now
         k_blk, v_blk = kv[0], kv[1]
         if src <= rank:                                              # causal: future chunks contribute nothing
-            k_pos = torch.arange(src * C, (src + 1) * C)
+            k_pos = torch.arange(src * C, (src + 1) * C, device=dev)
             s = (q @ k_blk.transpose(-1, -2)) * scale
             s = s.masked_fill(k_pos[None, None, :] > q_pos[None, :, None], float("-inf"))
             m_new = torch.maximum(m, s.amax(-1, keepdim=True))
@@ -54,11 +55,16 @@ def ring_attention(q, k, v, rank, world):
     return o / l
 
 
-def worker(rank, world, seq, heads, dim, port):
-    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
-    dist.init_process_group("gloo", rank=rank, world_size=world)
+def worker(rank, world, seq, heads, dim, port, backend="gloo"):
+    if "RANK" not in os.environ:                                     # mp.spawn mode (one machine)
+        os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
+        dist.init_process_group(backend, rank=rank, world_size=world)
+    else:                                                            # torchrun mode (e.g. two Sparks)
+        dist.init_process_group(backend)
+    dev = torch.device("cuda", 0) if backend == "nccl" else torch.device("cpu")
+    dtype = torch.float32 if backend == "nccl" else torch.float64
     torch.manual_seed(0)                                             # same full tensors on every rank
-    q, k, v = (torch.randn(heads, seq, dim, dtype=torch.float64) for _ in range(3))
+    q, k, v = (torch.randn(heads, seq, dim, dtype=dtype).to(dev) for _ in range(3))
     C = seq // world
     sl = slice(rank * C, (rank + 1) * C)
     out = ring_attention(q[:, sl], k[:, sl], v[:, sl], rank, world)
@@ -70,9 +76,11 @@ def worker(rank, world, seq, heads, dim, port):
         err = (ring - ref).abs().max().item()
         kv_full = 2 * heads * seq * dim * 2 / 2**20
         print(f"world={world} seq={seq} heads={heads} dim={dim}")
-        print(f"max |ring - full| = {err:.2e}  → {'✓ identical' if err < 1e-8 else '✗ MISMATCH'}")
+        tol = 1e-8 if dtype == torch.float64 else 1e-4
+        print(f"backend={backend} device={dev}")
+        print(f"max |ring - full| = {err:.2e}  → {'✓ identical' if err < tol else '✗ MISMATCH'}")
         print(f"K/V held per rank (bf16): {kv_full / world:.1f} MiB instead of {kv_full:.1f} MiB")
-        assert err < 1e-8
+        assert err < tol
     dist.destroy_process_group()
 
 
@@ -83,6 +91,10 @@ if __name__ == "__main__":
     ap.add_argument("--heads", type=int, default=4)
     ap.add_argument("--dim", type=int, default=64)
     ap.add_argument("--port", type=int, default=29533)
+    ap.add_argument("--backend", default="gloo", choices=["gloo", "nccl"])
     a = ap.parse_args()
-    assert a.seq % a.world == 0
-    mp.spawn(worker, args=(a.world, a.seq, a.heads, a.dim, a.port), nprocs=a.world, join=True)
+    if "RANK" in os.environ:                                         # launched by torchrun
+        worker(int(os.environ["RANK"]), int(os.environ["WORLD_SIZE"]), a.seq, a.heads, a.dim, a.port, a.backend)
+    else:
+        assert a.seq % a.world == 0
+        mp.spawn(worker, args=(a.world, a.seq, a.heads, a.dim, a.port, a.backend), nprocs=a.world, join=True)

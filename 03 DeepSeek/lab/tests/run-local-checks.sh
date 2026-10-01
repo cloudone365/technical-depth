@@ -20,7 +20,7 @@ pids=(); cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; do
 echo "== yamllint";            yamllint -s .
 echo "== overlays in sync";    python3 scripts/gen_overlays.py --check
 echo "== kustomize + kubeconform"
-for d in . k8s/models/* k8s/spec-decode/* k8s/sglang/* k8s/apps observability breakfix/*; do "$KUBECTL" kustomize "$d" | kc -; done
+for d in . k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/sglang/* k8s/apps observability breakfix/*; do "$KUBECTL" kustomize "$d" | kc -; done
 for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml; do kc "$f"; done
 echo "== promtool";            promtool check rules <(python3 -c "
 import yaml
@@ -41,12 +41,14 @@ assert kv_bytes_per_token(resolve("qwen2.5-7b")) == 2 * 28 * 4 * 128 * 2
 print("model_math OK")
 PY
 echo "== architecture demos (CPU)"
-expect "all three formulations produce the same output" python3 tools/mla_attention_demo.py
+expect "faster" python3 tools/mla_attention_demo.py --decode-bench 256 --batch 1
 expect "WITH aux-loss-free" python3 tools/moe_router_demo.py --steps 40
 expect "Block scales" python3 tools/fp8_blockscale.py --n 512
 expect "identical" python3 tools/ring_attention_demo.py --world 2 --seq 512
+expect "identical" torchrun --nproc-per-node 2 tools/ring_attention_demo.py --seq 512
 expect "eplb-lite" python3 tools/eplb_sim.py --experts 64 --gpus 8 --redundant 8
 python3 tools/spec_decode_calc.py --sweep >/dev/null
+expect "padded" python3 tools/grouped_gemm_bench.py --iters 2
 echo "== training tools (dry run)"
 expect "rewards behave" python3 tools/grpo_tiny.py --dry-run
 expect "<answer>" python3 tools/sft_lora.py --dry-run
@@ -60,6 +62,9 @@ python3 -c "import json,sys; d=json.load(open(sys.argv[1])); acc={k:v['accuracy'
 echo "== agent tool loop vs scripted mock"
 python3 tests/mock_tools_server.py 18767 & pids+=($!); sleep 1
 expect "20.35" python3 tools/agent_tools.py "What is 17% of 119.7?" --url http://127.0.0.1:18767
+echo "== needle test vs mock"
+python3 tests/mock_needle.py 18768 & pids+=($!); sleep 1
+expect "4/4 needles found" python3 tools/needle_test.py --url http://127.0.0.1:18768 --model m --lengths 1000 4000 --depths 0.2 0.8
 echo "== weights manifest"
 w=$(mktemp -d); echo a > "$w/x.safetensors"; python3 tools/weights_verify.py snapshot "$w" --out "$w.json" >/dev/null
 python3 tools/weights_verify.py verify "$w" "$w.json" >/dev/null && echo b > "$w/x.safetensors" && ! python3 tools/weights_verify.py verify "$w" "$w.json" >/dev/null && echo "weights_verify OK"
@@ -79,7 +84,7 @@ if [[ "${API:-0}" == 1 ]]; then
   "$KUBECTL" apply -k "$K8S_LAB/manifests/00-platform" >/dev/null
   "$KUBECTL" apply -f k8s/multinode/namespace.yaml >/dev/null
   "$KUBECTL" apply --dry-run=server -k . >/dev/null
-  for d in k8s/models/* k8s/spec-decode/* k8s/sglang/* k8s/apps observability; do "$KUBECTL" apply --dry-run=server -k "$d" >/dev/null; done
+  for d in k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/sglang/* k8s/apps observability; do "$KUBECTL" apply --dry-run=server -k "$d" >/dev/null; done
   for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml; do "$KUBECTL" apply --dry-run=server -f "$f" >/dev/null; done
   echo "== pod templates vs PSA / CEL policies / quotas"
   python3 "$K8S_LAB/tests/pod_template_check.py" k8s/models/* k8s/sglang/* k8s/apps k8s/jobs/*.yaml k8s/ops/*.yaml \

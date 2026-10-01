@@ -31,11 +31,55 @@ def rope(x, pos, base=10000.0):
     return out
 
 
+def decode_bench(dev, cache_len, batch, iters=20):
+    """One decode step (1 new token per sequence) over `cache_len` cached tokens,
+    DeepSeek-V3 layer sizes: naive (rebuild K/V from the latent every step) vs absorbed."""
+    import time
+    d, h, dn, dr, dv, r = 7168, 128, 128, 64, 128, 512
+    dt = torch.bfloat16 if dev == "cuda" else torch.float32
+    g = lambda *s: torch.randn(*s, device=dev, dtype=dt) * 0.02          # noqa: E731
+    W_UK, W_UV = g(r, h, dn), g(r, h, dv)
+    c_kv, k_pe = g(batch, cache_len, r), g(batch, cache_len, dr)          # the cache
+    q_nope, q_pe = g(batch, h, dn), g(batch, h, dr)                       # this step's queries
+
+    def naive():
+        k = torch.einsum("bsr,rhd->bhsd", c_kv, W_UK)                     # materialise K for all cached tokens
+        v = torch.einsum("bsr,rhd->bhsd", c_kv, W_UV)
+        s = torch.einsum("bhd,bhsd->bhs", q_nope, k) + torch.einsum("bhd,bsd->bhs", q_pe, k_pe)
+        return torch.einsum("bhs,bhsd->bhd", torch.softmax(s.float(), -1).to(dt), v)
+
+    def absorbed():
+        ql = torch.einsum("bhd,rhd->bhr", q_nope, W_UK)                   # fold W_UK into q (tiny)
+        s = torch.einsum("bhr,bsr->bhs", ql, c_kv) + torch.einsum("bhd,bsd->bhs", q_pe, k_pe)
+        ol = torch.einsum("bhs,bsr->bhr", torch.softmax(s.float(), -1).to(dt), c_kv)
+        return torch.einsum("bhr,rhd->bhd", ol, W_UV)                     # fold W_UV into the output
+
+    def t(fn):
+        for _ in range(3):
+            fn()
+        if dev == "cuda":
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(iters):
+            fn()
+        if dev == "cuda":
+            torch.cuda.synchronize()
+        return (time.perf_counter() - t0) / iters * 1e3
+    tn, ta = t(naive), t(absorbed)
+    cache_mib = batch * cache_len * (r + dr) * (2 if dt == torch.bfloat16 else 4) / 2**20
+    print(f"decode step, batch {batch}, {cache_len} cached tokens, latent cache {cache_mib:.0f} MiB/layer")
+    print(f"  naive (rebuild K/V each step): {tn:8.2f} ms/layer")
+    print(f"  absorbed (attend on latent)  : {ta:8.2f} ms/layer   → {tn / ta:.1f}× faster")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--v3", action="store_true", help="use DeepSeek-V3 layer sizes (needs a GPU)")
     ap.add_argument("--tokens", type=int, default=64)
+    ap.add_argument("--decode-bench", type=int, metavar="CACHE_LEN",
+                    help="also time one decode step over this many cached tokens (V3 sizes)")
+    ap.add_argument("--batch", type=int, default=4)
     a = ap.parse_args()
     torch.manual_seed(0)
     dev, dt = a.device, torch.float64 if a.device == "cpu" else torch.float32
@@ -98,6 +142,9 @@ def main():
     print(f"  MHA ({h} heads)       : {elems_mha:6d}")
     print(f"  GQA (8 KV heads)      : {elems_gqa8:6d}")
     print(f"  MLA (latent + rope)   : {elems_mla:6d}   → {elems_mha / elems_mla:.1f}× smaller than MHA")
+    if a.decode_bench:
+        print()
+        decode_bench(dev, a.decode_bench, a.batch)
 
 
 if __name__ == "__main__":
