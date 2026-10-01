@@ -42,6 +42,9 @@ jobs:
       - name: Platform from 02 + CRDs the lab expects
         working-directory: "02 Kubernetes/lab"
         run: |
+          # surface the failing command and its stderr as an annotation
+          exec 2> >(tee /tmp/step.err >&2)
+          trap 'echo "::error title=platform step failed::${BASH_COMMAND} :: $(tail -c 1800 /tmp/step.err | tr "\n" " ")"' ERR
           tests/fake-gpu-node.sh
           source versions.env
           kubectl apply --server-side -f "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml"
