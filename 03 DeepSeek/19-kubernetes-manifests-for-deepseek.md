@@ -1,439 +1,217 @@
-# 19. Kubernetes Manifests for DeepSeek & Qwen on DGX Spark
+# Volume 19 — Kubernetes Manifests for DeepSeek: The Lab's Layout, the Base Deployment Line by Line, and Admission-Checked Overlays
 
-> **Target Audience**: Kubernetes Platform Engineers, MLOps Architects, and SREs responsible for orchestrating containerized LLM inference on accelerated GPU hardware.  
-> **Prerequisites**: Core Kubernetes concepts (Pods, Deployments, Services, PVCs), Linux container fundamentals, and vLLM configuration (from [15-vllm-serving-deepseek-and-qwen.md](15-vllm-serving-deepseek-and-qwen.md)).  
-> **Estimated Study Time**: 60 minutes.  
-> **What You Will Master**: Declarative production orchestration of **DeepSeek-R1-Distill-32B** and **Qwen2.5-32B**, triple-probe healthcheck architecture (Startup, Liveness, Readiness), IPC shared memory sizing, and multi-tenant resource quotas on the **NVIDIA DGX Spark (GB10)**.
+> **Module 03 · Part V — Platform integration** · Prev: [18 TensorRT-LLM](18-tensorrt-llm-compilation-for-deepseek.md) · Next: [20 NVMe & weight caching](20-nvme-local-storage-and-weight-caching.md)
 
----
-
-## 📑 Table of Contents
-1. [Foundational Scaffolding: Why Bare-Metal Scripts Fail in Enterprise](#1-foundational-scaffolding-why-bare-metal-scripts-fail-in-enterprise)
-2. [Co-Related Concepts & The Evolution of Cloud-Native AI](#2-co-related-concepts--the-evolution-of-cloud-native-ai)
-3. [Deep First-Principles: The GPU Pod Architecture](#3-deep-first-principles-the-gpu-pod-architecture)
-4. [The Critical Triple-Probe Healthcheck Lifecycle](#4-the-critical-triple-probe-healthcheck-lifecycle)
-5. [Comparative Analysis: Raw K8s vs. KServe vs. KubeRay vs. Slurm](#5-comparative-analysis-raw-k8s-vs-kserve-vs-kuberay-vs-slurm)
-6. [Hardware Grounding: Resource Allocation on DGX Spark (GB10)](#6-hardware-grounding-resource-allocation-on-dgx-spark-gb10)
-7. [Complete Production Manifest Suite (Namespace to NetworkPolicy)](#7-complete-production-manifest-suite-namespace-to-networkpolicy)
-8. [Deployment Runbook & Cluster Operations](#8-deployment-runbook--cluster-operations)
-9. [Practice Exercises with Step-by-Step Solutions](#9-practice-exercises-with-step-by-step-solutions)
-10. [Troubleshooting Guide & Diagnostic Runbook](#10-troubleshooting-guide--diagnostic-runbook)
+| | |
+|---|---|
+| **You will build** | A full read-through of every manifest the DeepSeek lab ships. You'll learn how the 02 platform's vLLM Deployment becomes eleven model overlays, how tools reach Jobs without custom images, and how CI catches a broken pod template before the ReplicaSet does. Then you'll break and fix a manifest with drill D08 |
+| **Hardware** | spark-01 (any kind cluster works for §5.1–5.3) |
+| **Time** | 60 min |
+| **Risk** | Low. Read-only until §5.4 |
+| **Lab files** | [`lab/kustomization.yaml`](lab/kustomization.yaml), [`lab/k8s/`](lab/k8s/), [`02 …/90-serving/vllm/vllm.yaml`](../02%20Kubernetes/lab/manifests/90-serving/vllm/vllm.yaml), [`02 …/tests/pod_template_check.py`](../02%20Kubernetes/lab/tests/pod_template_check.py), [`tests/run-local-checks.sh`](lab/tests/run-local-checks.sh) |
 
 ---
 
-## 1. Foundational Scaffolding: Why Bare-Metal Scripts Fail in Enterprise
+## 1. Why this volume exists
 
-### The Fragility of Shell Scripts
-Running LLM inference servers via ad-hoc terminal commands (`python3 -m vllm ... &`) or unmanaged systemd scripts creates critical operational risks:
-* **Silent Process Death**: If a worker encounters an unhandled CUDA out-of-memory exception, the process terminates silently. Without orchestration, traffic continues routing to a dead port.
-* **No Declarative Quotas**: Multiple developers or jobs can inadvertently allocate the exact same GPU device, causing catastrophic memory collisions.
-* **Rolling Zero-Downtime Upgrades Impossible**: Updating a model weight checkpoint or container image requires manual downtime and port teardowns.
+Volumes 11–18 deployed things with one command. Production teams have to *own* those manifests: review them, patch them and explain every field to an auditor. This volume covers three rules that keep the lab maintainable:
 
-### The Shipping Container Fleet Analogy
-Deploying an LLM without Kubernetes is like loading 30-ton industrial machinery onto an open flatbed pickup truck with bungee cords. 
-**Kubernetes** provides the standardized ISO shipping container, dock cranes, automated weigh stations (**ResourceQuotas**), and maritime safety inspectors (**Startup, Liveness, and Readiness Probes**). If a container fails inspection, it is instantly replaced without disrupting port operations.
-
-```
-                          KUBERNETES GPU POD ANATOMY
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ Kubernetes Pod: deepseek-r1-serving-79d8f9b8c-x2k4p                                    │
-│                                                                                        │
-│  ┌──────────────────────────────────────────────────────────────────────────────────┐  │
-│  │ Container: vllm-engine                                                           │  │
-│  │  - Command: python3 -m vllm.entrypoints.openai.api_server                        │  │
-│  │  - Resources: limits: { nvidia.com/gpu: 1, memory: 96Gi, cpu: 16 }               │  │
-│  │  - Environment: HF_HOME=/models/cache, CUDA_DEVICE_ORDER=PCI_BUS_ID              │  │
-│  └──────────────────────────────────────────────────────────────────────────────────┘  │
-│              │                                                   │                     │
-│              ▼                                                   ▼                     │
-│  ┌───────────────────────┐                           ┌───────────────────────┐         │
-│  │ Volume: model-storage │ (Local NVMe 80GB PVC)     │ Volume: dshm          │         │
-│  │ Mount: /models        │ Fast mmap weight load     │ Mount: /dev/shm       │         │
-│  │                       │ Zero re-download tax      │ SizeLimit: 16Gi RAM   │         │
-│  └───────────────────────┘                           └───────────────────────┘         │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-```
+| Rule | How the lab applies it |
+|---|---|
+| **One base, many overlays** | 02's `vllm.yaml` is the only hand-written vLLM Deployment. Every model is a generated JSON-patch overlay |
+| **No custom images for tools** | Python tools and eval data ship as ConfigMaps (`kubectl apply -k "03 DeepSeek/lab"`) and mount into stock images |
+| **Admission is tested, not hoped for** | `kubeconform` (schemas) → server-side dry-run (API objects) → `pod_template_check.py` (PodSecurity, quota and policies on the *pods*) |
 
 ---
 
-## 2. Co-Related Concepts & The Evolution of Cloud-Native AI
+## 2. Architecture — HLD
 
 ```mermaid
-flowchart TD
-    BareMetal["Bare-Metal Process / Systemd<br/>Manual process management, no auto-healing"] --> DockerRun["Docker Run CLI<br/>Container isolation, but single-node manual restart"]
-    DockerRun --> K8sNative["Kubernetes Native Deployment<br/>Declarative state, self-healing, Service routing, PVC storage"]
-    K8sNative --> K8sOperators["Cloud-Native AI Operators (KServe / KubeRay / vLLM Operator)<br/>Autoscaling on concurrency metrics, multi-node gang scheduling"]
-```
-
-### Key Kubernetes Concepts for LLM Infrastructure:
-1. **NVIDIA Container Toolkit (k8s-device-plugin)**: Exposes physical GPUs to Kubernetes as allocatable resources (`nvidia.com/gpu: 1`).
-2. **IPC Shared Memory (`/dev/shm`)**: Docker containers default to a tiny 64 MB `/dev/shm` buffer. PyTorch distributed processes and vLLM worker threads exchange intermediate activations via shared memory; an under-sized `/dev/shm` causes instant `SIGBUS` or `Bus error` fatal crashes!
-3. **Local-Path Storage Provisioner**: Mounts high-speed host NVMe storage directly into the Pod, allowing 32 GB of model weights to load in seconds across Pod restarts.
-
----
-
-## 3. Deep First-Principles: The GPU Pod Architecture
-
-### Memory Allocation Math in Containerized Pods
-When configuring Kubernetes limits for a Pod hosting `DeepSeek-R1-Distill-32B`:
-
-$$\text{Pod Memory Request} = W_{\text{model}} + KV_{\text{pool}} + M_{\text{CUDA Runtime}} + M_{\text{Host Overhead}}$$
-
-On the **Grace Blackwell GB10 (128 GB Unified Memory)**:
-* FP8 Model Weights: **32 GB**.
-* vLLM KV Cache Pool (at 0.90 utilization): **~75 GB**.
-* CUDA Driver, PyTorch context, and NCCL buffers: **~4 GB**.
-* Host System & Operating System reserve: **~17 GB**.
-
-Therefore, the container `limits.memory` must be set to **`96Gi`** or **`100Gi`**, with `limits.nvidia.com/gpu: "1"`. Setting a memory limit below 90 GiB will trigger the Linux OOM (Out Of Memory) Killer, terminating the pod with **Exit Code 137**.
-
----
-
-## 4. The Critical Triple-Probe Healthcheck Lifecycle
-
-One of the most common beginner mistakes in Kubernetes AI deployments is configuring only a `livenessProbe`. 
-
-```
-                                POD STARTUP LIFECYCLE
-[Pod Scheduled] ──► [Pull Container Image] ──► [Mount Local NVMe Model PVC]
-                                                      │
-                                                      ▼
-                                       ┌─────────────────────────────┐
-                                       │ Container Starts:           │
-                                       │ python3 -m vllm ...         │
-                                       └─────────────────────────────┘
-                                                      │
-                                                      ▼
-                                       ┌─────────────────────────────┐
-                                       │ Phase 1: Startup Probe      │ ◄── 45s Delay, Period 10s
-                                       │ Loading 32GB weights &      │     FailureThreshold 30
-                                       │ capturing CUDA graphs...    │     (Allows up to 5 min!)
-                                       └─────────────────────────────┘
-                                                      │
-                                             Startup Probe SUCCEEDS
-                                                      │
-                                                      ▼
-                      ┌────────────────────────────────────────────────────────┐
-                      │ Phase 2: Readiness Probe & Liveness Probe Take Over    │
-                      ├──────────────────────────┬─────────────────────────────┤
-                      │ Readiness Probe:         │ Liveness Probe:             │
-                      │ Checks if KV cache is    │ Checks if server is dead.   │
-                      │ full. If full, stops     │ If dead, restarts the Pod.  │
-                      │ sending new HTTP traffic!│                             │
-                      └──────────────────────────┴─────────────────────────────┘
-```
-
-* **Startup Probe**: Prevents Kubernetes from prematurely killing the Pod during the 60–120 second period where vLLM is reading model weights from disk and capturing CUDA graphs.
-* **Readiness Probe**: Dictates whether the Pod's IP is included in the Service endpoints. If the engine is overwhelmed, it drops traffic without crashing.
-* **Liveness Probe**: Detects true deadlocks or frozen processes and restarts the container.
-
----
-
-## 5. Comparative Analysis: Raw K8s vs. KServe vs. KubeRay vs. Slurm
-
-| Orchestration Layer | Deployment Mechanism | Primary Advantage | Scaling Trigger | Setup Complexity |
-| :--- | :--- | :--- | :--- | :--- |
-| **Native Kubernetes (This Module)** | Standard Deployments & PVCs | Zero external dependencies, pure declarative YAML | CPU / HPA / Custom Metrics | **Low (Vanilla K8s)** |
-| **KServe v0.14+** | Custom Resource Definition (`InferenceService`) | Native serverless scale-to-zero, canary deployments | Request concurrency / queue depth | High (Requires Istio/Cert-Manager) |
-| **KubeRay** | `RayCluster` / `RayJob` | Multi-node distributed pipelines, MoE sharding | Ray autoscaler | Medium |
-| **HPC Slurm** | Batch scripts (`sbatch`) | Traditional supercomputing job scheduling | Job queue priority | High (Non-cloud-native) |
-
----
-
-## 6. Hardware Grounding: Resource Allocation on DGX Spark (GB10)
-
-The **NVIDIA DGX Spark** features a single unified compute board:
-* **CPU**: 72-core NVIDIA Grace ARM Neoverse V2.
-* **GPU**: NVIDIA Blackwell GB10 (128 GB Unified Memory).
-* **Interconnect**: 900 GB/s NVLink-C2C.
-
-In the multi-tenant architecture defined in the cluster setup, our serving pod runs in the `ai-inference` namespace:
-* We allocate **16 CPU cores** (`requests.cpu: "16"`).
-* We allocate **1 physical GPU** (`limits.nvidia.com/gpu: "1"`).
-* We pass through the host NVMe cache at `/data/models` using a `PersistentVolume` with `storageClassName: local-path`.
-
----
-
-## 7. Complete Production Manifest Suite (Namespace to NetworkPolicy)
-
-Save the following manifests into a unified file or individual configuration modules:
-
-### `01-namespace-and-quota.yaml`
-```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ai-inference
-  labels:
-    environment: production
-    workload: llm-serving
-    hardware: dgx-spark
----
-apiVersion: v1
-kind: ResourceQuota
-metadata:
-  name: inference-quota
-  namespace: ai-inference
-spec:
-  hard:
-    requests.cpu: "16"
-    requests.memory: "64Gi"
-    limits.cpu: "32"
-    limits.memory: "100Gi"
-    requests.nvidia.com/gpu: "1"
-    limits.nvidia.com/gpu: "1"
-    requests.storage: "100Gi"
-```
-
-### `02-storage-pvc.yaml`
-```yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: nvme-model-cache-pvc
-  namespace: ai-inference
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: local-path
-  resources:
-    requests:
-      storage: 80Gi
-```
-
-### `03-deepseek-deployment.yaml`
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: deepseek-r1-serving
-  namespace: ai-inference
-  labels:
-    app.kubernetes.io/name: deepseek-r1
-    app.kubernetes.io/part-of: ai-inference-stack
-spec:
-  replicas: 1
-  strategy:
-    type: Recreate  # Avoid dual-allocation of the single GPU during rolling update
-  selector:
-    matchLabels:
-      app: deepseek-r1
-  template:
-    metadata:
-      labels:
-        app: deepseek-r1
-    spec:
-      restartPolicy: Always
-      containers:
-      - name: vllm-engine
-        image: vllm/vllm-openai:latest
-        imagePullPolicy: IfNotPresent
-        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
-        args:
-          - "--model=/models/DeepSeek-R1-Distill-Qwen-32B"
-          - "--served-model-name=deepseek-r1"
-          - "--host=0.0.0.0"
-          - "--port=8000"
-          - "--gpu-memory-utilization=0.90"
-          - "--max-model-len=32768"
-          - "--max-num-seqs=128"
-          - "--enable-chunked-prefill"
-          - "--enable-prefix-caching"
-          - "--kv-cache-dtype=fp8"
-          - "--trust-remote-code"
-        resources:
-          requests:
-            cpu: "8"
-            memory: "32Gi"
-            nvidia.com/gpu: "1"
-          limits:
-            cpu: "24"
-            memory: "96Gi"
-            nvidia.com/gpu: "1"
-        ports:
-          - name: http-api
-            containerPort: 8000
-        env:
-          - name: HF_HOME
-            value: "/models/cache"
-          - name: VLLM_ENGINE_ITERATION_TIMEOUT_S
-            value: "60"
-        volumeMounts:
-          - name: model-storage
-            mountPath: /models
-          - name: dshm
-            mountPath: /dev/shm
-        # Phase 1: Startup Probe (permits up to 5 minutes for weight load & CUDA graphs)
-        startupProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          initialDelaySeconds: 30
-          periodSeconds: 10
-          failureThreshold: 30
-        # Phase 2: Liveness Probe
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          periodSeconds: 15
-          timeoutSeconds: 5
-          failureThreshold: 3
-        # Phase 3: Readiness Probe
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          periodSeconds: 5
-          timeoutSeconds: 3
-          failureThreshold: 2
-      volumes:
-        - name: model-storage
-          persistentVolumeClaim:
-            claimName: nvme-model-cache-pvc
-        # Crucial: 16 GB RAM-backed shared memory to prevent PyTorch IPC SIGBUS
-        - name: dshm
-          emptyDir:
-            medium: Memory
-            sizeLimit: 16Gi
-```
-
-### `04-service-and-networkpolicy.yaml`
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: deepseek-r1-service
-  namespace: ai-inference
-  labels:
-    app: deepseek-r1
-spec:
-  type: ClusterIP
-  selector:
-    app: deepseek-r1
-  ports:
-    - name: http
-      port: 8000
-      targetPort: 8000
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-inference-ingress
-  namespace: ai-inference
-spec:
-  podSelector:
-    matchLabels:
-      app: deepseek-r1
-  ingress:
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          environment: production
-    ports:
-    - protocol: TCP
-      port: 8000
+flowchart TB
+  subgraph REPO["git: technical-depth"]
+    direction LR
+    BASE["02 Kubernetes/lab<br/>90-serving/vllm · sglang<br/>60-storage · 20-scheduling"]
+    CAT["03 lab/models.yaml"] -->|gen_overlays.py| OVL["k8s/models/*<br/>k8s/spec-decode/*<br/>k8s/long-context/*"]
+    APPS["k8s/apps<br/>bge-m3 · litellm · open-webui"]
+    JOBS["k8s/jobs<br/>eval · rag-ingest · sft · grpo · fsdp · gpu-probes"]
+    OPS["k8s/ops<br/>vault-sync · weights-verify"]
+    TOOLS["tools/*.py · data/*.jsonl"] -->|configMapGenerator| CM["ConfigMaps<br/>deepseek-tools · deepseek-evaldata · deepseek-train"]
+  end
+  BASE --> OVL
+  subgraph CL["k3s on spark-01"]
+    direction LR
+    NS1["llm-serving<br/>vllm · sglang · trtllm · llama-server<br/>bge-m3 · litellm · open-webui · qdrant"]
+    NS2["batch<br/>sft · grpo · fsdp (Kueue: train)"]
+    NS3["observability<br/>PrometheusRule · dashboard"]
+  end
+  OVL --> NS1
+  APPS --> NS1
+  JOBS --> NS1
+  JOBS --> NS2
+  OPS --> NS1
+  CM --> NS1
+  CM --> NS2
+  CI["CI: kubeconform → dry-run=server → pod_template_check"] -.gate.-> REPO
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef sec fill:#cf222e,stroke:#82071e,color:#fff
+  classDef obs fill:#fb8500,stroke:#9a5000,color:#000
+  class BASE,CAT,OVL,APPS,JOBS,OPS ctrl
+  class TOOLS,CM store
+  class NS1,NS2 gpu
+  class NS3 obs
+  class CI sec
+  style REPO fill:#f6f8fa,stroke:#57606a
+  style CL fill:#e6f4f5,stroke:#0e7c86
 ```
 
 ---
 
-## 8. Deployment Runbook & Cluster Operations
+## 3. LLD
 
-### 1. Applying the Manifests:
+### 3.1 The base vLLM Deployment, field by field
+
+| Field | Value | Why it's there |
+|---|---|---|
+| `strategy.type` | `Recreate` | a rolling update would run two copies and double UMA use. Plan for ~1–5 min downtime per switch |
+| `priorityClassName` | `spark-serving` (50000) | serving preempts batch (10000) when memory or slices run short |
+| `terminationGracePeriodSeconds` | 120 | longer than a long generation, so streams finish |
+| `lifecycle.preStop` | `sleep 15` | the pod leaves the EndpointSlice before SIGTERM, so new requests stop arriving first |
+| `startupProbe` | `/health`, 10 s × 180 | up to 30 min for first download + CUDA-graph capture, without liveness killing it |
+| `readinessProbe` / `livenessProbe` | `/health` 5 s / 15 s × 4 | traffic only when the engine is up. Restart a hung engine after ~1 min |
+| `resources.requests` | cpu 4, memory 16Gi, `nvidia.com/gpu: 1` | 1 of 4 time-slices. The memory request is for the *host-side* process |
+| `resources.limits.memory` | 48Gi, patched per model (r1-7b 32Gi, r1-32b larger) | a cgroup limit. On UMA it also bounds pinned/host allocations |
+| `/dev/shm` | `emptyDir: Memory`, 8Gi | NCCL and PyTorch dataloaders. The 64 MiB default breaks them |
+| `env.MODEL`, `env.SERVED_NAME` | overlay-patched | args use `$(MODEL)` so patches touch env, not the whole arg list |
+| `HF_TOKEN` | from Secret `hf-token` | gated models. Synced from Vault (Vol 32) |
+| volume `models` | PVC `model-cache` (500Gi, `local-nvme-retain`) | weights survive pod and PVC deletion (Vol 20) |
+| ServiceMonitor | `release: kps`, 15 s | `/metrics` → Prometheus (Vol 38) |
+
+### 3.2 What an overlay changes
+
+`gen_overlays.py` writes six JSON-patch operations per model: `args`, `env[0]` (MODEL), `env[1]` (SERVED_NAME), `limits.memory`, and the `model` label on the Deployment and the pod template. Nothing else changes, so a security fix in the base reaches all eleven models.
+
+### 3.3 Namespaces, PSA and who runs where
+
+| Namespace | PSA enforce | Lab workloads | Notes |
+|---|---|---|---|
+| `llm-serving` | baseline | engines, apps, eval, rag-ingest, vault-sync, weights-verify | eval runs model-written code: non-root, no SA token, read-only root FS, all caps dropped |
+| `batch` | privileged (warn baseline) | sft, grpo, fsdp | fsdp needs `hostNetwork` + `IPC_LOCK` for RoCE |
+| `llm-multinode` | privileged | LWS 70B, llama.cpp RPC | two-Spark only |
+| `observability` | — | PrometheusRule `spark-reasoning`, dashboard ConfigMap | label `release: kps` |
+
+### 3.4 Three layers of validation
+
+| Layer | Tool | Catches | Misses |
+|---|---|---|---|
+| Schema | `kubeconform -strict` + CRD catalog | typos, wrong types, unknown fields | anything cluster-specific |
+| API | `kubectl apply --dry-run=server` | missing namespaces/CRDs, webhook rejections, immutable-field changes | pod-level admission for controllers' pods |
+| Pod | `pod_template_check.py` | PSA violations, ValidatingAdmissionPolicy, ResourceQuota/LimitRange on the *pod* | runtime faults (OOM, image pull) |
+
+---
+
+## 4. Integrations
+
+- **02 platform**: namespaces, priority classes, Kueue (`train` LocalQueue), quotas, the Gateway and the `model-cache` PVC all come from `02 Kubernetes/lab/scripts/apply-lab.sh`.
+- **Vol 31 (Ansible)** applies exactly these kustomizations through `kubernetes.core.kustomize`.
+- **CI**: `.github/workflows/deepseek-lab-ci.yml` runs all three validation layers on a kind cluster with a fake GPU node.
+
+---
+
+## 5. Lab
+
+### 5.1 Render everything and count it
+
 ```bash
-# Apply stack in sequence
-kubectl apply -f 01-namespace-and-quota.yaml
-kubectl apply -f 02-storage-pvc.yaml
-kubectl apply -f 03-deepseek-deployment.yaml
-kubectl apply -f 04-service-and-networkpolicy.yaml
+cd "03 DeepSeek/lab"
+kubectl kustomize . | yq -N '.kind + "/" + .metadata.name'
+for d in k8s/models/* k8s/apps; do printf '%-28s %s objects\n' "$d" "$(kubectl kustomize "$d" | grep -c '^kind:')"; done
 ```
 
-### 2. Monitoring the Startup Lifecycle:
+Expected: three ConfigMaps from the root kustomization, and four objects per model overlay (Secret `hf-token`, Deployment, Service, ServiceMonitor from the base).
+
+### 5.2 Diff two models
+
 ```bash
-# Watch pod phase transitions
-kubectl get pods -n ai-inference -w
-
-# Stream startup logs and CUDA graph capture
-kubectl logs -n ai-inference -l app=deepseek-r1 -f
+diff <(kubectl kustomize k8s/models/r1-7b) <(kubectl kustomize k8s/models/r1-32b-fp8)
 ```
 
-### 3. Port-Forwarding & Validation:
+Expected: only the args, env values, memory limit and `model` labels differ. If anything else shows up, someone edited a generated file. `python3 scripts/gen_overlays.py --check` will flag it.
+
+### 5.3 The three validation layers
+
 ```bash
-# Forward cluster port to localhost
-kubectl port-forward svc/deepseek-r1-service -n ai-inference 8000:8000 &
+tests/run-local-checks.sh                     # schema + tool tests (no cluster needed)
+API=1 tests/run-local-checks.sh               # + server-side dry-run + pod templates
+python3 "../../02 Kubernetes/lab/tests/pod_template_check.py" k8s/models/r1-7b k8s/jobs/eval.yaml k8s/jobs/fsdp-2spark.yaml
+```
 
-# Validate model endpoint
-curl -s http://localhost:8000/v1/models | jq .
+```text
+3 pod templates checked, 0 rejected
+```
+
+Now break it on purpose. Add `hostNetwork: true` to `k8s/jobs/eval.yaml` and run the last command again: the Job object passes `--dry-run=server`, but the pod check rejects it (`violates PodSecurity "baseline:latest": host namespaces`). Without that check you'd only find out from a ReplicaSet/Job stuck at 0 pods. Revert the change.
+
+### 5.4 Apply and inspect the live objects
+
+```bash
+kubectl apply -k .                               # ConfigMaps
+scripts/serve-model.sh r1-7b
+kubectl -n llm-serving get deploy,svc,servicemonitor,pvc -l 'app in (vllm)' -o wide
+kubectl -n llm-serving get pod -l app=vllm -o jsonpath='{.items[0].spec.containers[0].args}' | tr ',' '\n'
+kubectl -n llm-serving describe pod -l app=vllm | grep -E 'Priority|QoS|Limits|Requests' -A2
+```
+
+Expected: `Priority: 50000`, `QoS Class: Burstable`, `nvidia.com/gpu: 1` in both requests and limits.
+
+### 5.5 Drill D08 — 404 model not found
+
+```bash
+kubectl -n llm-serving port-forward svc/vllm 8000 &
+scripts/breakfix.sh inject D08     # prints a command that uses the HF repo id as the model name
+python3 tools/eval_harness.py --url http://localhost:8000 --model deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --suites json --limit 2
+curl -s localhost:8000/v1/models | jq -r '.data[].id'
+scripts/breakfix.sh answer D08
 ```
 
 ---
 
-## 9. Practice Exercises with Step-by-Step Solutions
+## 6. Verify
 
-### Exercise 1: Sizing the Startup Probe Timeout Window
-**Scenario**: You are deploying an unquantized 65 GB model over a network storage volume where read speeds average **250 MB/s**.
-Following weight loading, vLLM takes **45 seconds** to compile CUDA graphs and run warmup batches.
-**Question**: If `periodSeconds` is set to `10`, what is the minimum `failureThreshold` you must configure on `startupProbe` to prevent Kubernetes from killing the pod prematurely?
-
-#### Solution:
-1. **Calculate Model Weight Loading Time**:
-   $$\text{Loading Time} = \frac{65 \times 1,000 \text{ MB}}{250 \text{ MB/s}} = 260 \text{ seconds}$$
-2. **Add CUDA Graph Warmup Time**:
-   $$\text{Total Initialization Time} = 260 + 45 = 305 \text{ seconds}$$
-3. **Calculate Required Probe Checks**:
-   $$\text{Checks Required} = \frac{305 \text{ seconds}}{10 \text{ seconds/period}} = 30.5 \text{ periods}$$
-4. **Add Operational Safety Margin (20%)**:
-   $$\text{Safety Buffer} = 30.5 \times 1.20 = 36.6 \to \mathbf{37 \text{ or } 40 \text{ periods}}$$
-*Configuration*: Set `failureThreshold: 40` and `periodSeconds: 10` (total allowance = 400 seconds).
+| Check | Command | Expected |
+|---|---|---|
+| overlays in sync | `python3 scripts/gen_overlays.py --check` | `11 overlays checked, 0 drifted` |
+| admission | `API=1 tests/run-local-checks.sh` | `0 rejected`. PodSecurity *warnings* in `batch` are advisory |
+| live | `scripts/verify.sh platform serving` | all `PASS` |
 
 ---
 
-### Exercise 2: Debugging PyTorch `/dev/shm` Bus Errors
-**Scenario**: A developer deploys a custom vLLM pod without defining the `emptyDir: medium: Memory` volume for `/dev/shm`.
-During high-concurrency requests, the pod crashes with:
-`RuntimeError: DataLoader worker (pid 42) is killed by signal: Bus error (core dumped).`
-**Question**: Explain why this error occurred and provide the exact YAML snippet to resolve it.
+## 7. Troubleshooting
 
-#### Solution:
-* **Explanation**: By default, Docker/Kubernetes mounts a tiny **64 Megabyte** POSIX shared memory buffer (`/dev/shm`). PyTorch uses shared memory for inter-process tensor queues and NCCL communications. When concurrent requests fill the 64 MB buffer, the Linux kernel raises a `SIGBUS` signal to kill the process.
-* **Resolution**: Mount a RAM-backed volume directly to `/dev/shm`:
-  ```yaml
-  volumeMounts:
-    - name: dshm
-      mountPath: /dev/shm
-  volumes:
-    - name: dshm
-      emptyDir:
-        medium: Memory
-        sizeLimit: 16Gi
-  ```
+| Symptom | Cause | Fix |
+|---|---|---|
+| `kubectl kustomize` error: `accumulating resources … no such file` | overlay resolves the base by a relative path, which breaks when the folder is moved | keep the repo layout. Run from the lab directory |
+| `error: … is immutable` on a Job | Job templates can't be patched | `kubectl delete job <name>` then apply (the playbook does this for prefetch) |
+| Deployment `0/1`, no pod, event `FailedCreate … forbidden: violates PodSecurity` | pod-level admission | run `pod_template_check.py` on it. Fix securityContext or move to the right namespace |
+| `exceeded quota` on the ReplicaSet | 02 ResourceQuota in `llm-serving` | `kubectl describe quota -n llm-serving`. Scale another engine to 0 |
+| a ConfigMap change doesn't reach the Job | ConfigMaps mount at pod start | re-run the Job. `disableNameSuffixHash` keeps names stable |
 
 ---
 
-## 10. Troubleshooting Guide & Diagnostic Runbook
+## 8. Scale-out path
 
-### Issue 1: Pod Status `Pending` with `0/1 nodes available: Insufficient nvidia.com/gpu`
-* **Root Cause**: The Kubernetes node has not registered the GPU resource or the NVIDIA device plugin daemonset is not running.
-* **Remediation**:
-  ```bash
-  # Check if node detects the GPU
-  kubectl describe node | grep -A 8 "Allocatable:" | grep nvidia.com/gpu
-  
-  # If 0, check NVIDIA device plugin pod
-  kubectl get pods -n kube-system -l app=nvidia-device-plugin-daemonset
-  ```
-
-### Issue 2: Pod Terminated with `Exit Code 137` (OOMKilled)
-* **Root Cause**: The container exceeded `limits.memory`. Linux cgroups terminated the process.
-* **Remediation**:
-  1. Inspect pod events: `kubectl describe pod -n ai-inference -l app=deepseek-r1 | grep -i oom`
-  2. Increase container `limits.memory` from `64Gi` to `96Gi` or `100Gi`.
-  3. Lower vLLM's internal budget: `--gpu-memory-utilization 0.88`.
+| One Spark | Fleet |
+|---|---|
+| kustomize overlays applied by script or Ansible | the same overlays rendered by Argo CD ApplicationSets per cluster/GPU type |
+| pod-template check in CI | the same policies enforced by Kyverno/Gatekeeper or ValidatingAdmissionPolicy, tested by CI |
+| `Recreate` | rolling updates with `maxSurge: 1` once a second Spark gives memory headroom |
 
 ---
 
-## 🔗 Related Curriculum Modules
-* **Underlying Serving Engine**: [15-vllm-serving-deepseek-and-qwen.md](15-vllm-serving-deepseek-and-qwen.md)
-* **High-Speed NVMe Caching**: [20-nvme-local-storage-and-weight-caching.md](20-nvme-local-storage-and-weight-caching.md)
-* **Realtime Streaming Ingress**: [21-ingress-and-realtime-streaming-gateways.md](21-ingress-and-realtime-streaming-gateways.md)
-* **Autoscaling with KServe**: [22-autoscaling-with-kserve-and-kueue.md](22-autoscaling-with-kserve-and-kueue.md)
+## 9. Checklist
+
+- [ ] I can explain every field of the base vLLM Deployment.
+- [ ] I can show that overlays differ only in model-specific fields.
+- [ ] I've seen a pod-level admission failure that server-side dry-run missed.
+- [ ] I solved D08.

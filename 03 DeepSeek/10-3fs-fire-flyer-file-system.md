@@ -1,249 +1,170 @@
-# 10. 3FS (Fire-Flyer File System) — DeepSeek's 180+ GB/s Parallel Storage Engine
+# Volume 10 — 3FS and the I/O Side of LLMs: What DeepSeek's File System Solves, Measured Against Your Spark's NVMe
 
-> **Target Audience**: Anyone from a developer exploring modern LLMs for the first time to an experienced infrastructure engineer seeking deep mathematical and architectural clarity.
+> **Module 03 · Part II — DeepSeek infrastructure** · Prev: [09 EPLB](09-eplb-expert-parallelism-load-balancer.md) · Next: [11 R1-32B and Qwen-32B](11-deepseek-r1-32b-and-qwen-32b-models.md)
 
----
-
-## 📑 Table of Contents
-1. [Foundational Scaffolding: Understanding Storage in AI Clusters](#1-foundational-scaffolding-understanding-storage-in-ai-clusters)
-   - [1.1 Why Traditional Storage (NFS, Ceph) Collapses Under AI Workloads](#11-why-traditional-storage-nfs-ceph-collapses-under-ai-workloads)
-   - [1.2 The Three Storage Nightmares: Starvation, Stalls, and Stampedes](#12-the-three-storage-nightmares-starvation-stalls-and-stampedes)
-   - [1.3 What is Kernel Bypass (SPDK) and RDMA in Plain English?](#13-what-is-kernel-bypass-spdk-and-rdma-in-plain-english)
-2. [Deep Architecture of DeepSeek 3FS](#2-deep-architecture-of-deepseek-3fs)
-   - [2.1 Decoupled Metadata vs. Data Architecture](#21-decoupled-metadata-vs-data-architecture)
-   - [2.2 Shared-Nothing Metadata Cluster with Raft Consensus](#22-shared-nothing-metadata-cluster-with-raft-consensus)
-   - [2.3 SPDK-Powered NVMe Striping Across RoCEv2/InfiniBand](#23-spdk-powered-nvme-striping-across-rocev2infiniband)
-   - [2.4 GPUDirect Storage (GDS) Zero-Copy Data Path](#24-gpudirect-storage-gds-zero-copy-data-path)
-3. [Throughput & IOPS Benchmarks vs. Lustre, Ceph & WekaFS](#3-throughput--iops-benchmarks-vs-lustre-ceph--wekafs)
-4. [Alternative Industry Approaches to AI Storage](#4-alternative-industry-approaches-to-ai-storage)
-5. [Kubernetes Integration & CSI Driver Architecture](#5-kubernetes-integration--csi-driver-architecture)
-6. [Operational Runbook & Diagnostic Commands](#6-operational-runbook--diagnostic-commands)
-7. [Beginner Practice Exercises with Solutions](#7-beginner-practice-exercises-with-solutions)
-8. [Troubleshooting, Common Misconceptions & FAQ](#8-troubleshooting-common-misconceptions--faq)
+| | |
+|---|---|
+| **You will build** | An I/O budget for every LLM workload that touches storage (weight loading, checkpointing, data loading, KV-cache spill), measured on your Spark's NVMe and set against the published 3FS cluster figures. You'll know which problems a single box has and which only clusters have |
+| **Hardware** | spark-01 |
+| **Time** | 45 min |
+| **Risk** | Low. fio writes scratch data on a PVC |
+| **Lab files** | [`02 Kubernetes/lab/manifests/60-storage/fio-job.yaml`](../02%20Kubernetes/lab/manifests/60-storage/fio-job.yaml), [`scripts/serve-model.sh`](lab/scripts/serve-model.sh), [`tools/weights_verify.py`](lab/tools/weights_verify.py). Module [08 Storage](../08%20Storage/README.md) goes deeper |
 
 ---
 
-## 1. Foundational Scaffolding: Understanding Storage in AI Clusters
+## 1. What 3FS is, and why DeepSeek built it
 
-### 1.1 Why Traditional Storage Collapses Under AI Workloads
-When running software on a laptop, reading a file from your SSD is simple. But imagine a cluster of **2,048 NVIDIA GPUs** training a model like DeepSeek-V3 or DeepSeek-R1.
+**3FS (Fire-Flyer File System)** is DeepSeek's open-source distributed file system for AI clusters. It's built on SSDs and RDMA, with metadata in FoundationDB (a transactional key-value store) and **CRAQ** (chain replication with apportioned queries) for strongly consistent replication. Design choices that matter:
 
-Traditional enterprise storage systems (like **NFS** or **Ceph**) were designed for office documents, web servers, and relational databases. When dropped into an AI supercluster, they immediately crash:
-1. **Operating System Overhead**: In standard Linux, every read operation triggers system calls, context switches between user space and kernel space, and copies data into the Linux page cache. When thousands of GPUs request data simultaneously, CPU cores on the storage servers reach 100% utilization just copying memory buffers!
-2. **Centralized Metadata Bottlenecks**: In NFS, a single server manages the file directory tree. When 2,048 GPUs attempt to open the same dataset file at the exact same millisecond, the metadata server locks up and drops network packets.
+| Choice | Consequence |
+|---|---|
+| Disaggregated: storage nodes with many NVMe drives, clients anywhere on the RDMA network | aggregate bandwidth scales with storage nodes |
+| Strong consistency (CRAQ) | applications don't need to reason about stale reads |
+| **No client-side page cache**, direct I/O via a user-space shared-memory interface (USRBIO) | predictable, CPU-light reads for random-access training data |
+| Stateless metadata services over FoundationDB | metadata scales out independently |
 
-### 1.2 The Three Storage Nightmares in AI Clusters
-
-```text
-1. DATA INGESTION STARVATION:
-   - Thousands of GPUs need to ingest billions of tokens per second.
-   - If storage throughput is too slow, GPUs spend 40% of their time idle waiting for data!
-   - Every idle second burns thousands of dollars in wasted electricity and hardware amortization.
-
-2. CHECKPOINT SAVE STALLS:
-   - When training a 671B model, you must save model weights and optimizer states regularly.
-   - A single checkpoint exceeds 1.3 TERABYTES of raw binary data!
-   - Over standard 10GbE network storage, saving 1.3 TB takes 20+ MINUTES, during which the
-     entire training cluster must be completely frozen!
-   - Over 3FS (180+ GB/s), saving 1.3 TB takes LESS THAN 8 SECONDS!
-
-3. METADATA STAMPEDES:
-   - When a job launches, thousands of parallel processes execute: open("/dataset/train.bin").
-   - The resulting burst of millions of concurrent IOPS melts traditional metadata servers.
-```
-
-### 1.3 What is Kernel Bypass (SPDK) and RDMA in Plain English?
-- **Standard Linux I/O**:
-  `NVMe SSD` $\to$ `Linux Kernel Driver` $\to$ `OS Page Cache` $\to$ `User Application` $\to$ `TCP/IP Stack` $\to$ `Network Card`.
-  *(Slow, high CPU interrupts, multiple memory copies).*
-- **SPDK (Storage Performance Development Kit)**:
-  Runs directly in user-space, communicating directly with the NVMe SSD controller registers. Bypasses the Linux kernel entirely!
-- **RDMA (Remote Direct Memory Access)**:
-  Allows one server to read or write memory directly on another server across the network without involving either server's operating system or CPU!
+Published figure (3FS README): about **6.6 TiB/s aggregate read throughput** from 180 storage nodes (each with 2×200 Gb/s InfiniBand and 16×14 TiB NVMe) serving a training cluster's clients. DeepSeek uses it for training data loading, checkpoints, the KVCache for inference (reusing prefixes across requests from SSD instead of DRAM), and dataset preparation (GraySort).
 
 ---
 
-## 2. Deep Architecture of DeepSeek 3FS
-
-DeepSeek engineered and open-sourced **3FS (Fire-Flyer File System)**: a distributed, parallel file system built from scratch to leverage **raw NVMe SSDs** and **RDMA networks**.
+## 2. Architecture — HLD
 
 ```mermaid
-graph TD
-    subgraph ComputeCluster["GPU Compute Nodes (DGX Spark Cluster)"]
-        GPU1["Compute Node 1<br/>3FS Client + GPUDirect"]
-        GPU2["Compute Node 2<br/>3FS Client + GPUDirect"]
-    end
-
-    subgraph RDMA_Fabric["High-Speed Network (RoCEv2 / InfiniBand 400Gbps)"]
-        Mesh["Zero-Copy RDMA Fabric"]
-    end
-
-    subgraph StorageCluster["3FS Distributed Storage Cluster"]
-        subgraph MetaService["Metadata Plane (Raft Consensus)"]
-            MDS1["Metadata Node A"]
-            MDS2["Metadata Node B (Follower)"]
-        end
-        subgraph DataPlane["Data Plane (SPDK User-Space NVMe Engine)"]
-            DS1["Storage Node 1<br/>(Striped NVMe SSDs: 180 GB/s)"]
-            DS2["Storage Node 2<br/>(Striped NVMe SSDs: 180 GB/s)"]
-        end
-    end
-
-    GPU1 -.->|"1. Async Metadata Query (Block Map)"| MDS1
-    GPU1 ====>|"2. Direct RDMA Read (Zero-Copy)"| DS1
-    GPU2 ====>|"Direct RDMA Read"| DS2
+flowchart LR
+  subgraph CL["Clients (GPU nodes)"]
+    F["FUSE / USRBIO<br/>(user-space, zero-copy)"]
+  end
+  subgraph META["Metadata"]
+    MS["meta services<br/>(stateless)"] --> FDB[("FoundationDB<br/>transactional KV")]
+  end
+  subgraph ST["Storage nodes ×180"]
+    direction TB
+    S1["chain: target A → B → C<br/>CRAQ replication"]
+    SSD[("16 × NVMe each")]
+  end
+  MGR["cluster manager<br/>(membership, chains)"]
+  F -->|"RDMA"| MS
+  F <==>|"RDMA reads from any replica<br/>writes along the chain"| S1
+  S1 --- SSD
+  MGR -.-> S1 & MS
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
+  class FDB,SSD,S1 store
+  class MS,MGR ctrl
+  class F net
 ```
 
-### 2.1 Decoupled Metadata vs. Data Architecture
-In 3FS, the **Metadata Plane** and the **Data Plane** are completely decoupled:
-1. When a client wants to read `/datasets/math_proofs.bin`, it sends a tiny query to the Metadata Service.
-2. The Metadata Service returns an immutable **Block Map** (e.g., *"Block 0 is on Storage Node 1 at NVMe offset 0x4A00; Block 1 is on Storage Node 2 at offset 0x1B00"*).
-3. The client connects directly to Storage Nodes 1 and 2 via **RDMA** to stream the data blocks.
-4. **The Metadata server is never touched again during the transfer!** This allows millions of streaming reads with zero metadata contention.
+### 2.1 The Spark's equivalent
 
-### 2.2 Shared-Nothing Metadata Cluster with Raft Consensus
-- Metadata nodes run an ultra-fast in-memory key-value store replicated via the **Raft consensus algorithm**.
-- Capable of resolving over **5 Million metadata operations per second** with sub-millisecond response latency.
-
-### 2.3 SPDK-Powered NVMe Striping Across RoCEv2/InfiniBand
-Data nodes manage raw NVMe flash drives using the Intel/Linux **SPDK** framework:
-- Disables Linux kernel interrupts.
-- Uses lock-free polling queues (`io_uring` and user-space NVMe queues).
-- Streams sequential and random read chunks across multiple striped NVMe drives, delivering **180+ GB/s of sustained throughput per physical storage node**.
-
-### 2.4 GPUDirect Storage (GDS) Zero-Copy Data Path
-3FS integrates with **NVIDIA GPUDirect Storage (GDS)**:
-Data travels directly from the remote storage server's NVMe drive across the InfiniBand NIC directly into the **Blackwell GPU VRAM** via PCIe/NVLink, with **zero intermediate copies into CPU system RAM!**
-
----
-
-## 3. Throughput & IOPS Benchmarks vs. Lustre, Ceph & WekaFS
-
-Below are real-world performance benchmarks measured during random 4KB read and sequential 1MB read operations across a 16-node storage cluster:
-
-| Storage System | Sequential Read Throughput | Random 4KB Read IOPS | CPU Utilization during 100 GB/s | Kernel Bypass? |
-| :--- | :---: | :---: | :---: | :---: |
-| **NFS (Network File System)** | 4.2 GB/s | 120,000 IOPS | 98% (CPU Bound) | No |
-| **Ceph FS (POSIX)** | 18.5 GB/s | 450,000 IOPS | 75% | No |
-| **Lustre (Classic HPC)** | 75.0 GB/s | 1,800,000 IOPS | 45% | Partial |
-| **DeepSeek 3FS** | **184.0 GB/s per node!** | **6,200,000 IOPS** | **< 12% (SPDK Polling)** | **Yes (Full User-Space)** |
-
-```text
-STORAGE READ THROUGHPUT (Higher is Better):
-NFS:          █ 4.2 GB/s
-Ceph:         ████ 18.5 GB/s
-Lustre:       ████████████████ 75.0 GB/s
-3FS:          ████████████████████████████████████████ 184.0 GB/s per node!
+```mermaid
+flowchart LR
+  APP["vLLM / training pod"] -->|"page cache (UMA!)"| FS["ext4 on 4 TB NVMe<br/>/data/k8s · model-cache PVC"]
+  APP -.->|"2 Sparks: NFS over RDMA<br/>(01 Ansible Vol 15)"| NFS[("spark-01 /srv/models")]
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  class FS,NFS store
+  class APP gpu
 ```
 
 ---
 
-## 4. Alternative Industry Approaches to AI Storage
+## 3. LLD: the I/O budget
 
-| System | Architecture | Primary Advantage | Primary Limitation |
-| :--- | :--- | :--- | :--- |
-| **DeepSeek 3FS** | Open-source, SPDK + RDMA native | Extreme 180+ GB/s throughput; zero-copy GDS | Requires InfiniBand/RoCE network infrastructure |
-| **Lustre** | Classic HPC client/server | Established pedigree in supercomputers | Complex metadata locking; prone to cascading failures |
-| **WekaFS** | Commercial parallel file system | Turnkey enterprise support | Expensive proprietary licensing |
-| **JuiceFS** | Cloud-native POSIX over S3/Redis | Simple to deploy on AWS/GCP | Slower than bare-metal NVMe over RDMA |
-| **Ceph / Rook** | Software-defined block/file storage | Ubiquitous Kubernetes integration | High CPU overhead; inadequate for 100k-GPU clusters |
+| Workload | Pattern | Size | What limits it on a Spark | Cluster answer |
+|---|---|---|---|---|
+| Load weights at server start | large sequential reads, once | 15–66 GB | NVMe read bandwidth + page-cache pressure on UMA (02 Vol 11) | parallel FS, local cache, weights streamed over RDMA |
+| Save a training checkpoint | large sequential writes | weights + optimizer (×3–6 of weights) | NVMe write bandwidth, etcd fsync contention (02 Vol 03) | async checkpoints to parallel FS (02 Vol 26) |
+| Training data loader | random reads of shards | small–medium | random-read IOPS, CPU decode | 3FS random reads at TiB/s |
+| KV-cache spill / reuse | random reads/writes of KV blocks | 30–256 KiB per token per model | on UMA, "offload to CPU memory" is the **same memory**, so only NVMe adds capacity | 3FS KVCache: prefix KV on SSD shared across nodes |
 
----
-
-## 5. Kubernetes Integration & CSI Driver Architecture
-
-DeepSeek deploys 3FS into Kubernetes clusters via a dedicated **Container Storage Interface (CSI) Driver**:
-
-```yaml
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: 3fs-ultra-iops
-provisioner: csi.3fs.deepseek.com
-parameters:
-  stripe_size: "1048576"   # 1 MB chunk striping
-  redundancy: "raft_3way"   # 3-way replicated data blocks
-  mount_options: "rdma,gds,direct_io"
-reclaimPolicy: Retain
-volumeBindingMode: Immediate
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: deepseek-training-pvc
-  namespace: k3s-alpha
-spec:
-  accessModes:
-    - ReadWriteMany        # Concurrent read/write across thousands of pods
-  storageClassName: 3fs-ultra-iops
-  resources:
-    requests:
-      storage: 100Ti
-```
+**Weight load time estimate:** `seconds ≈ weight_bytes / read_bandwidth`. 66 GB at 5 GB/s is about 13 s from a cold page cache. The real load time also includes deserialisation, CUDA graph capture and compilation, which often dominate.
 
 ---
 
-## 6. Operational Runbook & Diagnostic Commands
+## 4. Integrations
 
-### 6.1 Testing Raw RDMA Storage Bandwidth with `fio`
-To verify that your storage fabric delivers over 150+ GB/s on an NVIDIA DGX node:
+- **02 Vol 11** benchmarks the NVMe with AI-shaped fio profiles. This volume puts those numbers into LLM terms.
+- **Vol 20** caches weights on NVMe (the `model-cache` PVC) so restarts never touch the internet.
+- **Vol 33** verifies the cached bytes with sha256 manifests.
+- **Module 08 Storage** covers parallel file systems (Weka, VAST, Lustre, GPFS), GPUDirect Storage and checkpoint engines in depth.
+
+---
+
+## 5. Lab
+
+### 5.1 Measure the NVMe the way LLM workloads use it
 
 ```bash
-# Execute multi-threaded asynchronous direct I/O benchmark
-fio --name=3fs_benchmark \
-    --filename=/mnt/3fs/test_io.bin \
-    --ioengine=io_uring \
-    --direct=1 \
-    --rw=randread \
-    --bs=1M \
-    --numjobs=16 \
-    --iodepth=64 \
-    --size=100G \
-    --runtime=30 \
-    --time_based \
-    --group_reporting
+cd "02 Kubernetes/lab"
+kubectl apply -f manifests/60-storage/fio-job.yaml
+kubectl -n lab-tools logs -f job/fio-ai | grep -E '^\S+:|READ:|WRITE:'
 ```
 
-### 6.2 Checking RDMA NIC Status and Packet Drops
+Record (**yours**):
+
+| fio profile | Stands for | GB/s or IOPS |
+|---|---|---|
+| `weights-seqread-1m` | loading weights | |
+| `checkpoint-seqwrite-1m` | saving a checkpoint | |
+| `dataloader-randread-128k` | shuffled training shards | |
+| `small-randread-4k` | KV-block / metadata access | |
+
+### 5.2 Cold vs warm weight load
+
 ```bash
-# Verify InfiniBand/RoCE link state
-ibv_devinfo -v | grep -E "hca_id|transport|state|active_width|active_speed"
-
-# Check for RoCEv2 pause frames and packet drops (PFC telemetry)
-ethtool -S eth0 | grep -E "rx_pause|tx_pause|drop"
+cd "../../03 DeepSeek/lab"
+scripts/serve-model.sh r1-7b                      # drops page cache first → cold load
+kubectl -n llm-serving logs deploy/vllm | grep -E 'Loading weights took|Model loading took|init engine'
+kubectl -n llm-serving rollout restart deploy/vllm && kubectl -n llm-serving rollout status deploy/vllm --timeout=20m
+kubectl -n llm-serving logs deploy/vllm | grep -E 'Loading weights took|Model loading took|init engine'   # warm
 ```
 
----
+| | Cold (cache dropped) | Warm (page cache) | Predicted (size ÷ fio seq read) |
+|---|---|---|---|
+| Loading weights took | | | 15 GB ÷ … |
+| total engine init | | | — |
 
-## 7. Beginner Practice Exercises with Solutions
+The gap between "loading weights" and "engine init" is compilation and CUDA graph capture. Storage can't fix that part.
 
-### Exercise 1: Checkpoint Time Sizing
-**Question**: You are training DeepSeek-V3 (671B parameters). At the end of every epoch, you must write a checkpoint of size **1.4 Terabytes**.
-1. How long does saving this checkpoint take over a standard 10 Gbps Ethernet NFS share (effective speed ~1.0 GB/s)?
-2. How long does it take over a 3FS storage cluster with an aggregate write speed of 140 GB/s?
-3. If checkpoints are saved every 4 hours over a 3-month pretraining run, how much total cluster time is saved by using 3FS?
+### 5.3 The UMA twist on KV offloading
 
-#### Solution:
-1. **Over 10 Gbps NFS**:
-   $$\text{Time} = \frac{1,400\text{ GB}}{1.0\text{ GB/s}} = 1,400\text{ seconds} \approx \mathbf{23.3\text{ minutes per checkpoint!}}$$
-2. **Over 3FS**:
-   $$\text{Time} = \frac{1,400\text{ GB}}{140\text{ GB/s}} = \mathbf{10\text{ seconds per checkpoint!}}$$
-3. **Total Cluster Time Saved**:
-   - Checkpoints saved: $\frac{90\text{ days} \times 24\text{ hours}}{4\text{ hours}} = 540\text{ checkpoints}$.
-   - Time saved per checkpoint: $23.33\text{ min} - 0.16\text{ min} = 23.17\text{ minutes}$.
-   - Total time saved: $540 \times 23.17\text{ min} = 12,511.8\text{ minutes} \approx \mathbf{208.5\text{ HOURS (8.7 DAYS of compute saved!)}}$
-   - At a cluster operating cost of $5,000/hour, 3FS saves **over $1,000,000 USD** in wasted electricity and compute time!
+Many engines can offload KV cache to "CPU memory". On a GB10, CPU and GPU memory are the **same** LPDDR5x pool, so offloading to CPU frees nothing. Only offloading to **NVMe** (e.g. via LMCache's disk backend) adds capacity, at NVMe latency. Work out the read time for one 16K-token R1-32B prefix (16384 × 256 KiB = 4 GiB) at your measured sequential read speed, and compare it with re-running prefill for 16K tokens (TTFT from Vol 08's needle test). That comparison tells you when SSD-backed KV reuse would pay off on your box.
 
 ---
 
-## 8. Troubleshooting, Common Misconceptions & FAQ
+## 6. Verify
 
-### Q1: "Can 3FS be mounted on standard Linux machines without RDMA?"
-**Answer**: While 3FS has a TCP fallback mode for management and diagnostics, its extreme performance (180+ GB/s) relies strictly on kernel-bypass **RoCEv2 or InfiniBand RDMA**. Running over standard TCP without hardware offload re-introduces the Linux kernel CPU interrupt bottleneck.
-
-### Q2: "Why did DeepSeek open-source 3FS instead of keeping it proprietary?"
-**Answer**: DeepSeek's open-source philosophy centers on empowering the global AI ecosystem with the complete infrastructure stack—from model weights to low-level storage engines. Open-sourcing 3FS allows research institutions to break free from expensive proprietary storage appliances.
+| Check | Expected |
+|---|---|
+| fio summary | four numbers recorded |
+| cold vs warm | warm weight load measurably faster. Engine init dominated by non-I/O work |
+| KV offload calculation | you can say whether NVMe KV reuse beats recompute for your model and prefix length |
 
 ---
 
-Proceed to [**11-deepseek-r1-32b-and-qwen-32b-models.md**](11-deepseek-r1-32b-and-qwen-32b-models.md) to explore the 32B model parameter sweet spot for local execution on NVIDIA DGX Spark.
+## 7. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| cold load much slower than fio predicts | many small files, safetensors deserialisation on CPU, CPU throttled by the pod limit | check the pod's CPU limit (02 Vol 12). Larger shards. Prefer safetensors |
+| warm load not faster | page cache evicted by other workloads (UMA pressure) | `free -g`, `scripts/uma-watch.sh` (02) |
+| fio p99 latency spikes | competing writers (checkpoints, image pulls) | schedule heavy I/O off-peak. `ionice` |
+
+---
+
+## 8. Scale-out path
+
+| Spark(s) | Cluster |
+|---|---|
+| local NVMe + NFS-RDMA between 2 Sparks | 3FS / Weka / VAST / Lustre over IB or RoCE |
+| page-cache-based loads | direct I/O, GPUDirect Storage, weight streaming |
+| no KV reuse across restarts | SSD-backed KV caches (3FS KVCache, LMCache, Mooncake) shared across a fleet |
+
+---
+
+## 9. Checklist
+
+- [ ] I can describe 3FS's architecture (CRAQ chains, FoundationDB metadata, RDMA clients, no page cache) and the problems it targets.
+- [ ] I measured my NVMe in LLM terms and predicted weight-load time.
+- [ ] I can explain why CPU offload of KV cache does nothing on a UMA GB10.

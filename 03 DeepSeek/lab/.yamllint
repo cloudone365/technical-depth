@@ -1,0 +1,10 @@
+extends: default
+rules:
+  line-length: {max: 200, level: warning}
+  document-start: disable
+  comments: {min-spaces-from-content: 1}
+  comments-indentation: disable
+  truthy: {check-keys: false}
+  braces: {max-spaces-inside: 1}
+  brackets: {max-spaces-inside: 1}
+  indentation: {spaces: consistent, indent-sequences: whatever}

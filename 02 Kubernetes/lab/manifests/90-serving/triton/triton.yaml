@@ -27,7 +27,7 @@ spec:
             - {name: cm-preprocess, mountPath: /cm/preprocess}
             - {name: cm-scorer, mountPath: /cm/scorer}
             - {name: cm-pipeline, mountPath: /cm/pipeline}
-          resources: {limits: {memory: 64Mi}}
+          resources: {requests: {cpu: 50m, memory: 32Mi}, limits: {memory: 64Mi}}   # llm-serving quota needs cpu requests
       containers:
         - name: triton
           image: nvcr.io/nvidia/tritonserver:25.09-pyt-python-py3   # includes PyTorch for the python backend

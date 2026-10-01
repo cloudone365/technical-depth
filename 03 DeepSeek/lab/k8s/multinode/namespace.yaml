@@ -1,0 +1,11 @@
+# Multi-Spark serving needs hostNetwork (NCCL/RDMA, llama.cpp RPC) and IPC_LOCK,
+# which the llm-serving namespace's baseline PSA forbids. This namespace keeps
+# the serving-tier admission policies (readiness required) but allows both.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llm-multinode
+  labels:
+    spark.lab/tier: serving
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: baseline

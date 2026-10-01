@@ -1,306 +1,183 @@
-# 06. FlashMLA Decoding Kernel — Custom CUDA Kernels for Hopper & Blackwell
+# Volume 06 — FlashMLA and MLA Decode Kernels: What the Kernel Does, What Runs on GB10, and How to Measure It
 
-> **Target Audience**: Anyone from a developer exploring modern LLMs for the first time to an experienced infrastructure engineer seeking deep mathematical and architectural clarity.
+> **Module 03 · Part II — DeepSeek infrastructure** · Prev: [05 R1 & GRPO](05-deepseek-r1-and-grpo-reasoning.md) · Next: [07 DeepGEMM](07-deepgemm-fp8-library.md)
 
----
-
-## 📑 Table of Contents
-1. [Foundational Scaffolding: Understanding GPU Architecture](#1-foundational-scaffolding-understanding-gpu-architecture)
-   - [1.1 The GPU Memory Hierarchy: The Restaurant Kitchen Analogy](#11-the-gpu-memory-hierarchy-the-restaurant-kitchen-analogy)
-   - [1.2 What is a CUDA Kernel and What is Kernel Fusion?](#12-what-is-a-cuda-kernel-and-what-is-kernel-fusion)
-   - [1.3 The Memory Wall: Why Python/PyTorch is Slow for Decoding](#13-the-memory-wall-why-pythonpytorch-is-slow-for-decoding)
-2. [The Decompression Trap: Why FlashAttention Fails for MLA](#2-the-decompression-trap-why-flashattention-fails-for-mla)
-   - [2.1 The Standard FlashAttention-2/3 Assumption](#21-the-standard-flashattention-23-assumption)
-   - [2.2 The Naive MLA Catastrophe: Memory Ping-Pong](#22-the-naive-mla-catastrophe-memory-ping-pong)
-3. [Deep Architecture of FlashMLA](#3-deep-architecture-of-flashmla)
-   - [3.1 Fused Matrix Absorption in Streaming Multiprocessor (SM) SRAM](#31-fused-matrix-absorption-in-streaming-multiprocessor-sm-sram)
-   - [3.2 Tensor Memory Accelerator (TMA) Asynchronous Copy](#32-tensor-memory-accelerator-tma-asynchronous-copy)
-   - [3.3 Warpgroup Matrix Multiply and Accumulate (WGMMA) on Blackwell](#33-warpgroup-matrix-multiply-and-accumulate-wgmma-on-blackwell)
-   - [3.4 Incremental Online Softmax](#34-incremental-online-softmax)
-4. [Throughput & Bandwidth Benchmarks vs. Standard Kernels](#4-throughput--bandwidth-benchmarks-vs-standard-kernels)
-5. [Alternative Industry Approaches to Attention Kernels](#5-alternative-industry-approaches-to-attention-kernels)
-6. [Compilation & Operational Setup on NVIDIA DGX Spark (GB10)](#6-compilation--operational-setup-on-nvidia-dgx-spark-gb10)
-7. [Hands-On PyTorch / Triton Benchmark Lab](#7-hands-on-pytorch--triton-benchmark-lab)
-8. [Beginner Practice Exercises with Solutions](#8-beginner-practice-exercises-with-solutions)
-9. [Troubleshooting, Common Misconceptions & FAQ](#9-troubleshooting-common-misconceptions--faq)
+| | |
+|---|---|
+| **You will build** | A timed comparison of the two ways to run MLA at decode time: naive (rebuild K/V) and absorbed (attend on the latent). That comparison is the design decision FlashMLA is built around. You'll identify which MLA kernel vLLM picks on your GB10, switch backends, and measure decode throughput of DeepSeek-V2-Lite across batch sizes |
+| **Hardware** | CPU for §5.1. spark-01 for §5.2–5.4 |
+| **Time** | 60 min |
+| **Risk** | None |
+| **Lab files** | [`tools/mla_attention_demo.py`](lab/tools/mla_attention_demo.py) (`--decode-bench`), [`k8s/jobs/gpu-probes.yaml`](lab/k8s/jobs/gpu-probes.yaml), [`k8s/models/v2-lite`](lab/k8s/models/v2-lite/kustomization.yaml) |
 
 ---
 
-## 1. Foundational Scaffolding: Understanding GPU Architecture
+## 1. Why this matters on a Spark
 
-### 1.1 The GPU Memory Hierarchy: The Restaurant Kitchen Analogy
-To understand why DeepSeek had to write custom CUDA code for MLA, you must understand how a GPU processes data. Think of an ultra-high-end restaurant kitchen:
+MLA (Vol 01) shrinks the cache. It only pays off at decode time if the kernel reads that small cache *as is*, instead of expanding it back into per-head keys and values for every cached token at every step. **FlashMLA** is DeepSeek's open-source CUDA kernel that does exactly this, with a paged latent cache, for Hopper (SM90) and later datacenter Blackwell (SM100).
 
-```text
-+-----------------------------------------------------------------------------------+
-| 1. REGISTERS (The Chef's Hands)                                                   |
-|    - Capacity: Tiny (~64 KB per core).                                            |
-|    - Speed: INSTANTANEOUS (0 clock cycles delay).                                 |
-|    - Data must be in registers for Tensor Cores to multiply numbers.               |
-+-----------------------------------------------------------------------------------+
-                                         │
-                                         ▼
-+-----------------------------------------------------------------------------------+
-| 2. SHARED MEMORY / SRAM (The Kitchen Countertop)                                  |
-|    - Capacity: ~228 KB per Streaming Multiprocessor (SM).                         |
-|    - Speed: LIGHTNING FAST (Over 19 TB/s aggregate bandwidth across the GPU!).    |
-|    - Shared among all threads working on the same sub-task.                       |
-+-----------------------------------------------------------------------------------+
-                                         │
-                                         ▼
-+-----------------------------------------------------------------------------------+
-| 3. HIGH-BANDWIDTH MEMORY / HBM (The Giant Cold Storage Warehouse Down the Street) |
-|    - Capacity: GIGANTIC (80 GB to 128 GB VRAM).                                  |
-|    - Speed: RELATIVELY SLOW (2.0 to 3.35 TB/s).                                   |
-|    - Every time the GPU fetches data from HBM, execution halts for hundreds       |
-|      of clock cycles waiting for data to travel over the physical circuit board!  |
-+-----------------------------------------------------------------------------------+
-```
-
-### 1.2 What is a CUDA Kernel and What is Kernel Fusion?
-- **CUDA Kernel**: A C++ function written to execute in parallel across thousands of GPU threads simultaneously.
-- **The Memory Ping-Pong Problem**: In naive PyTorch, every line of code is a separate kernel:
-  ```python
-  x = a + b    # Kernel 1: Reads a, b from HBM; writes x to HBM
-  y = x * c    # Kernel 2: Reads x, c from HBM; writes y to HBM
-  z = relu(y)  # Kernel 3: Reads y from HBM; writes z to HBM
-  ```
-  The GPU spends 90% of its time moving temporary variables ($x$ and $y$) back and forth to the "warehouse" (HBM)!
-- **Kernel Fusion**: Writing a single custom C++ CUDA kernel that loads $a, b, c$ into the "countertop" (Shared Memory), executes addition, multiplication, and ReLU in one breath, and writes only the final answer $z$ back to HBM.
+The GB10 is compute capability **12.1** (sm_121), a different Blackwell variant from the datacenter B200 (SM100). Kernels compiled only for SM90/SM100 **don't run on it**. So on a Spark the practical questions are: which MLA implementation does my serving engine fall back to, and how fast is it?
 
 ---
 
-## 2. The Decompression Trap: Why FlashAttention Fails for MLA
-
-In Volume 01, we learned that DeepSeek's Multi-Head Latent Attention (MLA) stores only a compact **512-dimensional latent vector $c_t^{KV}$** in VRAM instead of 16,384 Key/Value dimensions.
-
-### 2.1 The Standard FlashAttention-2/3 Assumption
-State-of-the-art attention engines (Tri Dao's **FlashAttention-2** and **FlashAttention-3**) are hardcoded around standard transformer assumptions:
-- They expect separate Key ($K$) and Value ($V$) tensors of shape `[Batch, Heads, SeqLen, HeadDim]`.
-- They assume every head has its own physical vectors stored in VRAM.
-
-### 2.2 The Naive MLA Catastrophe: Memory Ping-Pong
-If an engineer tries to run DeepSeek-V3 using standard FlashAttention:
-
-```text
-NAIVE EXECUTION FLOW (Disaster):
-[VRAM: 512-dim Compressed Latent c_t]
-        │
-        ▼ (Kernel 1: Decompress via PyTorch Linear Layer)
-[VRAM: 16,384-dim Massive Decompressed Keys & Values]  <=== WASTES 32x MEMORY BANDWIDTH!
-        │
-        ▼ (Kernel 2: Standard FlashAttention-2)
-[Tensor Cores: Attention Output]
-```
-By decompressing the latent vector in global memory, **the entire 93% memory bandwidth advantage of MLA is thrown in the trash!**
-
----
-
-## 3. Deep Architecture of FlashMLA
-
-DeepSeek open-sourced **FlashMLA**: a custom **CUDA / CUTLASS kernel** engineered specifically for the NVIDIA Hopper (H100/H800) and Blackwell (GB10/B200) architectures.
+## 2. Architecture — HLD
 
 ```mermaid
-graph TD
-    VRAM["HBM / VRAM: Compressed Latent Vector c_t (512 dims) + RoPE (64 dims)"] -->|"TMA Asynchronous Stream (Bypasses Registers)"| SRAM["SM Shared Memory (SRAM Countertop)"]
-    
-    Query["Query Vector q_t (In Registers)"] --> MatAbs["Absorb W_uk into Query:<br/>q_absorbed = q_t * W_uk"]
-    
-    MatAbs --> WGMMA["WGMMA Tensor Core Instruction:<br/>Dot Product (q_absorbed . c_t)"]
-    SRAM --> WGMMA
-    
-    WGMMA --> OnlineSoftmax["Incremental Online Softmax in SRAM"]
-    OnlineSoftmax --> ValueAggr["Aggregate Latents: sum(weights * c_t)"]
-    ValueAggr --> FinalProj["Multiply by W_uv Output Projection"]
-    FinalProj --> Output["Write Final Attention Output to VRAM"]
+flowchart TB
+  subgraph REQ["one decode step, batch B"]
+    Q["q for the new token<br/>128 heads × (128 + 64)"]
+  end
+  subgraph CACHE["paged latent cache (block size 64)"]
+    direction LR
+    P1["page: 64 tokens × 576"] --- P2["page"] --- P3["page …"]
+  end
+  Q --> ABS["absorb W_UK into q<br/>→ 128 heads × 576"]
+  ABS --> K["kernel: for each head-group,<br/>stream latent pages from memory once,<br/>online softmax (FlashAttention-style)"]
+  CACHE --> K
+  K --> OL["latent output 128 × 512"] --> UV["× W_UV → × W_O"]
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  class K gpu
+  class P1,P2,P3 store
+  class ABS,UV,OL ctrl
+  style CACHE fill:#fff8e6,stroke:#bf8700
 ```
 
-### 3.1 Fused Matrix Absorption in SM SRAM
-FlashMLA executes the **Matrix Absorption Trick** directly inside the GPU's ultra-fast Shared Memory (SRAM):
-1. The Query vector $q_t$ is loaded into registers.
-2. The Key up-projection weights $W^{UK}$ are loaded into Shared Memory.
-3. The kernel computes the absorbed query $\tilde{q} = q_t \cdot W^{UK}$ once.
-4. It streams the compact 512-dim latent vectors $c_s^{KV}$ directly from HBM into Shared Memory.
-5. It computes attention scores directly: $\text{Score} = \tilde{q} \cdot c_s^{KV}$.
-6. **The KV cache is NEVER expanded to 16,384 dimensions in VRAM!**
+**Why it's fast:** decode is memory-bound. The absorbed form reads the latent cache once (576 values/token/layer) and shares it across all 128 heads. That raises arithmetic intensity enough to use tensor cores instead of being purely bandwidth-limited.
 
-### 3.2 Tensor Memory Accelerator (TMA) Asynchronous Copy
-On Hopper and Blackwell GPUs, NVIDIA introduced the **Tensor Memory Accelerator (TMA)**:
-- A hardware copy engine that transfers multi-dimensional tensor blocks directly from HBM to Shared Memory asynchronously.
-- The GPU compute threads **do not need to spend clock cycles loading data**. They issue a single instruction: *"TMA, fetch the next 128 tokens of latent cache"*—and immediately proceed to compute the current batch while data flies in over the bus!
+### 2.1 MLA backends you may see in vLLM
 
-### 3.3 Warpgroup Matrix Multiply and Accumulate (WGMMA) on Blackwell
-On NVIDIA Blackwell (GB10), matrix operations are executed by a **Warpgroup** (128 threads acting as a single unit).
-FlashMLA uses native `wgmma.mma_async` assembly instructions:
-- Delivers up to **3,000+ GB/s of effective memory throughput**.
-- Executes matrix multiply-accumulate operations directly between Shared Memory and registers without intermediate register spills.
+| Backend (names vary by vLLM version) | Hardware | Notes |
+|---|---|---|
+| `FLASHMLA` | SM90, SM100 | DeepSeek's kernel. Paged, block size 64 |
+| `CUTLASS_MLA` | SM100 | NVIDIA CUTLASS implementation for datacenter Blackwell |
+| `FLASHINFER_MLA` | depends on build | FlashInfer's MLA kernels |
+| `TRITON_MLA` | **portable** | Triton-generated. The usual choice where the others aren't built: **expect this on GB10** |
 
-### 3.4 Incremental Online Softmax
-In standard attention, calculating $\text{softmax}(S)$ requires having all scores $S$ available to find the row-maximum $m = \max(S)$ and denominator $\sum e^{S_i - m}$.
-
-FlashMLA implements the **Online Softmax algorithm** (Milakov & Gimelshein, 2018):
-- As each block of 64 past tokens is processed, it dynamically rescales the running numerator and denominator:
-  $$m_{\text{new}} = \max(m_{\text{prev}}, \max(S_{\text{block}}))$$
-  $$\text{Correction Factor} = e^{m_{\text{prev}} - m_{\text{new}}}$$
-  $$\text{Accumulator} \leftarrow \text{Accumulator} \times \text{Correction Factor} + \sum e^{S_{\text{block}} - m_{\text{new}}} \cdot V_{\text{block}}$$
-- This allows FlashMLA to decode across **128,000 tokens** using a constant, tiny footprint of Shared Memory!
+Force one with `VLLM_ATTENTION_BACKEND=<name>`. vLLM refuses or falls back if it's unsupported, and the log says which happened.
 
 ---
 
-## 4. Throughput & Bandwidth Benchmarks vs. Standard Kernels
+## 3. LLD
 
-Below are real-world benchmark metrics on an NVIDIA Hopper H800 / Blackwell system running DeepSeek-V3 decoding with a context length of 32,768 tokens:
+### 3.1 The cost difference (CPU run of `--decode-bench`, V3 layer sizes)
 
-| Attention Implementation | KV Cache Read Size / Token | Effective Memory Bandwidth | Decoding Latency per Token | Max Concurrent Batch Size |
-| :--- | :---: | :---: | :---: | :---: |
-| **Naive PyTorch MLA** | 32.7 KB (Decompressed) | 480 GB/s (Inefficient) | 38.4 ms | 4 requests |
-| **Standard FlashAttention-2 (Decompressed)** | 32.7 KB (Decompressed) | 1,850 GB/s | 14.2 ms | 12 requests |
-| **FlashMLA (Fused Latent Kernel)** | **1.15 KB (Compressed)** | **3,120 GB/s (Near Hardware Limit)** | **4.1 ms (3.5x Faster!)** | **64 requests (5.3x More!)** |
+| Form | What each step does | Time / layer (CPU, batch 2, 1,024 cached) |
+|---|---|---|
+| naive | rebuild K and V for every cached token (`c_kv × W_UK`, `c_kv × W_UV`), then attend | 467 ms |
+| absorbed | 2 small projections of q and o, attend over 576-wide latents | **4.1 ms (≈115×)** |
 
-```text
-DECODING LATENCY PER TOKEN (Lower is Better):
-Naive PyTorch:       ████████████████████████████████████████ 38.4 ms
-FlashAttention-2:    ███████████████ 14.2 ms
-FlashMLA (DeepSeek): ████ 4.1 ms  <=== 3.5x FASTER!
-```
+The ratio grows with cache length: naive work is O(cache × r × heads × head_dim) **per step**, absorbed is O(cache × r × heads). On the GB10 the absolute numbers drop by orders of magnitude, but the ratio holds.
 
----
+### 3.2 Decode throughput sweep
 
-## 5. Alternative Industry Approaches to Attention Kernels
-
-| Kernel Library | Authors | Target Architectures | Supported Attention Mechanisms | Best Used For |
-| :--- | :--- | :--- | :--- | :--- |
-| **FlashMLA** | **DeepSeek AI** | **Hopper (H100/H800), Blackwell (GB10/B200)** | **Multi-Head Latent Attention (MLA)** | **Production DeepSeek-V3 / R1 Serving** |
-| **FlashAttention-3** | Tri Dao et al. | Hopper (H100) | Standard MHA, GQA | Llama-3, Mistral, Qwen Prefill |
-| **PagedAttention** | vLLM Team | Ampere, Ada, Hopper, Blackwell | MHA, GQA with Virtual Paging | High-concurrency standard serving |
-| **RadixAttention** | SGLang Team | NVIDIA CUDA | Tree-based KV cache prefix reuse | Multi-turn chat & tool-calling |
+| Batch | What to expect on a bandwidth-bound GPU |
+|---|---|
+| 1 | limited by reading active weights (~2.4B params for V2-Lite) per token |
+| 8–32 | throughput rises almost linearly. Weights are read once per step for all sequences |
+| 64+ | KV reads and attention compute start to dominate. Gains flatten |
 
 ---
 
-## 6. Compilation & Operational Setup on NVIDIA DGX Spark (GB10)
+## 4. Integrations
 
-### 6.1 Prerequisites
-The NVIDIA DGX Spark features the Grace ARM CPU coupled with the Blackwell GPU (compute capability `sm_100` or `sm_120`).
+- **Vol 01** proves the absorbed form is mathematically identical.
+- **Vol 15** uses the same vLLM deployment. The backend choice is an env var on the container.
+- **Module 07 Nvidia** (Nsight Systems/Compute) lets you open the chosen kernel and check whether it's memory- or compute-bound.
+
+---
+
+## 5. Lab
+
+### 5.1 Naive vs absorbed (CPU, then GPU)
 
 ```bash
-# 1. Verify CUDA Toolkit 12.6+ and CUTLASS 3.5+
-nvcc --version
-python3 -c "import torch; print(f'CUDA Available: {torch.cuda.is_available()}, Arch: {torch.cuda.get_device_capability()}')"
-
-# 2. Clone the official DeepSeek FlashMLA repository
-git clone https://github.com/deepseek-ai/FlashMLA.git
-cd FlashMLA
-
-# 3. Compile and install the CUDA extension for Hopper / Blackwell
-export TORCH_CUDA_ARCH_LIST="9.0;10.0"
-pip install -e .
+cd "03 DeepSeek/lab"
+python3 tools/mla_attention_demo.py --decode-bench 1024 --batch 2
 ```
 
----
-
-## 7. Hands-On PyTorch / Triton Benchmark Lab
-
-The following script benchmarks the decoding speed and memory transfer difference between **Naive Decompression Attention** and a **Fused Latent Attention** simulation.
-
-```python
-"""
-FlashMLA Architectural Simulation & Latency Benchmark
-Author: DGX Spark AI Infrastructure Team
-Description: Demonstrates the memory bandwidth savings of fused latent decoding.
-"""
-
-import torch
-import time
-
-def benchmark_naive_decompression(c_kv, W_uk, q, iters=100):
-    """Simulates decompressing the 512-dim latent to 4096 dims in VRAM before attention."""
-    torch.cuda.synchronize()
-    start = time.perf_counter()
-    for _ in range(iters):
-        # 1. Decompress latent in VRAM: [B, S, 512] x [512, 4096] -> [B, S, 4096]
-        K_full = torch.matmul(c_kv, W_uk)
-        # 2. Compute dot product attention: [B, 1, 4096] x [B, 4096, S]
-        scores = torch.matmul(q, K_full.transpose(-1, -2))
-    torch.cuda.synchronize()
-    return (time.perf_counter() - start) / iters
-
-def benchmark_fused_absorption(c_kv, W_uk, q, iters=100):
-    """Simulates FlashMLA: Absorb W_uk into Query once, then dot product directly with latent!"""
-    torch.cuda.synchronize()
-    start = time.perf_counter()
-    for _ in range(iters):
-        # 1. Absorb W_uk into query ONCE: [B, 1, 4096] x [4096, 512] -> [B, 1, 512]
-        q_absorbed = torch.matmul(q, W_uk.t())
-        # 2. Dot product directly against 512-dim latent in SRAM!
-        scores = torch.matmul(q_absorbed, c_kv.transpose(-1, -2))
-    torch.cuda.synchronize()
-    return (time.perf_counter() - start) / iters
-
-# ----------------- Verification Lab -----------------
-if __name__ == "__main__":
-    if not torch.cuda.is_available():
-        print("CUDA GPU required for FlashMLA benchmark.")
-        exit(0)
-        
-    device = "cuda"
-    batch_size = 8
-    seq_len = 8192 # 8k past context tokens
-    d_model = 4096
-    d_latent = 512
-    
-    print(f"Benchmarking Attention Decoding at Context Length: {seq_len} tokens...")
-    
-    c_kv = torch.randn(batch_size, seq_len, d_latent, device=device, dtype=torch.float16)
-    W_uk = torch.randn(d_latent, d_model, device=device, dtype=torch.float16)
-    q = torch.randn(batch_size, 1, d_model, device=device, dtype=torch.float16)
-    
-    time_naive = benchmark_naive_decompression(c_kv, W_uk, q) * 1000
-    time_fused = benchmark_fused_absorption(c_kv, W_uk, q) * 1000
-    
-    print("\n--- BENCHMARK RESULTS ---")
-    print(f"Naive Decompression Attention: {time_naive:.3f} ms per step")
-    print(f"FlashMLA Fused Latent Attention: {time_fused:.3f} ms per step")
-    print(f"Speedup Factor: {time_naive / time_fused:.2f}x FASTER!")
+```text
+decode step, batch 2, 1024 cached tokens, latent cache 4 MiB/layer
+  naive (rebuild K/V each step):   467.28 ms/layer
+  absorbed (attend on latent)  :     4.07 ms/layer   → 114.9× faster
 ```
 
+On the Spark the GPU probe runs it at 8,192 cached tokens, batch 8, in BF16:
+
+```bash
+kubectl apply -k . && kubectl apply -f k8s/jobs/gpu-probes.yaml
+kubectl -n llm-serving logs job/gpu-probes | sed -n '/decode step/,+2p'
+```
+
+**Record yours.** Expect milliseconds for absorbed versus tens to hundreds of milliseconds for naive.
+
+### 5.2 Which MLA kernel does vLLM use on GB10?
+
+```bash
+scripts/serve-model.sh v2-lite
+kubectl -n llm-serving logs deploy/vllm | grep -iE 'mla|attention backend|flash' | head
+```
+
+Write down the backend. If the log shows FlashMLA or CUTLASS MLA being skipped for capability 12.1, that's expected.
+
+### 5.3 Try forcing a backend
+
+```bash
+kubectl -n llm-serving set env deploy/vllm VLLM_ATTENTION_BACKEND=FLASHMLA
+kubectl -n llm-serving rollout status deploy/vllm --timeout=20m || kubectl -n llm-serving logs deploy/vllm | tail -20
+kubectl -n llm-serving set env deploy/vllm VLLM_ATTENTION_BACKEND-          # back to automatic
+```
+
+An unsupported backend should fail fast with a clear message about compute capability, not crash mid-request. That's the behaviour you want to see before trusting a new image.
+
+### 5.4 Decode throughput vs batch size
+
+```bash
+kubectl -n llm-serving port-forward svc/vllm 8000 &
+for c in 1 4 16 32; do
+  python3 tools/eval_harness.py --url http://localhost:8000 --model v2-lite --suites json math \
+    --concurrency $c --temperature 0.3 --out results/v2lite-c$c.json | grep 'tok/s aggregate'
+done
+```
+
+Plot tokens/s against concurrency (**record yours**). Compare with a dense 7B (`scripts/serve-model.sh qwen2.5-7b-tools`, same loop). The MoE with ~2.4B active should decode faster per stream than the dense 7B, despite having twice the total parameters.
+
 ---
 
-## 8. Beginner Practice Exercises with Solutions
+## 6. Verify
 
-### Exercise 1: Calculating Memory Traffic Reduction
-**Question**: An LLM is decoding token #10,000 for a batch of 16 users.
-- In Naive MLA: Each token requires reading 16,384 half-precision numbers (32,768 bytes) from VRAM.
-- In FlashMLA: Each token requires reading only 576 half-precision numbers (1,152 bytes) from VRAM.
-1. Calculate the total data transferred across the memory bus in one decode step under both methods.
-2. If the GPU memory bandwidth is 2,000 GB/s, what is the theoretical minimum memory transfer time for both?
-
-#### Solution:
-$$\text{Total Tokens in Cache} = 16 \text{ users} \times 10,000 \text{ tokens} = 160,000 \text{ tokens}$$
-
-1. **Total Data Transferred**:
-   - Under Naive MLA:
-     $$\text{Data} = 160,000 \times 32,768 \text{ bytes} \approx 5,242,880,000 \text{ bytes} \approx \mathbf{5.24\text{ GB}}$$
-   - Under FlashMLA:
-     $$\text{Data} = 160,000 \times 1,152 \text{ bytes} \approx 184,320,000 \text{ bytes} \approx \mathbf{0.184\text{ GB}}$$
-
-2. **Theoretical Transfer Time ($T = \frac{\text{Data}}{\text{Bandwidth}}$)**:
-   - Under Naive MLA:
-     $$T = \frac{5.24\text{ GB}}{2,000\text{ GB/s}} = \mathbf{2.62\text{ ms}}$$
-   - Under FlashMLA:
-     $$T = \frac{0.184\text{ GB}}{2,000\text{ GB/s}} = \mathbf{0.092\text{ ms}}$$
-
-*Takeaway*: FlashMLA cuts memory bus wait time by **96.5%**, allowing the GPU to run near peak theoretical speed!
+| Check | Expected |
+|---|---|
+| decode bench | absorbed ≫ faster than naive, on CPU and GPU |
+| vLLM log | an MLA backend named. You know whether it's Triton or a native kernel |
+| sweep | aggregate tok/s rises with concurrency, then flattens |
 
 ---
 
-## 9. Troubleshooting, Common Misconceptions & FAQ
+## 7. Troubleshooting
 
-### Q1: "Can FlashMLA be used on consumer GPUs like RTX 4090 or RTX 3090?"
-**Answer**: FlashMLA contains CUTLASS instructions optimized for the Tensor Memory Accelerator (TMA) and asynchronous warpgroups introduced in **Compute Capability 9.0+ (Hopper H100/H800) and 10.0+ (Blackwell GB10/B200)**. On Ada Lovelace (RTX 4090, `sm_89`), FlashMLA will either fail to compile or fall back to standard shared memory loads, reducing the speedup.
-
-### Q2: "Is FlashMLA needed during the prefill phase?"
-**Answer**: **No.** During the prefill phase, all prompt tokens are processed simultaneously in a compute-bound GEMM. Standard FlashAttention-3 or DeepGEMM can handle prefill efficiently. FlashMLA is specifically engineered to accelerate the **memory-bandwidth-bound token-by-token decoding phase**.
+| Symptom | Cause | Fix |
+|---|---|---|
+| `FlashMLA is only supported on … SM90/SM100` | GB10 is sm_121 | use the automatic choice (Triton MLA) |
+| very low decode speed for V2-Lite | falling back to a non-MLA path that expands K/V | check the log. Use a newer vLLM with MLA support for your arch |
+| building FlashMLA from source fails | `TORCH_CUDA_ARCH_LIST` doesn't include a supported arch | there's no supported arch on GB10. Don't fight it |
+| probe OOM at large cache | the naive path materialises K/V for the whole cache | lower `--decode-bench` or `--batch`. The naive path is a deliberate worst case |
 
 ---
 
-Proceed to [**07-deepgemm-fp8-library.md**](07-deepgemm-fp8-library.md) to explore how DeepSeek engineered JIT-compiled FP8 matrix multiplication kernels that outperform NVIDIA cuBLAS.
+## 8. Scale-out path
+
+| One Spark | Datacenter |
+|---|---|
+| Triton MLA on sm_121 | FlashMLA / CUTLASS MLA on H100/H200/B200. FP8 latent caches |
+| one GPU holds the whole cache | data-parallel attention + expert-parallel MoE (V3 serving at scale), MLA cache sharded per DP rank |
+| measure with the harness | per-kernel profiling with Nsight Compute (module 07) |
+
+---
+
+## 9. Checklist
+
+- [ ] I can explain why decode kernels use the absorbed form and how much work it saves.
+- [ ] I know which MLA backend runs on my GB10, and why FlashMLA doesn't.
+- [ ] I measured decode throughput vs batch size for an MLA MoE and a dense model.

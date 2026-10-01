@@ -1,0 +1,8 @@
+# Shared checkpoint volume for the training Jobs in this directory.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: deepseek-ckpt, namespace: batch}
+spec:
+  storageClassName: local-nvme-retain
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 100Gi}}

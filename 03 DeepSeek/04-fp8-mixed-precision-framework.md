@@ -1,339 +1,213 @@
-# 04. FP8 Mixed Precision Training & Inference Framework
+# Volume 04 — FP8 in Practice: Block Scaling, DeepSeek-V3's Training Recipe, and FP8 Serving on the GB10
 
-> **Target Audience**: Anyone from a developer exploring modern LLMs for the first time to an experienced infrastructure engineer seeking deep mathematical and architectural clarity.
+> **Module 03 · Part I — Architecture** · Prev: [03 MTP](03-multi-token-prediction-mtp.md) · Next: [05 R1 & GRPO](05-deepseek-r1-and-grpo-reasoning.md)
 
----
-
-## 📑 Table of Contents
-1. [Foundational Scaffolding: Understanding Computer Number Formats](#1-foundational-scaffolding-understanding-computer-number-formats)
-   - [1.1 Anatomy of a Floating-Point Number (Sign, Exponent, Mantissa)](#11-anatomy-of-a-floating-point-number-sign-exponent-mantissa)
-   - [1.2 The Precision vs. Dynamic Range Dilemma](#12-the-precision-vs-dynamic-range-dilemma)
-   - [1.3 The Evolutionary Progression: FP32 $\to$ FP16 $\to$ BF16 $\to$ FP8](#13-the-evolutionary-progression-fp32-to-fp16-to-bf16-to-fp8)
-   - [1.4 The Economic Miracle: How FP8 Enabled a $6 Million Pretraining Run](#14-the-economic-miracle-how-fp8-enabled-a-6-million-pretraining-run)
-2. [The Two Standard FP8 Formats: E4M3 vs. E5M2](#2-the-two-standard-fp8-formats-e4m3-vs-e5m2)
-   - [2.1 FP8 E4M3: High Precision for Forward Passes](#21-fp8-e4m3-high-precision-for-forward-passes)
-   - [2.2 FP8 E5M2: High Dynamic Range for Gradient Backpropagation](#22-fp8-e5m2-high-dynamic-range-for-gradient-backpropagation)
-   - [2.3 Comparison Matrix of Numerical Limits](#23-comparison-matrix-of-numerical-limits)
-3. [The Outlier Crisis: Why Naive Quantization Destroys LLMs](#3-the-outlier-crisis-why-naive-quantization-destroys-llms)
-   - [3.1 What are Emergent Activation Outliers?](#31-what-are-emergent-activation-outliers)
-   - [3.2 The Disaster of Per-Tensor Scaling](#32-the-disaster-of-per-tensor-scaling)
-4. [DeepSeek's Solution: Fine-Grained Tile-Wise & Block-Wise Quantization](#4-deepseeks-solution-fine-grained-tile-wise--block-wise-quantization)
-   - [4.1 Tile-Wise Activation Scaling ($1 \times 128$)](#41-tile-wise-activation-scaling-1-times-128)
-   - [4.2 Block-Wise Weight Scaling ($128 \times 128$)](#42-block-wise-weight-scaling-128-times-128)
-   - [4.3 Confining Outliers to Local Micro-Blocks](#43-confining-outliers-to-local-micro-blocks)
-5. [The End-to-End FP8 Mixed-Precision Computational Graph](#5-the-end-to-end-fp8-mixed-precision-computational-graph)
-6. [Hardware Acceleration on NVIDIA Blackwell (GB10) Tensor Cores](#6-hardware-acceleration-on-nvidia-blackwell-gb10-tensor-cores)
-7. [Alternative Industry Approaches to Quantization](#7-alternative-industry-approaches-to-quantization)
-8. [Hands-On PyTorch Implementation & Verification Lab](#8-hands-on-pytorch-implementation--verification-lab)
-9. [Beginner Practice Exercises with Solutions](#9-beginner-practice-exercises-with-solutions)
-10. [Troubleshooting, Common Misconceptions & FAQ](#10-troubleshooting-common-misconceptions--faq)
+| | |
+|---|---|
+| **You will build** | A measured understanding of why DeepSeek scales FP8 per 128×128 block and not per tensor. You'll benchmark FP8 vs BF16 matrix multiplies on the GB10's tensor cores, and serve the same 32B model in BF16 and FP8 to compare memory, speed and accuracy |
+| **Hardware** | CPU for §5.1. spark-01 for §5.2–5.4 |
+| **Time** | 75 min |
+| **Risk** | None |
+| **Lab files** | [`tools/fp8_blockscale.py`](lab/tools/fp8_blockscale.py), [`k8s/models/r1-32b`](lab/k8s/models/r1-32b/kustomization.yaml), [`k8s/models/r1-32b-fp8`](lab/k8s/models/r1-32b-fp8/kustomization.yaml), [`tools/eval_harness.py`](lab/tools/eval_harness.py) |
 
 ---
 
-## 1. Foundational Scaffolding: Understanding Computer Number Formats
+## 1. Why this matters on a Spark
 
-### 1.1 Anatomy of a Floating-Point Number
-In digital computers, numbers are stored as binary bits. Standard floating-point numbers follow the IEEE scientific notation format:
+Every halving of bytes per parameter halves weight memory **and** roughly doubles single-stream decode speed on a bandwidth-bound GPU. That makes number formats the most powerful knob on a GB10:
 
-$$\text{Value} = (-1)^{\text{Sign}} \times 2^{\text{Exponent} - \text{Bias}} \times \left(1 + \frac{\text{Mantissa}}{2^{\text{Bits}}}\right)$$
+| Format | Bits | Exponent/mantissa | Range | Where you meet it |
+|---|---|---|---|---|
+| FP32 | 32 | 8/23 | huge | optimizer state, master weights |
+| BF16 | 16 | 8/7 | same as FP32 | default training and serving |
+| FP8 **E4M3** | 8 | 4/3 | ±448 | weights and activations (forward) |
+| FP8 E5M2 | 8 | 5/2 | ±57,344 | gradients (wider range, less precision) |
+| NVFP4 | 4 | 2/1 + an FP8 scale per 16 values | — | Blackwell 4-bit inference (GB10's 1 PFLOP figure is FP4 sparse) |
 
-Every float consists of three distinct components:
-1. **Sign bit ($S$)**: 1 bit (0 for positive, 1 for negative).
-2. **Exponent ($E$)**: Determines the scale or magnitude of the number (how large or small it can be—the "Dynamic Range").
-3. **Mantissa / Fraction ($M$)**: Determines the fractional precision and detail (how many decimal places of accuracy are preserved).
-
-```text
-32-BIT FLOAT (FP32 - 4 Bytes):
-[Sign: 1 bit] [Exponent: 8 bits] [Mantissa: 23 bits]
-Dynamic Range: ~10^(-38) to 10^(+38) | Extremely high precision
-
-16-BIT FLOAT (BF16 - 2 Bytes):
-[Sign: 1 bit] [Exponent: 8 bits] [Mantissa: 7 bits]
-Dynamic Range: Same as FP32! | Moderate precision (Industry standard for pretraining)
-
-8-BIT FLOAT (FP8 - 1 Byte):
-[Sign: 1 bit] [Exponent: 4 or 5 bits] [Mantissa: 3 or 2 bits]
-Dynamic Range: Restricted | Low precision (Requires fine-grained scaling to prevent accuracy loss)
-```
-
-### 1.2 The Precision vs. Dynamic Range Dilemma
-In an 8-bit number, you have **only 8 total bits** ($2^8 = 256$ possible values). You face a fundamental mathematical dilemma:
-- If you give more bits to the **Exponent**, you can represent huge and tiny numbers, but you have very few bits left for the **Mantissa** (numbers become coarse and round off).
-- If you give more bits to the **Mantissa**, numbers are precise, but your **Exponent** is small, so large numbers overflow to Infinity (`Inf`) and small numbers underflow to Zero (`0`).
-
-### 1.3 The Evolutionary Progression
-- **2017 (FP32)**: Early transformers used 32-bit floats. Memory consumption was gigantic.
-- **2020 (FP16 & BF16)**: Halved memory to 2 bytes per parameter. BF16 became the standard because its 8-bit exponent matches FP32, completely preventing training loss overflows.
-- **2024 (FP8)**: DeepSeek-V3 and NVIDIA Blackwell proved that models can be trained and served directly in **8-bit floating point**, halving memory again and doubling processing speed!
-
-### 1.4 The Economic Miracle: How FP8 Enabled a $6 Million Pretraining Run
-Pretraining Meta's Llama-3 405B in BF16 required an estimated **$100M+** in GPU compute.
-
-DeepSeek pretrained **DeepSeek-V3 (671B parameters)** on 14.8 Trillion tokens using FP8 mixed-precision on a modest cluster of 2,048 NVIDIA H800 GPUs for just **$6 Million USD**!
-- **Memory Bandwidth**: Halving memory traffic allowed Tensor Cores to run at peak throughput.
-- **Inter-GPU Communication**: Communication packets across InfiniBand/NVLink were cut in half.
-- **Cache Efficiency**: 2x more tokens fit into GPU L2 cache and SRAM.
+E4M3 can only represent about 18 binades (powers of two) of magnitude. LLM tensors have **outliers**: a handful of values hundreds or thousands of times larger than the rest. Scale the whole tensor so the largest fits, and the small values lose precision or underflow to zero. DeepSeek-V3 was the first frontier model trained mostly in FP8, and the key was **fine-grained scaling**.
 
 ---
 
-## 2. The Two Standard FP8 Formats: E4M3 vs. E5M2
-
-The Open Compute Project (OCP) and IEEE defined two complementary 8-bit floating-point formats:
+## 2. Architecture — HLD
 
 ```mermaid
-graph TD
-    subgraph E4M3["FP8 E4M3 Format (Forward Pass)"]
-        S1["Sign: 1 bit"]
-        E1["Exponent: 4 bits"]
-        M1["Mantissa: 3 bits"]
-        U1["Purpose: Weights & Activations<br/>High Precision (8 levels per octave)<br/>Max Value: 448"]
-    end
-
-    subgraph E5M2["FP8 E5M2 Format (Backward Pass)"]
-        S2["Sign: 1 bit"]
-        E2["Exponent: 5 bits"]
-        M2["Mantissa: 2 bits"]
-        U2["Purpose: Gradients<br/>High Dynamic Range (Matches FP16)<br/>Max Value: 57,344"]
-    end
+flowchart LR
+  subgraph W["Weight W (e.g. 7168 × 18432)"]
+    direction TB
+    B1["128×128 block<br/>scale s₁"] --- B2["128×128 block<br/>scale s₂"] --- B3["…"]
+  end
+  subgraph A["Activation X"]
+    direction TB
+    T1["1×128 tile · scale"] --- T2["1×128 tile · scale"] --- T3["…"]
+  end
+  W --> Q1["quantise: W/s → E4M3"]
+  A --> Q2["quantise: X/s → E4M3"]
+  Q1 & Q2 --> MMA["FP8 tensor-core MMA<br/>accumulate"]
+  MMA -->|"every 128 K-elements:<br/>promote partial sums"| ACC["FP32 accumulator<br/>× s_w × s_x"]
+  ACC --> OUT["BF16 output"]
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  class MMA,ACC gpu
+  class B1,B2,B3,T1,T2,T3 store
+  class Q1,Q2,OUT ctrl
 ```
 
-### 2.1 FP8 E4M3: High Precision for Forward Passes
-- **Structure**: 1 sign bit, 4 exponent bits, 3 mantissa bits.
-- **Maximum Representable Value**: $448.0$.
-- **Smallest Positive Normal Value**: $2^{-6} = 0.015625$.
-- **Why it is used in the Forward Pass**: During inference and the forward training pass, neural network weights and hidden activations follow relatively bounded normal distributions. Preserving high precision (3 mantissa bits) is critical to prevent degradation of reasoning and linguistic nuance.
+### 2.1 DeepSeek-V3's recipe, in five rules
 
-### 2.2 FP8 E5M2: High Dynamic Range for Gradient Backpropagation
-- **Structure**: 1 sign bit, 5 exponent bits, 2 mantissa bits.
-- **Maximum Representable Value**: $57,344.0$ (Exactly matches IEEE FP16!).
-- **Smallest Positive Normal Value**: $2^{-14} \approx 6.1 \times 10^{-5}$.
-- **Why it is used in the Backward Pass**: Backpropagated gradients span orders of magnitude—some gradients are tiny ($10^{-5}$) while others are large. The 5 exponent bits prevent gradients from vanishing (underflowing to zero), ensuring stable optimization.
+| Rule | Why |
+|---|---|
+| Weights scaled per **128×128 block**, activations per **1×128 tile** | an outlier only damages its own block or tile |
+| FP8 **E4M3 everywhere** (not E5M2 for gradients) | fine-grained scaling makes the extra mantissa bit worth more than the range |
+| **Promote** partial sums to FP32 every 128 elements of K | Hopper's FP8 tensor-core accumulation keeps limited precision. Periodic promotion bounds error growth |
+| Keep sensitive parts in BF16/FP32: embeddings, output head, MoE gates, norms, attention softmax | a small fraction of compute, a large share of numerical risk |
+| Master weights, gradients for the optimizer and Adam moments in higher precision | the update step needs the precision |
 
-### 2.3 Comparison Matrix of Numerical Limits
+The open-source pieces: **DeepGEMM** (Vol 07) implements exactly these block-scaled FP8 GEMMs, and the released V3/R1 weights are stored in this FP8 block format with `weight_scale_inv` tensors.
 
-| Format | Total Bits | Exponent Bits | Mantissa Bits | Exponent Bias | Max Value | Min Positive Normal | Primary Usage |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
-| **FP32** | 32 | 8 | 23 | 127 | $3.4 \times 10^{38}$ | $1.18 \times 10^{-38}$ | Master Weights, Optimizer States |
-| **BF16** | 16 | 8 | 7 | 127 | $3.39 \times 10^{38}$ | $1.18 \times 10^{-38}$ | Residual Stream, Attention Softmax |
-| **FP8 (E4M3)** | 8 | 4 | 3 | 7 | **448.0** | **0.015625** | **Forward Weights & Activations** |
-| **FP8 (E5M2)** | 8 | 5 | 2 | 15 | **57,344.0** | **$6.1 \times 10^{-5}$** | **Backward Pass Gradients** |
+### 2.2 Serving formats you will actually use on a Spark
 
----
-
-## 3. The Outlier Crisis: Why Naive Quantization Destroys LLMs
-
-### 3.1 What are Emergent Activation Outliers?
-In 2022, researchers discovered a strange phenomenon in LLMs exceeding 6.7 Billion parameters: **Emergent Activation Outliers**.
-- In 99.9% of channels, activation values sit comfortably between $[-2.0, +2.0]$.
-- However, in a tiny fraction of channels (e.g., channel #342), values suddenly spike to **$+150.0$ or $+300.0$**!
-- These outlier channels carry critical semantic information (such as syntactic structure, rare entities, and multi-step logic).
-
-### 3.2 The Disaster of Per-Tensor Scaling
-In naive quantization, the entire matrix is scaled by a single global factor $S$:
-
-$$S = \frac{\max(|X|)}{\text{Max\_FP8}} = \frac{300.0}{448} \approx 0.67$$
-
-Every value in the matrix is divided by $S$. 
-- Normal values like $0.05$ become $\frac{0.05}{0.67} = 0.074$.
-- In FP8, the step size between representable numbers is too large to resolve $0.074$. The normal values **round down to ZERO**!
-- 99.9% of the neural network's features are wiped out, causing catastrophic perplexity collapse (the model outputs gibberish).
+| Checkpoint style | Example | vLLM flag | Notes |
+|---|---|---|---|
+| FP8 **dynamic** (W8A8, per-channel weights, per-token activations computed on the fly) | `RedHatAI/DeepSeek-R1-Distill-Qwen-32B-FP8-dynamic` | auto-detected (`compressed-tensors`) | no calibration data needed. Catalog entry `r1-32b-fp8` |
+| FP8 **block** (DeepSeek-native 128×128) | `deepseek-ai/DeepSeek-V3` | auto-detected | the format of the full V3/R1 checkpoints |
+| AWQ / GPTQ INT4 | `Qwen/Qwen2.5-32B-Instruct-AWQ` | `--quantization awq_marlin` | 4-bit weights, BF16 activations |
+| FP8 **KV cache** | any model | `--kv-cache-dtype fp8` | halves KV memory, small accuracy cost |
 
 ---
 
-## 4. DeepSeek's Solution: Fine-Grained Tile-Wise & Block-Wise Quantization
+## 3. LLD
 
-DeepSeek-V3 bypassed the outlier crisis by abandoning per-tensor quantization in favor of **fine-grained micro-blocks**.
+### 3.1 Error study (from `fp8_blockscale.py`, 1024×1024 weight, 16 outliers)
 
-```mermaid
-graph TD
-    Matrix["Full Activation Matrix [4096 x 4096]"] --> Split["Partition into 1x128 Tile Micro-Blocks"]
-    
-    Split --> Tile0["Tile 0 [Tokens 1..128, Chan 0]<br/>Max = 1.8 ──> Scale S_0 = 1.8 / 448<br/>Precision: 100% Intact!"]
-    Split --> Tile1["Tile 1 [Tokens 1..128, Chan 1] (OUTLIER!)<br/>Max = 250.0 ──> Scale S_1 = 250 / 448<br/>Outlier Confined to Tile 1!"]
-    Split --> Tile2["Tile 2 [Tokens 1..128, Chan 2]<br/>Max = 0.9 ──> Scale S_2 = 0.9 / 448<br/>Precision: 100% Intact!"]
+| Outlier size | Max/typical | Per-tensor: rel. error · flushed to 0 | 128×128 block: rel. error · flushed to 0 |
+|---|---|---|---|
+| 1 | 50 | 0.0266 · 0.0 % | 0.0265 · 0.0 % |
+| 100 | 5,000 | 0.0265 · 0.9 % | 0.0264 · 0.2 % |
+| 1,000 | 50,000 | **0.0630 · 8.7 %** | 0.0377 · 1.9 % |
+| 5,000 | 250,000 | **0.3147 · 41.4 %** | 0.1491 · 9.1 % |
+
+With modest outliers both work. Per-tensor scaling then **collapses** while blocks degrade gracefully. Real activations in long training runs do produce such outliers.
+
+### 3.2 32B on one Spark: BF16 vs FP8
+
+| | `r1-32b` (BF16) | `r1-32b-fp8` |
+|---|---|---|
+| Weights | 61.0 GiB | 30.5 GiB |
+| `--gpu-memory-utilization` | 0.70 | 0.45 |
+| KV budget → tokens (model_math) | 19.8 GiB → 80,952 | 20.4 GiB → 83,361 |
+| Max context / seqs in the catalog | 16K / 16 | 32K / 32 |
+| Room left for other services | little | bge-m3, Open WebUI, a tenant pod |
+
+---
+
+## 4. Integrations
+
+- **Vol 07 (DeepGEMM)** is the kernel library behind this recipe.
+- **Vol 12 (memory math)** and **Vol 15 (vLLM)** use the FP8 numbers to choose catalog settings.
+- **Eval harness** answers the only question that matters about a quantised model: did accuracy on *your* tasks move?
+
+---
+
+## 5. Lab
+
+### 5.1 Why blocks: the error sweep (CPU)
+
+```bash
+cd "03 DeepSeek/lab"
+python3 tools/fp8_blockscale.py
 ```
 
-### 4.1 Tile-Wise Activation Scaling ($1 \times 128$)
-Activations are grouped into micro-tiles of **1 token across 128 channels** ($1 \times 128$):
-- Each 128-element slice has its own dedicated scaling factor:
-  $$s_i = \frac{\max(|x_i|)}{448.0}$$
-- If an outlier occurs at index 342, only that specific 128-element slice uses a large scale factor.
-- The remaining thousands of tokens and channels maintain tiny scale factors and **retain maximum fractional precision**!
+Compare your output with §3.1. Then read `q_block`: it reshapes the matrix into `(M/128, 128, N/128, 128)`, takes the max per block, and stores one scale per block. That's the `weight_scale_inv` tensor you'll find in DeepSeek's checkpoint files.
 
-### 4.2 Block-Wise Weight Scaling ($128 \times 128$)
-Model weight matrices are partitioned into **$128 \times 128$ rectangular micro-blocks**:
-- For a $4096 \times 4096$ matrix, there are $\frac{4096}{128} \times \frac{4096}{128} = 32 \times 32 = 1,024$ independent scale factors!
-- Storing 1,024 floating-point scale factors takes negligible memory ($1024 \times 2 \text{ bytes} = 2 \text{ KB}$), representing less than **0.01% overhead**, while completely eliminating quantization error!
+### 5.2 FP8 vs BF16 GEMM on the GB10
 
-### 4.3 Quantization Formula with Clamping
-For any element $x$ in block $B$:
+```bash
+kubectl apply -k . && kubectl apply -f k8s/jobs/gpu-probes.yaml   # if not already run in Vol 01/02
+kubectl -n llm-serving logs job/gpu-probes | sed -n '/BF16 GEMM/,/FP8  GEMM/p'
+```
 
-$$x_{\text{FP8}} = \text{clamp}\left( \text{round}\left( \frac{x}{s_B} \right), -448, 448 \right)$$
-
----
-
-## 5. The End-to-End FP8 Mixed-Precision Computational Graph
-
-To prevent numerical drift, DeepSeek does not run 100% of operations in FP8. Highly sensitive operations remain in 16-bit or 32-bit:
+Expected shape (**record yours**):
 
 ```text
-+-----------------------------------------------------------------------------------+
-| 1. MASTER WEIGHTS & OPTIMIZER STATES: Stored in FP32 / BF16.                       |
-|    - Updated by AdamW in 32-bit to maintain subtle gradient accumulation.         |
-+-----------------------------------------------------------------------------------+
-                                         │
-                                         ▼ [Quantize to FP8 E4M3]
-+-----------------------------------------------------------------------------------+
-| 2. FORWARD PASS: Matrix Multiplications (GEMMs) executed in FP8 E4M3.             |
-|    - Linear Projections (Q, K, V, Out) run on Tensor Cores at 2x speed.           |
-|    - Feed-Forward MoE Expert Projections run in FP8.                              |
-+-----------------------------------------------------------------------------------+
-                                         │
-                                         ▼ [Keep in BF16 / FP32]
-+-----------------------------------------------------------------------------------+
-| 3. ATTENTION SOFTMAX & RESIDUAL STREAM: Kept in BF16 / FP32.                       |
-|    - Softmax exponentials and layer additions require high precision.             |
-|    - RMSNorm calculations remain in FP32.                                         |
-+-----------------------------------------------------------------------------------+
-                                         │
-                                         ▼ [Quantize to FP8 E5M2]
-+-----------------------------------------------------------------------------------+
-| 4. BACKWARD PASS: Gradients computed in FP8 E5M2.                                 |
-|    - High dynamic range prevents gradient underflow during backprop.              |
-+-----------------------------------------------------------------------------------+
+NVIDIA GB10  cc=(12, 1)  n=8192
+  BF16 GEMM :   …  TFLOPS
+  FP8  GEMM :   …  TFLOPS  (≈1.5–2× BF16)
 ```
 
----
+`torch._scaled_mm` with per-tensor scales exercises the FP8 tensor-core path. If it reports `unavailable`, the PyTorch build lacks FP8 kernels for sm_121. Use a newer NGC PyTorch image.
 
-## 6. Hardware Acceleration on NVIDIA Blackwell (GB10) Tensor Cores
+### 5.3 Serve the 32B in BF16, then FP8
 
-The **NVIDIA Blackwell architecture (GB10)** is purpose-built for fine-grained FP8 execution:
-- **5th Generation Tensor Cores**: Support native hardware instructions for asynchronous scaling factor decompression directly inside the matrix multiplication pipeline.
-- **Compute Throughput**:
-  - FP16/BF16 Tensor Core Peak: **$1\times$ baseline FLOPs**
-  - FP8 Tensor Core Peak: **$2\times$ baseline FLOPs (DOUBLE THE SPEED!)**
-- **Unified Memory Advantage**: On the DGX Spark (128 GB unified memory), running DeepSeek-32B or Qwen-32B in FP8 requires only **~32 GB of VRAM**, leaving over **90 GB free** for massive concurrent batches and multi-user KV caches!
+```bash
+scripts/serve-model.sh r1-32b
+kubectl -n llm-serving port-forward svc/vllm 8000 &
+python3 tools/eval_harness.py --url http://localhost:8000 --model r1-32b --out results/r1-32b-bf16.json
+kill %1
 
----
-
-## 7. Alternative Industry Approaches to Quantization
-
-| Quantization Method | Precision Format | Granularity | Training vs. Post-Training | Accuracy Retention |
-| :--- | :--- | :--- | :--- | :---: |
-| **DeepSeek FP8 Framework** | **FP8 (E4M3 / E5M2)** | **Tile-Wise ($1 \times 128$) & Block-Wise ($128 \times 128$)** | **Native Pretraining & Serving** | **99.9%** |
-| **NVIDIA Transformer Engine** | FP8 (E4M3 / E5M2) | Per-Tensor with Delayed History Scales | Training & Serving | 98.5% |
-| **bitsandbytes (LLM.int8)** | INT8 + FP16 Outliers | Per-Channel + Outlier Extraction | Post-Training Inference | 99.5% (Slow) |
-| **AWQ** | INT4 (Integer) | Group-Wise (Group Size = 128) | Post-Training Inference | 97.5% |
-| **GPTQ** | INT4 (Integer) | Column-Wise with Hessian Matrix | Post-Training Inference | 97.0% |
-
----
-
-## 8. Hands-On PyTorch Implementation & Verification Lab
-
-The following self-contained script simulates an activation matrix with severe outliers and compares **Naive Per-Tensor Quantization** against **DeepSeek Fine-Grained Tile-Wise Quantization**.
-
-```python
-"""
-FP8 Mixed-Precision Verification Lab
-Author: DGX Spark AI Infrastructure Team
-Description: Benchmarks Naive Per-Tensor Quantization vs DeepSeek Tile-Wise Quantization under Outliers.
-"""
-
-import torch
-
-def quantize_per_tensor(x: torch.Tensor, max_fp8: float = 448.0):
-    """Naive Per-Tensor Quantization."""
-    scale = x.abs().max() / max_fp8
-    scale = torch.clamp(scale, min=1e-8)
-    x_quant = torch.clamp(torch.round(x / scale), -max_fp8, max_fp8)
-    x_dequant = x_quant * scale
-    return x_dequant, scale
-
-def quantize_tile_wise(x: torch.Tensor, tile_size: int = 128, max_fp8: float = 448.0):
-    """
-    DeepSeek Fine-Grained Tile-Wise Quantization.
-    x: [Batch, Channels] where Channels is a multiple of tile_size (128).
-    """
-    B, C = x.shape
-    assert C % tile_size == 0, "Channels must be divisible by tile_size!"
-    
-    # Reshape into tiles: [B, num_tiles, tile_size]
-    num_tiles = C // tile_size
-    x_tiles = x.view(B, num_tiles, tile_size)
-    
-    # Compute scale factor per tile: [B, num_tiles, 1]
-    scales = x_tiles.abs().amax(dim=-1, keepdim=True) / max_fp8
-    scales = torch.clamp(scales, min=1e-8)
-    
-    # Quantize and dequantize
-    x_quant = torch.clamp(torch.round(x_tiles / scales), -max_fp8, max_fp8)
-    x_dequant = x_quant * scales
-    
-    return x_dequant.view(B, C), scales
-
-# ----------------- Verification Lab -----------------
-if __name__ == "__main__":
-    torch.manual_seed(42)
-    print("Running FP8 Fine-Grained Quantization Verification Lab...")
-    
-    # Create a batch of normal activations (mean=0, std=1.0)
-    batch_size = 4
-    channels = 512 # 4 tiles of 128
-    activations = torch.randn(batch_size, channels)
-    
-    # INJECT EXTREME ACTIVATION OUTLIER IN TILE 1 (Channel 150)
-    activations[:, 150] = 350.0 # Outlier is 350x normal values!
-    
-    # 1. Run Naive Per-Tensor Quantization
-    dequant_tensor, global_scale = quantize_per_tensor(activations)
-    mse_tensor = torch.mean((activations - dequant_tensor) ** 2).item()
-    
-    # 2. Run DeepSeek Tile-Wise Quantization (Tile size = 128)
-    dequant_tile, tile_scales = quantize_tile_wise(activations, tile_size=128)
-    mse_tile = torch.mean((activations - dequant_tile) ** 2).item()
-    
-    print("\n--- RESULTS UNDER SEVERE OUTLIERS ---")
-    print(f"Global Tensor Scale Factor: {global_scale.item():.4f}")
-    print(f"Tile-Wise Scale Factors (Sample Batch 0): {tile_scales[0].view(-1).numpy().round(4)}")
-    print(f"\nNaive Per-Tensor Reconstruction MSE:  {mse_tensor:.6f}")
-    print(f"DeepSeek Tile-Wise Reconstruction MSE: {mse_tile:.6f}")
-    
-    improvement = (mse_tensor / mse_tile)
-    print(f"\n[SUCCESS] DeepSeek Tile-Wise Quantization is {improvement:.1f}x MORE ACCURATE than Naive Quantization!")
+scripts/serve-model.sh r1-32b-fp8
+kubectl -n llm-serving port-forward svc/vllm 8000 &
+python3 tools/eval_harness.py --url http://localhost:8000 --model r1-32b-fp8 --out results/r1-32b-fp8.json
+python3 tools/eval_harness.py --report results/r1-32b-*.json
 ```
 
----
+Fill in:
 
-## 9. Beginner Practice Exercises with Solutions
+| | BF16 | FP8 |
+|---|---|---|
+| math / code / json accuracy | | |
+| aggregate tok/s | | |
+| `free -g` on the host while serving | | |
+| vLLM `GPU KV cache size` (log) | | |
 
-### Exercise 1: Quantization Range Calculation
-**Question**: Suppose you have an FP8 E4M3 format.
-- Sign: 1 bit
-- Exponent: 4 bits (Bias = 7)
-- Mantissa: 3 bits
-1. What is the binary bit pattern for the maximum normal value?
-2. What is the decimal value of this bit pattern?
+The usual outcome: accuracy within noise, about half the weight memory, faster single-stream decode.
 
-#### Solution:
-1. In IEEE FP8 E4M3, the maximum normal number has:
-   - Sign = 0 (positive)
-   - Exponent = `1111` (binary 15)
-   - Mantissa = `110` (binary 6) *(Note: in E4M3, `1111` with `111` is reserved for NaN)*
-2. Calculation:
-   - Exponent Value = $15 - \text{Bias} = 15 - 7 = 8 \implies 2^8 = 256$
-   - Mantissa Value = $1 + \frac{6}{2^3} = 1 + \frac{6}{8} = 1.75$
-   - Decimal Value = $256 \times 1.75 = \mathbf{448.0}$
+### 5.4 FP8 KV cache
 
----
+```bash
+kubectl -n llm-serving patch deploy vllm --type json -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kv-cache-dtype=fp8"}]'
+kubectl -n llm-serving rollout status deploy/vllm --timeout=30m
+kubectl -n llm-serving logs deploy/vllm | grep -i 'KV cache size'
+```
 
-## 10. Troubleshooting, Common Misconceptions & FAQ
-
-### Q1: "Why don't we use INT8 instead of FP8 for training?"
-**Answer**: INT8 has uniform, linear spacing between integers ($0, 1, 2, 3\dots$). Neural network weights and activations follow Gaussian (bell-curve) distributions with dense clusters near zero and long tails. FP8 naturally allocates more precision near zero and wider spacing for large values, matching the natural distribution of deep learning tensors.
-
-### Q2: "Can FP8 models run on older NVIDIA GPUs like V100 or T4?"
-**Answer**: **No.** Native FP8 Tensor Core execution instructions were introduced in the **NVIDIA Ada Lovelace, Hopper (H100), and Blackwell (GB10/B200)** architectures. On older GPUs, FP8 tensors must be emulated or cast to FP16, resulting in slower execution.
+The KV token count roughly doubles. Re-run the eval to check accuracy. Restore with `scripts/serve-model.sh r1-32b-fp8`.
 
 ---
 
-Proceed to [**06-flash-mla-decoding-kernel.md**](06-flash-mla-decoding-kernel.md) to explore how DeepSeek engineered custom CUDA/CUTLASS kernels to accelerate MLA on Hopper and Blackwell GPUs.
+## 6. Verify
+
+| Check | Expected |
+|---|---|
+| error sweep | per-tensor collapses (≥ 8 % flushed) at 50,000× outliers, blocks don't |
+| GEMM probe | FP8 TFLOPS > BF16 TFLOPS on the GB10 |
+| BF16 vs FP8 eval | accuracy difference within a few points. FP8 uses about half the weight memory |
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `_scaled_mm … not supported on this device` | PyTorch build without sm_121 FP8 kernels | NGC PyTorch 25.09+ (or newer) built for DGX Spark |
+| vLLM: `quantization method … not supported for capability 121` | quantisation backend not compiled for consumer Blackwell | newer vLLM image. Try another checkpoint format (FP8-dynamic vs AWQ) |
+| FP8 model much worse on code/maths | aggressive activation quantisation, or a bad calibration on static checkpoints | prefer dynamic per-token FP8. Keep KV in BF16. Compare checkpoints with the harness |
+| no memory saving | weights dequantised at load (fallback path) | log line `Loading weights took … GiB` should be ~half of BF16 |
+
+---
+
+## 8. Scale-out path
+
+| One Spark | Datacenter |
+|---|---|
+| FP8 inference, FP8 KV | FP8 training at scale (DeepSeek-V3 recipe, Transformer Engine, MXFP8 on Blackwell datacenter GPUs) |
+| NVFP4 checkpoints where available | NVFP4/MXFP4 inference on B200/GB200 with FP8 KV |
+| one GEMM probe | per-layer numerics monitoring: amax histograms, outlier tracking, loss-spike alerts |
+
+---
+
+## 9. Checklist
+
+- [ ] I can explain why per-tensor FP8 scaling fails with outliers, and what 128×128 blocks and 1×128 tiles change.
+- [ ] I measured FP8 vs BF16 GEMM throughput on my GB10.
+- [ ] I compared a BF16 and an FP8 checkpoint of the same model on accuracy, memory and speed.
+- [ ] I know which parts of a model stay in high precision, and why.

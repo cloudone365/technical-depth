@@ -12,3 +12,11 @@ kubectl label node "$node" nvidia.com/gpu.product=GB10 nvidia.com/gpu.count=1 \
 kubectl patch node "$node" --subresource=status --type=merge \
   -p "{\"status\":{\"capacity\":{\"nvidia.com/gpu\":\"$n\"},\"allocatable\":{\"nvidia.com/gpu\":\"$n\"}}}"
 kubectl get node "$node" -o jsonpath='{.metadata.name}: allocatable nvidia.com/gpu={.status.allocatable.nvidia\.com/gpu}{"\n"}'
+# k3s creates RuntimeClass "nvidia" automatically; kind does not. Admission of
+# GPU pod specs (runtimeClassName: nvidia) needs it to exist.
+kubectl get runtimeclass nvidia >/dev/null 2>&1 || kubectl apply -f - <<'YAML'
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata: {name: nvidia}
+handler: nvidia
+YAML

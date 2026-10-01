@@ -1,0 +1,41 @@
+# Nightly integrity check of every cached model snapshot (Volume 33).
+# Trust on first use: a snapshot without a manifest gets one (record it right
+# after a known-good download: kubectl create job --from=cronjob/weights-verify wv-now);
+# every later run verifies against it and fails the Job on any change.
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: weights-verify, namespace: llm-serving}
+spec:
+  schedule: "17 3 * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: verify
+              image: python:3.12-slim
+              command: ["bash", "-c"]
+              args:
+                - |
+                  set -e
+                  mkdir -p /models/manifests; rc=0
+                  for snap in /models/hf/models--*/snapshots/*/; do
+                    id=$(echo "$snap" | sed 's|/models/hf/models--||; s|/snapshots/|@|; s|/$||; s|/|_|g')
+                    m=/models/manifests/$id.json
+                    if [ ! -f "$m" ]; then
+                      echo "== NEW  $id"; python3 /tools/weights_verify.py snapshot "$snap" --out "$m"
+                    else
+                      echo "== CHECK $id"; python3 /tools/weights_verify.py verify "$snap" "$m" || rc=1
+                    fi
+                  done
+                  exit $rc
+              resources: {requests: {cpu: "1", memory: 128Mi}, limits: {memory: 512Mi}}
+              volumeMounts:
+                - {name: tools, mountPath: /tools}
+                - {name: models, mountPath: /models}
+          volumes:
+            - {name: tools, configMap: {name: deepseek-tools}}
+            - {name: models, persistentVolumeClaim: {claimName: model-cache}}

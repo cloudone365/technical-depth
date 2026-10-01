@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .cache/
 diag-*.tar.gz
+03 DeepSeek/lab/results/

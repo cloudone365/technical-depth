@@ -1,0 +1,51 @@
+# Open WebUI (Volume 27): chat UI with collapsible "thinking" for R1 models,
+# talking to LiteLLM. Data (users, chats) on a Retain PVC.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: open-webui, namespace: llm-serving, labels: {app: open-webui}}
+spec:
+  serviceName: open-webui
+  replicas: 1
+  selector: {matchLabels: {app: open-webui}}
+  template:
+    metadata: {labels: {app: open-webui}}
+    spec:
+      containers:
+        - name: webui
+          image: ghcr.io/open-webui/open-webui:v0.6.30
+          env:
+            - {name: OPENAI_API_BASE_URLS, value: "http://litellm.llm-serving:4000/v1"}
+            - name: OPENAI_API_KEYS
+              valueFrom: {secretKeyRef: {name: litellm-master-key, key: key}}
+            - {name: ENABLE_OLLAMA_API, value: "false"}
+            - {name: WEBUI_URL, value: "http://webui.lab.local"}
+            - {name: RAG_EMBEDDING_ENGINE, value: openai}
+            - {name: RAG_OPENAI_API_BASE_URL, value: "http://litellm.llm-serving:4000/v1"}
+            - {name: RAG_EMBEDDING_MODEL, value: embeddings}
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, initialDelaySeconds: 20}
+          resources: {requests: {cpu: 250m, memory: 1Gi}, limits: {memory: 4Gi}}
+          volumeMounts: [{name: data, mountPath: /app/backend/data}]
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        storageClassName: local-nvme-retain
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 10Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: open-webui, namespace: llm-serving}
+spec:
+  selector: {app: open-webui}
+  ports: [{name: http, port: 8080, targetPort: http}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: open-webui, namespace: llm-serving}
+spec:
+  parentRefs: [{name: lab-gateway, namespace: ingress}]
+  hostnames: ["webui.lab.local"]
+  rules:
+    - timeouts: {request: 900s}
+      backendRefs: [{name: open-webui, port: 8080}]

@@ -1,0 +1,33 @@
+# Architecture labs on the real GPU (Volumes 01, 02, 04, 07): MLA equivalence at
+# DeepSeek-V3 sizes, FP8 block scaling + FP8 GEMM, and the MoE router probe on
+# DeepSeek-V2-Lite (≈31 GB BF16 — scale the chat model down first).
+apiVersion: batch/v1
+kind: Job
+metadata: {name: gpu-probes, namespace: llm-serving}
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: probes
+          image: nvcr.io/nvidia/pytorch:25.09-py3
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -e
+              python3 /tools/mla_attention_demo.py --v3 --tokens 256 --decode-bench 8192 --batch 8
+              python3 /tools/fp8_blockscale.py --gemm --n 8192
+              python3 /tools/grouped_gemm_bench.py --experts 64 --tokens 8192 --dim 2048 --ffn 1408
+              pip install --quiet transformers==4.56.2 accelerate==1.10.1
+              python3 /tools/moe_router_probe.py --model deepseek-ai/DeepSeek-V2-Lite-Chat --out /tmp/loads.json
+          env: [{name: HF_HOME, value: /models/hf}]
+          resources:
+            requests: {cpu: "4", memory: 16Gi, nvidia.com/gpu: "1"}
+            limits: {memory: 56Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: tools, mountPath: /tools}
+            - {name: models, mountPath: /models}
+      volumes:
+        - {name: tools, configMap: {name: deepseek-tools}}
+        - {name: models, persistentVolumeClaim: {claimName: model-cache}}

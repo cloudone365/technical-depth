@@ -1,421 +1,267 @@
-# 21. Ingress & Real-Time Streaming Gateways — SSE, gRPC & Long Reasoning Timeouts
+# Volume 21 — Ingress and Streaming for Reasoning Models: SSE Through Every Hop, Timeouts That Fit a Chain of Thought, and Spotting a Buffering Proxy
 
-> **Target Audience**: Networking Engineers, Kubernetes Platform Administrators, and Frontend/Full-Stack Developers integrating live AI streaming into user interfaces.  
-> **Prerequisites**: HTTP/1.1 and HTTP/2 protocol fundamentals, Kubernetes Ingress and Services (from [19-kubernetes-manifests-for-deepseek.md](19-kubernetes-manifests-for-deepseek.md)), and SSE protocol basics.  
-> **Estimated Study Time**: 55 minutes.  
-> **What You Will Master**: The physical networking mechanics of **Server-Sent Events (SSE)**, neutralizing the **Proxy Buffering Trap** in NGINX and Traefik, tuning long reasoning timeout ceilings (600s) for **DeepSeek-R1**, and implementing resilient streaming gateways on the **NVIDIA DGX Spark**.
+> **Module 03 · Part V — Platform integration** · Prev: [20 NVMe & weight caching](20-nvme-local-storage-and-weight-caching.md) · Next: [22 Autoscaling with KServe & Kueue](22-autoscaling-with-kserve-and-kueue.md)
 
----
-
-## 📑 Table of Contents
-1. [Foundational Scaffolding: The Streaming Networking Problem](#1-foundational-scaffolding-the-streaming-networking-problem)
-2. [Co-Related Concepts & The Evolution of AI Transport Protocols](#2-co-related-concepts--the-evolution-of-ai-transport-protocols)
-3. [Deep First-Principles: Server-Sent Events (SSE) Protocol Anatomy](#3-deep-first-principles-server-sent-events-sse-protocol-anatomy)
-4. [The Proxy Buffering Trap: Why Default Reverse Proxies Break LLMs](#4-the-proxy-buffering-trap-why-default-reverse-proxies-break-llms)
-5. [The Reasoner Timeout Crisis: Handling Multi-Minute `<think>` Blocks](#5-the-reasoner-timeout-crisis-handling-multi-minute-think-blocks)
-6. [Comparative Analysis: NGINX vs. Traefik vs. Envoy vs. Cloudflare](#6-comparative-analysis-nginx-vs-traefik-vs-envoy-vs-cloudflare)
-7. [Production Gateway Manifests (NGINX & Traefik for K3s)](#7-production-gateway-manifests-nginx--traefik-for-k3s)
-8. [Hands-On Python Lab: End-to-End SSE Latency Benchmarking Client](#8-hands-on-python-lab-end-to-end-sse-latency-benchmarking-client)
-9. [Practice Exercises with Step-by-Step Solutions](#9-practice-exercises-with-step-by-step-solutions)
-10. [Troubleshooting Guide & Diagnostic Runbook](#10-troubleshooting-guide--diagnostic-runbook)
+| | |
+|---|---|
+| **You will build** | The full request path, client → Traefik Gateway → LiteLLM → vLLM, with server-sent events (SSE) that stream reasoning and answer tokens separately. You'll measure TTFT, time-to-first-answer and inter-token latency at each hop with `stream_probe.py`, set timeouts that survive a 10-minute chain of thought, and catch a hop that buffers the stream |
+| **Hardware** | spark-01 |
+| **Time** | 60 min |
+| **Risk** | Low. Drill D04 changes LiteLLM's timeout. `breakfix.sh reset D04` restores it |
+| **Lab files** | [`tools/stream_probe.py`](lab/tools/stream_probe.py), [`k8s/apps/litellm.yaml`](lab/k8s/apps/litellm.yaml), [`02 …/addons/traefik.yaml`](../02%20Kubernetes/lab/addons/traefik.yaml), [`02 …/40-ingress/`](../02%20Kubernetes/lab/manifests/40-ingress/) |
 
 ---
 
-## 1. Foundational Scaffolding: The Streaming Networking Problem
+## 1. Why reasoning models stress gateways
 
-### Traditional REST vs. Generative Token Streams
-In traditional web applications (such as querying a PostgreSQL database or fetching a user profile), the backend produces a complete response object:
-```json
-HTTP/1.1 200 OK
-Content-Length: 142
-{"user_id": 104, "status": "active", "roles": ["admin"]}
-```
-The entire payload is packaged into a single TCP frame and delivered immediately.
+A chat model answers in seconds. A reasoning model like R1 can **think for minutes** before the first answer token. Every proxy on the path has its own idea of how long a request may live and whether to pass bytes on immediately:
 
-In generative LLMs, waiting for the entire 1,500-token answer to generate before sending an HTTP response causes an agonizing **15 to 30 second delay** where the user stares at a blank screen. To deliver a fluid user experience, the inference engine emits tokens incrementally as they roll off the GPU Tensor Cores.
+| Property | Typical default | What R1 needs |
+|---|---|---|
+| request/read timeout | 30–60 s on many proxies | ≥ 900 s end to end |
+| response buffering | some middlewares buffer whole responses | none: SSE chunks must flush as they arrive |
+| idle timeout | 60–180 s | covered by the steady token stream, as long as nothing buffers |
+| client timeout | OpenAI Python SDK: 600 s | ≥ the server's longest generation |
 
-```
-                          STREAMING ARCHITECTURAL FLOW
-┌──────────────┐          ┌───────────────────────┐          ┌───────────────────────┐
-│ Browser / UI │ ◄─────── │ Ingress Proxy Gateway │ ◄─────── │ vLLM / SGLang Pod     │
-│ Client       │   SSE    │ (NGINX / Traefik)     │   HTTP   │ (Blackwell GB10 GPU)  │
-└──────────────┘          └───────────────────────┘          └───────────────────────┘
-      ▲                              ▲                                   ▲
-      │                              │                                   │
-      │ 1 Token every 15ms           │ MUST FLUSH TCP IMMEDIATELY!       │ Generates Token
-      │ Typewriter effect            │ Do NOT buffer in memory!          │ Pushes to SSE Stream
-```
-
-### The Garden Hose vs. Bucket Brigade Analogy
-* **Default Proxy Buffering**: Like a fire brigade using buckets. A firefighter refuses to pass water until the 5-gallon bucket is completely full. If the water source is a slow drip (token generation), the house burns down while waiting for the bucket to fill.
-* **Non-Buffering Streaming**: Like a high-pressure garden hose. The moment water enters the hose, it sprays out of the nozzle continuously without waiting to fill any reservoir.
+The *shortest* timeout on the path wins, and the symptom ("the answer stops", "504", "it just hangs") rarely names the hop.
 
 ---
 
-## 2. Co-Related Concepts & The Evolution of AI Transport Protocols
+## 2. Architecture — HLD
 
 ```mermaid
-flowchart TD
-    Poll["Short / Long Polling<br/>Client repeatedly queries /poll endpoint<br/>Massive HTTP header overhead and server load"] --> WS["WebSockets (Full Duplex)<br/>Persistent bidirectional TCP connection<br/>Complex state management, breaks L7 load balancers"]
-    WS --> SSE["Server-Sent Events (SSE / text/event-stream)<br/>Unidirectional, lightweight over standard HTTP<br/>Native browser EventSource support, OpenAI API standard"]
-    SSE --> gRPC["gRPC / HTTP/2 Bidirectional Streaming<br/>Binary Protobuf serialization, ultra-low latency<br/>Requires specialized client libraries, difficult in web browsers"]
+flowchart LR
+  C["Client<br/>curl · OpenAI SDK · Open WebUI"] -->|"HTTP :80<br/>Host: api.lab.local"| T
+  subgraph ING["ingress namespace"]
+    T["Traefik · Gateway lab-gateway<br/>entrypoint readTimeout 0 · idle 600 s"]
+  end
+  T -->|"HTTPRoute litellm<br/>timeouts.request 900 s"| L
+  subgraph SRV["llm-serving namespace"]
+    L["LiteLLM :4000<br/>auth · aliases · fallbacks<br/>timeout 900 s"]
+    V["vLLM :8000<br/>--reasoning-parser deepseek_r1<br/>SSE: reasoning_content → content"]
+    S["SGLang :30000<br/>(fallback)"]
+  end
+  L -->|"alias reasoning"| V
+  L -.->|"fallback"| S
+  P["stream_probe.py<br/>at each hop"] -.measures.-> T
+  P -.-> L
+  P -.-> V
+  classDef ext fill:#24292f,stroke:#000,color:#fff
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef obs fill:#fb8500,stroke:#9a5000,color:#000
+  class C ext
+  class T net
+  class L ctrl
+  class V,S gpu
+  class P obs
+  style ING fill:#f3effc,stroke:#8250df
+  style SRV fill:#e6f4f5,stroke:#0e7c86
 ```
 
-### Why the Industry Standardized on SSE
-The OpenAI Chat Completions API standard (`/v1/chat/completions` with `"stream": true`) chose **Server-Sent Events** because:
-1. It runs over standard HTTP/1.1 and HTTP/2 without requiring protocol upgrades like WebSockets.
-2. It is natively supported in web browsers via JavaScript's `fetch()` ReadableStream or `EventSource`.
-3. It traverses enterprise firewalls and corporate proxies that often terminate or block WebSockets.
+### 2.1 One streamed R1 request
+
+```mermaid
+sequenceDiagram
+  autonumber
+  box rgb(36,41,47) Client
+    participant C as client
+  end
+  box rgb(130,80,223) Gateway
+    participant T as Traefik
+  end
+  box rgb(31,111,235) Proxy
+    participant L as LiteLLM
+  end
+  box rgb(118,185,0) Engine
+    participant V as vLLM
+  end
+  C->>T: POST /v1/chat/completions stream true
+  T->>L: forward, timer 900 s starts
+  L->>L: auth key, map reasoning to r1-32b-fp8
+  L->>V: POST, own timer 900 s
+  V-->>C: data delta role assistant
+  loop thinking, can be minutes
+    V-->>C: data delta reasoning_content
+  end
+  loop answer
+    V-->>C: data delta content
+  end
+  V-->>C: data finish_reason stop, then usage
+  V-->>C: data DONE
+```
 
 ---
 
-## 3. Deep First-Principles: Server-Sent Events (SSE) Protocol Anatomy
+## 3. LLD
 
-An SSE stream consists of an ongoing HTTP response with no fixed `Content-Length`. Instead, it uses **Chunked Transfer Encoding** (`Transfer-Encoding: chunked` in HTTP/1.1) or HTTP/2 DATA frames:
+### 3.1 Timeouts per hop (lab values)
 
-```http
-HTTP/1.1 200 OK
-Content-Type: text/event-stream; charset=utf-8
-Cache-Control: no-cache, no-transform
-Connection: keep-alive
-X-Accel-Buffering: no
+| Hop | Setting | Lab value | Where |
+|---|---|---|---|
+| client | SDK `timeout`, curl `--max-time` | ≥ 900 s | your code |
+| Traefik entrypoint `web` | `respondingTimeouts.readTimeout / writeTimeout / idleTimeout` | 0 / 0 / 600 s | `02 …/addons/traefik.yaml` |
+| HTTPRoute `litellm`, `open-webui` | `rules[].timeouts.request` | 900 s | `k8s/apps/*.yaml` |
+| LiteLLM | `router_settings.timeout`, `litellm_settings.request_timeout` | 900 s | `litellm-config` |
+| Open WebUI → LiteLLM | `AIOHTTP_CLIENT_TIMEOUT` | the image default. Raise it if long chats cut off | env |
+| vLLM | none on the server. Bounded by `max_tokens` × ITL | — | — |
+| vLLM shutdown | `preStop sleep 15` + `terminationGracePeriodSeconds 120` | — | 02 base Deployment |
 
-data: {"id":"chat-1","choices":[{"delta":{"role":"assistant","content":""}}]}
+### 3.2 The SSE wire format with the reasoning parser
 
-data: {"id":"chat-1","choices":[{"delta":{"content":"<think>"}}]}
-
-data: {"id":"chat-1","choices":[{"delta":{"content":"\nLet"}}]}
-
-data: {"id":"chat-1","choices":[{"delta":{"content":" us"}}]}
-
-data: {"id":"chat-1","choices":[{"delta":{"content":" calculate"}}]}
-
+```text
+data: {"choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+data: {"choices":[{"index":0,"delta":{"reasoning_content":"The trip runs from 09:40"}}]}
+…
+data: {"choices":[{"index":0,"delta":{"content":"205 minutes."}}]}
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+data: {"choices":[],"usage":{"prompt_tokens":38,"completion_tokens":611}}
 data: [DONE]
 ```
 
-### Crucial SSE Framing Rules:
-* Each event line must begin with the literal prefix `data: `.
-* Each message must terminate with **two consecutive newline characters (`\n\n`)**.
-* The stream is gracefully closed when the server transmits the terminal sentinel: `data: [DONE]\n\n`.
+`stream_options.include_usage` adds the final usage chunk. LiteLLM passes `reasoning_content` through for `hosted_vllm/` models.
+
+### 3.3 What `stream_probe.py` measures
+
+| Field | Meaning | Healthy (**record yours**) |
+|---|---|---|
+| `ttfb` | first byte of the response | ≈ queue + prefill |
+| `first reasoning` | first thinking token | ≈ TTFT |
+| `first answer` | first token after `</think>` | seconds to minutes. This is what users *feel* |
+| `ITL p50 / p99` | gap between chunks | p50 ≈ 1 / decode tok/s. Gateways add < 1 ms |
+| `BUFFERED` | all chunks arrived in one burst at the end | must never appear |
+| `TRUNCATED` | `finish_reason=length` | the client's `max_tokens` is too small for the chain of thought |
 
 ---
 
-## 4. The Proxy Buffering Trap: Why Default Reverse Proxies Break LLMs
+## 4. Integrations
 
-Reverse proxies (like NGINX, HAProxy, and Traefik) were originally engineered to protect slow upstream servers from fast clients. 
-By default:
-1. The proxy allocates an **internal memory buffer** (typically 4 KB, 8 KB, or 16 KB).
-2. It reads chunks from the upstream vLLM pod into this buffer.
-3. It holds the data in memory until the buffer is 100% full, and only then flushes a single large TCP packet to the client.
-
-### Mathematical Proof of Perceived Latency Degradation
-Let:
-* Target buffer size $B = 4,096 \text{ bytes}$.
-* Average token length = 4 bytes (encoded in UTF-8 JSON chunk = ~60 bytes total).
-* Model generation throughput = 30 tokens/second.
-* Bytes emitted per second = $30 \times 60 = 1,800 \text{ bytes/sec}$.
-
-$$\text{Buffer Delay} = \frac{4,096 \text{ bytes}}{1,800 \text{ bytes/sec}} = \mathbf{2.27 \text{ seconds of artificial lag!}}$$
-
-If the buffer is 16 KB (NGINX default on 64-bit systems), the user experiences **over 9 seconds of complete silence**, followed by a jarring dump of 250 tokens all at once!
-
-### The Solution: Direct TCP Socket Flushing
-We must explicitly instruct the reverse proxy to:
-* Disable upstream response buffering (`proxy_buffering off;`).
-* Set the `TCP_NODELAY` flag on the socket to disable Nagle's algorithm.
-* Pass the `X-Accel-Buffering: no` header to downstream proxies.
+- **02 Vol 09** set up the Gateway, the Traefik middlewares and the canary route. This volume applies them to reasoning traffic.
+- **Vol 28** covers LiteLLM's keys, budgets and fallbacks. **Vol 27** puts Open WebUI on the same path.
+- **Vol 38** alert `ReasoningTruncated` fires when >20 % of requests end with `finish_reason=length`.
 
 ---
 
-## 5. The Reasoner Timeout Crisis: Handling Multi-Minute `<think>` Blocks
+## 5. Lab
 
-Conventional microservices enforce a strict **30-second or 60-second gateway timeout**.
-In reasoning models like **DeepSeek-R1**:
-* For complex mathematical proofs, competitive programming, or logic deduction, the model performs deep Chain-of-Thought search inside its internal `<think>...</think>` block.
-* The model may compute for **90 to 180 seconds** before emitting its first output tokens to the stream!
-* A standard reverse proxy sees no HTTP data for 60 seconds and terminates the connection with `504 Gateway Timeout`.
+Prerequisites: `scripts/serve-model.sh r1-7b`, `kubectl apply -k k8s/apps`, and on your workstation `/etc/hosts` has `10.10.10.11 api.lab.local webui.lab.local`.
 
-```
-                    THE 504 GATEWAY TIMEOUT DISASTER
-Client ──► Ingress Proxy ──► DeepSeek-R1 Pod (Blackwell GB10)
-                 │                   │
-                 │                   ├─ Thinking: Token 1... (inside <think>)
-                 │                   ├─ Thinking: Token 100...
-                 │                   ├─ Thinking: Token 500...
-                 │                   │
-        [60 Seconds Elapses]         │ (Still crunching proof)
-                 │                   │
-Ingress drops socket!                │
-Returns HTTP 504 Gateway Timeout!    │
-                 │                   │
-                 ▼                   ▼
-      User sees CRASH!      GPU compute wasted!
+```bash
+cd "03 DeepSeek/lab"
+KEY=$(kubectl -n llm-serving get secret litellm-master-key -o jsonpath='{.data.key}' | base64 -d)
 ```
 
-**Mandatory Rule**: All proxy read, send, and idle timeouts for DeepSeek-R1 must be set to at least **600 seconds (10 minutes)**.
+### 5.1 Hop 1 — straight to vLLM
 
----
-
-## 6. Comparative Analysis: NGINX vs. Traefik vs. Envoy vs. Cloudflare
-
-| Reverse Proxy | Buffering Disable Directive | Timeout Directive | SSE Realtime Performance | Native K8s Ingress |
-| :--- | :--- | :--- | :--- | :--- |
-| **Ingress-NGINX** | `proxy-buffering: "off"` | `proxy-read-timeout: "600"` | **Flawless (Instant flush)** | Kubernetes Standard |
-| **Traefik (K3s Default)** | `maxResponseBodyBytes: 0` | `respondingTimeouts.readTimeout` | **Flawless** | K3s Built-in |
-| **Envoy / Istio** | `route.timeout: 0s` | `stream_idle_timeout: 600s` | Excellent (HTTP/2 native) | Service Mesh standard |
-| **Cloudflare Proxy** | Requires Enterprise Plan | Capped at 100s on Free/Pro | Poor (Kills long `<think>`) | Cloud edge CDN |
-
----
-
-## 7. Production Gateway Manifests (NGINX & Traefik for K3s)
-
-### 1. Ingress-NGINX Production Manifest (`01-nginx-streaming-ingress.yaml`)
-
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: deepseek-streaming-ingress
-  namespace: ai-inference
-  annotations:
-    kubernetes.io/ingress.class: "nginx"
-    # CRITICAL: Disable all proxy buffering for immediate TCP token flushing
-    nginx.ingress.kubernetes.io/proxy-buffering: "off"
-    # CRITICAL: Extend timeouts to 10 minutes for DeepSeek-R1 reasoning chains
-    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
-    # Instruct downstream CDNs not to buffer
-    nginx.ingress.kubernetes.io/configuration-snippet: |
-      more_set_headers "X-Accel-Buffering: no";
-      more_set_headers "Cache-Control: no-cache, no-transform";
-    # Allow large prompt payloads (up to 50MB for RAG context)
-    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
-    # Enable HTTP/2 multiplexing
-    nginx.ingress.kubernetes.io/server-tokens: "false"
-spec:
-  rules:
-  - host: deepseek.local
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: deepseek-r1-service
-            port:
-              number: 8000
+```bash
+kubectl -n llm-serving port-forward svc/vllm 8000 &
+python3 tools/stream_probe.py --url http://localhost:8000 --model r1-7b
 ```
 
-### 2. Traefik IngressRoute for K3s on DGX Spark (`02-traefik-streaming.yaml`)
-
-Because K3s deploys Traefik by default, use this custom `IngressRoute` and `Middleware`:
-
-```yaml
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata:
-  name: llm-streaming-policy
-  namespace: ai-inference
-spec:
-  buffering:
-    maxResponseBodyBytes: 0       # 0 completely disables response body buffering!
-    memResponseBodyBytes: 0
-  headers:
-    customResponseHeaders:
-      X-Accel-Buffering: "no"
-      Cache-Control: "no-cache, no-transform"
----
-apiVersion: traefik.io/v1alpha1
-kind: IngressRoute
-metadata:
-  name: deepseek-traefik-route
-  namespace: ai-inference
-spec:
-  entryPoints:
-    - web
-  routes:
-  - match: Host(`deepseek.local`) && PathPrefix(`/`)
-    kind: Rule
-    services:
-    - name: deepseek-r1-service
-      port: 8000
-    middlewares:
-    - name: llm-streaming-policy
+```text
+http://localhost:8000  model=r1-7b
+  ttfb      41 ms | first reasoning      41 ms | first answer    9120 ms | total 9.84 s
+  chunks 642 (reasoning 598, answer 44) | ITL p50 14.2 ms p99 21.7 ms | ≈66 chunks/s
+  finish_reason=stop  usage={'prompt_tokens': 38, 'completion_tokens': 643, …}
 ```
 
----
+(Illustrative numbers. **Record yours**.)
 
-## 8. Hands-On Python Lab: End-to-End SSE Latency Benchmarking Client
+### 5.2 Hop 2 — through LiteLLM
 
-This diagnostic script connects to your ingress gateway, verifies that buffering is completely disabled, and calculates the exact latency gap between successive tokens:
-
-```python
-#!/usr/bin/env python3
-"""
-benchmark_sse_gateway.py
-Audits ingress gateway buffering behavior and measures live inter-token latency.
-"""
-
-import time
-import json
-import requests
-
-INGRESS_URL = "http://deepseek.local/v1/chat/completions"
-HEADERS = {
-    "Content-Type": "application/json",
-    "Accept": "text/event-stream"
-}
-
-PAYLOAD = {
-    "model": "deepseek-r1",
-    "messages": [
-        {"role": "user", "content": "Count from 1 to 20 slowly, explaining each number in 1 short phrase."}
-    ],
-    "temperature": 0.6,
-    "max_tokens": 256,
-    "stream": True
-}
-
-def audit_gateway_streaming():
-    print(f"[*] Dispatching streaming request to: {INGRESS_URL}")
-    start_time = time.perf_counter()
-    
-    response = requests.post(INGRESS_URL, headers=HEADERS, json=PAYLOAD, stream=True, timeout=600)
-    
-    # 1. Audit HTTP Headers
-    print("\n" + "=" * 60)
-    print("GATEWAY RESPONSE HEADERS AUDIT")
-    print("=" * 60)
-    content_type = response.headers.get("Content-Type", "")
-    buffering_header = response.headers.get("X-Accel-Buffering", "")
-    transfer_encoding = response.headers.get("Transfer-Encoding", "")
-    
-    print(f"Status Code        : {response.status_code}")
-    print(f"Content-Type       : {content_type}")
-    print(f"Transfer-Encoding  : {transfer_encoding}")
-    print(f"X-Accel-Buffering  : {buffering_header}")
-    
-    if "text/event-stream" not in content_type:
-        print("[!] WARNING: Content-Type is not text/event-stream! Gateway may be stripping headers.")
-    if buffering_header != "no":
-        print("[!] WARNING: X-Accel-Buffering: no is missing! Proxies may buffer data.")
-    print("=" * 60 + "\n")
-    
-    # 2. Measure Live Token Arrival
-    first_token_time = None
-    last_token_time = None
-    latencies = []
-    token_count = 0
-    
-    print("[*] Streaming Tokens:")
-    for line in response.iter_lines():
-        if not line:
-            continue
-        decoded = line.decode('utf-8').strip()
-        if not decoded.startswith("data: "):
-            continue
-        data_body = decoded[6:]
-        if data_body == "[DONE]":
-            break
-            
-        now = time.perf_counter()
-        if first_token_time is None:
-            first_token_time = now
-            ttft_ms = (first_token_time - start_time) * 1000
-            print(f"\n[✓] First Token Received! TTFT: {ttft_ms:.2f} ms\n")
-        else:
-            delta_ms = (now - last_token_time) * 1000
-            latencies.append(delta_ms)
-            
-        last_token_time = now
-        token_count += 1
-        
-        try:
-            chunk = json.loads(data_body)
-            delta = chunk["choices"][0]["delta"].get("content", "")
-            print(delta, end="", flush=True)
-        except json.JSONDecodeError:
-            pass
-
-    print("\n\n" + "=" * 60)
-    print("STREAMING JITTER AUDIT")
-    print("=" * 60)
-    if latencies:
-        avg_itl = sum(latencies) / len(latencies)
-        max_itl = max(latencies)
-        print(f"Total Streamed Tokens   : {token_count}")
-        print(f"Average Inter-Token Gap : {avg_itl:.2f} ms")
-        print(f"Maximum Jitter Spike    : {max_itl:.2f} ms")
-        
-        # Buffering detection heuristic
-        if max_itl > 1500 and avg_itl < 20:
-            print("[!] CRITICAL ALERT: Extreme jitter detected! Ingress is likely buffering chunks.")
-        else:
-            print("[✓] PASS: Smooth streaming verified. Zero proxy buffering.")
-    print("=" * 60)
-
-if __name__ == "__main__":
-    audit_gateway_streaming()
+```bash
+kubectl -n llm-serving port-forward svc/litellm 4000 &
+python3 tools/stream_probe.py --url http://localhost:4000 --api-key "$KEY" --model reasoning-fast
 ```
 
----
+### 5.3 Hop 3 — through the Gateway
 
-## 9. Practice Exercises with Step-by-Step Solutions
+```bash
+python3 tools/stream_probe.py --url http://api.lab.local --api-key "$KEY" --model reasoning-fast
+# or by IP, without /etc/hosts
+python3 tools/stream_probe.py --url http://10.10.10.11 --host api.lab.local --api-key "$KEY" --model reasoning-fast
+```
 
-### Exercise 1: Quantifying the User Impact of Proxy Buffering
-**Scenario**: An AI chatbot generates text at **40 tokens per second**. Each token packet averages **75 bytes** of JSON overhead.
-The enterprise ingress proxy is misconfigured with default **8 KB response buffering**.
-**Question**: How many tokens will be trapped in the proxy buffer before the user sees the first text chunk, and how many seconds of frozen silence will the user experience?
+| Hop | ttfb (ms) | first answer (s) | ITL p50 (ms) | ITL p99 (ms) |
+|---|---|---|---|---|
+| vLLM | | | | |
+| + LiteLLM | | | | |
+| + Traefik | | | | |
 
-#### Solution:
-1. **Calculate tokens required to fill the 8 KB buffer**:
-   $$\text{Tokens} = \frac{8 \times 1,024 \text{ bytes}}{75 \text{ bytes/token}} = \frac{8,192}{75} \approx \mathbf{109.2 \to 110 \text{ tokens}}$$
-2. **Calculate user perceived delay**:
-   $$\text{Delay} = \frac{110 \text{ tokens}}{40 \text{ tokens/sec}} = \mathbf{2.75 \text{ seconds of frozen silence!}}$$
-3. *Impact*: Instead of seeing the first token in 100 ms, the user experiences almost 3 seconds of lag, after which 110 tokens explode onto the screen simultaneously.
+Expected: each hop adds a few ms to `ttfb` and almost nothing to ITL. `first answer` is set by the model's thinking length, not by the network.
 
----
+### 5.4 Watch raw SSE
 
-### Exercise 2: Debugging Ingress Timeout Math
-**Scenario**: A student submits a complex calculus problem to DeepSeek-R1. The model takes **140 seconds** to formulate its internal Chain-of-Thought before emitting the first token.
-The Ingress is configured with:
-* `proxy-connect-timeout: "30"`
-* `proxy-read-timeout: "120"`
-* `proxy-send-timeout: "120"`
+```bash
+curl -sN http://api.lab.local/v1/chat/completions -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"reasoning-fast","stream":true,"messages":[{"role":"user","content":"Is 221 prime?"}]}' | head -20
+```
 
-**Question**: Will this request succeed or fail? What HTTP status code will the user see, and at what second?
+### 5.5 Drill D04 — the 30-second gateway
 
-#### Solution:
-* The connection phase succeeds in under 1 second ($< 30\text{s}$).
-* Once connected, the proxy waits for data from the vLLM pod.
-* Because DeepSeek-R1 generates internal reasoning without emitting public tokens for 140 seconds, the proxy's `proxy-read-timeout` of 120 seconds is exceeded at $t = 120 \text{ seconds}$.
-* **Result**: The request **fails at exactly 120 seconds with HTTP 504 Gateway Timeout**.
-* **Fix**: Increase `proxy-read-timeout` to **`600`** (10 minutes).
+```bash
+scripts/breakfix.sh inject D04
+python3 tools/stream_probe.py --url http://api.lab.local --api-key "$KEY" --model reasoning-fast --max-tokens 16384 \
+  --prompt "Prove that there are infinitely many primes of the form 4k+3, step by step."
+scripts/breakfix.sh hint D04
+```
 
----
+Expected: the stream dies at ~30 s with an error or a cut-off stream, while §5.1 against vLLM directly completes. Find which hop gave up (LiteLLM logs: `kubectl -n llm-serving logs deploy/litellm | grep -i timeout`), then `scripts/breakfix.sh answer D04` and `scripts/breakfix.sh reset D04`.
 
-## 10. Troubleshooting Guide & Diagnostic Runbook
+### 5.6 Make a hop buffer, then catch it
 
-### Issue 1: `504 Gateway Timeout` on Complex Reasoning Queries
-* **Root Cause**: The client connection timed out while DeepSeek-R1 was computing in its `<think>` block.
-* **Remediation**: In your Ingress resource, update the read and send timeouts:
-  ```yaml
-  nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
-  nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
-  ```
+Attach 02's `llm-body-limit` middleware (Traefik `buffering`) to the LiteLLM route:
 
-### Issue 2: `ERR_INCOMPLETE_CHUNKED_ENCODING` in Chrome
-* **Root Cause**: The client or reverse proxy terminated the TCP socket before receiving the terminal `data: [DONE]` sentinel.
-* **Remediation**: Check the vLLM container logs for an unhandled Python OOM exception that crashed the worker mid-stream:
-  ```bash
-  kubectl logs -n ai-inference -l app=deepseek-r1 --tail=100
-  ```
+```bash
+kubectl -n llm-serving patch httproute litellm --type json -p '[{"op":"add","path":"/spec/rules/0/filters","value":[
+  {"type":"ExtensionRef","extensionRef":{"group":"traefik.io","kind":"Middleware","name":"llm-body-limit"}}]}]'
+python3 tools/stream_probe.py --url http://api.lab.local --api-key "$KEY" --model reasoning-fast
+kubectl apply -f k8s/apps/litellm.yaml          # remove the filter
+```
+
+Expected: if your Traefik version buffers responses in that middleware, the probe prints `BUFFERED` and `first answer ≈ total`. Users see nothing until the whole answer is done. Lesson: put request-size limits on a separate non-streaming route, or enforce them in LiteLLM.
 
 ---
 
-## 🔗 Related Curriculum Modules
-* **High-Throughput Engine**: [15-vllm-serving-deepseek-and-qwen.md](15-vllm-serving-deepseek-and-qwen.md)
-* **Kubernetes Deployments**: [19-kubernetes-manifests-for-deepseek.md](19-kubernetes-manifests-for-deepseek.md)
-* **Enterprise Gateway Load Balancing**: [28-litellm-proxy-gateway-load-balancing.md](28-litellm-proxy-gateway-load-balancing.md)
-* **Web UI Frontend Integration**: [27-open-webui-deployment-and-integration.md](27-open-webui-deployment-and-integration.md)
+## 6. Verify
+
+| Check | Expected |
+|---|---|
+| three hops | all `finish_reason=stop`, no `BUFFERED`, ITL p50 within ~1 ms of each other |
+| long reasoning | a 5-minute generation completes through the Gateway |
+| D04 | diagnosed by comparing hops, and reset |
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `504 Gateway Timeout` after exactly N seconds | shortest timeout on the path | probe each hop. Raise that hop to ≥ 900 s |
+| stream cut at 600 s from Python | OpenAI SDK default timeout | `OpenAI(timeout=900)` |
+| nothing for minutes, then the whole answer | a hop buffers SSE (`BUFFERED`) | remove buffering/compression middleware from streaming routes |
+| `finish_reason=length`, answer empty | client `max_tokens` used up by thinking | raise `max_tokens` (R1: 8K–32K). Alert `ReasoningTruncated` |
+| thinking shows inside `content` | no reasoning parser (D01) | `--reasoning-parser=deepseek_r1` |
+| `401` at the Gateway, `200` at vLLM | LiteLLM needs the key | `Authorization: Bearer $KEY` |
+| `404` from Traefik | Host header doesn't match the HTTPRoute | `api.lab.local` in `/etc/hosts`, or `--host` |
+| streams break during a model switch | `Recreate` stops the old pod | expected downtime. Switch models in a maintenance window, or add spark-02 |
+
+---
+
+## 8. Scale-out path
+
+| One Spark | Fleet |
+|---|---|
+| Traefik + LiteLLM, 900 s everywhere | an L7 gateway with per-route timeouts, plus an LLM-aware router (queue- and prefix-cache-aware, e.g. Gateway API Inference Extension) |
+| `stream_probe.py` by hand | synthetic probes per region every minute, TTFT and ITL SLOs in Prometheus |
+| `Recreate` downtime | rolling updates across replicas. Drain by `num_requests_running == 0` |
+
+---
+
+## 9. Checklist
+
+- [ ] I measured TTFT, time-to-first-answer and ITL at every hop.
+- [ ] I know every timeout on the path and its value.
+- [ ] I can recognise a buffering hop from the probe output alone.
+- [ ] I solved D04.

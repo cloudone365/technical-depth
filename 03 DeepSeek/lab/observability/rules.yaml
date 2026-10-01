@@ -1,0 +1,30 @@
+# Serving alerts specific to reasoning models (Volume 38).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata: {name: spark-reasoning, namespace: observability, labels: {release: kps}}
+spec:
+  groups:
+    - name: spark-reasoning
+      rules:
+        - alert: ReasoningTruncated
+          # >20 % of requests stop at max_tokens: chains of thought cut off → wrong/empty answers
+          expr: |
+            sum by (model_name) (rate(vllm:request_success_total{finished_reason="length"}[15m]))
+              / sum by (model_name) (rate(vllm:request_success_total[15m])) > 0.2
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: "{{ $labels.model_name }}: {{ $value | humanizePercentage }} of requests hit max_tokens"
+            action: "raise client max_tokens / --max-model-len, or check temperature (R1 loops at 0)"
+        - alert: VLLMDown
+          expr: absent(up{job=~".*vllm.*"} == 1)
+          for: 5m
+          labels: {severity: critical}
+          annotations: {summary: "no vLLM target is up"}
+        - alert: PrefixCacheIneffective
+          expr: |
+            sum(rate(vllm:prefix_cache_hits_total[30m])) / sum(rate(vllm:prefix_cache_queries_total[30m])) < 0.05
+            and sum(rate(vllm:prefix_cache_queries_total[30m])) > 100
+          for: 30m
+          labels: {severity: info}
+          annotations: {summary: "prefix cache hit rate <5 % — variable content before the shared prompt? (Vol 16)"}

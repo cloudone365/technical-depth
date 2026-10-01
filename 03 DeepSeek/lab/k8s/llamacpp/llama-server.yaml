@@ -1,0 +1,36 @@
+# GGUF serving with llama.cpp (Volume 17): R1-Distill-Qwen-7B at Q4_K_M
+# (~4.7 GB). -ngl 999 offloads every layer to the GB10.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llama-server, namespace: llm-serving, labels: {app: llama-server}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: llama-server}}
+  template:
+    metadata: {labels: {app: llama-server}}
+    spec:
+      containers:
+        - name: llama
+          image: spark-local/llama.cpp:server-sm121
+          imagePullPolicy: Never              # imported into k3s containerd from the local build
+          args: ["-hf", "unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF:Q4_K_M", "--alias", "r1-7b-q4",
+                 "-ngl", "999", "-c", "16384", "--parallel", "4", "--jinja",
+                 "--host", "0.0.0.0", "--port", "8080", "--metrics"]
+          env: [{name: LLAMA_CACHE, value: /models/gguf}]
+          ports: [{name: http, containerPort: 8080}]
+          startupProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, failureThreshold: 90}
+          readinessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 5}
+          resources:
+            requests: {cpu: "4", memory: 4Gi, nvidia.com/gpu: "1"}
+            limits: {memory: 24Gi, nvidia.com/gpu: "1"}
+          volumeMounts: [{name: models, mountPath: /models}]
+      volumes:
+        - {name: models, persistentVolumeClaim: {claimName: model-cache}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: llama-server, namespace: llm-serving}
+spec:
+  selector: {app: llama-server}
+  ports: [{name: http, port: 8080, targetPort: http}]

@@ -1,0 +1,495 @@
+{
+ "title": "Spark \u00b7 LLM serving (DeepSeek)",
+ "uid": "spark-llm-serving",
+ "tags": [
+  "dgx-spark",
+  "vllm",
+  "deepseek"
+ ],
+ "schemaVersion": 39,
+ "refresh": "30s",
+ "time": {
+  "from": "now-3h",
+  "to": "now"
+ },
+ "templating": {
+  "list": [
+   {
+    "name": "datasource",
+    "type": "datasource",
+    "query": "prometheus",
+    "current": {}
+   },
+   {
+    "name": "model",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "${datasource}"
+    },
+    "query": "label_values(vllm:num_requests_running, model_name)",
+    "includeAll": true,
+    "multi": true,
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    },
+    "allValue": ".*"
+   }
+  ]
+ },
+ "panels": [
+  {
+   "type": "row",
+   "title": "Throughput",
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   },
+   "collapsed": false,
+   "id": 1
+  },
+  {
+   "type": "timeseries",
+   "title": "Output tokens/s",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 1
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "sum by (model_name) (rate(vllm:generation_tokens_total{model_name=~\"$model\"}[1m]))",
+     "legendFormat": "{{model_name}}",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 2
+  },
+  {
+   "type": "timeseries",
+   "title": "Prompt tokens/s (incl. cached)",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 1
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "sum by (model_name) (rate(vllm:prompt_tokens_total{model_name=~\"$model\"}[1m]))",
+     "legendFormat": "{{model_name}}",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 3
+  },
+  {
+   "type": "row",
+   "title": "Latency",
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 9
+   },
+   "collapsed": false,
+   "id": 4
+  },
+  {
+   "type": "timeseries",
+   "title": "TTFT p50 / p95",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 10
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.5, sum by (le, model_name) (rate(vllm:time_to_first_token_seconds_bucket{model_name=~\"$model\"}[5m])))",
+     "legendFormat": "p50 {{model_name}}",
+     "refId": "A"
+    },
+    {
+     "expr": "histogram_quantile(0.95, sum by (le, model_name) (rate(vllm:time_to_first_token_seconds_bucket{model_name=~\"$model\"}[5m])))",
+     "legendFormat": "p95 {{model_name}}",
+     "refId": "B"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 5
+  },
+  {
+   "type": "timeseries",
+   "title": "Inter-token latency p50 / p95",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 10
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.5, sum by (le, model_name) (rate(vllm:inter_token_latency_seconds_bucket{model_name=~\"$model\"}[5m]) or rate(vllm:time_per_output_token_seconds_bucket{model_name=~\"$model\"}[5m])))",
+     "legendFormat": "p50 {{model_name}}",
+     "refId": "A"
+    },
+    {
+     "expr": "histogram_quantile(0.95, sum by (le, model_name) (rate(vllm:inter_token_latency_seconds_bucket{model_name=~\"$model\"}[5m]) or rate(vllm:time_per_output_token_seconds_bucket{model_name=~\"$model\"}[5m])))",
+     "legendFormat": "p95 {{model_name}}",
+     "refId": "B"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 6
+  },
+  {
+   "type": "timeseries",
+   "title": "End-to-end request p95",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 18
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.95, sum by (le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=~\"$model\"}[5m])))",
+     "legendFormat": "{{model_name}}",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 7
+  },
+  {
+   "type": "timeseries",
+   "title": "Generated tokens per request p50 / p95 (reasoning length)",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 18
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.5, sum by (le, model_name) (rate(vllm:request_generation_tokens_bucket{model_name=~\"$model\"}[15m])))",
+     "legendFormat": "p50 {{model_name}}",
+     "refId": "A"
+    },
+    {
+     "expr": "histogram_quantile(0.95, sum by (le, model_name) (rate(vllm:request_generation_tokens_bucket{model_name=~\"$model\"}[15m])))",
+     "legendFormat": "p95 {{model_name}}",
+     "refId": "B"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 8
+  },
+  {
+   "type": "row",
+   "title": "Capacity",
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 26
+   },
+   "collapsed": false,
+   "id": 9
+  },
+  {
+   "type": "timeseries",
+   "title": "Running / waiting requests",
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 27
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "sum by (model_name) (vllm:num_requests_running{model_name=~\"$model\"})",
+     "legendFormat": "running {{model_name}}",
+     "refId": "A"
+    },
+    {
+     "expr": "sum by (model_name) (vllm:num_requests_waiting{model_name=~\"$model\"})",
+     "legendFormat": "waiting {{model_name}}",
+     "refId": "B"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 10
+  },
+  {
+   "type": "timeseries",
+   "title": "KV cache usage",
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 27
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "max by (model_name) (vllm:kv_cache_usage_perc{model_name=~\"$model\"} or vllm:gpu_cache_usage_perc{model_name=~\"$model\"})",
+     "legendFormat": "{{model_name}}",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 11
+  },
+  {
+   "type": "timeseries",
+   "title": "Preemptions/s",
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 27
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "sum by (model_name) (rate(vllm:num_preemptions_total{model_name=~\"$model\"}[5m]))",
+     "legendFormat": "{{model_name}}",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 12
+  },
+  {
+   "type": "row",
+   "title": "Quality signals",
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 35
+   },
+   "collapsed": false,
+   "id": 13
+  },
+  {
+   "type": "timeseries",
+   "title": "Finish reasons (length = truncated reasoning)",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 36
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "sum by (finished_reason) (rate(vllm:request_success_total{model_name=~\"$model\"}[5m]))",
+     "legendFormat": "{{finished_reason}}",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 14
+  },
+  {
+   "type": "timeseries",
+   "title": "Prefix-cache hit rate",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 36
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(vllm:prefix_cache_hits_total{model_name=~\"$model\"}[5m])) / sum(rate(vllm:prefix_cache_queries_total{model_name=~\"$model\"}[5m]))",
+     "legendFormat": "hit rate",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 15
+  },
+  {
+   "type": "timeseries",
+   "title": "Speculative decoding acceptance",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 44
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(vllm:spec_decode_num_accepted_tokens_total{model_name=~\"$model\"}[5m])) / sum(rate(vllm:spec_decode_num_draft_tokens_total{model_name=~\"$model\"}[5m]))",
+     "legendFormat": "acceptance",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 16
+  }
+ ]
+}

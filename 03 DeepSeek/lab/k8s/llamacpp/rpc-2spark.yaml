@@ -1,0 +1,56 @@
+# DeepSeek-R1 671B (dynamic 1.58-bit GGUF, ≈131 GB) across TWO Sparks with
+# llama.cpp RPC (Volume 14). spark-02 runs rpc-server and lends its GB10 +
+# memory; spark-01 runs llama-server and splits layers across both.
+# Needs: the GGUF shards in /srv/models/gguf on spark-01 (see volume), CX-7 up.
+# Namespace llm-multinode (privileged PSA: hostNetwork) comes from k8s/multinode/namespace.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llama-rpc-worker, namespace: llm-multinode, labels: {app: llama-rpc-worker}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: llama-rpc-worker}}
+  template:
+    metadata: {labels: {app: llama-rpc-worker}}
+    spec:
+      nodeSelector: {kubernetes.io/hostname: spark-02}
+      hostNetwork: true
+      containers:
+        - name: rpc
+          image: spark-local/llama.cpp:server-sm121
+          imagePullPolicy: Never
+          command: ["rpc-server"]
+          args: ["--host", "192.168.100.12", "--port", "50052"]
+          readinessProbe: {tcpSocket: {port: 50052}, periodSeconds: 10}
+          resources:
+            requests: {cpu: "4", memory: 8Gi, nvidia.com/gpu: "1"}
+            limits: {memory: 110Gi, nvidia.com/gpu: "1"}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llama-r1-671b, namespace: llm-multinode, labels: {app: llama-r1-671b}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: llama-r1-671b}}
+  template:
+    metadata: {labels: {app: llama-r1-671b}}
+    spec:
+      nodeSelector: {kubernetes.io/hostname: spark-01}
+      hostNetwork: true
+      containers:
+        - name: llama
+          image: spark-local/llama.cpp:server-sm121
+          imagePullPolicy: Never
+          args: ["-m", "/gguf/DeepSeek-R1-UD-IQ1_S/DeepSeek-R1-UD-IQ1_S-00001-of-00003.gguf",
+                 "--rpc", "192.168.100.12:50052", "-ngl", "999", "-c", "8192", "--parallel", "1",
+                 "--alias", "r1-671b-iq1", "--host", "0.0.0.0", "--port", "8081", "--metrics"]
+          ports: [{name: http, containerPort: 8081}]
+          startupProbe: {httpGet: {path: /health, port: 8081}, periodSeconds: 20, failureThreshold: 90}
+          readinessProbe: {httpGet: {path: /health, port: 8081}, periodSeconds: 10}
+          resources:
+            requests: {cpu: "8", memory: 16Gi, nvidia.com/gpu: "1"}
+            limits: {memory: 110Gi, nvidia.com/gpu: "1"}
+          volumeMounts: [{name: gguf, mountPath: /gguf, readOnly: true}]
+      volumes:
+        - name: gguf
+          hostPath: {path: /srv/models/gguf, type: Directory}
