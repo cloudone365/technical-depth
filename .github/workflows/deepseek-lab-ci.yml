@@ -48,6 +48,8 @@ jobs:
           tests/fake-gpu-node.sh
           source versions.env
           kubectl apply --server-side -f "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml"
+          # Kueue's webhook also mutates Deployments (incl. LWS's): it must be up first
+          kubectl -n kueue-system rollout status deploy/kueue-controller-manager --timeout=5m
           kubectl apply --server-side -f "https://github.com/prometheus-operator/prometheus-operator/releases/download/v0.81.0/stripped-down-crds.yaml"
           kubectl apply --server-side -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
           kubectl apply --server-side -f "https://github.com/kubernetes-sigs/lws/releases/download/v0.7.0/manifests.yaml"
@@ -56,7 +58,6 @@ jobs:
             kubectl apply --server-side -f "https://raw.githubusercontent.com/traefik/traefik-helm-chart/v${TRAEFIK_CHART_VERSION}/traefik/crds/${c}.yaml"
           done
           # webhooks must be serving before apply-lab.sh creates Kueue/LWS objects
-          kubectl -n kueue-system rollout status deploy/kueue-controller-manager --timeout=5m
           kubectl -n lws-system rollout status deploy/lws-controller-manager --timeout=5m
           scripts/apply-lab.sh
       - name: All 03 checks (incl. RAG on real Qdrant and server-side dry-run)
