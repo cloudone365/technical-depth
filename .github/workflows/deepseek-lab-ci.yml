@@ -1,0 +1,56 @@
+# CI for "03 DeepSeek/lab" — see 03 DeepSeek/40-hands-on-exercises-workbook.md §0
+name: deepseek-lab
+
+on:
+  pull_request:
+    paths: ["03 DeepSeek/lab/**", "02 Kubernetes/lab/**", ".github/workflows/deepseek-lab-ci.yml"]
+  push:
+    branches: [main]
+    paths: ["03 DeepSeek/lab/**"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: "03 DeepSeek/lab"
+
+env:
+  KUBECONFORM: v0.6.7
+  PROMETHEUS: "3.4.1"
+  QDRANT: v1.13.4
+
+jobs:
+  checks:
+    name: tools · data · manifests · RAG (CPU) · kind dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with: {python-version: "3.12"}
+      - uses: azure/setup-kubectl@v4
+        with: {version: v1.32.5}
+      - name: Tools
+        run: |
+          pip install yamllint shellcheck-py pyyaml
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install "trl==0.23.0" "peft==0.17.1" "transformers==4.56.2" "accelerate==1.10.1" "datasets==4.1.1"
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM}/kubeconform-linux-amd64.tar.gz" | sudo tar xz -C /usr/local/bin kubeconform
+          curl -sSL "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS}/prometheus-${PROMETHEUS}.linux-amd64.tar.gz" \
+            | sudo tar xz -C /usr/local/bin --strip-components=1 "prometheus-${PROMETHEUS}.linux-amd64/promtool"
+          curl -sSL "https://github.com/qdrant/qdrant/releases/download/${QDRANT}/qdrant-x86_64-unknown-linux-musl.tar.gz" | tar xz -C /tmp
+      - uses: helm/kind-action@v1
+        with: {cluster_name: spark-sim, node_image: "kindest/node:v1.32.2"}
+      - name: Platform from 02 + CRDs the lab expects
+        working-directory: "02 Kubernetes/lab"
+        run: |
+          tests/fake-gpu-node.sh
+          source versions.env
+          kubectl apply --server-side -f "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml"
+          kubectl apply --server-side -f "https://github.com/prometheus-operator/prometheus-operator/releases/download/v0.81.0/stripped-down-crds.yaml"
+          kubectl apply --server-side -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
+          kubectl apply --server-side -f "https://github.com/kubernetes-sigs/lws/releases/download/v0.7.0/manifests.yaml"
+          for c in traefik.io_middlewares traefik.io_ingressroutes; do
+            kubectl apply --server-side -f "https://raw.githubusercontent.com/traefik/traefik-helm-chart/v${TRAEFIK_CHART_VERSION}/traefik/crds/${c}.yaml"
+          done
+          scripts/apply-lab.sh
+      - name: All 03 checks (incl. RAG on real Qdrant and server-side dry-run)
+        run: QDRANT=/tmp/qdrant API=1 ../../02\ Kubernetes/lab/tests/ci-run.sh tests/run-local-checks.sh
