@@ -1,323 +1,190 @@
-# 03. Multi-Token Prediction (MTP) — Built-In Speculative Decoding
+# Volume 03 — Multi-Token Prediction (MTP) and Speculative Decoding: Turning Spare Compute into Tokens
 
-> **Target Audience**: Anyone from a developer exploring modern LLMs for the first time to an experienced infrastructure engineer seeking deep mathematical and architectural clarity.
+> **Module 03 · Part I — Architecture** · Prev: [02 DeepSeekMoE](02-deepseek-moe-fine-grained-routing.md) · Next: [04 FP8 training](04-fp8-mixed-precision-framework.md)
 
----
-
-## 📑 Table of Contents
-1. [Foundational Scaffolding: The Autoregressive Generation Bottleneck](#1-foundational-scaffolding-the-autoregressive-generation-bottleneck)
-   - [1.1 The Single-Token Generation Tax](#11-the-single-token-generation-tax)
-   - [1.2 What is Speculative Decoding? The Writer-Editor Analogy](#12-what-is-speculative-decoding-the-writer-editor-analogy)
-   - [1.3 The Infrastructure Nightmare of Traditional Draft Models](#13-the-infrastructure-nightmare-of-traditional-draft-models)
-2. [DeepSeek Multi-Token Prediction (MTP) Architecture](#2-deepseek-multi-token-prediction-mtp-architecture)
-   - [2.1 Why Pre-Training to Predict Multiple Tokens Improves Representation](#21-why-pre-training-to-predict-multiple-tokens-improves-representation)
-   - [2.2 Sequential Cascading Prediction Modules](#22-sequential-cascading-prediction-modules)
-   - [2.3 Feature Fusion: Combining Representations and Embeddings](#23-feature-fusion-combining-representations-and-embeddings)
-   - [2.4 Mathematical Training Loss Formulation](#24-mathematical-training-loss-formulation)
-3. [Inference Mechanics: Native Speculative Decoding with Zero Extra VRAM](#3-inference-mechanics-native-speculative-decoding-with-zero-extra-vram)
-   - [3.1 The 2-Token Dual-Generation Loop](#31-the-2-token-dual-generation-loop)
-   - [3.2 The Acceptance / Rejection Verification Rule](#32-the-acceptance--rejection-verification-rule)
-   - [3.3 Mathematical Speedup Formulation (The Acceptance Rate $\alpha$)](#33-mathematical-speedup-formulation-the-acceptance-rate-alpha)
-4. [Alternative Industry Approaches to Speculative Decoding](#4-alternative-industry-approaches-to-speculative-decoding)
-5. [Hardware Grounding for NVIDIA DGX Spark (Grace Blackwell GB10)](#5-hardware-grounding-for-nvidia-dgx-spark-grace-blackwell-gb10)
-6. [Hands-On PyTorch Implementation & Verification Lab](#6-hands-on-pytorch-implementation--verification-lab)
-7. [Beginner Practice Exercises with Solutions](#7-beginner-practice-exercises-with-solutions)
-8. [Troubleshooting, Common Misconceptions & FAQ](#8-troubleshooting-common-misconceptions--faq)
+| | |
+|---|---|
+| **You will build** | An estimate of the speed-up any draft method can give from its acceptance rate. You'll run speculative decoding on the Spark with a 1.5B draft for the R1 7B, compare it with draft-free n-gram lookup, and read the acceptance rate from vLLM's metrics |
+| **Hardware** | CPU for §5.1. spark-01 for §5.2–5.4 |
+| **Time** | 60 min |
+| **Risk** | None |
+| **Lab files** | [`tools/spec_decode_calc.py`](lab/tools/spec_decode_calc.py), [`k8s/spec-decode/`](lab/k8s/spec-decode/), [`k8s/models/r1-7b`](lab/k8s/models/r1-7b/kustomization.yaml), [`k8s/models/r1-1.5b`](lab/k8s/models/r1-1.5b/kustomization.yaml) |
 
 ---
 
-## 1. Foundational Scaffolding: The Autoregressive Generation Bottleneck
+## 1. Why this matters on a Spark
 
-### 1.1 The Single-Token Generation Tax
-Standard Large Language Models (LLMs) operate under the **next-token prediction** paradigm:
+Decoding one token means reading every active weight once, and doing very little arithmetic per byte. On a GB10 with ~273 GB/s of memory bandwidth, a 7B BF16 model (≈15 GB) is limited to roughly `273 / 15 ≈ 18` forward passes per second for a single stream, **however many TFLOPS sit idle**. Speculative decoding spends that idle compute: guess several tokens cheaply, verify them all in **one** forward pass of the big model, and keep the ones it agrees with.
 
-$$P(t_{n+1} \mid t_1, t_2, \dots, t_n)$$
-
-To generate an essay of 1,000 tokens, the model must execute **1,000 separate, sequential forward passes**.
-
-During each forward pass:
-1. The GPU must read **all model weights** (e.g., 32 GB for a 32B model, or 671 GB for a 671B model) from High-Bandwidth Memory (HBM) into on-chip cache (SRAM).
-2. It performs matrix multiplications to predict **exactly ONE token**.
-3. It writes the token to memory, and repeats the process 1,000 times!
-
-This is why LLM generation can feel slow: the GPU compute cores are lightning-fast, but they are constantly starved of data waiting for weights to travel over the memory bus.
-
-### 1.2 What is Speculative Decoding? The Writer-Editor Analogy
-Imagine writing a book:
-- **Without Speculation**: A brilliant, Nobel-prize-winning professor writes one letter at a time, pausing for 2 seconds after each letter to consider its profound implications. It takes 10 hours to write one page.
-- **With Speculative Decoding**: An eager graduate student (a small, fast "draft model") quickly drafts 5 words ahead: *"The quick brown fox jumps"*. The Nobel professor (the large "target model") glances at the whole sentence in a single 2-second glance and says: *"Yes, words 1 through 4 are correct, but change word 5 to 'leaps'"*.
-
-In computer science, **verifying 5 tokens in parallel takes almost the exact same time as generating 1 token from scratch** because the GPU can process multiple tokens in parallel during the verification forward pass!
-
-### 1.3 The Infrastructure Nightmare of Traditional Draft Models
-Traditionally, speculative decoding required serving **two distinct models concurrently**:
-- **Target Model**: e.g., Llama-3-70B (consuming 140 GB VRAM).
-- **Draft Model**: e.g., Llama-3-8B or a tiny 68M model (consuming an extra 16 GB VRAM).
-
-**Why Traditional Speculative Decoding Failed in Production**:
-1. **Memory Overhead**: The draft model occupies precious GPU memory that could have been used for larger batch sizes or KV caches.
-2. **Tokenizer Mismatches**: If the draft model was trained on a different vocabulary, token alignment is complex and error-prone.
-3. **Distribution Drift**: Small models make low-quality guesses on complex coding or math questions, causing the acceptance rate to drop below 30%—at which point speculative decoding actually **slows down** inference due to verification overhead!
+DeepSeek-V3 builds the guesser into the model: **Multi-Token Prediction (MTP)** modules trained to predict token t+2 from the main model's hidden state at t+1. In training MTP is an auxiliary objective that densifies the signal. In serving the MTP module becomes a built-in draft. DeepSeek reports an 85–90 % acceptance rate for the second token, which gives about 1.8× decode throughput.
 
 ---
 
-## 2. DeepSeek Multi-Token Prediction (MTP) Architecture
-
-DeepSeek-V3 solved this dilemma by integrating speculative drafting **directly into the pretraining architecture**.
+## 2. Architecture — HLD
 
 ```mermaid
-graph TD
-    Input["Input Tokens: t_1 ... t_n"] --> Backbone["Main Transformer Backbone (61 Layers)"]
-    Backbone --> H0["Hidden Representation h_n^(0)"]
-    
-    H0 --> Head0["Main Prediction Head 0 (Predicts t_{n+1})"]
-    
-    subgraph MTP_Module_1["MTP Layer Depth 1"]
-        H0 --> Norm1["RMSNorm(h_n^(0))"]
-        Embed1["Embed(t_{n+1})"] --> NormE1["RMSNorm(Embed)"]
-        Norm1 --> Concat1["Concat & Linear Projection"]
-        NormE1 --> Concat1
-        Concat1 --> Block1["1 Transformer Layer"]
-        Block1 --> H1["Representation h_n^(1)"]
-        H1 --> Head1["MTP Head 1 (Predicts t_{n+2})"]
-    end
-
-    subgraph MTP_Module_2["MTP Layer Depth 2 (Optional)"]
-        H1 --> Norm2["RMSNorm(h_n^(1))"]
-        Embed2["Embed(t_{n+2})"] --> NormE2["RMSNorm(Embed)"]
-        Norm2 --> Concat2["Concat & Linear Projection"]
-        NormE2 --> Concat2
-        Concat2 --> Block2["1 Transformer Layer"]
-        Block2 --> H2["Representation h_n^(2)"]
-        H2 --> Head2["MTP Head 2 (Predicts t_{n+3})"]
-    end
+flowchart LR
+  subgraph TRAIN["Training (DeepSeek-V3)"]
+    direction LR
+    MT["main trunk<br/>61 layers"] -->|"h_t"| H1["output head → token t+1"]
+    MT -->|"h_t ⊕ emb(t+1)"| M1["MTP module 1<br/>1 transformer block<br/>shared embedding + head"] --> H2["token t+2"]
+  end
+  subgraph SERVE["Serving: draft → verify"]
+    direction LR
+    D["draft k tokens<br/>(MTP head · small model · n-gram)"] --> VV["target model verifies<br/>k+1 positions in ONE pass"]
+    VV --> ACC{"accept prefix<br/>that matches"}
+    ACC -->|"accepted + 1 bonus token"| OUT["output"]
+    ACC -->|"first mismatch"| D
+  end
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  class MT,M1,VV gpu
+  class D,ACC ctrl
+  style TRAIN fill:#f6f8fa,stroke:#57606a
+  style SERVE fill:#f4fbe8,stroke:#76b900
 ```
 
-### 2.1 Why Pre-Training to Predict Multiple Tokens Improves Representation
-In standard pretraining, a model only needs to know what token comes immediately next. It can often guess simple grammatical transitions without deeply planning ahead.
-
-When forced to predict $t_{n+1}$ AND $t_{n+2}$ simultaneously:
-- The hidden state $h_n$ must anticipate multi-token grammatical structures, future semantic intent, and long-range dependencies.
-- In DeepSeek-V3, training with MTP improved the benchmark accuracy of the main model across math, code, and natural language, even when MTP heads were not used during evaluation!
-
-### 2.2 Sequential Cascading Prediction Modules
-Rather than predicting future tokens independently in parallel, DeepSeek chains prediction modules sequentially:
-- To predict $t_{n+2}$, the module receives both the backbone representation $h_n^{(0)}$ and the ground truth embedding of $t_{n+1}$.
-- This preserves the causal autoregressive structure: future predictions are conditioned on previous predictions!
-
-### 2.3 Feature Fusion: Combining Representations and Embeddings
-At MTP depth $k$ (predicting token $t_{n+k+1}$):
-
-$$h_i^{(k)} = \text{TransformerLayer}^{(k)}\left( \text{Linear}\left( [ \text{RMSNorm}(h_i^{(k-1)}) \, ; \, \text{RMSNorm}(\text{Embed}(t_{i+k})) ] \right) \right)$$
-
-Where:
-- $h_i^{(k-1)}$ is the representation from the previous MTP module (or the main backbone).
-- $\text{Embed}(t_{i+k})$ is the token embedding from the shared vocabulary embedding matrix.
-- The two vectors are concatenated along the hidden dimension and projected back down to $d_{\text{model}}$.
-
-### 2.4 Mathematical Training Loss Formulation
-During pretraining, the loss is the weighted sum of the main next-token loss and all cascading MTP losses:
-
-$$\mathcal{L}_{\text{total}} = \mathcal{L}_0 + \sum_{k=1}^D \lambda_k \mathcal{L}_k$$
-
-Where:
-$$\mathcal{L}_k = - \frac{1}{T} \sum_{i=1}^T \log P_k(t_{i+k+1} \mid h_i^{(k)})$$
-
-In DeepSeek-V3, depth $D = 1$ (predicting 1 additional future token), with weight $\lambda_1 = 0.3$. The extra computation adds less than **2.5% to total pretraining FLOPs**, but yields massive speedups at inference!
+**Output quality is unchanged.** With rejection sampling, the verified sequence follows exactly the target model's distribution. Speculation changes speed, never the answer distribution.
 
 ---
 
-## 3. Inference Mechanics: Native Speculative Decoding with Zero Extra VRAM
+## 3. LLD
 
-During inference on an engine like **vLLM** or **SGLang**:
+### 3.1 The speed-up formula
+
+With per-token acceptance rate α, k drafted tokens and draft cost c (relative to one target pass):
+
+`E[tokens per target pass] = (1 − α^(k+1)) / (1 − α)`, and `speed-up ≈ E / (1 + k·c)`.
+
+`spec_decode_calc.py --sweep --draft-cost 0.1`:
+
+| α | k=1 | k=2 | k=3 | k=4 | k=6 |
+|---|---|---|---|---|---|
+| 0.5 | 1.36× | 1.46× | 1.44× | 1.38× | 1.24× |
+| 0.7 | 1.55× | 1.82× | 1.95× | 1.98× | 1.91× |
+| 0.8 | 1.64× | 2.03× | 2.27× | 2.40× | 2.47× |
+| 0.9 | 1.73× | 2.26× | 2.65× | 2.93× | 3.26× |
+
+Two lessons: **acceptance rate dominates**, and past the optimum, extra draft tokens cost more than they save.
+
+### 3.2 Draft methods in vLLM
+
+| Method | `--speculative-config` | Draft cost | Typical α | Best for |
+|---|---|---|---|---|
+| Built-in MTP (DeepSeek-V3/R1) | `{"method": "deepseek_mtp", "num_speculative_tokens": 1}` | ~1 block | high (0.85–0.9 for token 2) | V3/R1 full models (Vol 14) |
+| Small draft model | `{"model": "<draft>", "num_speculative_tokens": 4}` | 0.05–0.15 | 0.5–0.8 | same tokenizer family: R1-1.5B → R1-7B/32B |
+| n-gram / prompt lookup | `{"method": "ngram", "num_speculative_tokens": 4, "prompt_lookup_max": 4}` | ~0 | high on copy-heavy output, ~0 otherwise | RAG, code edits, summarisation |
+| EAGLE-style heads | `{"method": "eagle3", "model": "<eagle head>", …}` | small | 0.6–0.8 | when a trained head exists for your model |
+
+### 3.3 UMA cost of a draft model
+
+| Config | Util | What's resident |
+|---|---|---|
+| r1-7b alone | 0.30 | 14.2 GiB weights + KV |
+| r1-7b + 1.5B draft | 0.36 | + 3.4 GiB draft weights + draft KV |
+
+---
+
+## 4. Integrations
+
+- **Metrics (Vol 38):** `vllm:spec_decode_num_accepted_tokens_total / vllm:spec_decode_num_draft_tokens_total` is α in practice. Add it to the serving dashboard when you run speculation.
+- **Eval harness (Vol 40):** quality must not move. Run the same suite with and without speculation as a regression check on your configuration.
+- **Reasoning models** emit long `<think>` chains, so decode time dominates and they benefit most from speculation.
+
+---
+
+## 5. Lab
+
+### 5.1 Predict before you measure
+
+```bash
+cd "03 DeepSeek/lab"
+python3 tools/spec_decode_calc.py --alpha 0.85 --k 1 --draft-cost 0.05     # V3-style MTP
+python3 tools/spec_decode_calc.py --sweep --draft-cost 0.1                 # 1.5B draft for 7B
+```
 
 ```text
-STEP 1: The Main Model predicts token t_{n+1}.
-STEP 2: The MTP Module immediately drafts speculative token t_{n+2}.
-STEP 3: In the next forward pass, BOTH t_{n+1} and t_{n+2} are verified in parallel!
-        - If the Main Model agrees with t_{n+2}:
-          ===> BOTH TOKENS ARE ACCEPTED! (2 tokens emitted in 1 step!)
-        - If the Main Model disagrees:
-          ===> t_{n+1} is accepted, the draft is discarded, and the correct token is emitted.
-          ===> ZERO PENALTY! (Identical speed to standard decoding!)
+α=0.85 k=1 c=0.05: 1.85 tokens/step, ≈1.76× decode speed-up
 ```
 
-### 3.1 The Acceptance / Rejection Verification Rule
-Let $q(x)$ be the probability assigned by the MTP draft head, and $p(x)$ be the probability assigned by the verified main model:
-- If $p(x) \ge q(x)$: The speculative token is **accepted with 100% probability**.
-- If $p(x) < q(x)$: The speculative token is accepted with probability $\frac{p(x)}{q(x)}$.
+### 5.2 Baseline: R1-7B without speculation
 
-This rejection sampling guarantees that the final output distribution is **mathematically identical** to sampling directly from the main model! There is zero quality degradation.
+```bash
+scripts/serve-model.sh r1-1.5b            # downloads the draft weights into model-cache too
+scripts/serve-model.sh r1-7b
+kubectl apply -f "../../02 Kubernetes/lab/manifests/90-serving/vllm/vllm-bench.yaml"
+kubectl -n llm-serving logs -f job/vllm-bench | grep -E 'max-concurrency|Output token throughput|Mean TPOT'
+```
 
-### 3.2 Mathematical Speedup Formulation
-Let $\alpha$ be the **acceptance rate** (the fraction of drafted tokens accepted by the main model):
+The bench Job's defaults target `qwen2.5-0.5b`. Edit `--model r1-7b --tokenizer deepseek-ai/DeepSeek-R1-Distill-Qwen-7B` in a copy of the Job first, or use the harness:
 
-$$\text{Tokens Generated per Step} = 1 + \alpha$$
+```bash
+kubectl -n llm-serving port-forward svc/vllm 8000 &
+python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math --concurrency 1 --out results/r1-7b-base.json
+```
 
-In coding and mathematical reasoning (which have rigid syntax and predictable tokens like `def`, `return`, `\frac{`, `\end{align*}`):
-- DeepSeek-V3 achieves an acceptance rate of **$\alpha \approx 0.85$ to $0.92$**!
-- Generation speed increases from 25 tokens/sec to **46+ tokens/sec (a 1.85x to 1.92x wall-clock speedup)** with **zero additional draft model VRAM required**!
+Note the `tok/s aggregate` line at concurrency 1 (single-stream decode speed).
 
----
+### 5.3 With a draft model, then with n-gram lookup
 
-## 4. Alternative Industry Approaches to Speculative Decoding
+```bash
+kubectl apply -k k8s/spec-decode/r1-7b-draft
+kubectl -n llm-serving rollout status deploy/vllm --timeout=30m
+python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math --concurrency 1 --out results/r1-7b-draft.json
+curl -s localhost:8000/metrics | grep -E '^vllm:spec_decode_num_(accepted|draft)_tokens_total'
 
-| Strategy | Architecture | Memory Overhead | Speedup Ratio | Portability |
-| :--- | :--- | :---: | :---: | :--- |
-| **DeepSeek MTP** | Built-in cascading transformer block | **< 2%** | **1.8x – 2.2x** | Native to model weights |
-| **Separate Draft Model** (e.g. Llama-68M) | Independent small transformer | 15% – 25% extra VRAM | 1.4x – 1.8x | Requires hosting 2 models |
-| **Medusa** | Multiple parallel non-autoregressive MLP heads | ~5% extra VRAM | 1.5x – 1.9x | Requires fine-tuning on SFT data |
-| **Prompt Lookup / N-Gram** | String matching against input context | 0% | 1.1x – 1.3x | Only works for copy-paste tasks |
-| **Lookahead Decoding** | Jacobi iteration branching | 0% | 1.2x – 1.4x | High compute overhead |
+kubectl apply -k k8s/spec-decode/r1-7b-ngram && kubectl -n llm-serving rollout status deploy/vllm --timeout=20m
+python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math --concurrency 1 --out results/r1-7b-ngram.json
+python3 tools/eval_harness.py --report results/r1-7b-*.json
+```
 
----
+Compute α = accepted / draft from the metrics, then plug it into `spec_decode_calc.py --alpha <α> --k 4 --draft-cost 0.1` and compare the prediction with the measured `tok/s`. Accuracy should be identical within run-to-run noise. If it isn't, something is wrong with the configuration, not the method.
 
-## 5. Hardware Grounding for NVIDIA DGX Spark (Grace Blackwell GB10)
+### 5.4 Check where speculation stops paying
 
-On the **NVIDIA DGX Spark**:
-- **Hardware Architecture**: Grace ARM CPU + Blackwell GPU connected via 900 GB/s NVLink-C2C, sharing 128 GB of unified memory.
-- **The MTP Advantage**: Because Blackwell Tensor Cores have immense compute capacity (PETAFLOPs of FP8) but memory bandwidth is finite, executing the small MTP layer takes almost **0 extra milliseconds** while cutting memory bus reads in half!
+Repeat §5.3 at `--concurrency 16`. At high batch the GPU is no longer idle between passes, so verification competes with real work and the gain shrinks or turns negative. vLLM can disable speculation above a batch size for this reason. Check `--speculative-config` options such as `disable_by_batch_size` in your vLLM version.
 
-$$\text{Memory Bandwidth Required per Token} = \frac{\text{Model Weights (GB)}}{1 + \alpha}$$
-
-For a 32B model in FP8 (32 GB weights) with $\alpha = 0.85$:
-- Without MTP: Requires 32 GB memory transfer per token.
-- With MTP: Requires $\frac{32}{1.85} \approx \mathbf{17.3\text{ GB per token}} \implies \mathbf{46\%\text{ reduction in memory bus traffic!}}$
-
----
-
-## 6. Hands-On PyTorch Implementation & Verification Lab
-
-The following self-contained script implements an **MTP Module**, trains it on synthetic sequences, and executes a real speculative draft-and-verify step.
-
-```python
-"""
-Multi-Token Prediction (MTP) Verification Lab
-Author: DGX Spark AI Infrastructure Team
-Description: Implements DeepSeek cascading MTP module with speculative verification loop.
-"""
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-class MTPModule(nn.Module):
-    """
-    Cascading Multi-Token Prediction module that predicts token t_{n+2}
-    given hidden state h_n^(0) and token embedding of t_{n+1}.
-    """
-    def __init__(self, d_model: int, vocab_size: int):
-        super().__init__()
-        self.d_model = d_model
-        self.vocab_size = vocab_size
-        
-        # Normalization layers
-        self.norm_h = nn.LayerNorm(d_model)
-        self.norm_embed = nn.LayerNorm(d_model)
-        
-        # Projection layer: [2 * d_model] -> [d_model]
-        self.proj = nn.Linear(2 * d_model, d_model, bias=False)
-        
-        # Transformer Block for MTP
-        self.transformer_block = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=8,
-            dim_feedforward=d_model * 2,
-            batch_first=True
-        )
-        
-        # Prediction Head
-        self.head = nn.Linear(d_model, vocab_size, bias=False)
-
-    def forward(self, h_prev: torch.Tensor, embed_next: torch.Tensor) -> torch.Tensor:
-        """
-        h_prev: Hidden state from main backbone [B, S, D]
-        embed_next: Token embedding of t_{n+1} [B, S, D]
-        """
-        normed_h = self.norm_h(h_prev)
-        normed_e = self.norm_embed(embed_next)
-        
-        # Feature fusion: concatenate along hidden dimension
-        fused = torch.cat([normed_h, normed_e], dim=-1)
-        projected = self.proj(fused)
-        
-        # Pass through dedicated MTP Transformer block
-        h_mtp = self.transformer_block(projected)
-        logits = self.head(h_mtp)
-        return logits
-
-# ----------------- Verification Lab -----------------
-if __name__ == "__main__":
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Running MTP Verification Lab on device: {device}")
-    
-    vocab_size = 1000
-    d_model = 256
-    seq_len = 10
-    batch_size = 2
-    
-    # 1. Instantiate MTP Module
-    mtp = MTPModule(d_model, vocab_size).to(device)
-    embedding_layer = nn.Embedding(vocab_size, d_model).to(device)
-    
-    # 2. Simulate Main Backbone forward pass
-    h_backbone = torch.randn(batch_size, seq_len, d_model, device=device)
-    token_t1 = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
-    embed_t1 = embedding_layer(token_t1)
-    
-    # 3. Predict token t_{n+2} using MTP
-    mtp_logits = mtp(h_backbone, embed_t1)
-    predicted_t2 = torch.argmax(mtp_logits, dim=-1)
-    
-    print("\n[SUCCESS] MTP forward pass completed!")
-    print(f"Backbone hidden shape: {h_backbone.shape}")
-    print(f"MTP Logits shape:       {mtp_logits.shape}")
-    print(f"Speculative Drafts (Sample): {predicted_t2[0, :5].cpu().numpy()}")
-    
-    # 4. Simulate Speculative Verification Loop
-    print("\n--- SIMULATING SPECULATIVE VERIFICATION ---")
-    draft_token = 42
-    main_model_verified_token = 42 # Main model agrees
-    
-    if draft_token == main_model_verified_token:
-        print(f"Token {draft_token} matches main model output! -> [ACCEPTED] (2 tokens emitted in 1 step)")
-    else:
-        print(f"Draft token {draft_token} rejected. -> [FALLBACK] Emitting verified token.")
+```bash
+scripts/serve-model.sh r1-7b      # back to the plain overlay
 ```
 
 ---
 
-## 7. Beginner Practice Exercises with Solutions
+## 6. Verify
 
-### Exercise 1: The Speculative Speedup Equation
-**Question**: You are serving a model with an MTP head on an NVIDIA DGX Spark.
-- The baseline generation speed without MTP is 30 tokens/second.
-- For code generation, the acceptance rate is $\alpha = 0.82$.
-- For creative fiction, the acceptance rate is $\alpha = 0.45$.
-1. Calculate the effective tokens/second for both coding and creative fiction.
-2. What is the percentage speedup for code generation?
-
-#### Solution:
-$$\text{Effective Speed} = \text{Baseline Speed} \times (1 + \alpha)$$
-1. **For Code Generation**:
-   $$\text{Speed} = 30 \times (1 + 0.82) = 30 \times 1.82 = \mathbf{54.6\text{ tokens/second}}$$
-   $$\text{Speedup} = \frac{54.6 - 30}{30} \times 100\% = \mathbf{82.0\%\text{ faster!}}$$
-
-2. **For Creative Fiction**:
-   $$\text{Speed} = 30 \times (1 + 0.45) = 30 \times 1.45 = \mathbf{43.5\text{ tokens/second}}$$
-
-*Takeaway*: Speculative decoding thrives on structured domains (code, JSON, math syntax) where future tokens have high mutual information.
+| Check | Expected |
+|---|---|
+| calculator | 1.85 tokens/step, ≈1.76× for α=0.85, k=1, c=0.05 |
+| draft run | `vllm:spec_decode_num_accepted_tokens_total` > 0. Single-stream tok/s above baseline |
+| quality | math accuracy unchanged (± a problem or two at temperature 0.6) |
 
 ---
 
-## 8. Troubleshooting, Common Misconceptions & FAQ
+## 7. Troubleshooting
 
-### Q1: "Does using MTP during pre-training require extra parameters during inference?"
-**Answer**: In DeepSeek-V3, the MTP modules represent only **about 1.5% of total parameters**. If you do not have enough VRAM for speculative decoding, you can completely discard the MTP layers during inference with zero impact on the main model's intelligence!
-
-### Q2: "Can an MTP head produce tokens that cause hallucinations?"
-**Answer**: **No.** MTP drafted tokens are *never* emitted directly to the user. Every drafted token must pass through the main model's forward pass verification. If the main model disagrees with the draft, the draft is instantly discarded.
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Speculative decoding … vocab size mismatch` | draft and target tokenizers differ | draft from the same family (R1-Qwen 1.5B ↔ R1-Qwen 7B/32B, not Llama ↔ Qwen) |
+| OOM at start after enabling the draft | two models + two KV caches | raise util slightly (overlay uses 0.36), or shorter `--max-model-len` |
+| α ≈ 0 with n-gram | output doesn't repeat input text | expected for open-ended reasoning. Use a draft model instead |
+| slower at high concurrency | GPU already busy | disable speculation above a batch size, or serve without it |
+| flag rejected | `--speculative-config` keys changed between vLLM versions | check `vllm serve --help=speculative` in your image |
 
 ---
 
-Proceed to [**04-fp8-mixed-precision-framework.md**](04-fp8-mixed-precision-framework.md) to explore DeepSeek's tile-wise and block-wise FP8 mixed-precision training framework.
+## 8. Scale-out path
+
+| One Spark | Datacenter |
+|---|---|
+| 1.5B draft for 7B, n-gram for RAG | MTP heads on V3/R1 (`deepseek_mtp`), EAGLE-3 heads trained per model |
+| fixed k | dynamic speculation length per request. Speculation off at high load |
+| α from metrics by hand | α tracked per model and per prompt type, feeding capacity planning |
+
+---
+
+## 9. Checklist
+
+- [ ] I can compute expected tokens per step and speed-up from α, k and draft cost.
+- [ ] I ran speculative decoding with a draft model and with n-gram lookup, and measured α.
+- [ ] I confirmed answer quality didn't change.
+- [ ] I know why speculation helps single-stream latency on a bandwidth-bound GB10 more than high-batch throughput.

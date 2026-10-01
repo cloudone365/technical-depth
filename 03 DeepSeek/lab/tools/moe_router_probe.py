@@ -85,6 +85,7 @@ def main():
     total = sum(counts[d][mid] for d in DOMAINS)
     print(f"\nlayer {mid} load max/mean = {total.max().item() / total.float().mean().item():.2f}")
     json.dump(total.tolist(), open(a.out, "w"))
+    print("LOADS_JSON: " + json.dumps(total.tolist()))           # grab from `kubectl logs` after the pod exits
     print(f"saved per-expert loads of layer {mid} → {a.out} (feed to eplb_sim.py --loads)")
 
 

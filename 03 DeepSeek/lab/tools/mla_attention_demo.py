@@ -82,11 +82,13 @@ def main():
         q_full.transpose(0, 1), k_full.transpose(0, 1), v.transpose(0, 1), is_causal=True
     ).transpose(0, 1).reshape(T, h * dv) @ W_O
 
-    err_abs = (out_naive - out_abs).abs().max().item()
-    err_mha = (out_naive - out_mha).abs().max().item()
+    ref = out_naive.abs().max().item()
+    err_abs = (out_naive - out_abs).abs().max().item() / ref        # relative to the output scale
+    err_mha = (out_naive - out_mha).abs().max().item() / ref
     print(f"device={dev} dtype={dt} d={d} heads={h} nope={dn} rope={dr} v={dv} latent r={r} tokens={T}")
-    print(f"max |naive - absorbed| = {err_abs:.2e}   max |naive - MHA| = {err_mha:.2e}")
-    assert err_abs < 1e-4 and err_mha < 1e-4, "variants disagree"
+    print(f"max rel. |naive - absorbed| = {err_abs:.2e}   max rel. |naive - MHA| = {err_mha:.2e}")
+    tol = 1e-10 if dt == torch.float64 else 1e-3
+    assert err_abs < tol and err_mha < tol, "variants disagree"
     print("✓ all three formulations produce the same output\n")
 
     elems_mha = 2 * h * (dn + dr)            # K (nope+rope) and V per head (V uses dv; dn == dv here)
