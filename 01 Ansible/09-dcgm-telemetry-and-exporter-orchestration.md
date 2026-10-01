@@ -361,11 +361,11 @@ groups:
 cd "01 Ansible/lab"
 ansible-playbook playbooks/04-telemetry.yml -K
 # node side
-ssh nvidia@10.10.10.11 'cat /var/lib/prometheus/node-exporter/spark_gpu.prom; curl -s localhost:9100/metrics | grep ^spark_ | head'
+ssh nvidia@192.168.0.100 'cat /var/lib/prometheus/node-exporter/spark_gpu.prom; curl -s localhost:9100/metrics | grep ^spark_ | head'
 # stack
-curl -s http://10.10.10.11:9090/api/v1/targets | jq -r '.data.activeTargets[] | "\(.labels.host) \(.health)"'
-curl -s http://10.10.10.11:9090/api/v1/rules | jq -r '.data.groups[].rules[].name'
-# Grafana: http://10.10.10.11:3000  (admin / gpu_telemetry_grafana_admin_password) → Spark Lab → Overview
+curl -s http://192.168.0.100:9090/api/v1/targets | jq -r '.data.activeTargets[] | "\(.labels.host) \(.health)"'
+curl -s http://192.168.0.100:9090/api/v1/rules | jq -r '.data.groups[].rules[].name'
+# Grafana: http://192.168.0.100:3000  (admin / gpu_telemetry_grafana_admin_password) → Spark Lab → Overview
 ```
 
 ### 4.1 Make the alerts fire (on purpose)

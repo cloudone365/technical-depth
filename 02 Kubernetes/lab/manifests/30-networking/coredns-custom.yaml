@@ -1,7 +1,7 @@
 # k3s CoreDNS imports /etc/coredns/custom/*.override (inside the .:53 block)
 # and *.server (extra server blocks) from this ConfigMap (Volume 08).
 #   log.override    — log every query (turn OFF after the lab; it is chatty)
-#   lab.server      — resolve *.lab.local via the site DNS (10.10.10.1)
+#   lab.server      — resolve *.lab.local via the site DNS (192.168.0.1)
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -14,5 +14,5 @@ data:
     lab.local:53 {
       errors
       cache 30
-      forward . 10.10.10.1
+      forward . 192.168.0.1
     }

@@ -92,7 +92,7 @@ The execution node runs your EE with **podman** under a dedicated user. Pre-pull
     organization: SparkLab
     credential_type: HashiCorp Vault Secret Lookup
     inputs:
-      url: https://10.10.10.11:8200
+      url: https://192.168.0.100:8200
       cacert: "{{ lookup('file', '.cache/spark-lab-ca.crt') }}"
       role_id: "{{ lookup('env', 'ANSIBLE_HASHI_VAULT_ROLE_ID') }}"
       secret_id: "{{ lookup('env', 'ANSIBLE_HASHI_VAULT_SECRET_ID') }}"
@@ -105,7 +105,7 @@ The execution node runs your EE with **podman** under a dedicated user. Pre-pull
     organization: SparkLab
     credential_type: HashiCorp Vault Signed SSH
     inputs:
-      url: https://10.10.10.11:8200
+      url: https://192.168.0.100:8200
       cacert: "{{ lookup('file', '.cache/spark-lab-ca.crt') }}"
       role_id: "{{ lookup('env', 'ANSIBLE_HASHI_VAULT_ROLE_ID') }}"
       secret_id: "{{ lookup('env', 'ANSIBLE_HASHI_VAULT_SECRET_ID') }}"
@@ -200,7 +200,7 @@ Schedule it with a Kubernetes CronJob that applies a dated `AWXBackup`, or with 
   - job_name: awx
     metrics_path: /api/v2/metrics/
     authorization: { type: Bearer, credentials_file: /etc/prometheus/awx.token }
-    static_configs: [{ targets: ["10.10.10.11:30080"] }]
+    static_configs: [{ targets: ["192.168.0.100:30080"] }]
 ```
 
 Useful series: `awx_pending_jobs_total`, `awx_running_jobs_total`, `awx_instance_remaining_capacity`, `awx_status_total{status="failed"}`. Alert when pending jobs stay above zero for 15 min (capacity or an execution node down).

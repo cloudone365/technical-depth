@@ -113,7 +113,7 @@ The same pattern protects **any** change that can cut your own access: sshd conf
   gather_facts: false          # we must redirect the connection before the first SSH
   vars:
     bootstrap_static_ip: false
-    bootstrap_prefix: "{{ mgmt_cidr | default('10.10.10.0/24') | regex_replace('^.*/', '') }}"
+    bootstrap_prefix: "{{ mgmt_cidr | default('192.168.0.0/24') | regex_replace('^.*/', '') }}"
     bootstrap_rollback_seconds: 180
     bootstrap_netplan: /etc/netplan/30-mgmt.yaml
   tasks:
@@ -224,11 +224,11 @@ The same pattern protects **any** change that can cut your own access: sshd conf
 ```bash
 cd "01 Ansible/lab"
 # First run: password SSH (-k) and sudo (-K), on the DHCP address, no IP change yet
-ansible-playbook playbooks/00-bootstrap.yml -l spark-02 -k -K -e bootstrap_current_ip=10.10.10.137
+ansible-playbook playbooks/00-bootstrap.yml -l spark-02 -k -K -e bootstrap_current_ip=192.168.0.137
 
-# Second run: move it to its inventory IP (10.10.10.12) with the dead-man switch
+# Second run: move it to its inventory IP (192.168.0.101) with the dead-man switch
 ansible-playbook playbooks/00-bootstrap.yml -l spark-02 -K \
-  -e bootstrap_current_ip=10.10.10.137 -e bootstrap_static_ip=true
+  -e bootstrap_current_ip=192.168.0.137 -e bootstrap_static_ip=true
 
 # From now on, plain inventory addressing works
 ansible-playbook playbooks/00-ping.yml -l spark-02
@@ -348,7 +348,7 @@ The Spark has no BMC, but the Redfish automation you'll use on DGX B200/GB200 sy
 
 ```bash
 ansible-playbook playbooks/12-redfish-practice.yml -K
-curl -s http://10.10.10.11:8000/redfish/v1/Systems | jq '.Members'
+curl -s http://192.168.0.100:8000/redfish/v1/Systems | jq '.Members'
 ```
 
 Real-BMC equivalents of what you just ran:

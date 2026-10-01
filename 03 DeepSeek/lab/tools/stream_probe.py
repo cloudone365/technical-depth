@@ -15,7 +15,7 @@ which is what a misconfigured proxy or middleware does to SSE.
 
   python3 stream_probe.py --url http://localhost:8000 --model r1-7b
   python3 stream_probe.py --url http://api.lab.local --api-key sk-… --model reasoning
-  python3 stream_probe.py --url http://10.10.10.11 --host api.lab.local --api-key sk-… --model reasoning --json
+  python3 stream_probe.py --url http://192.168.0.100 --host api.lab.local --api-key sk-… --model reasoning --json
 Stdlib only.
 """
 import argparse

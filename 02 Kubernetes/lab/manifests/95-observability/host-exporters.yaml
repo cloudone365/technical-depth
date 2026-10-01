@@ -24,9 +24,9 @@ addressType: IPv4
 ports:
   - {name: node, port: 9100, protocol: TCP}
 endpoints:
-  - addresses: ["10.10.10.11"]
+  - addresses: ["192.168.0.100"]
     nodeName: spark-01
-  # - addresses: ["10.10.10.12"]      # uncomment when spark-02 joins
+  # - addresses: ["192.168.0.101"]      # uncomment when spark-02 joins
   #   nodeName: spark-02
 ---
 apiVersion: monitoring.coreos.com/v1

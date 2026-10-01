@@ -288,8 +288,8 @@ if __name__ == "__main__":
 ```
 
 ```bash
-scp tools/spark_invariants.py nvidia@10.10.10.12:
-ssh nvidia@10.10.10.12 'python3 spark_invariants.py --peer 192.168.100.11'
+scp tools/spark_invariants.py nvidia@192.168.0.101:
+ssh nvidia@192.168.0.101 'python3 spark_invariants.py --peer 192.168.100.11'
 ```
 
 ### 1.3 Evidence-based scorecard

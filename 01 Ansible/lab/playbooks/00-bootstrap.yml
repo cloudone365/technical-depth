@@ -16,7 +16,7 @@
   gather_facts: false          # we must redirect the connection before the first SSH
   vars:
     bootstrap_static_ip: false
-    bootstrap_prefix: "{{ mgmt_cidr | default('10.10.10.0/24') | regex_replace('^.*/', '') }}"
+    bootstrap_prefix: "{{ mgmt_cidr | default('192.168.0.0/24') | regex_replace('^.*/', '') }}"
     bootstrap_rollback_seconds: 180
     bootstrap_netplan: /etc/netplan/30-mgmt.yaml
   tasks:

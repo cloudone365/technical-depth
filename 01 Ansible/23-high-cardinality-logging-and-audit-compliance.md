@@ -365,8 +365,8 @@ compactor:
 ```bash
 cd "01 Ansible/lab"
 ansible-playbook playbooks/23-logging-audit.yml -K
-curl -s http://10.10.10.11:3100/ready                        # ready
-curl -s http://10.10.10.11:8000/api/v1/ | jq 'keys'           # ARA API
+curl -s http://192.168.0.100:3100/ready                        # ready
+curl -s http://192.168.0.100:8000/api/v1/ | jq 'keys'           # ARA API
 ```
 
 ### 4.2 Record every playbook run in ARA
@@ -374,7 +374,7 @@ curl -s http://10.10.10.11:8000/api/v1/ | jq 'keys'           # ARA API
 ```bash
 pip install "ara>=1.7"                                       # client side, on the control node
 export ANSIBLE_CALLBACK_PLUGINS=$(python3 -m ara.setup.callback_plugins)
-export ARA_API_CLIENT=http ARA_API_SERVER=http://10.10.10.11:8000
+export ARA_API_CLIENT=http ARA_API_SERVER=http://192.168.0.100:8000
 ansible-playbook playbooks/01-baseline.yml -K
 ara playbook list --limit 5
 ara result list --playbook <id> --changed      # every changed task, with the diff
@@ -397,8 +397,8 @@ To make it permanent, put the three variables in your shell profile or in the AW
 ### 4.4 auditd: prove it catches a manual change
 
 ```bash
-ssh nvidia@10.10.10.12 'sudo sed -i "s/mtu: 9000/mtu: 1500/" /etc/netplan/40-cx7.yaml'
-ssh nvidia@10.10.10.12 'sudo ausearch -k network -i --start recent | tail -20'
+ssh nvidia@192.168.0.101 'sudo sed -i "s/mtu: 9000/mtu: 1500/" /etc/netplan/40-cx7.yaml'
+ssh nvidia@192.168.0.101 'sudo ausearch -k network -i --start recent | tail -20'
 # → type=SYSCALL ... comm="sed" ... auid=nvidia ... key="network"
 tools/drift-cycle.sh      # drift reports the fabric template (and doesn't auto-heal it)
 ansible-playbook playbooks/02-fabric.yml -K -l spark-02    # a human puts it back

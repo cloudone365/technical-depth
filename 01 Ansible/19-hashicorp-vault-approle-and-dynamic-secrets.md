@@ -82,7 +82,7 @@ vault_config_approles:
     token_max_ttl: 1h
     secret_id_ttl: 24h        # AWX/cron must refresh; stolen secret_ids expire
     secret_id_num_uses: 0
-    token_bound_cidrs: ""     # e.g. "10.10.10.0/24" to pin to the mgmt network
+    token_bound_cidrs: ""     # e.g. "192.168.0.0/24" to pin to the mgmt network
 
 vault_config_ssh_role:
   name: ansible
@@ -116,7 +116,7 @@ vault_config_ssh_role:
 #   3. secrets read with the token (never stored in the repo, never logged)
 #   4. an SSH certificate valid 30 min is signed for this run
 #
-#   export VAULT_ADDR=https://10.10.10.11:8200 VAULT_CACERT=$PWD/.cache/spark-lab-ca.crt
+#   export VAULT_ADDR=https://192.168.0.100:8200 VAULT_CACERT=$PWD/.cache/spark-lab-ca.crt
 #   ansible-playbook playbooks/19-vault-integration.yml -e vault_issue_secret_id=true   # admin step (root/admin token in VAULT_TOKEN)
 #   source .cache/approle.env && ansible-playbook playbooks/19-vault-integration.yml -K
 - name: Issue AppRole credentials (admin step, optional)
@@ -249,7 +249,7 @@ vault_config_ssh_role:
 
 ```bash
 cd "01 Ansible/lab"
-export VAULT_ADDR=https://10.10.10.11:8200 VAULT_CACERT=$PWD/.cache/spark-lab-ca.crt
+export VAULT_ADDR=https://192.168.0.100:8200 VAULT_CACERT=$PWD/.cache/spark-lab-ca.crt
 
 # admin step (uses an admin/root token in VAULT_TOKEN — lab only)
 export VAULT_TOKEN=$(jq -r .root_token .cache/vault-init.json)
@@ -343,7 +343,7 @@ ssh-keygen -L -f "${KEY}-cert.pub" | sed -n '1,12p'
 ```bash
 tools/vault-ssh-cert.sh ~/.ssh/id_ed25519 nvidia
 ssh-keygen -L -f ~/.ssh/id_ed25519-cert.pub | grep -E 'Valid|Principals'
-ssh -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519 nvidia@10.10.10.12 'echo cert login OK'
+ssh -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519 nvidia@192.168.0.101 'echo cert login OK'
 # Only after cert login works from TWO places: remove the static key from authorized_keys
 ```
 

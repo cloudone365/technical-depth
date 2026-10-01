@@ -18,7 +18,7 @@ The Spark has three very different networks, and Kubernetes only knows about one
 
 | Network | Hardware | Carries | Kubernetes view |
 |---|---|---|---|
-| Management | 10 GbE RJ-45 `enP7s7`, 10.10.10.0/24 | SSH, API :6443, image pulls, kubelet | node IP |
+| Management | 10 GbE RJ-45 `enP7s7`, 192.168.0.0/24 | SSH, API :6443, image pulls, kubelet | node IP |
 | **Pod overlay** | flannel VXLAN on top of mgmt (1 Spark) or CX-7 (2 Sparks) | pod ↔ pod, Services, DNS | the pod network (10.42.0.0/16) |
 | CX-7 fabric | 2× QSFP 200 GbE, `enp1s0f1np1` / `enP2p1s0f1np1`, RoCE | NCCL, NFS-RDMA, KV-cache transfer | **invisible**, unless you add it with Multus or `hostNetwork` |
 
@@ -30,7 +30,7 @@ The overlay is fine for HTTP. **It's the wrong path for NCCL**: VXLAN adds 50 by
 
 ```mermaid
 flowchart LR
-  subgraph S1["spark-01 · node IP 10.10.10.11 · podCIDR 10.42.0.0/24"]
+  subgraph S1["spark-01 · node IP 192.168.0.100 · podCIDR 10.42.0.0/24"]
     direction TB
     subgraph P1["pod A netns"]
       E1["eth0 10.42.0.15"]
@@ -73,7 +73,7 @@ With one Spark, pod ↔ pod traffic never leaves `cni0`, so there's no VXLAN. Th
 
 | Range | Purpose | Set by |
 |---|---|---|
-| 10.10.10.0/24 | management / node IPs | 01 Ansible `group_vars/all.yml` |
+| 192.168.0.0/24 | management / node IPs | 01 Ansible `group_vars/all.yml` |
 | 192.168.100.0/24, 192.168.101.0/24 | CX-7 point-to-point (one subnet per logical port) | 01 Ansible `host_vars` |
 | **10.42.0.0/16** | pods, one /24 per node (`10.42.0.0/24` spark-01, `10.42.1.0/24` spark-02) | k3s `cluster-cidr` default |
 | **10.43.0.0/16** | Service ClusterIPs. DNS at **10.43.0.10** | k3s `service-cidr` default |
@@ -144,7 +144,7 @@ default via 10.42.0.1 dev eth0
 ── host side
 eth0 (in pod) ⇄ veth8c1e2f0a (on host), ifindex 27
 veth8c1e2f0a  UP  …  master cni0
-flannel.1 … vxlan id 1 local 10.10.10.11 dev enP7s7 srcport 0 0 dstport 8472 … mtu 1450
+flannel.1 … vxlan id 1 local 192.168.0.100 dev enP7s7 srcport 0 0 dstport 8472 … mtu 1450
 ── route the host uses to reach the pod
 10.42.0.23 dev cni0 src 10.42.0.1
 ```

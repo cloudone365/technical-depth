@@ -139,7 +139,7 @@ Expected: `{"name":"SCORE","datatype":"FP32","shape":[2,1],"data":[0.5…,0.4…
 Confirm the scorer really runs on the GPU:
 
 ```bash
-ssh nvidia@10.10.10.11 nvidia-smi --query-compute-apps=pid,process_name --format=csv   # a triton_python_backend_stub process
+ssh nvidia@192.168.0.100 nvidia-smi --query-compute-apps=pid,process_name --format=csv   # a triton_python_backend_stub process
 ```
 
 ### 5.3 Load test and batching efficiency

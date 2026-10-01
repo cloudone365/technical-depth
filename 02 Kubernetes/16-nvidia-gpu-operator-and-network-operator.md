@@ -172,7 +172,7 @@ curl -s 'localhost:9090/api/v1/targets?state=active' | jq -r '.data.activeTarget
 
 Expected targets `up`: apiserver, kubelet, kube-state-metrics, coredns, etcd (via :2381), `spark-host-exporters`, traefik, and vLLM once deployed.
 
-Open Grafana at `http://10.10.10.11:32000` → dashboard **Spark · Kubernetes**. Generate some signal and watch each row respond:
+Open Grafana at `http://192.168.0.100:32000` → dashboard **Spark · Kubernetes**. Generate some signal and watch each row respond:
 
 ```bash
 kubectl -n lab-tools scale deploy gemm-contention --replicas=2      # GPU util, slices in use
@@ -191,7 +191,7 @@ kubectl delete -f manifests/10-tenancy/experiments/cpu-throttle.yaml; kill %1
 ### 5.5 DCGM exporter (when supported)
 
 ```bash
-ssh nvidia@10.10.10.11 'dcgmi discovery -l'        # must list GB10
+ssh nvidia@192.168.0.100 'dcgmi discovery -l'        # must list GB10
 cd "../../01 Ansible/lab" && ansible-playbook playbooks/06-gpu-operator.yml -e gpu_operator_dcgm_exporter=true
 kubectl -n gpu-operator port-forward ds/nvidia-dcgm-exporter 9400 & sleep 2
 curl -s localhost:9400/metrics | grep -E '^DCGM_FI_DEV_(GPU_UTIL|GPU_TEMP|POWER_USAGE)' | head
@@ -239,7 +239,7 @@ scripts/verify.sh gpu observability
 | allocatable `nvidia.com/gpu` 0 or missing | device plugin crashed / wrong config key | `kubectl -n gpu-operator logs ds/nvidia-device-plugin-daemonset` | fix the ConfigMap (YAML inside YAML: indentation!), delete the plugin pod |
 | GFD labels missing | GFD not running or NFD disabled | `kubectl -n gpu-operator get pods -l app=gpu-feature-discovery` | re-enable NFD |
 | Operator tries to install a driver | values drift (`driver.enabled` true) | ClusterPolicy spec | re-run 01 Ansible `06-gpu-operator.yml` (the source of truth) |
-| Prometheus target `spark-host-exporters` down | host node-exporter stopped or the node IP changed | `curl 10.10.10.11:9100/metrics` | `systemctl status prometheus-node-exporter`. Update the EndpointSlice |
+| Prometheus target `spark-host-exporters` down | host node-exporter stopped or the node IP changed | `curl 192.168.0.100:9100/metrics` | `systemctl status prometheus-node-exporter`. Update the EndpointSlice |
 | Two node-exporters fight for :9100 | kps `nodeExporter.enabled` left true | pod in CrashLoop, `bind: address already in use` | keep it false (lab values) |
 | Grafana empty panels | wrong datasource variable / metric names from a different exporter version | Explore → run the panel query | regenerate the dashboard, check metric names |
 | NicClusterPolicy not ready | DOCA/MOFED on the host missing or mismatched | `kubectl -n nvidia-network-operator logs …` | DGX OS provides the host driver. Never enable `ofedDriver` on Sparks |

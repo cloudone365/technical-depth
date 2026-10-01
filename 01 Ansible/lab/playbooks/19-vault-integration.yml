@@ -5,7 +5,7 @@
 #   3. secrets read with the token (never stored in the repo, never logged)
 #   4. an SSH certificate valid 30 min is signed for this run
 #
-#   export VAULT_ADDR=https://10.10.10.11:8200 VAULT_CACERT=$PWD/.cache/spark-lab-ca.crt
+#   export VAULT_ADDR=https://192.168.0.100:8200 VAULT_CACERT=$PWD/.cache/spark-lab-ca.crt
 #   ansible-playbook playbooks/19-vault-integration.yml -e vault_issue_secret_id=true   # admin step (root/admin token in VAULT_TOKEN)
 #   source .cache/approle.env && ansible-playbook playbooks/19-vault-integration.yml -K
 - name: Issue AppRole credentials (admin step, optional)
