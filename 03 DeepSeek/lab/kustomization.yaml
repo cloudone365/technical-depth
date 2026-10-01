@@ -19,6 +19,7 @@ configMapGenerator:
       - tools/needle_test.py
       - tools/ring_attention_demo.py
       - tools/vault_sync.py
+      - tools/stream_probe.py
   - name: deepseek-evaldata
     namespace: llm-serving
     files:

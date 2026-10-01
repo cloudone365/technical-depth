@@ -1,0 +1,28 @@
+# "Serve by day, train by night" on one Spark (Volume 22).
+# Replaces 02's ScaledObject 'vllm' (same name): KEDA takes the MAX of all triggers,
+#   cron        1 replica Mon–Fri 08:00–20:00 (lab timezone)
+#   prometheus  stay at 1 while any request is still running or waiting
+# Outside those windows vLLM scales to 0 and its time-slice + ~36–55 GiB of UMA go
+# to Kueue's training queue (batch/train). Needs KEDA: 02 scripts/install-addons.sh keda
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: {name: vllm, namespace: llm-serving}
+spec:
+  scaleTargetRef: {name: vllm}
+  minReplicaCount: 0
+  maxReplicaCount: 1                   # 2 when spark-02 joins (and set strategy RollingUpdate)
+  cooldownPeriod: 900                  # 15 min of quiet before scaling to 0 — a reload costs minutes
+  triggers:
+    - type: cron
+      metadata:
+        timezone: Europe/London        # set yours
+        start: "0 8 * * 1-5"
+        end: "0 20 * * 1-5"
+        desiredReplicas: "1"
+    - type: prometheus
+      metadata:
+        serverAddress: http://kps-prometheus.observability.svc:9090
+        query: sum(vllm:num_requests_running{namespace="llm-serving"}) + sum(vllm:num_requests_waiting{namespace="llm-serving"})
+        threshold: "16"
+        activationThreshold: "0"       # any in-flight request keeps (or brings back) one replica
+        ignoreNullValues: "true"       # no vLLM pod → no series → 0, not an error

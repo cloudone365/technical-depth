@@ -1,347 +1,240 @@
-# 20. NVMe Local Storage & Weight Caching — Eliminating Cold Starts
+# Volume 20 — NVMe and Weight Caching: The Model Cache, Load-Time Math, Page Cache on UMA, and a Shared Store for Two Sparks
 
-> **Target Audience**: Platform Engineers, Storage Architects, and SREs optimizing LLM startup latency and node resilience in production clusters.  
-> **Prerequisites**: Linux filesystem basics (`ext4/xfs`, `mmap`, symlinks), Kubernetes storage abstractions (PV, PVC, StorageClass from [19-kubernetes-manifests-for-deepseek.md](19-kubernetes-manifests-for-deepseek.md)), and Hugging Face model layouts.  
-> **Estimated Study Time**: 50 minutes.  
-> **What You Will Master**: High-speed PCIe Gen5 NVMe storage architecture, zero-copy `mmap()` weight loading, Rust-accelerated pre-warming via `hf_transfer`, atomic version swapping using directory symlinks, and eliminating cold starts on the **NVIDIA DGX Spark**.
+> **Module 03 · Part V — Platform integration** · Prev: [19 Kubernetes manifests](19-kubernetes-manifests-for-deepseek.md) · Next: [21 Ingress & streaming](21-ingress-and-realtime-streaming-gateways.md)
 
----
-
-## 📑 Table of Contents
-1. [Foundational Scaffolding: The WAN Download Anti-Pattern](#1-foundational-scaffolding-the-wan-download-anti-pattern)
-2. [Co-Related Concepts & The Evolution of Model Storage](#2-co-related-concepts--the-evolution-of-model-storage)
-3. [Deep First-Principles: SafeTensors & Zero-Copy `mmap()`](#3-deep-first-principles-safetensors--zero-copy-mmap)
-4. [Comparative Analysis: Local NVMe vs. NFS vs. S3-FUSE vs. 3FS](#4-comparative-analysis-local-nvme-vs-nfs-vs-s3-fuse-vs-3fs)
-5. [Hardware Grounding: NVMe Architecture on NVIDIA DGX Spark](#5-hardware-grounding-nvme-architecture-on-nvidia-dgx-spark)
-6. [High-Speed Pre-Warming Lab with Rust `hf_transfer`](#6-high-speed-pre-warming-lab-with-rust-hf_transfer)
-7. [Zero-Downtime Atomic Model Swapping via Symlinks](#7-zero-downtime-atomic-model-swapping-via-symlinks)
-8. [Automated Cache Pruning Daemon & Disk Hygiene](#8-automated-cache-pruning-daemon--disk-hygiene)
-9. [Practice Exercises with Step-by-Step Solutions](#9-practice-exercises-with-step-by-step-solutions)
-10. [Troubleshooting Guide & Diagnostic Runbook](#10-troubleshooting-guide--diagnostic-runbook)
+| | |
+|---|---|
+| **You will build** | A measured picture of where model weights live and how fast they move: the `model-cache` PVC on the Spark's NVMe, a prefetch-first workflow, cold vs warm load times, what the Linux page cache costs on unified memory, a disk budget for the whole catalog, and an NFS-over-RDMA model share for spark-02 |
+| **Hardware** | spark-01 (spark-02 optional for §5.6) |
+| **Time** | 75 min |
+| **Risk** | Low. §5.4 drops the page cache, which is harmless but slows the next read |
+| **Lab files** | [`02 …/addons/local-path-nvme.yaml`](../02%20Kubernetes/lab/addons/local-path-nvme.yaml), [`02 …/60-storage/`](../02%20Kubernetes/lab/manifests/60-storage/), [`scripts/serve-model.sh`](lab/scripts/serve-model.sh), [`tools/weights_verify.py`](lab/tools/weights_verify.py) |
 
 ---
 
-## 1. Foundational Scaffolding: The WAN Download Anti-Pattern
+## 1. Why storage matters for LLM serving
 
-### The Model Cold Start Disaster
-In naive Kubernetes AI deployments, the container startup script invokes Hugging Face to fetch weights dynamically on boot:
-```bash
-# NAIVE ANTI-PATTERN: DO NOT DO THIS IN PRODUCTION!
-python3 -m vllm.entrypoints.openai.api_server \
-  --model deepseek-ai/DeepSeek-R1-Distill-Qwen-32B ...
-```
-When this Pod boots:
-1. It queries Hugging Face servers over public WAN.
-2. It attempts to stream **32 Gigabytes of weights** across the internet.
-3. If public bandwidth averages 100 Mbps, downloading takes **42.6 minutes**.
-4. If Hugging Face encounters an outage, applies API rate limits, or transient packet loss causes a TCP timeout, the pod enters `CrashLoopBackOff`, triggering a major production outage.
+A DeepSeek-R1-Distill-Qwen-32B checkpoint in BF16 is ~65 GB. Every engine restart, model switch or node reboot reads it again. Three things decide how long the GPU sits idle while that happens:
 
-```
-                  UNCACHED WAN STARTUP (FATAL 42-MINUTE OUTAGE)
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ [Pod Boot] ──► [WAN Download: 32 GB over Internet (42 min)] ──► [VRAM Load (6s)]       │
-│                                                                                        │
-│ Total Recovery Downtime: ~2,550 seconds!                                               │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-
-                  PRE-WARMED NVMe LOCAL CACHE (6-SECOND RECOVERY)
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ [Pod Boot] ──► [Attach Local NVMe PVC (0.1s)] ──► [mmap VRAM Load (5.8s)] ──► [Ready]  │
-│                                                                                        │
-│ Total Recovery Downtime: < 6 seconds! (425x faster!)                                   │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-### The Book Depot Analogy
-Ordering a 50-volume encyclopedia from a publisher across the ocean every time a library patron walks through the front door is absurd. Instead, the library keeps the encyclopedia permanently on the reference room shelf. A patron accesses any volume in three seconds.
-**Local NVMe Weight Caching** ensures the physical weights never leave the server chassis.
+| Factor | Bad | Good |
+|---|---|---|
+| Where weights come from | Hugging Face on each start (minutes to hours, rate limits, outages) | local NVMe cache, prefetched once |
+| Who downloads | every replica races to download the same files | one prefetch Job, then servers start read-only |
+| Memory during load | page cache full of old models competing with the GPU for the *same* LPDDR5x | page cache dropped before a big load (UMA-specific) |
 
 ---
 
-## 2. Co-Related Concepts & The Evolution of Model Storage
+## 2. Architecture — HLD
 
 ```mermaid
-flowchart TD
-    DockerBake["Bake Weights into Docker Image<br/>Images balloon to 50-80 GB<br/>Registry push/pull fails, massive image sprawl"] --> NFSVolume["Shared Network Filesystem (NFS / EFS)<br/>Centralized, but severe 1 Gbps network bottleneck<br/>Multiple pods reading simultaneously crash NFS"]
-    NFSVolume --> S3FUSE["Object Storage FUSE (s3fs / gcsfuse)<br/>POSIX emulation over HTTP REST API<br/>Terrible random IOPS, breaks memory mapping"]
-    S3FUSE --> LocalNVMe["Host Local NVMe (Direct-Attached SSD)<br/>Direct PCIe Gen5 bus connection (7+ GB/s)<br/>Native zero-copy mmap() loading in seconds"]
-```
-
-### Why SafeTensors Beat PyTorch Pickles
-* **Pickle (`.bin` / `.pt`)**: A serialized Python execution graph. Loading a pickle file requires parsing arbitrary Python bytecode, creating critical remote code execution (RCE) vulnerabilities and requiring deserialization allocations in RAM.
-* **SafeTensors (`.safetensors`)**: A pure byte-aligned binary format. It contains a small JSON header describing tensor shapes and exact byte offsets, followed immediately by raw binary tensor data. This allows the operating system to map files directly to memory without deserialization.
-
----
-
-## 3. Deep First-Principles: SafeTensors & Zero-Copy `mmap()`
-
-### The Mechanics of Memory Mapping (`mmap`)
-When an engine loads a SafeTensors file:
-1. It issues the Linux system call `mmap(..., PROT_READ, MAP_SHARED, fd, 0)`.
-2. The operating system kernel maps the file on NVMe directly into the process's virtual memory address space.
-3. **No intermediate CPU RAM buffers are allocated**.
-4. As the GPU calls `cudaMemcpyAsync`, DMA (Direct Memory Access) controllers stream bytes directly from NVMe pages across the PCIe bus into GPU High Bandwidth Memory (HBM).
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│ SAFETENSORS FILE ON NVMe DISK                                          │
-│ [JSON Header: "model.layers.0.weight": offset 0x4000 to 0x1A0000]      │
-│ [RAW CONTIGUOUS BINARY FLOAT TENSOR DATA]                             │
-└────────────────────────────────────────────────────────────────────────┘
-                                    │
-                       Linux System Call: mmap()
-                                    │
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ PROCESS VIRTUAL ADDRESS SPACE (Zero-Copy Pointer Mapping)              │
-│ Pointer: 0x7FFF1000 ──► Points directly to NVMe Page Cache!            │
-└────────────────────────────────────────────────────────────────────────┘
-                                    │
-                       Direct DMA Transfer / cudaMemcpyAsync
-                                    │
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ GPU MEMORY (Blackwell GB10 Unified LPDDR5X)                            │
-│ [Resident FP8 Tensor Weights: Instant Readiness!]                      │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
-### Theoretical Load Time Formulation
-Let $S$ be the total model size in Gigabytes, and $B_{\text{read}}$ be the sequential read bandwidth of the storage layer:
-
-$$t_{\text{load}} = \frac{S}{B_{\text{read}}} + t_{\text{metadata}}$$
-
-* Over 1 Gbps WAN ($12.5 \text{ MB/s}$): $t_{\text{load}} = \frac{32,000 \text{ MB}}{12.5 \text{ MB/s}} = \mathbf{2,560 \text{ seconds (42.6 minutes)}}$.
-* Over Enterprise PCIe Gen5 NVMe ($7,000 \text{ MB/s}$): $t_{\text{load}} = \frac{32,000 \text{ MB}}{7,000 \text{ MB/s}} = \mathbf{4.57 \text{ seconds!}}$
-
----
-
-## 4. Comparative Analysis: Local NVMe vs. NFS vs. S3-FUSE vs. 3FS
-
-| Storage Architecture | Sequential Read Speed | `mmap()` Zero-Copy Support | Cost / Complexity | Failure Blast Radius |
-| :--- | :--- | :--- | :--- | :--- |
-| **Local PCIe Gen5 NVMe** | **7,000 MB/s (Blazing)** | **Native 100% Support** | **Lowest (Direct hardware)**| Isolated strictly to single host |
-| **Network File System (NFS)**| 120 – 350 MB/s (Slow) | Partial (Network overhead) | Low / Medium | Central NFS outage halts all nodes |
-| **S3 / GCS FUSE Mounts** | 50 – 150 MB/s (Unusable)| No (Emulated POSIX layer) | Medium | S3 API rate-limiting halts pods |
-| **DeepSeek 3FS (Parallel FS)**| 10,000+ MB/s (RDMA SPDK)| High (Custom C++ drivers) | High (Requires InfiniBand fabric) | Cluster-wide storage network |
-
----
-
-## 5. Hardware Grounding: NVMe Architecture on NVIDIA DGX Spark
-
-The **NVIDIA DGX Spark** features high-performance direct-attached enterprise NVMe storage:
-* **Storage Device**: Enterprise PCIe Gen5 x4 NVMe SSD.
-* **Mount Point**: Dedicated high-speed volume at `/data`.
-* **Filesystem Tuning**: Formatted with `ext4` using latency-optimized mount flags:
-  ```bash
-  # Recommended mount flags in /etc/fstab for LLM weight caching
-  UUID=xxxx-xxxx-xxxx  /data  ext4  noatime,nodiratime,data=writeback,barrier=0,nobh  0  2
-  ```
-  * `noatime,nodiratime`: Disables writing file access timestamps, eliminating unnecessary disk write operations during weight reads.
-
----
-
-## 6. High-Speed Pre-Warming Lab with Rust `hf_transfer`
-
-Standard Python `huggingface-cli` downloads are single-threaded and bottlenecked by Python's Global Interpreter Lock (GIL). 
-By enabling the Rust-based **`hf_transfer`** binary, the system spawns multiple asynchronous worker threads to saturate 10 GbE / 25 GbE enterprise network links.
-
-### Pre-Warming Automation Script (`prewarm_models.sh`):
-
-```bash
-#!/usr/bin/env bash
-# ==============================================================================
-# prewarm_models.sh
-# Production script for pre-warming model weights into local NVMe storage.
-# ==============================================================================
-set -euo pipefail
-
-MODEL_ID="deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
-TARGET_DIR="/data/models/DeepSeek-R1-Distill-Qwen-32B"
-LOCKFILE="/tmp/model_prewarm.lock"
-
-echo "[*] Initializing local NVMe pre-warming pipeline..."
-
-# 1. Ensure directory and locking mechanism to prevent concurrent runs
-exec 200>"$LOCKFILE"
-flock -n 200 || { echo "[!] Another prewarm operation is active. Exiting."; exit 1; }
-
-mkdir -p "$TARGET_DIR"
-
-# 2. Install Rust acceleration binary
-pip install -q -U hf-transfer huggingface_hub
-
-# 3. Activate high-speed multi-threaded Rust transfer
-export HF_HUB_ENABLE_HF_TRANSFER=1
-
-echo "[*] Downloading model: $MODEL_ID into $TARGET_DIR..."
-START_TIME=$(date +%s)
-
-# 4. Download weights with zero symlinks (pure direct files for Kubernetes mounting)
-huggingface-cli download "$MODEL_ID" \
-  --local-dir "$TARGET_DIR" \
-  --local-dir-use-symlinks False \
-  --exclude "*.bin" "*.pth" \
-  --include "*.safetensors" "*.json" "*.txt"
-
-END_TIME=$(date +%s)
-DURATION=$((END_TIME - START_TIME))
-
-echo "[✓] Pre-warming completed successfully in $DURATION seconds!"
-echo "[*] Total disk footprint:"
-du -sh "$TARGET_DIR"
+flowchart LR
+  HF["Hugging Face Hub<br/>(or an internal mirror)"] -->|"hf download --cache-dir /models/hf<br/>hf_transfer · 8 workers"| PF["Job model-prefetch<br/>llm-serving"]
+  subgraph S1["spark-01 · 4 TB NVMe"]
+    direction TB
+    PVC[("PVC model-cache 500Gi<br/>local-nvme-retain<br/>/data/k8s/retain/llm-serving/model-cache")]
+    PC["Linux page cache<br/>(in the same 128 GB LPDDR5x)"]
+    V["vLLM / SGLang / TRT-LLM<br/>mmap safetensors → GPU"]
+    WV["CronJob weights-verify<br/>sha256 manifests (Vol 33)"]
+    NFS["NFS server · RDMA<br/>/srv/models (exports hf/)"]
+  end
+  PF --> PVC
+  PVC -->|"read 1M sequential"| PC --> V
+  WV -.-> PVC
+  PVC --- NFS
+  NFS ==>|"CX-7 200 GbE · RoCE<br/>192.168.100.0/24"| S2["spark-02<br/>/mnt/models (optional)"]
+  classDef ext fill:#24292f,stroke:#000,color:#fff
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef sec fill:#cf222e,stroke:#82071e,color:#fff
+  class HF ext
+  class PVC,PC store
+  class V gpu
+  class NFS,S2 net
+  class PF ctrl
+  class WV sec
+  style S1 fill:#e6f4f5,stroke:#0e7c86
 ```
 
 ---
 
-## 7. Zero-Downtime Atomic Model Swapping via Symlinks
+## 3. LLD
 
-In production, updating a model from `v1` to `v2` must not corrupt running pods or require redownloading during cutover.
-We organize the local NVMe directory using **Atomic Filesystem Symlinks**:
+### 3.1 Storage classes (from 02)
 
-```
-/data/models/
-├── DeepSeek-R1-32B-v1/                 # Initial model checkpoint
-├── DeepSeek-R1-32B-v2/                 # New fine-tuned checkpoint
-└── active_model -> DeepSeek-R1-32B-v1  # Atomic symlink mounted into Pods
-```
+| Class | Reclaim | Host path | Used for |
+|---|---|---|---|
+| `local-nvme` | Delete | `/data/k8s/<ns>/<pvc>` | scratch, fio, Prometheus |
+| `local-nvme-retain` | **Retain** | `/data/k8s/retain/<ns>/<pvc>` | `model-cache`, Qdrant, Open WebUI, `deepseek-ckpt` |
 
-### Zero-Downtime Cutover Script (`switch_model_version.sh`):
+Both are `WaitForFirstConsumer`: the volume binds when the first pod schedules, on that pod's node.
 
-```bash
-#!/usr/bin/env bash
-# ==============================================================================
-# switch_model_version.sh
-# Performs zero-downtime atomic symlink switch and initiates rolling restart.
-# ==============================================================================
-set -euo pipefail
+### 3.2 Hugging Face cache layout inside the PVC
 
-NEW_VERSION_DIR="/data/models/DeepSeek-R1-32B-v2"
-SYMLINK_TARGET="/data/models/active_model"
-
-if [ ! -d "$NEW_VERSION_DIR" ]; then
-    echo "[!] Error: Target directory $NEW_VERSION_DIR does not exist!"
-    exit 1
-fi
-
-echo "[*] Switching active model symlink to: $NEW_VERSION_DIR"
-
-# 'ln -sfn' ensures atomic switch of the symbolic link
-ln -sfn "$NEW_VERSION_DIR" "$SYMLINK_TARGET"
-
-echo "[✓] Symlink updated atomically."
-ls -l "$SYMLINK_TARGET"
-
-echo "[*] Triggering rolling restart of Kubernetes serving deployment..."
-kubectl rollout restart deployment/deepseek-r1-serving -n ai-inference
-
-echo "[*] Waiting for deployment rollout to complete..."
-kubectl rollout status deployment/deepseek-r1-serving -n ai-inference --timeout=180s
-
-echo "[✓] Zero-downtime model swap complete!"
-```
-
----
-
-## 8. Automated Cache Pruning Daemon & Disk Hygiene
-
-When testing multiple models, Hugging Face cache directories quickly exhaust NVMe storage.
-This maintenance script deletes orphaned blob revisions while strictly protecting actively mounted models.
-
-```bash
-#!/usr/bin/env bash
-# ==============================================================================
-# /usr/local/bin/prune-model-cache.sh
-# Removes unreferenced Hugging Face cache blobs older than 14 days.
-# ==============================================================================
-set -euo pipefail
-
-CACHE_DIR="/data/models/cache/hub"
-LOGFILE="/var/log/model-prune.log"
-
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting NVMe storage audit..." >> "$LOGFILE"
-
-# Delete unreferenced cached blob files with no access for >14 days
-if [ -d "$CACHE_DIR" ]; then
-    DELETED_COUNT=$(find "$CACHE_DIR" -type f -atime +14 -delete -print | wc -l)
-    echo "Deleted $DELETED_COUNT stale cache files." >> "$LOGFILE"
-fi
-
-# Log current NVMe utilization
-df -h /data >> "$LOGFILE"
-echo "Storage audit completed." >> "$LOGFILE"
-```
-
-Add to host crontab (`sudo crontab -e`):
 ```text
-0 3 * * 0 /usr/local/bin/prune-model-cache.sh
+/models/hf/
+  models--deepseek-ai--DeepSeek-R1-Distill-Qwen-7B/
+    refs/main                      → commit hash
+    blobs/<sha256>                 ← the actual bytes, deduplicated
+    snapshots/<commit>/            ← symlinks into blobs/, what engines open
+      config.json  tokenizer.json  model-00001-of-00002.safetensors …
+/models/manifests/<repo>@<commit>.json   ← weights-verify (Vol 33)
+/models/gguf/                            ← llama.cpp (Vol 17)
 ```
 
----
+### 3.3 Load-time math
 
-## 9. Practice Exercises with Step-by-Step Solutions
+```text
+cold load time ≈ checkpoint bytes / NVMe sequential read  +  engine init (graph capture, KV alloc)
+warm load time ≈ checkpoint bytes / memory copy rate      +  engine init      (pages already cached)
+```
 
-### Exercise 1: Storage Sizing & Satiation on DGX Spark NVMe
-**Scenario**: You have a 1 Terabyte NVMe drive mounted at `/data`.
-You plan to host:
-* `DeepSeek-R1-Distill-32B` in FP8 (32 GB).
-* `Qwen2.5-32B` in FP8 (32 GB).
-* `DeepSeek-Coder-V2-Lite-16B` in FP8 (16 GB).
-* A rolling update staging slot for the largest model (32 GB).
-* Linux root OS reservation requirement (15% disk safety margin).
+| Model | Bytes on disk | Cold read at 5 GB/s (example) | Your NVMe (**record yours**) |
+|---|---|---|---|
+| r1-7b BF16 | ~15 GB | ~3 s | |
+| r1-32b-fp8 | ~34 GB | ~7 s | |
+| r1-32b BF16 | ~66 GB | ~13 s | |
+| R1 671B IQ1_S GGUF | ~131 GB | ~26 s | |
 
-**Question**: What is the maximum remaining disk capacity available for fine-tuning checkpoints and temporary datasets?
+In practice engine init (CUDA-graph capture, compilation, KV allocation) dominates once the read is local. The win from prefetching is avoiding the *download*, which runs at WAN speed.
 
-#### Solution:
-1. **Calculate Fixed Safety Margin**:
-   $$\text{OS Safety Reserve} = 1,000 \text{ GB} \times 0.15 = 150 \text{ GB}$$
-2. **Calculate Model Weight Commitments**:
-   $$\text{Weights Total} = 32 + 32 + 16 = 80 \text{ GB}$$
-3. **Calculate Rolling Update Staging Headroom**:
-   $$\text{Staging Slot} = 32 \text{ GB}$$
-4. **Calculate Total Committed Space**:
-   $$\text{Total Committed} = 150 + 80 + 32 = 262 \text{ GB}$$
-5. **Remaining Headroom for Checkpoints**:
-   $$\text{Remaining Free Space} = 1,000 - 262 = \mathbf{738 \text{ GB}}$$
+### 3.4 Page cache on unified memory
 
----
+On a discrete-GPU server the page cache uses host RAM, and VRAM is separate. On the GB10 they're **the same 128 GB**. After reading a 66 GB checkpoint, the kernel keeps those pages cached. vLLM then asks for `--gpu-memory-utilization × 119.7 GiB`. The kernel can reclaim clean page cache, but under pressure that's slow and can trigger OOM kills elsewhere. `serve-model.sh` therefore runs `sync; echo 3 > /proc/sys/vm/drop_caches` between prefetch and load.
 
-### Exercise 2: Benchmarking Direct NVMe Read Speed
-**Scenario**: You want to verify that your NVMe drive is achieving hardware line-rate read performance without OS page cache skewing the results.
-**Question**: Write the exact bash command using `dd` with Direct I/O (`oflag=direct` or `iflag=direct`) and explain why standard `dd` yields misleadingly high numbers.
+### 3.5 Disk budget for the catalog
 
-#### Solution:
-* **The Problem with Standard `dd`**: Standard `dd` reads from the Linux page cache in RAM. If the file was recently accessed, `dd` reports 25 GB/s (the speed of RAM), completely masking underlying NVMe disk bottlenecks.
-* **The Solution (Direct I/O)**:
-  ```bash
-  dd if=/data/models/DeepSeek-R1-Distill-Qwen-32B/model-00001-of-00007.safetensors \
-     of=/dev/null bs=4M count=1000 iflag=direct status=progress
-  ```
-  * `iflag=direct`: Bypasses the OS page cache completely, forcing the Linux kernel to perform direct DMA reads from the physical NVMe storage controller.
+| Group | Models | Approx. total |
+|---|---|---|
+| reasoning | r1-1.5b, r1-7b, r1-32b, r1-32b-fp8 | ~120 GB |
+| MoE | v2-lite, coder-v2-lite | ~63 GB |
+| baselines | qwen2.5-7b-tools, qwen2.5-32b-awq, llama-3.1-8b, mistral-7b, nemotron-nano-8b | ~85 GB |
+| embeddings + GGUF | bge-m3, R1-7B GGUFs | ~20 GB |
+| **total** | | **~290 GB of the 500Gi PVC** |
 
 ---
 
-## 10. Troubleshooting Guide & Diagnostic Runbook
+## 4. Integrations
 
-### Issue 1: `hf_transfer` Fails with `ImportError: cannot import name 'hf_hub_download'`
-* **Root Cause**: Version incompatibility between `hf-transfer` and outdated `huggingface_hub` libraries.
-* **Remediation**:
-  ```bash
-  pip install --upgrade huggingface_hub hf-transfer
-  ```
-
-### Issue 2: `Permission Denied` When Kubernetes Pod Mounts HostPath `/data/models`
-* **Root Cause**: The container runs under a non-root user (e.g. UID 1000 or 65534), but `/data/models` on the host is owned by `root:root` with permissions `0750`.
-* **Remediation**: Grant read permissions to all users or set a specific group ID:
-  ```bash
-  sudo chown -R 1000:1000 /data/models
-  sudo chmod -R 755 /data/models
-  ```
+- **02 Vol 11** covers CSI, local-path and fio from the Kubernetes side. This volume applies it to weights.
+- **Vol 33** pins every snapshot with sha256 manifests and verifies them nightly.
+- **Vol 14** uses the NFS-RDMA share to give both Sparks the same 131 GB GGUF without copying it twice.
+- **08 Storage** (later module) goes deep on NVMe, NFS-RDMA and GPUDirect Storage.
 
 ---
 
-## 🔗 Related Curriculum Modules
-* **Hardware Sizing**: [12-memory-math-for-30b-32b-on-gb10.md](12-memory-math-for-30b-32b-on-gb10.md)
-* **Serving Integration**: [15-vllm-serving-deepseek-and-qwen.md](15-vllm-serving-deepseek-and-qwen.md)
-* **Kubernetes Storage Classes**: [19-kubernetes-manifests-for-deepseek.md](19-kubernetes-manifests-for-deepseek.md)
-* **Automated Day-2 Syncing**: [33-automated-weight-sync-and-day2-ops.md](33-automated-weight-sync-and-day2-ops.md)
+## 5. Lab
+
+### 5.1 Find the cache on the host
+
+```bash
+kubectl -n llm-serving get pvc model-cache -o jsonpath='{.spec.volumeName}{"\n"}'
+sudo du -sh /data/k8s/retain/llm-serving/model-cache/hf/models--* | sort -h
+df -h /data
+```
+
+### 5.2 Benchmark the NVMe from a pod
+
+```bash
+kubectl apply -f "../02 Kubernetes/lab/manifests/60-storage/fio-job.yaml"
+kubectl -n lab-tools logs -f job/fio-ai | grep -E '^\[|READ:|WRITE:'
+```
+
+Record `weights-seqread-1m` bandwidth. That's the denominator for the cold-load estimate in §3.3.
+
+### 5.3 Prefetch vs download-on-start
+
+```bash
+cd "03 DeepSeek/lab"
+# A: prefetch path (the default)
+time scripts/serve-model.sh r1-7b
+# B: second switch to the same model — weights already cached
+kubectl -n llm-serving rollout restart deploy/vllm
+time kubectl -n llm-serving rollout status deploy/vllm --timeout=30m
+kubectl -n llm-serving logs deploy/vllm | grep -E 'Loading weights took|Model loading took|Graph capturing finished'
+```
+
+| | Wall time | Weight load (log) | Graph capture (log) |
+|---|---|---|---|
+| first serve (download + load) | | | |
+| restart (cached, warm page cache) | | | |
+| restart after `drop_caches` (cold) | | | |
+
+**Record yours.** The restart rows should be dominated by graph capture, not weight loading.
+
+### 5.4 Watch the page cache compete for UMA
+
+```bash
+free -g                                            # note buff/cache
+cat /data/k8s/retain/llm-serving/model-cache/hf/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-7B/snapshots/*/*.safetensors > /dev/null
+free -g                                            # buff/cache grows by ~15 GB
+sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
+free -g                                            # back down
+```
+
+### 5.5 Pin what you just downloaded
+
+```bash
+kubectl apply -f k8s/ops/weights-verify.yaml
+kubectl -n llm-serving create job --from=cronjob/weights-verify wv-now
+kubectl -n llm-serving logs -f job/wv-now
+```
+
+Expected: `== NEW  deepseek-ai_DeepSeek-R1-Distill-Qwen-7B@<commit>` for each snapshot on the first run, `== CHECK … OK` on later runs.
+
+### 5.6 (Two Sparks) share the cache over NFS-RDMA
+
+On spark-01 (01 Ansible lab configures the export and RDMA transport):
+
+```bash
+showmount -e localhost                             # /srv/models 192.168.100.0/24
+# on spark-02
+mount | grep /mnt/models                           # proto=rdma,port=20049
+dd if=/mnt/models/hf/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-7B/blobs/$(ls /mnt/models/hf/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-7B/blobs | head -1) of=/dev/null bs=16M status=progress
+```
+
+Compare with the local NVMe read from §5.2 (**record yours**).
+
+---
+
+## 6. Verify
+
+| Check | Expected |
+|---|---|
+| PVC | `model-cache` Bound, class `local-nvme-retain`, reclaim `Retain` |
+| prefetch | `kubectl -n llm-serving logs job/model-prefetch` ends with `downloaded <repo> in Ns` |
+| warm restart | weight-load line in the vLLM log is seconds, not minutes |
+| manifests | one JSON per snapshot in `/models/manifests` |
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| PVC `Pending` forever | `WaitForFirstConsumer` and no pod uses it yet | normal. It binds when the first pod schedules |
+| two pods downloading the same model, `.incomplete` files | servers started before prefetch | always prefetch first (`serve-model.sh` does) |
+| `No space left on device` during prefetch | catalog grew past 500Gi or `/` is full (same NVMe) | `hf cache scan --dir /models/hf` / `hf cache delete`, then remove unused snapshots |
+| vLLM OOM at load right after a big download | page cache holding the checkpoint | drop caches. Lower `--gpu-memory-utilization` |
+| deleted the PVC, weights gone? | no: `Retain` | the PV is `Released`. Clear `claimRef` to re-bind, or copy from `/data/k8s/retain/…` |
+| NFS mount falls back to TCP | `rpcrdma` module missing, or wrong port | `modprobe rpcrdma`. Mount with `proto=rdma,port=20049` |
+
+---
+
+## 8. Scale-out path
+
+| One / two Sparks | Datacenter |
+|---|---|
+| local NVMe + prefetch Job | node-local NVMe cache filled from an object store or internal HF mirror |
+| NFS-RDMA from spark-01 | parallel file system (Lustre, WEKA, VAST) or 3FS (Vol 10). GPUDirect Storage straight into GPU memory |
+| `drop_caches` before load | dedicated host RAM. Page cache doesn't compete with HBM |
+
+---
+
+## 9. Checklist
+
+- [ ] I know where every model's bytes live on the host, and how much space is left.
+- [ ] I measured cold and warm load times and know what dominates each.
+- [ ] I can explain why page cache matters more on UMA than on a discrete-GPU server.
+- [ ] My cached snapshots have sha256 manifests.

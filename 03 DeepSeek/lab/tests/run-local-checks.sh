@@ -21,7 +21,7 @@ echo "== yamllint";            yamllint -s .
 echo "== overlays in sync";    python3 scripts/gen_overlays.py --check
 echo "== kustomize + kubeconform"
 for d in . k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/sglang/* k8s/apps observability breakfix/*; do "$KUBECTL" kustomize "$d" | kc -; done
-for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml; do kc "$f"; done
+for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml k8s/autoscale/*.yaml k8s/kserve/*.yaml; do kc "$f"; done
 echo "== promtool";            promtool check rules <(python3 -c "
 import yaml
 for d in yaml.safe_load_all(open('observability/rules.yaml')): print(yaml.safe_dump({'groups': d['spec']['groups']}))")
@@ -65,6 +65,13 @@ expect "20.35" python3 tools/agent_tools.py "What is 17% of 119.7?" --url http:/
 echo "== needle test vs mock"
 python3 tests/mock_needle.py 18768 & pids+=($!); sleep 1
 expect "4/4 needles found" python3 tools/needle_test.py --url http://127.0.0.1:18768 --model m --lengths 1000 4000 --depths 0.2 0.8
+echo "== stream probe vs mocks (normal / buffered / truncated)"
+python3 tests/mock_stream.py 18770 & pids+=($!); python3 tests/mock_stream.py 18771 buffered & pids+=($!)
+python3 tests/mock_stream.py 18772 truncated & pids+=($!); sleep 1
+expect "finish_reason=stop" python3 tools/stream_probe.py --url http://127.0.0.1:18770 --model m
+! python3 tools/stream_probe.py --url http://127.0.0.1:18770 --model m | grep -q BUFFERED
+expect "BUFFERED" python3 tools/stream_probe.py --url http://127.0.0.1:18771 --model m
+expect "TRUNCATED" python3 tools/stream_probe.py --url http://127.0.0.1:18772 --model m
 echo "== weights manifest"
 w=$(mktemp -d); echo a > "$w/x.safetensors"; python3 tools/weights_verify.py snapshot "$w" --out "$w.json" >/dev/null
 python3 tools/weights_verify.py verify "$w" "$w.json" >/dev/null && echo b > "$w/x.safetensors" && ! python3 tools/weights_verify.py verify "$w" "$w.json" >/dev/null && echo "weights_verify OK"
@@ -85,7 +92,7 @@ if [[ "${API:-0}" == 1 ]]; then
   "$KUBECTL" apply -f k8s/multinode/namespace.yaml >/dev/null
   "$KUBECTL" apply --dry-run=server -k . >/dev/null
   for d in k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/sglang/* k8s/apps observability; do "$KUBECTL" apply --dry-run=server -k "$d" >/dev/null; done
-  for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml; do "$KUBECTL" apply --dry-run=server -f "$f" >/dev/null; done
+  for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml k8s/autoscale/*.yaml; do "$KUBECTL" apply --dry-run=server -f "$f" >/dev/null; done
   echo "== pod templates vs PSA / CEL policies / quotas"
   python3 "$K8S_LAB/tests/pod_template_check.py" k8s/models/* k8s/sglang/* k8s/apps k8s/jobs/*.yaml k8s/ops/*.yaml \
     k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/lws-vllm-70b.yaml
