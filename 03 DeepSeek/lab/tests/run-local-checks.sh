@@ -59,6 +59,7 @@ python3 tests/mock_oracle.py 18765 & pids+=($!); sleep 1
 out=$(mktemp -d)
 python3 tools/eval_harness.py --url http://127.0.0.1:18765 --model mock --out "$out/r.json" >/dev/null
 python3 -c "import json,sys; d=json.load(open(sys.argv[1])); acc={k:v['accuracy'] for k,v in d['suites'].items()}; assert acc=={'math':0.5,'code':0.5,'json':0.5}, acc; print('eval harness OK', acc)" "$out/r.json"
+expect "tok/ok" python3 tools/eval_harness.py --report "$out/r.json"
 echo "== agent tool loop vs scripted mock"
 python3 tests/mock_tools_server.py 18767 & pids+=($!); sleep 1
 expect "20.35" python3 tools/agent_tools.py "What is 17% of 119.7?" --url http://127.0.0.1:18767 --audit "$T.audit"

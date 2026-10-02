@@ -74,6 +74,14 @@ models:
     weights: 19GB
     args: [--quantization=awq_marlin, --max-num-seqs=32]
     use: dense 32B non-reasoning comparison (Vol 35)
+  - name: qwq-32b-awq
+    hf: Qwen/QwQ-32B-AWQ
+    util: 0.40
+    max_len: 32768
+    mem: 48Gi
+    weights: 20GB
+    args: [--quantization=awq_marlin, --max-num-seqs=32, --reasoning-parser=deepseek_r1]
+    use: Qwen's own reasoning model on the same Qwen2.5-32B base — RL-trained vs R1-distilled (Vol 35)
   - name: llama-3.1-8b
     hf: meta-llama/Llama-3.1-8B-Instruct
     util: 0.30
@@ -82,6 +90,14 @@ models:
     weights: 16GB
     args: [--enable-auto-tool-choice, --tool-call-parser=llama3_json]
     use: Meta baseline (Vol 34, 41); gated on Hugging Face — needs hf-token
+  - name: r1-llama-8b
+    hf: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+    util: 0.30
+    max_len: 32768
+    mem: 32Gi
+    weights: 16GB
+    args: [--reasoning-parser=deepseek_r1]
+    use: R1 reasoning distilled into Llama-3.1-8B — same base as llama-3.1-8b, isolates what R1 distillation adds (Vol 34)
   - name: mistral-7b
     hf: mistralai/Mistral-7B-Instruct-v0.3
     util: 0.30

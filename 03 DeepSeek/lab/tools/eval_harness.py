@@ -163,14 +163,22 @@ def econ(out_tokens, wall_s, a):
 def report(paths):
     rows = [json.load(open(p)) for p in paths]
     suites = sorted({s for r in rows for s in r["suites"]})
-    hdr = f"{'model':34}" + "".join(f"{s+' acc':>10}" for s in suites) + f"{'out tok':>9}{'reason%':>9}{'tok/s':>8}{'$/Mtok':>8}"
+    hdr = (f"{'model':34}" + "".join(f"{s+' acc':>10}" for s in suites)
+           + f"{'out tok':>9}{'reason%':>9}{'p50 s':>7}{'tok/ok':>8}{'tok/s':>8}{'$/Mtok':>8}")
     print(hdr)
     print("-" * len(hdr))
     for r in rows:
-        toks = statistics.mean(s["mean_completion_tokens"] for s in r["suites"].values())
-        reas = statistics.mean(s["reasoning_share"] for s in r["suites"].values())
+        su = r["suites"].values()
+        toks = statistics.mean(s["mean_completion_tokens"] for s in su)
+        reas = statistics.mean(s["reasoning_share"] for s in su)
+        p50 = statistics.mean(s["latency_p50"] for s in su)
+        # output tokens spent per CORRECT answer: what a right answer actually costs
+        spent = sum(s["mean_completion_tokens"] * s["n"] for s in su)
+        ok = sum(s["correct"] for s in su)
+        per_ok = f"{spent / ok:8.0f}" if ok else f"{'inf':>8}"
         print(f"{r['model'][:34]:34}" + "".join(f"{r['suites'].get(s, {}).get('accuracy', float('nan')):10.2f}" for s in suites)
-              + f"{toks:9.0f}{reas*100:8.0f}%{r['economics']['tokens_per_s']:8.1f}{r['economics']['local_usd_per_mtok']:8.2f}")
+              + f"{toks:9.0f}{reas*100:8.0f}%{p50:7.1f}{per_ok}{r['economics']['tokens_per_s']:8.1f}"
+              + f"{r['economics']['local_usd_per_mtok']:8.2f}")
 
 
 if __name__ == "__main__":

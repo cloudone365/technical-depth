@@ -1,7 +1,8 @@
 # Run the evaluation harness against the currently served model (Volumes 34-37, 40).
 # The code suite executes model-written Python, so it runs here, sandboxed
 # (non-root, no capabilities, read-only root, no service account token).
-#   MODEL=r1-7b envsubst < eval.yaml | kubectl apply -f -     (or edit the args)
+#   yq '.spec.template.spec.containers[0].args[3] = "llama-3.1-8b"' k8s/jobs/eval.yaml | kubectl apply -f -
+#   kubectl -n llm-serving logs -f job/eval        (the per-suite lines and the summary are in the log)
 apiVersion: batch/v1
 kind: Job
 metadata: {name: eval, namespace: llm-serving}

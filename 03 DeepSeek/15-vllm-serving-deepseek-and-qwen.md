@@ -22,7 +22,7 @@ Every model needs slightly different flags: memory fraction, context, parsers, `
 
 ```mermaid
 flowchart LR
-  CAT["models.yaml<br/>11 entries"] -->|"gen_overlays.py"| OV["k8s/models/&lt;name&gt;/kustomization.yaml<br/>(JSON patches)"]
+  CAT["models.yaml<br/>13 entries"] -->|"gen_overlays.py"| OV["k8s/models/&lt;name&gt;/kustomization.yaml<br/>(JSON patches)"]
   BASE["02 Kubernetes<br/>90-serving/vllm/vllm.yaml"] --> OV
   OV -->|"serve-model.sh &lt;name&gt;"| FLOW
   subgraph FLOW["serve-model.sh"]
@@ -58,6 +58,8 @@ flowchart LR
 | coder-v2-lite | …/DeepSeek-Coder-V2-Lite-Instruct | 0.45 | 32K | trust-remote-code | code, FIM |
 | qwen2.5-7b-tools | Qwen/Qwen2.5-7B-Instruct | 0.30 | 32K | auto tool choice, hermes parser | agents, JSON |
 | qwen2.5-32b-awq | Qwen/Qwen2.5-32B-Instruct-AWQ | 0.40 | 32K | awq_marlin | dense 32B baseline |
+| r1-llama-8b | deepseek-ai/DeepSeek-R1-Distill-Llama-8B | 0.30 | 32K | reasoning parser | R1 distilled into Llama-3.1-8B (Vol 34) |
+| qwq-32b-awq | Qwen/QwQ-32B-AWQ | 0.40 | 32K | awq_marlin, reasoning parser | Qwen's RL-trained reasoner (Vol 35) |
 | llama-3.1-8b | meta-llama/Llama-3.1-8B-Instruct | 0.30 | 32K | llama3_json tool parser | Meta baseline (gated) |
 | mistral-7b | mistralai/Mistral-7B-Instruct-v0.3 | 0.30 | 32K | mistral tokenizer/config/load formats | Mistral baseline |
 | nemotron-nano-8b | nvidia/Llama-3.1-Nemotron-Nano-8B-v1 | 0.30 | 32K | — | NVIDIA reasoning model |
@@ -90,7 +92,7 @@ flowchart LR
 
 ```bash
 cd "03 DeepSeek/lab"
-python3 scripts/gen_overlays.py --check          # 11 overlays checked, 0 drifted
+python3 scripts/gen_overlays.py --check          # 13 overlays checked, 0 drifted
 scripts/serve-model.sh list
 kubectl kustomize k8s/models/r1-7b | yq 'select(.kind=="Deployment") | .spec.template.spec.containers[0].args'
 ```
