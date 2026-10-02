@@ -153,7 +153,7 @@ flowchart LR
 ```bash
 cd "01 Ansible/lab"
 ansible-playbook playbooks/12b-roce-qos.yml -K
-ssh nvidia@10.10.10.11 'sudo mlnx_qos -i enp1s0f1np1 | sed -n "1,20p"'
+ssh nvidia@192.168.0.100 'sudo mlnx_qos -i enp1s0f1np1 | sed -n "1,20p"'
 ```
 
 Persist it: create a oneshot systemd unit that runs the same commands at boot. Templating that unit is the exercise at the end of this volume. Or have AWX run the play on a boot-triggered webhook.
@@ -291,7 +291,7 @@ ansible-playbook playbooks/10-nccl-test.yml -K
 With `NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,NET` you'll see lines like:
 
 ```
-NCCL INFO NET/IB : Using [0]rocep1s0f1:1/RoCE [1]roceP2p1s0f1:1/RoCE ; OOB enP7s7:10.10.10.11<0>
+NCCL INFO NET/IB : Using [0]rocep1s0f1:1/RoCE [1]roceP2p1s0f1:1/RoCE ; OOB enP7s7:192.168.0.100<0>
 NCCL INFO Channel 00/0 : 0[0] -> 1[0] [send] via NET/IB/0
 ```
 

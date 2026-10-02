@@ -117,7 +117,7 @@ Env vars from Secrets are copied into a container at start. A changed Secret doe
 
 ```bash
 cd "01 Ansible/lab"
-export VAULT_ADDR=https://10.10.10.11:8200 VAULT_CACERT=$PWD/.cache/spark-lab-ca.crt
+export VAULT_ADDR=https://192.168.0.100:8200 VAULT_CACERT=$PWD/.cache/spark-lab-ca.crt
 export VAULT_TOKEN=$(jq -r .root_token .cache/vault-init.json)     # lab only; use an admin token in production
 vault status | grep -E 'Sealed|Version'
 cd "../../03 DeepSeek/lab"
@@ -227,7 +227,7 @@ scripts/breakfix.sh reset D05
 | `403` updating a Secret | the Secret's name isn't in the Role's `resourceNames` | add it to the Role *and* `SYNC_MAP` |
 | `403` on PATCH of a workload | workload not listed in the apps rule | add it to `resourceNames` |
 | Secret updated, app still uses the old value | consumer not listed under `restart` | add it. Or the app caches the value: restart it |
-| `connection refused` to 10.10.10.11:8200 | Vault sealed or down | `vault status`. Unseal (01 Ansible Vol 19) |
+| `connection refused` to 192.168.0.100:8200 | Vault sealed or down | `vault status`. Unseal (01 Ansible Vol 19) |
 | `KeyError: 'master_key'` | key name differs in Vault | `vault kv get kv/spark-lab/deepseek/litellm` and fix `SYNC_MAP` |
 
 ---

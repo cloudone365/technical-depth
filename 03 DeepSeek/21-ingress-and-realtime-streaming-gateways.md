@@ -145,7 +145,7 @@ data: [DONE]
 
 ## 5. Lab
 
-Prerequisites: `scripts/serve-model.sh r1-7b`, `kubectl apply -k k8s/apps`, and on your workstation `/etc/hosts` has `10.10.10.11 api.lab.local webui.lab.local`.
+Prerequisites: `scripts/serve-model.sh r1-7b`, `kubectl apply -k k8s/apps`, and on your workstation `/etc/hosts` has `192.168.0.100 api.lab.local webui.lab.local`.
 
 ```bash
 cd "03 DeepSeek/lab"
@@ -180,7 +180,7 @@ python3 tools/stream_probe.py --url http://localhost:4000 --api-key "$KEY" --mod
 ```bash
 python3 tools/stream_probe.py --url http://api.lab.local --api-key "$KEY" --model reasoning-fast
 # or by IP, without /etc/hosts
-python3 tools/stream_probe.py --url http://10.10.10.11 --host api.lab.local --api-key "$KEY" --model reasoning-fast
+python3 tools/stream_probe.py --url http://192.168.0.100 --host api.lab.local --api-key "$KEY" --model reasoning-fast
 ```
 
 | Hop | ttfb (ms) | first answer (s) | ITL p50 (ms) | ITL p99 (ms) |

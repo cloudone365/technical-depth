@@ -34,7 +34,7 @@ flowchart TB
   subgraph LAPTOP["Control node"]
     KC["kubectl<br/>KUBECONFIG"]
   end
-  subgraph SPARK["spark-01 · 10.10.10.11 · DGX OS 7 (Ubuntu 24.04 arm64)"]
+  subgraph SPARK["spark-01 · 192.168.0.100 · DGX OS 7 (Ubuntu 24.04 arm64)"]
     direction TB
     subgraph K3S["k3s server process (one binary)"]
       direction LR
@@ -184,7 +184,7 @@ Expected (abridged):
 ### Step 2 · See that k3s really is one process
 
 ```bash
-ssh nvidia@10.10.10.11
+ssh nvidia@192.168.0.100
 ps -eo pid,rss,cmd | grep -E '[k]3s server|[c]ontainerd ' | cut -c1-120
 sudo ss -ltnp | grep -E ':(6443|10250|10257|10259|2379) '
 ```
@@ -312,7 +312,7 @@ flowchart LR
 | Step | What changes | What stays the same |
 |---|---|---|
 | Add spark-02 | Uncomment `spark-02` in `inventory/hosts.yml` and re-run `playbooks/05-k3s.yml`. Flannel then runs over the CX-7 link | All manifests. The scheduler now has 8 GPU slices |
-| 3 servers | `server: https://10.10.10.11:6443` + `cluster-init` on the first. You need a third machine for etcd quorum (2 Sparks can't form a safe quorum) | Workloads |
+| 3 servers | `server: https://192.168.0.100:6443` + `cluster-init` on the first. You need a third machine for etcd quorum (2 Sparks can't form a safe quorum) | Workloads |
 | Datacenter | Control plane on small CPU nodes, GPU nodes tainted `nvidia.com/gpu=present:NoSchedule`, OIDC auth, external etcd or managed control plane | The loops, the objects, the debugging method in this volume |
 
 ---

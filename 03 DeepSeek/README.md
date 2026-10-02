@@ -179,7 +179,7 @@ The short path through all of it is the [step-by-step guide](00-deepseek-step-by
 
 | Item | Value |
 |---|---|
-| Nodes | spark-01 `10.10.10.11`. Optional spark-02 `10.10.10.12` |
+| Nodes | spark-01 `192.168.0.100`. Optional spark-02 `192.168.0.101` |
 | CX-7 | `192.168.100.0/24` + `192.168.101.0/24`, RoCE, NCCL GID index 3 |
 | GPU | GB10, sm_121 / compute capability 12.1, 4 time-slices, no MIG, ≈119.7 GiB visible to CUDA, ~273 GB/s |
 | Entry points | `api.lab.local` (LiteLLM), `webui.lab.local` (Open WebUI) via the 02 Gateway |

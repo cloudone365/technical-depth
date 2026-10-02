@@ -220,7 +220,7 @@ class InventoryModule(BaseInventoryPlugin, Constructable):
         want_if = self.get_option("interface")
         group = self.inventory.add_group(self.get_option("group"))
 
-        # '=;iface;IPv4;service name;_ssh._tcp;local;host.local;10.10.10.11;22;"txt"'
+        # '=;iface;IPv4;service name;_ssh._tcp;local;host.local;192.168.0.100;22;"txt"'
         for line in self._capture().splitlines():
             f = line.split(";")
             if len(f) < 9 or f[0] != "=" or f[2] != "IPv4":
@@ -265,9 +265,9 @@ ansible-inventory -i inventory -i inventory-examples/spark.mdns.yml --graph   # 
 The plugin accepts `from_file:` so you can unit-test it against a saved capture without any Sparks on the network. That's how it was validated for this lab:
 
 ```text
-=;enp0s31f6;IPv4;spark-01;_ssh._tcp;local;spark-01.local;10.10.10.11;22;
-=;enp0s31f6;IPv4;spark-02;_ssh._tcp;local;spark-02.local;10.10.10.12;22;
-=;enp0s31f6;IPv4;nas;_ssh._tcp;local;nas.local;10.10.10.50;22;          <- filtered by name_regex
+=;enp0s31f6;IPv4;spark-01;_ssh._tcp;local;spark-01.local;192.168.0.100;22;
+=;enp0s31f6;IPv4;spark-02;_ssh._tcp;local;spark-02.local;192.168.0.101;22;
+=;enp0s31f6;IPv4;nas;_ssh._tcp;local;nas.local;192.168.0.200;22;          <- filtered by name_regex
 =;wlp2s0;IPv4;spark-01;_ssh._tcp;local;spark-01.local;192.168.1.77;22;   <- filtered by interface
 ```
 
@@ -302,7 +302,7 @@ Seed NetBox from your inventory, so the model describes the Spark precisely:
   gather_facts: false
   connection: local
   vars:
-    nb: { url: "http://10.10.10.11:8081", token: "{{ lookup('env', 'NETBOX_TOKEN') }}" }
+    nb: { url: "http://192.168.0.100:8081", token: "{{ lookup('env', 'NETBOX_TOKEN') }}" }
   tasks:
     - name: Manufacturer / device type / role / site (run once)
       run_once: true
@@ -346,7 +346,7 @@ Then read it back as inventory:
 ```yaml
 # inventory-examples/netbox.yml
 plugin: netbox.netbox.nb_inventory
-api_endpoint: http://10.10.10.11:8081
+api_endpoint: http://192.168.0.100:8081
 validate_certs: false
 config_context: true
 group_by: [device_roles, sites, tags]

@@ -52,12 +52,12 @@ flowchart LR
   subgraph CTL["Control node (laptop / VM / spark-01 itself)"]
     A["ansible-core 2.18<br/>collections, kubeconfig,<br/>vault CA, .cache/"]
   end
-  subgraph MGMT["Mgmt LAN 10.10.10.0/24 (10GbE enP7s7)"]
+  subgraph MGMT["Mgmt LAN 192.168.0.0/24 (10GbE enP7s7)"]
   end
-  subgraph S1["spark-01 · 10.10.10.11"]
+  subgraph S1["spark-01 · 192.168.0.100"]
     S1a["k3s server · slurmctld+slurmd<br/>Vault · Prometheus/Grafana<br/>NFS server /srv/models"]
   end
-  subgraph S2["spark-02 · 10.10.10.12"]
+  subgraph S2["spark-02 · 192.168.0.101"]
     S2a["k3s agent · slurmd<br/>NFS client /mnt/models"]
   end
   A -- SSH 22 --> MGMT
@@ -80,7 +80,7 @@ ansible-galaxy collection install -r requirements.yml -p ./collections
 
 # 2. Edit inventory/hosts.yml (IPs) and host_vars/*.yml (CX-7 names from `ibdev2netdev`)
 #    Fresh from the first-boot wizard? Use playbooks/00-bootstrap.yml (Volume 06).
-ssh-copy-id nvidia@10.10.10.11     # and .12
+ssh-copy-id nvidia@192.168.0.100     # and .12
 
 # 3. Walk the stages (each is safe to re-run)
 ansible-playbook playbooks/00-ping.yml

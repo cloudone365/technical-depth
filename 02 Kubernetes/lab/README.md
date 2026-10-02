@@ -42,7 +42,7 @@ flowchart LR
   subgraph CTL["Control node (laptop or spark-01)"]
     K["kubectl · KUBECONFIG from<br/>01 Ansible .cache/"]
   end
-  subgraph S1["spark-01 · 10.10.10.11 · k3s server"]
+  subgraph S1["spark-01 · 192.168.0.100 · k3s server"]
     direction TB
     CP["API server · etcd · scheduler<br/>controller-manager"]
     subgraph NS["Namespaces"]
@@ -56,7 +56,7 @@ flowchart LR
     OBS["kube-prometheus-stack<br/>Grafana :32000"]
     GPU["GB10 → 4 time-slices<br/>nvidia.com/gpu"]
   end
-  subgraph S2["spark-02 · 10.10.10.12 · optional agent"]
+  subgraph S2["spark-02 · 192.168.0.101 · optional agent"]
     G2["GB10 → 4 slices"]
   end
   K -->|6443| CP

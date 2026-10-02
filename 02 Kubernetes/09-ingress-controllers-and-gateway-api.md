@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | Traefik v3 as both Ingress controller and Gateway API implementation in front of an OpenAI-compatible endpoint. You'll prove token streaming isn't buffered, add body-size limits, rate limits and API-key auth, run a 90/10 canary with an `HTTPRoute`, terminate TLS and route gRPC to Triton. The mock LLM makes all of it GPU-free |
-| **Hardware** | spark-01 (servicelb binds :80/:443 on 10.10.10.11). Your laptop is the client |
+| **Hardware** | spark-01 (servicelb binds :80/:443 on 192.168.0.100). Your laptop is the client |
 | **Time** | 90 min |
 | **Risk** | Low |
 | **Lab files** | [`addons/traefik.yaml`](lab/addons/traefik.yaml), [`manifests/40-ingress/`](lab/manifests/40-ingress/) (`mock_llm.py`, `middlewares.yaml`, `ingress.yaml`, `gateway-routes.yaml`), [`breakfix/08`](lab/breakfix/08-selector-typo.yaml), [`breakfix/09`](lab/breakfix/09-buffered-stream.yaml) |
@@ -31,7 +31,7 @@ LLM traffic breaks web-app assumptions:
 
 ```mermaid
 flowchart LR
-  CL["client<br/>curl / OpenAI SDK / Open WebUI"] -->|"http://llm.lab.local<br/>10.10.10.11:80"| LB["k3s servicelb<br/>svclb-traefik DaemonSet"]
+  CL["client<br/>curl / OpenAI SDK / Open WebUI"] -->|"http://llm.lab.local<br/>192.168.0.100:80"| LB["k3s servicelb<br/>svclb-traefik DaemonSet"]
   LB --> TR["Traefik v3 · ns ingress<br/>entrypoints web :8000 / websecure :8443<br/>readTimeout 0 · idleTimeout 600s"]
   subgraph MW["Middlewares (per route)"]
     direction TB
@@ -77,7 +77,7 @@ flowchart LR
 | Entrypoints | `web` 8000→80, `websecure` 8443→443, `traefik` 8080 (dashboard, internal) |
 | Transport timeouts | `readTimeout: 0s`, `writeTimeout: 0s`, `idleTimeout: 600s` on web and websecure |
 | Gateway | `ingress/lab-gateway`, listener `web` :8000 HTTP, `namespacePolicy: All` |
-| Hostnames | `llm.lab.local` (Ingress), `gw.lab.local` (HTTPRoute) → add both to your laptop's `/etc/hosts` as `10.10.10.11` |
+| Hostnames | `llm.lab.local` (Ingress), `gw.lab.local` (HTTPRoute) → add both to your laptop's `/etc/hosts` as `192.168.0.100` |
 | Metrics | ServiceMonitor `release: kps` → `traefik_service_*` (KEDA uses these in Vol 21) |
 | Priority | platform (keep ingress alive under memory pressure) |
 
@@ -103,7 +103,7 @@ kubectl -n ingress get pods,svc
 kubectl get gatewayclass,gateway -A
 ```
 
-Expected: `svc/traefik-lab` `LoadBalancer` with `EXTERNAL-IP 10.10.10.11`. GatewayClass `traefik` `ACCEPTED True`. Gateway `lab-gateway` `PROGRAMMED True`.
+Expected: `svc/traefik-lab` `LoadBalancer` with `EXTERNAL-IP 192.168.0.100`. GatewayClass `traefik` `ACCEPTED True`. Gateway `lab-gateway` `PROGRAMMED True`.
 
 ### 5.2 Deploy the mock API behind Ingress and HTTPRoute
 
@@ -111,7 +111,7 @@ Expected: `svc/traefik-lab` `LoadBalancer` with `EXTERNAL-IP 10.10.10.11`. Gatew
 kubectl apply -k manifests/40-ingress
 kubectl -n llm-serving get pods,ingress,httproute
 kubectl -n llm-serving get httproute llm-gw -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {end}{"\n"}'
-echo "10.10.10.11 llm.lab.local gw.lab.local" | sudo tee -a /etc/hosts     # on your laptop
+echo "192.168.0.100 llm.lab.local gw.lab.local" | sudo tee -a /etc/hosts     # on your laptop
 curl -s http://llm.lab.local/v1/models | jq
 ```
 
@@ -129,7 +129,7 @@ Expected: **TTFB ≈ 0.05 s, total ≈ 5 s** (100 tokens at 20 tok/s), and times
 
 ```bash
 scripts/breakfix.sh inject 09
-echo "10.10.10.11 bf09.lab.local" | sudo tee -a /etc/hosts
+echo "192.168.0.100 bf09.lab.local" | sudo tee -a /etc/hosts
 curl -sN -o /dev/null -w 'TTFB %{time_starttransfer}s  total %{time_total}s\n' \
   http://bf09.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":100}'
 scripts/breakfix.sh reset 09
@@ -217,7 +217,7 @@ scripts/verify.sh ingress
 
 ```text
 ── ingress
-[PASS] Traefik LoadBalancer IP 10.10.10.11
+[PASS] Traefik LoadBalancer IP 192.168.0.100
 [PASS] Ingress llm.lab.local/v1/models → 200
 [PASS] SSE streaming through ingress (11 events)
 [PASS] Gateway API HTTPRoute gw.lab.local → 200

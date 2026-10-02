@@ -21,20 +21,20 @@ spec:
         kubeProxy: true
     kubeEtcd:
       enabled: true
-      endpoints: [10.10.10.11]      # k3s exposes etcd metrics on :2381 with etcd-expose-metrics
+      endpoints: [192.168.0.100]      # k3s exposes etcd metrics on :2381 with etcd-expose-metrics
       service:
         port: 2381
         targetPort: 2381
     kubeControllerManager:
-      endpoints: [10.10.10.11]
+      endpoints: [192.168.0.100]
       service: {port: 10257, targetPort: 10257}
       serviceMonitor: {https: true, insecureSkipVerify: true}
     kubeScheduler:
-      endpoints: [10.10.10.11]
+      endpoints: [192.168.0.100]
       service: {port: 10259, targetPort: 10259}
       serviceMonitor: {https: true, insecureSkipVerify: true}
     kubeProxy:
-      endpoints: [10.10.10.11]
+      endpoints: [192.168.0.100]
     # The 01 Ansible lab already runs prometheus-node-exporter on the host
     # (:9100, with the GPU/UMA textfile collector). Don't start a second one;
     # manifests/95-observability/host-exporters.yaml scrapes the existing one.

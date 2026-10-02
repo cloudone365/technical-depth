@@ -48,7 +48,7 @@ spec:
               image: python:3.12-slim
               command: ["python3", "/tools/vault_sync.py"]
               env:
-                - {name: VAULT_ADDR, value: "https://10.10.10.11:8200"}
+                - {name: VAULT_ADDR, value: "https://192.168.0.100:8200"}
                 - {name: VAULT_CACERT, value: /vault-ca/ca.crt}
                 - {name: VAULT_ROLE, value: deepseek-serving}
                 - name: SYNC_MAP

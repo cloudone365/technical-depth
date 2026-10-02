@@ -163,8 +163,8 @@ ansible-playbook playbooks/15-jinja-lab.yml        # → "7/7 Jinja katas passed
     - name: K5 recursive combine keeps unknown keys, list_merge controls arrays
       ansible.builtin.set_fact:
         k5: >-
-          {{ {'runtimes': {'nvidia': {'path': 'nvidia-container-runtime'}}, 'insecure-registries': ['10.10.10.11:5000']}
-             | combine({'default-runtime': 'nvidia', 'insecure-registries': ['10.10.10.12:5000'],
+          {{ {'runtimes': {'nvidia': {'path': 'nvidia-container-runtime'}}, 'insecure-registries': ['192.168.0.100:5000']}
+             | combine({'default-runtime': 'nvidia', 'insecure-registries': ['192.168.0.101:5000'],
                         'runtimes': {'nvidia': {'args': []}}}, recursive=True, list_merge='append_rp') }}
     - name: K5 check
       ansible.builtin.assert:

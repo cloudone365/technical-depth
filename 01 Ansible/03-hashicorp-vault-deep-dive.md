@@ -330,7 +330,7 @@ ansible-playbook playbooks/08-vault.yml -K
 Then work with it from the control node:
 
 ```bash
-export VAULT_ADDR=https://10.10.10.11:8200
+export VAULT_ADDR=https://192.168.0.100:8200
 export VAULT_CACERT=$PWD/.cache/spark-lab-ca.crt
 export VAULT_TOKEN=$(jq -r .root_token .cache/vault-init.json)     # lab only!
 
@@ -346,7 +346,7 @@ sudo tail -1 /var/log/vault/audit.log | jq '.request.path, .auth.display_name'  
 ### 3.1 Prove the seal behaviour
 
 ```bash
-ssh nvidia@10.10.10.11 sudo systemctl restart vault
+ssh nvidia@192.168.0.100 sudo systemctl restart vault
 vault status | grep Sealed           # true: every secret read now returns 503
 ansible-playbook playbooks/08-vault.yml -K     # detects sealed=true and unseals; everything else reports ok
 vault status | grep Sealed           # false
@@ -407,8 +407,8 @@ Add a Prometheus job in Volume 09 (use a token with a `sys/metrics` read policy)
 
 | Symptom | Diagnose | Fix |
 |---|---|---|
-| `x509: certificate signed by unknown authority` | `openssl s_client -connect 10.10.10.11:8200 -showcerts` | Set `VAULT_CACERT` to `.cache/spark-lab-ca.crt`, or install the CA on the client |
-| `x509: certificate is valid for spark-01, not 10.10.10.11` | Inspect the SANs: `openssl x509 -in /opt/vault/tls/vault.crt -noout -ext subjectAltName` | Add the name or IP to `subject_alt_name` and re-run (the cert is reissued) |
+| `x509: certificate signed by unknown authority` | `openssl s_client -connect 192.168.0.100:8200 -showcerts` | Set `VAULT_CACERT` to `.cache/spark-lab-ca.crt`, or install the CA on the client |
+| `x509: certificate is valid for spark-01, not 192.168.0.100` | Inspect the SANs: `openssl x509 -in /opt/vault/tls/vault.crt -noout -ext subjectAltName` | Add the name or IP to `subject_alt_name` and re-run (the cert is reissued) |
 | `503 Vault is sealed` after a reboot | `vault status` | Re-run `08-vault.yml` (it unseals) or `vault operator unseal` ×3 |
 | `Error initializing: Vault is already initialized` | — | Expected on re-runs. The role checks first; if you ran init by hand, recover the keys you got then |
 | Vault won't start: `failed to open raft storage: permission denied` | `journalctl -u vault -n 50`; `ls -ld /opt/vault/data` | `chown -R vault:vault /opt/vault` |

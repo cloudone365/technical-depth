@@ -237,7 +237,7 @@ ansible-playbook playbooks/03-containers.yml -K \
 Check the result:
 
 ```bash
-ssh nvidia@10.10.10.11 'docker info --format "{{.DefaultRuntime}} {{json .Runtimes}}"; nvidia-ctk cdi list'
+ssh nvidia@192.168.0.100 'docker info --format "{{.DefaultRuntime}} {{json .Runtimes}}"; nvidia-ctk cdi list'
 # nvidia {"nvidia":{"path":"nvidia-container-runtime"},"runc":{...}}
 # INFO[0000] Found 2 CDI devices
 # nvidia.com/gpu=0

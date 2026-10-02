@@ -14,9 +14,9 @@ spark_admin_pubkeys:
 
 # Management network
 mgmt_interface: enP7s7
-mgmt_cidr: 10.10.10.0/24
-mgmt_gateway: 10.10.10.1
-dns_servers: [10.10.10.1, 1.1.1.1]
+mgmt_cidr: 192.168.0.0/24
+mgmt_gateway: 192.168.0.1
+dns_servers: [192.168.0.1, 1.1.1.1]
 ntp_servers: [time.cloudflare.com, pool.ntp.org]
 
 # Where things live on the control node

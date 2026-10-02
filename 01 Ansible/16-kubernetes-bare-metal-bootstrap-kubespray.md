@@ -40,7 +40,7 @@ flowchart TB
     CD2["containerd (k3s)<br/>runtimes: runc, nvidia (default)"]
     FL2["flannel VXLAN on enp1s0f1np1"]
   end
-  API <-->|"node-ip = mgmt 10.10.10.x"| S2
+  API <-->|"node-ip = mgmt 192.168.0.x"| S2
   FL1 <==>|"pod traffic over CX-7 200G"| FL2
 ```
 
@@ -260,7 +260,7 @@ It works, but Kubernetes has no idea a GPU was used: no `nvidia.com/gpu` resourc
 
 ```bash
 kubectl get pods -A -o wide | head
-ssh nvidia@10.10.10.11 'ip -d link show flannel.1 | grep -o "dev [^ ]*"'   # → dev enp1s0f1np1
+ssh nvidia@192.168.0.100 'ip -d link show flannel.1 | grep -o "dev [^ ]*"'   # → dev enp1s0f1np1
 kubectl run a --image=nicolaka/netshoot --overrides='{"spec":{"nodeName":"spark-01"}}' -- sleep 1d
 kubectl run b --image=nicolaka/netshoot --overrides='{"spec":{"nodeName":"spark-02"}}' -- sleep 1d
 B=$(kubectl get pod b -o jsonpath='{.status.podIP}')

@@ -89,7 +89,7 @@ flowchart LR
 ### 5.1 Inspect the toolkit and CDI on the host
 
 ```bash
-ssh nvidia@10.10.10.11
+ssh nvidia@192.168.0.100
 nvidia-ctk --version
 sudo nvidia-ctk cdi list
 grep -nE 'default_runtime_name|runtimes.nvidia|BinaryName' /var/lib/rancher/k3s/agent/etc/containerd/config.toml
