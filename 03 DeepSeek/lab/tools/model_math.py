@@ -22,6 +22,7 @@ import sys
 
 GIB = 2**30
 SPARK_VISIBLE_GIB = 119.7          # what CUDA reports as total on a GB10 (≈128 GB)
+GB10_BW_GBS = 273.0          # LPDDR5x bandwidth of one GB10
 BYTES = {"bf16": 2.0, "fp16": 2.0, "fp8": 1.0, "int8": 1.0, "int4": 0.5, "awq": 0.5, "gptq": 0.5,
          "q4_k_m": 4.85 / 8, "q8_0": 8.5 / 8, "iq1_s": 1.58 / 8, "iq2_xxs": 2.06 / 8}
 
@@ -167,6 +168,11 @@ def report(name, p, dtype, util, sparks, kv_dtype, overhead_gib, ctx):
           f"= {tokens // ctx} concurrent sequences at {ctx:,} context")
     print(f"verdict          : ✓ fits (set --gpu-memory-utilization {util:.2f}"
           f"{', tensor/pipeline parallel across 2 Sparks' if sparks > 1 else ''})")
+    # Decode is memory-bandwidth-bound: every generated token reads the ACTIVE weights once
+    # (plus that sequence's KV). Upper bound for one stream; batching amortises the weight reads.
+    per_tok = active * wb + kvb * min(ctx, 4096)
+    print(f"decode ceiling   : ≈{GB10_BW_GBS * 1e9 / per_tok:5.0f} tok/s single stream "
+          f"({active * wb / 1e9:.1f} GB active weights + KV of 4K context per token at {GB10_BW_GBS:.0f} GB/s)")
     return 0
 
 

@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **You will build** | A full read-through of every manifest the DeepSeek lab ships. You'll learn how the 02 platform's vLLM Deployment becomes thirteen model overlays, how tools reach Jobs without custom images, and how CI catches a broken pod template before the ReplicaSet does. Then you'll break and fix a manifest with drill D08 |
+| **You will build** | A full read-through of every manifest the DeepSeek lab ships. You'll learn how the 02 platform's vLLM Deployment becomes fourteen model overlays, how tools reach Jobs without custom images, and how CI catches a broken pod template before the ReplicaSet does. Then you'll break and fix a manifest with drill D08 |
 | **Hardware** | spark-01 (any kind cluster works for §5.1–5.3) |
 | **Time** | 60 min |
 | **Risk** | Low. Read-only until §5.4 |
@@ -90,7 +90,7 @@ flowchart TB
 
 ### 3.2 What an overlay changes
 
-`gen_overlays.py` writes six JSON-patch operations per model: `args`, `env[0]` (MODEL), `env[1]` (SERVED_NAME), `limits.memory`, and the `model` label on the Deployment and the pod template. Nothing else changes, so a security fix in the base reaches all thirteen models.
+`gen_overlays.py` writes six JSON-patch operations per model: `args`, `env[0]` (MODEL), `env[1]` (SERVED_NAME), `limits.memory`, and the `model` label on the Deployment and the pod template. Nothing else changes, so a security fix in the base reaches all fourteen models.
 
 ### 3.3 Namespaces, PSA and who runs where
 
@@ -181,7 +181,7 @@ scripts/breakfix.sh answer D08
 
 | Check | Command | Expected |
 |---|---|---|
-| overlays in sync | `python3 scripts/gen_overlays.py --check` | `13 overlays checked, 0 drifted` |
+| overlays in sync | `python3 scripts/gen_overlays.py --check` | `14 overlays checked, 0 drifted` |
 | admission | `API=1 tests/run-local-checks.sh` | `0 rejected`. PodSecurity *warnings* in `batch` are advisory |
 | live | `scripts/verify.sh platform serving` | all `PASS` |
 

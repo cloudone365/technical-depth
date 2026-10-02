@@ -22,7 +22,7 @@ Every model needs slightly different flags: memory fraction, context, parsers, `
 
 ```mermaid
 flowchart LR
-  CAT["models.yaml<br/>13 entries"] -->|"gen_overlays.py"| OV["k8s/models/&lt;name&gt;/kustomization.yaml<br/>(JSON patches)"]
+  CAT["models.yaml<br/>14 entries"] -->|"gen_overlays.py"| OV["k8s/models/&lt;name&gt;/kustomization.yaml<br/>(JSON patches)"]
   BASE["02 Kubernetes<br/>90-serving/vllm/vllm.yaml"] --> OV
   OV -->|"serve-model.sh &lt;name&gt;"| FLOW
   subgraph FLOW["serve-model.sh"]
@@ -62,6 +62,7 @@ flowchart LR
 | qwq-32b-awq | Qwen/QwQ-32B-AWQ | 0.40 | 32K | awq_marlin, reasoning parser | Qwen's RL-trained reasoner (Vol 35) |
 | llama-3.1-8b | meta-llama/Llama-3.1-8B-Instruct | 0.30 | 32K | llama3_json tool parser | Meta baseline (gated) |
 | mistral-7b | mistralai/Mistral-7B-Instruct-v0.3 | 0.30 | 32K | mistral tokenizer/config/load formats | Mistral baseline |
+| mixtral-8x7b-fp8 | RedHatAI/Mixtral-8x7B-Instruct-v0.1-FP8 | 0.55 | 32K | 32 seqs | Mistral's MoE baseline (Vol 36) |
 | nemotron-nano-8b | nvidia/Llama-3.1-Nemotron-Nano-8B-v1 | 0.30 | 32K | — | NVIDIA reasoning model |
 
 ### 3.2 Common args every overlay sets
@@ -92,7 +93,7 @@ flowchart LR
 
 ```bash
 cd "03 DeepSeek/lab"
-python3 scripts/gen_overlays.py --check          # 13 overlays checked, 0 drifted
+python3 scripts/gen_overlays.py --check          # 14 overlays checked, 0 drifted
 scripts/serve-model.sh list
 kubectl kustomize k8s/models/r1-7b | yq 'select(.kind=="Deployment") | .spec.template.spec.containers[0].args'
 ```

@@ -106,6 +106,14 @@ models:
     weights: 15GB
     args: [--tokenizer-mode=mistral, --config-format=mistral, --load-format=mistral]
     use: Mistral baseline (Vol 36)
+  - name: mixtral-8x7b-fp8
+    hf: RedHatAI/Mixtral-8x7B-Instruct-v0.1-FP8
+    util: 0.55
+    max_len: 32768
+    mem: 64Gi
+    weights: 47GB
+    args: [--max-num-seqs=32]
+    use: Mistral's sparse MoE (8 experts, top-2) vs DeepSeekMoE in v2-lite (Vol 36)
   - name: nemotron-nano-8b
     hf: nvidia/Llama-3.1-Nemotron-Nano-8B-v1
     util: 0.30

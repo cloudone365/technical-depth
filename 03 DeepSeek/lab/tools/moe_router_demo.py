@@ -73,7 +73,7 @@ def main():
         print(f"\n== {'WITH' if balance else 'WITHOUT'} aux-loss-free bias balancing "
               f"({a.experts} experts, top-{a.topk}, groups {a.limited}/{a.groups})")
         print(" step   max/mean expert load   idle experts   max/mean GPU load (EP={})".format(a.gpus))
-        for s in (0, 9, 19, 39, a.steps - 1):
+        for s in sorted({i for i in (0, 9, 19, 39, a.steps - 1) if i < a.steps}):
             load = hist[s]
             per_gpu = load.view(a.gpus, -1).sum(1)
             print(f" {s+1:4d}   {load.max()/load.mean():20.2f}   {int((load == 0).sum()):12d}   "

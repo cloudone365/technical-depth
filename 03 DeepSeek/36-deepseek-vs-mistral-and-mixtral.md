@@ -1,295 +1,221 @@
-# 36. DeepSeek vs. Mistral & Mixtral — The Evolution of Mixture-of-Experts
+# Volume 36 — DeepSeek vs Mistral and Mixtral: Two Kinds of MoE, One Dense Baseline, and the Bandwidth Math That Predicts Their Speed
 
-> **Target Audience**: AI Systems Architects, Quantitative Researchers, and Platform Engineers analyzing the generational shift in sparse Mixture-of-Experts (MoE) architectures.  
-> **Prerequisites**: MoE routing fundamentals (from [02-deepseek-moe-fine-grained-routing.md](02-deepseek-moe-fine-grained-routing.md)), Multi-Head Latent Attention (from [01-multi-head-latent-attention-mla.md](01-multi-head-latent-attention-mla.md)), and GPU memory bandwidth concepts.  
-> **Estimated Study Time**: 55 minutes.  
-> **What You Will Master**: The architectural leap from **Gen-1 Coarse-Grained MoE (Mixtral 8x7B)** to **Gen-2 Fine-Grained MoE (DeepSeekMoE)**, mathematical combinatorial expressiveness ($4.37 \times 10^{11}$ combinations), auxiliary-loss-free dynamic routing, state-space models (Codestral Mamba), and deployment sizing on the **NVIDIA DGX Spark**.
+> **Module 03 · Part IX — Model comparisons** · Prev: [35 DeepSeek vs Qwen2.5](35-deepseek-vs-alibaba-qwen25.md) · Next: [37 DeepSeek vs o1 and Claude](37-deepseek-vs-openai-o1-and-claude.md)
 
----
-
-## 📑 Table of Contents
-1. [Foundational Scaffolding: The MoE Generational Divide](#1-foundational-scaffolding-the-moe-generational-divide)
-2. [Co-Related Concepts & The Evolution of Sparse Architectures](#2-co-related-concepts--the-evolution-of-sparse-architectures)
-3. [Deep First-Principles: Coarse-Grained (Mixtral) vs. Fine-Grained (DeepSeekMoE)](#3-deep-first-principles-coarse-grained-mixtral-vs-fine-grained-deepseekmoe)
-4. [Combinatorial Expressiveness Mathematics: $\binom{8}{2}$ vs. $\binom{256}{8}$](#4-combinatorial-expressiveness-mathematics-binom82-vs-binom2568)
-5. [The Auxiliary-Loss Dilemma & Dynamic Bias Routing](#5-the-auxiliary-loss-dilemma--dynamic-bias-routing)
-6. [Codestral & State-Space Models (Mamba) vs. Transformer MLA](#6-codestral--state-space-models-mamba-vs-transformer-mla)
-7. [Licensing, Sovereignty & Compliance: Apache-2.0 vs. MNCL vs. MIT](#7-licensing-sovereignty--compliance-apache-20-vs-mncl-vs-mit)
-8. [Comprehensive Benchmark Showdown: Mixtral 8x22B vs. DeepSeek-V3](#8-comprehensive-benchmark-showdown-mixtral-8x22b-vs-deepseek-v3)
-9. [Hands-On Python Lab: Simulating Combinatorial Routing Expressiveness](#9-hands-on-python-lab-simulating-combinatorial-routing-expressiveness)
-10. [Hardware Grounding: Serving Sizing on NVIDIA DGX Spark](#10-hardware-grounding-serving-sizing-on-nvidia-dgx-spark)
-11. [Practice Exercises with Step-by-Step Solutions](#11-practice-exercises-with-step-by-step-solutions)
-12. [Troubleshooting Guide & Diagnostic Runbook](#12-troubleshooting-guide--diagnostic-runbook)
+| | |
+|---|---|
+| **You will build** | A comparison of mixture-of-experts designs on the GB10: Mixtral-8x7B (8 large experts, top-2, GQA) vs DeepSeek-V2-Lite (64 fine-grained experts + 2 shared, top-6, MLA), with Mistral-7B and R1-Distill-Qwen-7B as dense references. You'll predict each model's single-stream decode speed from memory bandwidth, measure it, and then watch MoE's advantage change as concurrency rises |
+| **Hardware** | spark-01 |
+| **Time** | 2 h |
+| **Risk** | Low |
+| **Lab files** | [`tools/model_math.py`](lab/tools/model_math.py) (`decode ceiling`), [`tools/stream_probe.py`](lab/tools/stream_probe.py), [`scripts/compare-models.sh`](lab/scripts/compare-models.sh), [`models.yaml`](lab/models.yaml) (`mistral-7b`, `mixtral-8x7b-fp8`, `v2-lite`, `r1-7b`), [`tools/moe_router_demo.py`](lab/tools/moe_router_demo.py) |
 
 ---
 
-## 1. Foundational Scaffolding: The MoE Generational Divide
+## 1. Why compare Mistral's and DeepSeek's MoE
 
-In late 2023, **Mistral AI** (France) ignited the open-weights Mixture-of-Experts revolution with **Mixtral 8x7B**. By pairing 8 coarse-grained feed-forward blocks and activating only 2 per token, Mixtral delivered Llama-1 70B performance at the inference speed of a 13B model.
+Both companies bet on sparse mixture-of-experts. They made different choices, and those choices show up directly in memory, speed and quality on a single GB10:
 
-However, Mixtral represented **Generation 1 MoE**:
-* **Coarse-Grained Experts**: Each expert was a giant, monolithic 7-billion parameter FFN network.
-* **Limited Routing Combinations**: Routing each token to only 2 of 8 experts provided very few combinatorial pathways.
-* **Knowledge Redundancy**: Common linguistic constructs (articles like *"the"*, punctuation, basic syntax) were redundantly memorized across all 8 experts, squandering parameter capacity.
-* **Auxiliary Loss Penalty**: To prevent the router from collapsing onto 1 popular expert, Mixtral applied an artificial mathematical loss penalty that directly degraded language modeling capability.
+| Design choice | Mixtral-8x7B | DeepSeek-V2-Lite (DeepSeekMoE, Vol 02) |
+|---|---|---|
+| Experts per MoE layer | 8 routed | 64 routed + **2 shared** (always on) |
+| Active per token | top-2 | top-6 routed + 2 shared |
+| Expert size (FFN width) | 14,336 (large) | 1,408 (fine-grained) |
+| Total / active parameters | 46.7 B / 12.9 B | 15.7 B / ~2.7 B |
+| Attention | GQA, 8 KV heads, 32 layers | **MLA**, 512-dim latent + 64 RoPE, 27 layers |
+| KV per token (bf16) | 128 KiB | 30.4 KiB |
+| Licence | Apache 2.0 | DeepSeek model licence |
+| Lab checkpoint | FP8 (~44 GiB) | BF16 (~29 GiB) |
 
-One year later, **DeepSeek** introduced **Generation 2 MoE (DeepSeekMoE)**:
-* **Fine-Grained Micro-Experts**: Sliced experts into 256 micro-networks ($1/4$ size each).
-* **Dedicated Shared Experts**: Dedicated 1 permanent expert to handle universal grammar and syntax, freeing routed experts to hyper-specialize.
-* **Auxiliary-Loss-Free Dynamic Balancing**: Replaced the degrading auxiliary loss with dynamic routing bias offsets.
-
-```
-                      GENERATION 1 VS. GENERATION 2 MoE
-┌──────────────────────────────────────┐     ┌──────────────────────────────────────┐
-│       Gen 1: Mixtral 8x7B (Coarse)   │     │      Gen 2: DeepSeekMoE (Fine)       │
-│  - 8 Total Monolithic Experts        │     │  - 256 Total Micro-Experts           │
-│  - Top-2 Routing                     │     │  - Top-8 Routing + 1 Shared Expert   │
-│  - 28 Combinatorial Combinations     │     │  - 437 Billion Combinations!         │
-│  - Heavy Knowledge Redundancy        │     │  - Zero Shared Redundancy            │
-│  - Degrative Auxiliary Loss          │     │  - Auxiliary-Loss-Free Dynamic Bias  │
-└──────────────────────────────────────┘     └──────────────────────────────────────┘
-```
-
-### The General Hospital Triage Analogy
-* **Mixtral (Gen 1)**: Like a hospital divided into only 8 massive, general departments (Surgery, Internal Medicine, Pediatrics, etc.). When a patient arrives, the front desk sends them to two large wings. Because the wings are so broad, each wing must redundantly staff general triage nurses, pharmacy counters, and administrative desks.
-* **DeepSeekMoE (Gen 2)**: Like a modern university medical center with a dedicated **Central Triage Desk (Shared Expert)** that checks vitals for 100% of patients, plus **256 hyper-specialized clinics (Micro-Experts)** (Pediatric Neuro-Oncologist, Cardiac Electrophysiologist, etc.). The patient sees the triage desk plus the exact 8 specialists tailored to their unique symptoms.
+**Mistral-7B** (dense, GQA, sliding-window heritage, Apache 2.0) and **R1-Distill-Qwen-7B** (dense reasoner) are the dense baselines at similar per-token cost to Mixtral's active set.
 
 ---
 
-## 2. Co-Related Concepts & The Evolution of Sparse Architectures
+## 2. Architecture — HLD
 
 ```mermaid
-flowchart TD
-    Shazeer["Shazeer et al. (2017)<br/>Outrageously Large Neural Networks<br/>137B LSTM with 2,048 experts, brittle training"] --> Switch["Switch Transformer (Fedus et al., 2021)<br/>Top-1 routing simplifies engineering but causes training instability"]
-    Switch --> Mixtral["Mixtral 8x7B / 8x22B (Dec 2023)<br/>Coarse-grained Top-2 of 8, popularized sparse open weights"]
-    Mixtral --> DeepSeekMoE["DeepSeekMoE (May 2024 - Jan 2025)<br/>256 Fine-grained micro-experts + Shared expert + DualPipe"]
-    DeepSeekMoE --> SSM_Hybrid["Alternative: State Space Models (Mamba / Jamba)<br/>Replaces attention with selective recurrence (Codestral Mamba)"]
+flowchart LR
+  subgraph MX["Mixtral MoE layer"]
+    direction TB
+    R1["router → top-2 of 8"] --> E1["expert 1<br/>14336"]
+    R1 --> E2["expert 5<br/>14336"]
+    E1 --> S1["weighted sum"]
+    E2 --> S1
+  end
+  subgraph DS["DeepSeekMoE layer (V2-Lite)"]
+    direction TB
+    SH["2 shared experts<br/>(every token)"]
+    R2["router → top-6 of 64"] --> F1["6 × small experts<br/>1408 each"]
+    SH --> S2["sum"]
+    F1 --> S2
+  end
+  BW["GB10 · 273 GB/s<br/>decode reads ACTIVE weights per token"]
+  MX -->|"12.9 GB/token (FP8)"| BW
+  DS -->|"5.3 GB/token (BF16)"| BW
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  class R1,R2 ctrl
+  class E1,E2,F1,SH gpu
+  class S1,S2 store
+  class BW store
+  style MX fill:#f3effc,stroke:#8250df
+  style DS fill:#e6f4f5,stroke:#0e7c86
 ```
 
 ---
 
-## 3. Deep First-Principles: Coarse-Grained (Mixtral) vs. Fine-Grained (DeepSeekMoE)
+## 3. LLD
 
-### Expert Sizing & Routing Granularity
-In a standard transformer layer with hidden dimension $d$ and intermediate FFN dimension $d_{ffn}$:
+### 3.1 The bandwidth model
 
-1. **Mixtral 8x7B**:
-   * Total Experts $N = 8$.
-   * Each expert intermediate dimension: $d_{\text{expert}} = d_{ffn} = 14,336$.
-   * Activated per token: $k = 2$.
-   * Active intermediate dimension: $2 \times 14,336 = 28,672$.
-2. **DeepSeek-V3**:
-   * Total Routed Experts $N = 256$, plus 1 Shared Expert.
-   * Each routed expert intermediate dimension: $d_{\text{expert}} = \frac{d_{ffn}}{4} = 2,048$.
-   * Activated per token: $k = 8$ routed $+ 1$ shared expert.
-   * Active intermediate dimension: $(8 + 1) \times 2,048 = 18,432$.
+Single-stream decode on a GB10 is memory-bandwidth-bound. Each new token must read every **active** weight once, plus the sequence's KV cache:
 
-By dividing FFN parameters into **smaller, granular chunks**, DeepSeek allows individual experts to focus on specialized linguistic, mathematical, or coding nuances without carrying redundant general knowledge!
-
----
-
-## 4. Combinatorial Expressiveness Mathematics: $\binom{8}{2}$ vs. $\binom{256}{8}$
-
-The expressive capability of an MoE network depends on the number of distinct subnetworks that can be dynamically assembled to process an input token:
-
-$$\text{Combinatorial Pathways } \mathcal{C} = \binom{N}{k} = \frac{N!}{k! (N - k)!}$$
-
-### 1. Mixtral 8x7B Expressive Pathways ($N = 8, k = 2$):
-$$\mathcal{C}_{\text{Mixtral}} = \binom{8}{2} = \frac{8 \times 7}{2 \times 1} = \mathbf{28 \text{ possible combinations}}$$
-
-Only **28 unique expert combinations** exist across the entire model. Two completely different concepts (e.g., French grammar and Python async programming) frequently collide into the exact same pair of experts!
-
-### 2. DeepSeekMoE Expressive Pathways ($N = 256, k = 8$):
-$$\mathcal{C}_{\text{DeepSeek}} = \binom{256}{8} = \frac{256!}{8! \times 248!} = \mathbf{437,395,199,440 \approx 4.37 \times 10^{11} \text{ combinations!}}$$
-
-$$\text{Combinatorial Expressiveness Ratio} = \frac{4.37 \times 10^{11}}{28} \approx \mathbf{15.6 \times 10^9 \text{ (15.6 Billion Times Higher!)}}$$
-
-DeepSeekMoE provides **over 15 Billion times more routing combinations** for the exact same active parameter budget, completely eliminating expert collision!
-
----
-
-## 5. The Auxiliary-Loss Dilemma & Dynamic Bias Routing
-
-### Why Traditional Auxiliary Loss Harms Quality
-In Mixtral, an auxiliary load-balancing loss $\mathcal{L}_{\text{aux}}$ is added to the training objective:
-$$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{LM}} + \alpha \cdot \mathcal{L}_{\text{aux}}$$
-If expert 3 receives more tokens than expert 4, $\mathcal{L}_{\text{aux}}$ penalizes the router.
-* **The Flaw**: It forces the model to route tokens to sub-optimal experts purely for the sake of artificial hardware balancing, directly degrading language modeling accuracy.
-
-### DeepSeek's Breakthrough: Dynamic Routing Bias ($b_i$)
-DeepSeek completely sets $\alpha = 0$, eliminating auxiliary loss from gradient descent. Instead, it adjusts router selection using **post-hoc dynamic bias offsets**:
-
-$$s_{i,t} = \text{TopK} \left( \frac{\exp(u_{i,t} + b_i)}{\sum_j \exp(u_{j,t} + b_j)}, k \right)$$
-
-* At the end of each training step, the orchestrator monitors expert queue loads.
-* If Expert $i$ is overloaded, its bias $b_i$ is decremented: $b_i \leftarrow b_i - \gamma$.
-* If Expert $i$ is starved, its bias $b_i$ is incremented: $b_i \leftarrow b_i + \gamma$.
-* **Result**: Perfect hardware load-balancing across GPU clusters with **zero penalty applied to language modeling gradients**!
-
----
-
-## 6. Codestral & State-Space Models (Mamba) vs. Transformer MLA
-
-Mistral also pioneered non-Transformer architectures with **Codestral Mamba (7B)**:
-
-```
-┌──────────────────────────────────────┐     ┌──────────────────────────────────────┐
-│       Codestral Mamba (Mamba2)       │     │     DeepSeek-Coder-V2 (Transformer)  │
-│  - Linear Time Complexity O(N)       │     │  - Quadratic / Latent Attention      │
-│  - Constant KV Memory O(1)           │     │  - MLA Latent KV Cache Compression   │
-│  - Infinite Context Streaming        │     │  - 128k Native Context               │
-│  - Weaker Multi-Hop Induction        │     │  - Unmatched Symbolic Reasoning      │
-└──────────────────────────────────────┘     └──────────────────────────────────────┘
+```text
+tok/s (one stream) ≤ 273 GB/s ÷ (active_params × bytes_per_param + KV_bytes_for_context)
 ```
 
-* **Codestral Mamba**: Ideal for infinite streaming log analysis and continuous telemetry where memory must remain strictly constant ($O(1)$).
-* **DeepSeek MLA**: Preserves the complete associative retrieval power of self-attention while using low-rank latent compression to slash KV cache memory by 93%.
+`model_math.py` prints this as `decode ceiling` (with a 4K-token context):
+
+| Model (lab format) | Active weights per token | Ceiling (1 stream) | Measured (**record yours**) |
+|---|---|---|---|
+| Mistral-7B (BF16) | 14.5 GB | ≈ 18 tok/s | |
+| R1-Distill-Qwen-7B (BF16) | 15.2 GB | ≈ 18 tok/s | |
+| Mixtral-8x7B (FP8) | 12.9 GB | ≈ 20 tok/s | |
+| DeepSeek-V2-Lite (BF16) | 5.3 GB | ≈ 50 tok/s | |
+
+Real numbers land below the ceiling (kernel efficiency, routing overhead, attention compute). The *ranking* should hold.
+
+### 3.2 Why MoE's advantage shrinks with batch size
+
+With batch size 1, Mixtral reads 2 of 8 experts per layer. With 8 concurrent sequences, the union of experts touched per layer is close to all 8, so the step reads nearly the **full 44 GiB**, but for 8 tokens at once. Dense and MoE models both become more compute-bound as batch grows, and MoE's "fewer bytes per token" advantage narrows. DeepSeekMoE's 64 small experts have the same property, with a different curve (Vol 09's EPLB exists because of this at datacenter scale).
+
+| | batch 1 | batch 8 |
+|---|---|---|
+| Mixtral experts read per layer | 2 of 8 | ≈ 7–8 of 8 |
+| V2-Lite experts read per layer | 6 of 64 + 2 shared | ≈ 30–40 of 64 + 2 shared |
+
+### 3.3 Memory and concurrency (`model_math.py`)
+
+| Entry | util | Weights | KV left | Sequences at max length |
+|---|---|---|---|---|
+| mistral-7b | 0.30 | 13.5 GiB | ~19 GiB | ~4 at 32K |
+| mixtral-8x7b-fp8 | 0.55 | 43.5 GiB | ~19 GiB | 4 at 32K |
+| v2-lite | 0.45 | ~29 GiB | ~22 GiB | **45 at 16K** (MLA) |
 
 ---
 
-## 7. Licensing, Sovereignty & Compliance: Apache-2.0 vs. MNCL vs. MIT
+## 4. Integrations
 
-| Dimension | Mistral AI (France / EU) | DeepSeek (China) |
-| :--- | :--- | :--- |
-| **Open Source Licensing** | Split: Apache-2.0 (Base) vs. **MNCL (Restricted)** | **Permissive MIT / DeepSeek Open License** |
-| **Commercial Exploitation** | Restrictive on Mistral Large 2 & Codestral | **100% Unrestricted Commercial Deployment** |
-| **Model Distillation Rights**| **Strictly Prohibited under MNCL** | **Explicitly Permitted (Encouraged!)** |
-| **Regulatory Alignment** | Native EU AI Act Compliance & GDPR Focus | Chinese Cybersecurity Standards (CAC) |
-| **Weights Availability** | Hugging Face / Mistral Cloud | Hugging Face / Direct BitTorrent |
-
-* **Warning on MNCL**: Mistral Large 2 and Codestral 22B cannot be commercially deployed or distilled without purchasing a commercial license from Mistral AI.
-* **DeepSeek Freedom**: DeepSeek explicitly allows distillation into smaller models (as proven by DeepSeek-R1-Distill-Qwen).
+- **Vol 01–02**: MLA and DeepSeekMoE, with the router demo this volume reuses.
+- **Vol 12**: the memory math. `model_math.py` gained the decode ceiling for this volume.
+- **Vol 21**: `stream_probe.py` measures single-stream ITL (1000 ÷ ITL p50 ≈ tok/s).
+- **Vol 34–35**: same harness and rules. Results go in the same `results/` folder.
 
 ---
 
-## 8. Comprehensive Benchmark Showdown: Mixtral 8x22B vs. DeepSeek-V3
+## 5. Lab
 
-| Benchmark Metric | Mixtral 8x7B (Gen 1) | Mixtral 8x22B (Gen 1) | Mistral Large 2 (Dense) | DeepSeek-V3 (Gen 2 MoE) |
-| :--- | :--- | :--- | :--- | :--- |
-| **Total Parameters** | 46.7 Billion | 141 Billion | 123 Billion (Dense) | **671 Billion** |
-| **Active Params / Token** | **12.9 Billion** | 39 Billion | 123 Billion | **37.1 Billion** |
-| **Context Window** | 32k tokens | 64k tokens | 128k tokens | **128k tokens** |
-| **Attention Architecture**| GQA | GQA | GQA | **MLA (93% KV Savings)**|
-| **MMLU (Knowledge)** | 70.6% | 77.8% | 84.0% | **88.5% (+10.7% over 8x22B!)**|
-| **MATH-500** | 28.4% | 41.8% | 66.8% | **90.2% (More than 2x higher!)**|
-| **HumanEval (Python)** | 68.4% | 75.0% | 82.0% | **82.6%** |
-| **GSM8K (Math Word Problems)**| 58.4% | 78.4% | 88.0% | **89.3%** |
+### 5.1 Predict
 
----
-
-## 9. Hands-On Python Lab: Simulating Combinatorial Routing Expressiveness
-
-This script calculates the exact mathematical combinations, active parameter ratios, and routing entropy differences between Mixtral (Top-2 of 8) and DeepSeekMoE (Top-8 of 256):
-
-```python
-#!/usr/bin/env python3
-"""
-moe_combinatorial_audit.py
-Mathematical comparison of routing expressiveness between Gen-1 and Gen-2 MoE architectures.
-"""
-
-import math
-
-def analyze_moe_architecture(name: str, num_experts: int, top_k: int, expert_param_b: float, shared_experts: int = 0):
-    combinations = math.comb(num_experts, top_k)
-    active_params = (top_k * expert_param_b) + (shared_experts * expert_param_b)
-    total_params = (num_experts * expert_param_b) + (shared_experts * expert_param_b)
-    sparsity_ratio = (active_params / total_params) * 100
-
-    print("=" * 65)
-    print(f"ARCHITECTURE ANALYSIS: {name}")
-    print("=" * 65)
-    print(f"Total Experts Available  : {num_experts} (+ {shared_experts} Shared)")
-    print(f"Experts Activated/Token  : Top-{top_k}")
-    print(f"Total Model Parameter FFN: {total_params:.1f} Billion")
-    print(f"Active Parameters/Token  : {active_params:.1f} Billion")
-    print(f"Activation Sparsity      : {sparsity_ratio:.2f}% active")
-    print(f"Combinatorial Pathways   : {combinations:,} unique combinations")
-    print("=" * 65 + "\n")
-    return combinations
-
-if __name__ == "__main__":
-    c_mixtral = analyze_moe_architecture(
-        name="Mixtral 8x7B (Gen 1 MoE)",
-        num_experts=8,
-        top_k=2,
-        expert_param_b=5.8,
-        shared_experts=0
-    )
-
-    c_deepseek = analyze_moe_architecture(
-        name="DeepSeekMoE V3 (Gen 2 Fine-Grained MoE)",
-        num_experts=256,
-        top_k=8,
-        expert_param_b=2.5,
-        shared_experts=1
-    )
-
-    advantage = c_deepseek / c_mixtral
-    print(f"DeepSeekMoE Combinatorial Advantage: \033[92m{advantage:,.0f}x more expressive pathways!\033[0m")
+```bash
+cd "03 DeepSeek/lab"
+python3 tools/model_math.py --compare mistral-7b mixtral-8x7b deepseek-v2-lite deepseek-r1-distill-qwen-7b
+for a in "mistral-7b" "deepseek-r1-distill-qwen-7b" "mixtral-8x7b --dtype fp8 --util 0.55" "deepseek-v2-lite --util 0.45"; do
+  python3 tools/model_math.py $a | grep -E '^model|decode ceiling'; done
 ```
 
----
+### 5.2 Measure single-stream speed
 
-## 10. Hardware Grounding: Serving Sizing on NVIDIA DGX Spark
+```bash
+for m in mistral-7b mixtral-8x7b-fp8 v2-lite r1-7b; do
+  scripts/serve-model.sh $m
+  kubectl -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 3
+  python3 tools/stream_probe.py --url http://localhost:8000 --model $m --max-tokens 512 \
+    --prompt "Explain, in about 300 words, how a mixture-of-experts router chooses experts." | grep -E 'ITL|total'
+  kill $pf
+done
+```
 
-The **NVIDIA DGX Spark** features **128 GB Unified Memory**:
+Fill in the "Measured" column of §3.1 with `1000 / ITL p50`. Expected ranking: V2-Lite clearly fastest, then Mixtral FP8 ≈ the dense 7Bs.
 
-| Model Candidate | Format | Memory Footprint | Tokens / Sec | Feasibility on Single DGX Spark |
-| :--- | :--- | :--- | :--- | :--- |
-| **Mixtral 8x7B** | FP8 | ~26 GiB | 85 tok/s | **Supported** (Fast daily conversational workhorse) |
-| **Mixtral 8x22B** | FP8 | ~80 GiB | 32 tok/s | **Marginal** (Constrained KV cache headroom) |
-| **Mistral Large 2 (123B)** | FP8 | ~126 GiB | < 5 tok/s | **OOM** (Exceeds unified memory when KV added) |
-| **DeepSeek-R1-Distill-32B** | **FP8 / FP16** | **~32 GiB** | **75 tok/s** | **OPTIMAL (Beats Mixtral 8x22B on all math/coding)** |
+### 5.3 Throughput as concurrency rises
 
----
+```bash
+for m in mixtral-8x7b-fp8 v2-lite mistral-7b; do
+  scripts/serve-model.sh $m
+  kubectl -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 3
+  for c in 1 4 16; do
+    python3 tools/eval_harness.py --url http://localhost:8000 --model $m --suites json --limit 8 \
+      --concurrency $c --max-tokens 512 | grep 'tok/s aggregate' | sed "s/^/$m c=$c  /"
+  done
+  kill $pf
+done
+```
 
-## 11. Practice Exercises with Step-by-Step Solutions
+| model | c=1 tok/s | c=4 | c=16 | scaling c16/c1 |
+|---|---|---|---|---|
+| mixtral-8x7b-fp8 | | | | |
+| v2-lite | | | | |
+| mistral-7b | | | | |
 
-### Exercise 1: Calculating KV Cache Memory at 64k Context
-**Scenario**: Compare the memory required per user session at **64,000 tokens** context length between:
-1. **Mixtral 8x22B (GQA)**: $L = 56$, $n_{kv} = 8$, $d_k = 128$, FP16 precision ($2 \text{ bytes}$).
-2. **DeepSeek-V3 (MLA)**: Latent dimension $d_c + d_R = 576$, $L = 61$, FP8 precision ($1 \text{ byte}$).
+Expected: all three scale well with concurrency. The dense model's relative gain is usually largest, because MoE pays its "touch more experts" tax as the batch grows (§3.2).
 
-#### Solution:
-1. **Mixtral 8x22B GQA**:
-   $$\text{Bytes/tok} = 2 \times 56 \times 8 \times 128 \times 2 = 229,376 \text{ Bytes} \approx 224 \text{ KiB/tok}$$
-   $$\text{Total Memory at 64k} = 64,000 \times 229,376 \text{ Bytes} \approx \mathbf{14.68 \text{ Gigabytes per user!}}$$
-2. **DeepSeek-V3 MLA**:
-   $$\text{Bytes/tok} = 576 \times 61 \times 1 = 35,136 \text{ Bytes} \approx 34.3 \text{ KiB/tok}$$
-   $$\text{Total Memory at 64k} = 64,000 \times 35,136 \text{ Bytes} \approx \mathbf{2.25 \text{ Gigabytes per user!}}$$
-*Result*: DeepSeek MLA consumes **6.5x less memory**, allowing a single DGX Spark node to serve 6.5x more concurrent users!
+### 5.4 Quality
 
----
+```bash
+MAX_TOKENS=4096 scripts/compare-models.sh mistral-7b mixtral-8x7b-fp8 v2-lite r1-7b
+```
 
-### Exercise 2: Why Did Mistral Shift to Dense for Mistral Large 2?
-**Scenario**: In mid-2024, Mistral AI released their flagship model **Mistral Large 2 (123B parameters)** as a **dense model**, abandoning the MoE architecture used in Mixtral 8x22B.
-**Question**: Analyze why a frontier lab would choose a 123B dense architecture over an MoE architecture for enterprise deployment.
+Questions for your table: does Mixtral's larger total capacity beat V2-Lite's on math and JSON? How far ahead is the R1 reasoner on math, and what does it cost in `tok/ok`?
 
-#### Solution:
-* **Inference Hardware Sizing**: A 123B dense model fits onto a single standard node of $8\times \text{H100 SXM5}$ GPUs with high Tensor Core arithmetic utilization ($> 65\%$).
-* **Elimination of All-to-All Bottlenecks**: Gen-1 MoE models across multi-node clusters suffer from network latency during cross-node expert dispatch. Dense models rely solely on intra-node NVLink `All-Reduce`, delivering more predictable latency.
-* **Simplicity**: Dense models can be deployed on standard inference runtimes without specialized grouped GEMM kernels or expert load-balancers.
+### 5.5 Routing behaviour (optional, connects to Vol 02)
 
----
+```bash
+python3 tools/moe_router_demo.py --experts 8 --topk 2 --groups 1 --limited 1 --steps 40       # Mixtral-like
+python3 tools/moe_router_demo.py --experts 64 --topk 6 --groups 1 --limited 1 --steps 40      # V2-Lite-like
+```
 
-## 12. Troubleshooting Guide & Diagnostic Runbook
-
-### Issue 1: `RuntimeError: CUDA error: invalid configuration argument` When Loading Mixtral in vLLM
-* **Root Cause**: Tensor Parallelism (`--tensor-parallel-size`) was set to a value that does not evenly divide the 8 experts (e.g., $TP = 3$ or $TP = 6$).
-* **Remediation**: Configure $TP$ to a power-of-two that divides 8 cleanly ($TP = 1, 2, 4, \text{ or } 8$).
-
-### Issue 2: Severe Token Generation Jitter on Mixtral 8x7B
-* **Root Cause**: Uneven token routing caused Expert 0 and Expert 1 to receive 80% of all tokens, while other experts sat idle.
-* **Remediation**: Update vLLM to enable fused MoE kernels with dynamic load-balancing buffers:
-  ```bash
-  python3 -m vllm.entrypoints.openai.api_server --model mistralai/Mixtral-8x7B-Instruct-v0.1 --enforce-eager
-  ```
+Compare the load imbalance each layout produces before balancing kicks in.
 
 ---
 
-## 🔗 Related Curriculum Modules
-* **MoE Fine-Grained Foundations**: [02-deepseek-moe-fine-grained-routing.md](02-deepseek-moe-fine-grained-routing.md)
-* **Meta Llama Comparison**: [34-deepseek-vs-meta-llama3.md](34-deepseek-vs-meta-llama3.md)
-* **Alibaba Qwen Comparison**: [35-deepseek-vs-alibaba-qwen25.md](35-deepseek-vs-alibaba-qwen25.md)
-* **OpenAI o1 & Claude Showdown**: [37-deepseek-vs-openai-o1-and-claude.md](37-deepseek-vs-openai-o1-and-claude.md)
+## 6. Verify
+
+| Check | Expected |
+|---|---|
+| prediction | ceilings computed for all four |
+| measurement | measured single-stream speed below each ceiling, same ranking |
+| scaling | throughput table at c = 1, 4, 16 |
+| quality | comparison table from `compare-models.sh` |
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Mistral-7B fails: tokenizer/config errors | needs Mistral's native formats | catalog args `--tokenizer-mode=mistral --config-format=mistral --load-format=mistral` |
+| Mixtral FP8 repo not found | repo renamed or moved | search Hugging Face for an FP8 or AWQ Mixtral-8x7B-Instruct and update `hf:` |
+| V2-Lite fails without `--trust-remote-code` | custom modelling code | catalog includes it. Review the code before trusting it in production |
+| measured speed above the ceiling | prefix-cache hits or speculative decoding | use unique prompts. Turn off speculative decoding for this test |
+| measured speed far below the ceiling | another GPU workload sharing the slice | scale other GPU pods to 0 |
+
+---
+
+## 8. Scale-out path
+
+| One Spark | Datacenter |
+|---|---|
+| one MoE model on one GPU, all experts local | expert parallelism across GPUs. All-to-all token dispatch. EPLB to balance hot experts (Vol 09) |
+| bandwidth-bound decode | batch-heavy serving where compute and interconnect dominate |
+| Mixtral-8x7B, V2-Lite | Mixtral-8x22B, DeepSeek-V3/R1 (671B, 37B active) across 2+ Sparks or HGX/GB200 systems (Vol 14) |
+
+---
+
+## 9. Checklist
+
+- [ ] I can predict single-stream decode speed from active parameters and bandwidth.
+- [ ] I measured it and explained the gap to the ceiling.
+- [ ] I can explain why MoE's speed advantage narrows as batch size grows.
+- [ ] I can contrast Mixtral's coarse experts with DeepSeekMoE's fine-grained + shared experts.
