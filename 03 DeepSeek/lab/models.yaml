@@ -7,6 +7,8 @@
 # util      vLLM --gpu-memory-utilization (fraction of ≈119.7 GiB)
 # mem       pod memory limit (CPU-side; see 02 Vol 12 §5.5 for the UMA question)
 # weights   approximate weight size on disk (for prefetch planning)
+# revision  optional Hugging Face commit SHA that pins the exact weights and tokenizer
+#           (tools/catalog_drift.py pin writes it; Volume 33). Unpinned = branch main.
 models:
   - name: r1-1.5b
     hf: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B

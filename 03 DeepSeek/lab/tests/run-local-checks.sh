@@ -89,6 +89,15 @@ expect "restart  deployment/litellm" vs
 expect "unchanged litellm-master-key" vs
 curl -s -X POST http://127.0.0.1:18769/_rotate >/dev/null
 expect "restart  deployment/litellm" vs
+echo "== catalog pinning + upstream drift vs mock Hub"
+python3 tests/mock_hf.py 18774 & pids+=($!); sleep 1
+cat_copy=$(mktemp); cp models.yaml "$cat_copy"
+HF_ENDPOINT=http://127.0.0.1:18774 python3 tools/catalog_drift.py pin --catalog "$cat_copy" --only r1-7b >/dev/null
+grep -q "revision: [0-9a-f]\{40\}" "$cat_copy"
+expect "0 moved" env HF_ENDPOINT=http://127.0.0.1:18774 python3 tools/catalog_drift.py report --catalog "$cat_copy"
+curl -s -X POST http://127.0.0.1:18774/ >/dev/null
+if HF_ENDPOINT=http://127.0.0.1:18774 python3 tools/catalog_drift.py report --catalog "$cat_copy" >"$T"; then cat "$T"; echo "drift not detected"; exit 1; fi
+grep -q "MOVED     r1-7b" "$T" && echo "catalog drift OK"
 echo "== weights manifest"
 w=$(mktemp -d); echo a > "$w/x.safetensors"; python3 tools/weights_verify.py snapshot "$w" --out "$w.json" >/dev/null
 python3 tools/weights_verify.py verify "$w" "$w.json" >/dev/null && echo b > "$w/x.safetensors" && ! python3 tools/weights_verify.py verify "$w" "$w.json" >/dev/null && echo "weights_verify OK"

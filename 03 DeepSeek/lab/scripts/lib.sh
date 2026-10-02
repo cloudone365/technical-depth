@@ -13,6 +13,6 @@ model_field() {   # model_field <name> <field>  (from models.yaml)
   python3 - "$DS_DIR/models.yaml" "$1" "$2" <<'PY'
 import sys, yaml
 m = {x["name"]: x for x in yaml.safe_load(open(sys.argv[1]))["models"]}
-print(m[sys.argv[2]][sys.argv[3]] if sys.argv[2] in m else "", end="")
+print(m[sys.argv[2]].get(sys.argv[3], "") if sys.argv[2] in m else "", end="")
 PY
 }

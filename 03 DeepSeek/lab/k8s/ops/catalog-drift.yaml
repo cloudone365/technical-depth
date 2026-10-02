@@ -1,0 +1,35 @@
+# Weekly: has any pinned catalog model moved upstream on Hugging Face? (Volume 33)
+# The Job fails (and the failed-Job alert in Vol 38 fires) when a pinned repo has a newer
+# commit, so a human decides whether to re-pin, re-evaluate and roll out.
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: catalog-drift, namespace: llm-serving}
+spec:
+  schedule: "23 6 * * 1"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext: {runAsNonRoot: true, runAsUser: 65534, seccompProfile: {type: RuntimeDefault}}
+          containers:
+            - name: drift
+              image: python:3.12-slim
+              command: ["sh", "-c", "pip install --quiet --user pyyaml==6.0.2 && python3 /app/tools/catalog_drift.py report"]
+              env:
+                - {name: HOME, value: /tmp}
+                - name: HF_TOKEN
+                  valueFrom: {secretKeyRef: {name: hf-token, key: token, optional: true}}
+              securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+              resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 256Mi}}
+              volumeMounts:
+                - {name: tools, mountPath: /app/tools}
+                - {name: catalog, mountPath: /app/models.yaml, subPath: models.yaml}
+                - {name: tmp, mountPath: /tmp}
+          volumes:
+            - {name: tools, configMap: {name: deepseek-tools}}
+            - {name: catalog, configMap: {name: deepseek-catalog}}
+            - {name: tmp, emptyDir: {}}

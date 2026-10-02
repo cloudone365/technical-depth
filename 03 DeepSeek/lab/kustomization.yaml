@@ -20,6 +20,7 @@ configMapGenerator:
       - tools/ring_attention_demo.py
       - tools/vault_sync.py
       - tools/stream_probe.py
+      - tools/catalog_drift.py
       - tools/format_check.py
       - tools/grpo_tiny.py
   - name: deepseek-evaldata
@@ -29,6 +30,10 @@ configMapGenerator:
       - data/code_tasks.jsonl
       - data/json_tasks.jsonl
       - data/rag_gold.jsonl
+  - name: deepseek-catalog
+    namespace: llm-serving
+    files:
+      - models.yaml
   - name: deepseek-train
     namespace: batch
     files:

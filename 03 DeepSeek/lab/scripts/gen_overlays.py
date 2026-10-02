@@ -25,6 +25,8 @@ def overlay(m):
     args = ["$(MODEL)", "--served-model-name=$(SERVED_NAME)", "--host=0.0.0.0", "--port=8000",
             f"--gpu-memory-utilization={m['util']}", f"--max-model-len={m['max_len']}",
             "--enable-prefix-caching", "--download-dir=/models/hf", *m["args"]]
+    if m.get("revision"):                      # pinned weights (Volume 33): the same commit for model + tokenizer
+        args += [f"--revision={m['revision']}", f"--tokenizer-revision={m['revision']}"]
     patch = [
         {"op": "replace", "path": "/spec/template/spec/containers/0/args", "value": args},
         {"op": "replace", "path": "/spec/template/spec/containers/0/env/0/value", "value": m["hf"]},
