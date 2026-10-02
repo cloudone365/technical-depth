@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        folder: ["02 Kubernetes", "03 DeepSeek"]
+        folder: ["02 Kubernetes", "03 DeepSeek", "04 Qwen"]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

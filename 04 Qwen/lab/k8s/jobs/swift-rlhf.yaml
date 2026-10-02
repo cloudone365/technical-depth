@@ -1,0 +1,45 @@
+# Preference alignment with ms-swift (Volume 08): DPO by default; set RLHF_TYPE to simpo,
+# orpo or kto to compare. Starts from the merged SFT model (swift-sft.yaml) and uses
+# dpo.jsonl: chosen = verified teacher solution, rejected = the student's wrong answer.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: swift-rlhf
+  namespace: batch
+  labels: {kueue.x-k8s.io/queue-name: train, kueue.x-k8s.io/priority-class: routine}
+spec:
+  suspend: true
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      priorityClassName: spark-batch
+      containers:
+        - name: train
+          image: nvcr.io/nvidia/pytorch:25.09-py3
+          command: ["bash", "-c"]
+          args:
+            - >-
+              pip install --quiet ms-swift==3.8.3 trl==0.20.0 transformers==4.56.2 peft==0.17.1 accelerate==1.10.1 datasets==3.6.0 &&
+              swift rlhf --rlhf_type "$RLHF_TYPE" --model /ckpt/swift-sft-merged --train_type lora
+              --dataset /data/dpo.jsonl --torch_dtype bfloat16 --num_train_epochs 2 --per_device_train_batch_size 2
+              --gradient_accumulation_steps 8 --learning_rate 5e-6 --lora_rank 16 --lora_alpha 32 --target_modules all-linear
+              --beta 0.1 --max_length 2048 --gradient_checkpointing true --logging_steps 5 --report_to none
+              --output_dir /ckpt/swift-$RLHF_TYPE --add_version false &&
+              CK=$(ls -d /ckpt/swift-$RLHF_TYPE/checkpoint-* | sort -V | tail -1) &&
+              swift export --adapters "$CK" --merge_lora true --output_dir /ckpt/swift-$RLHF_TYPE-merged
+          env:
+            - {name: RLHF_TYPE, value: dpo}
+            - {name: USE_HF, value: "1"}
+            - {name: HF_HOME, value: /ckpt/hf}
+          resources:
+            requests: {cpu: "4", memory: 24Gi, nvidia.com/gpu: "1"}
+            limits: {cpu: "4", memory: 48Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: ckpt, mountPath: /ckpt}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - {name: data, configMap: {name: swift-data}}
+        - {name: ckpt, persistentVolumeClaim: {claimName: deepseek-ckpt}}
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 8Gi}}

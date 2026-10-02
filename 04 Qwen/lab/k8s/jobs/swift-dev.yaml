@@ -1,0 +1,43 @@
+# An interactive ms-swift workstation on the GB10 for Volumes 06-09, admitted by Kueue
+# like any training run (so it counts against batch quota and is preempted fairly).
+# It sleeps for 4 h; exec in, use `swift …`, delete it when done.
+#   kubectl apply -f k8s/jobs/swift-dev.yaml && kubectl -n batch wait --for=condition=ready pod -l job-name=swift-dev --timeout=20m
+#   kubectl -n batch exec -it job/swift-dev -- bash
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: swift-dev
+  namespace: batch
+  labels: {kueue.x-k8s.io/queue-name: train, kueue.x-k8s.io/priority-class: routine}
+spec:
+  suspend: true
+  backoffLimit: 0
+  activeDeadlineSeconds: 14400
+  template:
+    spec:
+      restartPolicy: Never
+      priorityClassName: spark-batch
+      containers:
+        - name: dev
+          image: nvcr.io/nvidia/pytorch:25.09-py3
+          command: ["bash", "-c"]
+          args:
+            - >-
+              pip install --quiet ms-swift==3.8.3 trl==0.20.0 transformers==4.56.2 peft==0.17.1 accelerate==1.10.1 datasets==3.6.0 &&
+              swift --help | head -5 && echo READY && sleep 14400
+          readinessProbe: {exec: {command: ["sh", "-c", "command -v swift"]}, periodSeconds: 15}
+          env:
+            - {name: USE_HF, value: "1"}
+            - {name: HF_HOME, value: /ckpt/hf}
+          resources:
+            requests: {cpu: "4", memory: 24Gi, nvidia.com/gpu: "1"}
+            limits: {cpu: "4", memory: 48Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: ckpt, mountPath: /ckpt}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - name: data
+          configMap: {name: swift-data, optional: true}
+        - {name: ckpt, persistentVolumeClaim: {claimName: deepseek-ckpt}}
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 8Gi}}

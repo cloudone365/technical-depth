@@ -11,15 +11,15 @@ LIMIT=${LIMIT:-0}; PORT=${PORT:-18000}
 mkdir -p "$DS_DIR/results"
 outs=()
 for name in "$@"; do
-  "$DS_DIR/scripts/serve-model.sh" "$name" || { bad "$name did not come up — skipped"; continue; }
+  "$DS_LAB/scripts/serve-model.sh" "$name" || { bad "$name did not come up — skipped"; continue; }
   k -n "$NS" port-forward svc/vllm "$PORT:8000" >/dev/null 2>&1 & pf=$!; sleep 3
   extra=(); [[ -n ${API_PRICE_OUT:-} ]] && extra+=(--api-price-out "$API_PRICE_OUT")
   # shellcheck disable=SC2086  # SUITES is a word list on purpose
-  python3 "$DS_DIR/tools/eval_harness.py" --url "http://127.0.0.1:$PORT" --model "$name" --suites $SUITES \
+  python3 "$DS_LAB/tools/eval_harness.py" --url "http://127.0.0.1:$PORT" --model "$name" --suites $SUITES \
     --limit "$LIMIT" --concurrency "${CONCURRENCY:-8}" --max-tokens "${MAX_TOKENS:-8192}" \
     --power-w "${POWER_W:-200}" "${extra[@]}" --out "$DS_DIR/results/$name.json" | tail -4
   kill "$pf" 2>/dev/null; wait "$pf" 2>/dev/null
   outs+=("$DS_DIR/results/$name.json")
 done
 echo
-python3 "$DS_DIR/tools/eval_harness.py" --report "${outs[@]}"
+python3 "$DS_LAB/tools/eval_harness.py" --report "${outs[@]}"

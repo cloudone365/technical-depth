@@ -1,341 +1,202 @@
-# 08. Advanced Alignment: DPO, SimPO & GRPO — Direct Preference, Simple Preference & Group Relative Policy Optimization
+# Volume 08 — Preference Alignment with ms-swift: DPO, SimPO and ORPO on Your Own Hard Cases, and Where GRPO Fits
 
-> **Target Audience**: Post-Training Specialists, Reinforcement Learning (RL) Engineers, Alignment Researchers, and Enterprise AI Safety Leads fine-tuning models on preference and reasoning data.  
-> **Prerequisites**: Solid foundation in probability theory (expectation, log-likelihood, KL divergence), Supervised Fine-Tuning (SFT), and familiarity with [Volume 06](06-models-scope-ms-swift-framework-core.md) and [DeepSeek Volume 05](../DeepSeek/05-deepseek-r1-and-grpo-reasoning.md).  
-> **Estimated Deep-Dive Time**: 50 minutes  
-> **What You Will Master**:
-> 1. The theoretical and computational limitations of classical **RLHF with PPO** (maintaining 4 simultaneous models in memory).
-> 2. The first-principles mathematical derivations of **Direct Preference Optimization (DPO)** and **Simple Preference Optimization (SimPO)**.
-> 3. The mechanics of **Group Relative Policy Optimization (GRPO)** in `ms-swift` for training verifiable reasoning and self-reflection loops.
-> 4. Comparative trade-off matrix: PPO vs. DPO vs. SimPO vs. KTO vs. GRPO across memory footprint, stability, and reasoning emergence.
-> 5. A runnable, self-contained Python script computing DPO and SimPO losses with numerical stability checks and advantage normalization.
-> 6. Hardware memory budgeting for preference alignment on the **NVIDIA DGX Spark (Grace Blackwell GB10)**.
+> **Module 04 · Part II — Training and alignment** · Prev: [07 SFT](07-distributed-sft-with-ms-swift.md) · Next: [09 PEFT variants](09-parameter-efficient-tuning-peft.md)
 
----
-
-## 📑 Table of Contents
-1. [Zero-to-One Intuition: Why SFT is Only Half the Battle](#1-zero-to-one-intuition-why-sft-is-only-half-the-battle)
-2. [Evolutionary Lineage: The Death of the Critic Network](#2-evolutionary-lineage-the-death-of-the-critic-network)
-3. [First-Principles Mathematics: Direct Preference Optimization (DPO)](#3-first-principles-mathematics-direct-preference-optimization-dpo)
-4. [Simple Preference Optimization (SimPO): Eliminating the Reference Model](#4-simple-preference-optimization-simpo-eliminating-the-reference-model)
-5. [Group Relative Policy Optimization (GRPO) for Reasoning](#5-group-relative-policy-optimization-grpo-for-reasoning)
-6. [Comparative Trade-Off Matrix: The Alignment Zoo](#6-comparative-trade-off-matrix-the-alignment-zoo)
-7. [Hands-On Production Lab: DPO, SimPO & GRPO Loss Simulator](#7-hands-on-production-lab-dpo-simpo--grpo-loss-simulator)
-8. [Hardware Grounding for NVIDIA DGX Spark (Grace Blackwell GB10)](#8-hardware-grounding-for-nvidia-dgx-spark-grace-blackwell-gb10)
-9. [Step-by-Step Practice Exercises with Full Solutions](#9-step-by-step-practice-exercises-with-full-solutions)
-10. [Troubleshooting & Operational FAQ](#10-troubleshooting--operational-faq)
+| | |
+|---|---|
+| **You will build** | Preference training on top of Volume 07's SFT model, using pairs mined from the model's own mistakes (chosen = verified teacher solution, rejected = the student's wrong answer). You'll train DPO and SimPO with the same data and budget, read the training signals that tell you it's working (reward margins, preference accuracy), and score all three models (SFT, +DPO, +SimPO) behind the release gate |
+| **Hardware** | spark-01 |
+| **Time** | 2 h |
+| **Risk** | Low |
+| **Lab files** | [`k8s/jobs/swift-rlhf.yaml`](lab/k8s/jobs/swift-rlhf.yaml) (`RLHF_TYPE`), [`tools/synth_data.py`](lab/tools/synth_data.py) (`dpo.jsonl`), [`03 …/tools/eval_harness.py`](../03%20DeepSeek/lab/tools/eval_harness.py) |
 
 ---
 
-## 1. Zero-to-One Intuition: Why SFT is Only Half the Battle
+## 1. Why preference training after SFT
 
-Supervised Fine-Tuning (SFT) trains a model via teacher forcing to predict the next token in high-quality demonstration datasets. 
+SFT teaches the model *what a good answer looks like*. Preference training teaches it *which of two answers is better*. That's the signal that pushes down specific failure modes, such as the arithmetic slips your student model actually makes:
 
-However, SFT suffers from a fundamental blindness:
-* **The Imitation Trap**: SFT learns *what* human developers wrote, but it has no mathematical concept of *why* one answer is superior to another.
-* **Compounding Distribution Drift**: If the model veers slightly off-distribution during inference, it enters uncharted territory where it has never seen ground-truth supervision, causing hallucinations.
-* **Negative Example Blindness**: SFT can only be trained on positive examples ($y_{\text{win}}$). It cannot be penalized for generating subtly dangerous or logically flawed text ($y_{\text{lose}}$).
-
-```text
-Supervised Fine-Tuning (SFT):
-[Prompt] ──> Maximize P(y_gold | x)  (Blind imitation of single target)
-
-Preference Alignment (DPO / SimPO):
-[Prompt] ──> Maximize P(y_win | x) AND Minimize P(y_lose | x) Simultaneously!
-             (Pushes probability mass away from bad answers toward good answers)
-```
-
-Preference alignment algorithms reshape the probability landscape: boosting the likelihood of preferred responses while actively depressing the probability of unhelpful, dangerous, or syntactically incorrect outputs.
+| Method | Needs a reference model? | Objective (per pair: chosen y_w, rejected y_l) | Notes |
+|---|---|---|---|
+| **DPO** | yes (frozen copy, or the base with LoRA disabled) | −log σ(β·[(log π(y_w) − log π_ref(y_w)) − (log π(y_l) − log π_ref(y_l))]) | the standard. β ≈ 0.1 |
+| **SimPO** | no | −log σ((β/\|y_w\|)·log π(y_w) − (β/\|y_l\|)·log π(y_l) − γ) | length-normalised, reference-free, has a margin γ |
+| **ORPO** | no | SFT loss + λ·odds-ratio term | can replace SFT + DPO with one stage |
+| KTO | no pairs needed | per-example "good/bad" labels | for thumbs-up/down data |
+| **GRPO** | no reward model | group-relative advantage on sampled answers scored by rules | online RL. Run it with TRL in 03 Vols 05/25, or `swift rlhf --rlhf_type grpo` |
 
 ---
 
-## 2. Evolutionary Lineage: The Death of the Critic Network
+## 2. Architecture — HLD
 
 ```mermaid
-flowchart TD
-    A["PPO / Classical RLHF (2020-2022)<br/>Actor, Critic, Reference, and Reward Models<br/>Massive memory overhead (4 models in VRAM); notoriously unstable"] --> B["DPO (Rafailov et al., 2023)<br/>Mathematically re-parameterizes reward as implicit policy ratio<br/>Eliminates Critic & Reward models; needs only Actor & Reference"]
-    B --> C["SimPO (Meng et al., 2024)<br/>Length-normalized margin directly in log-likelihood space<br/>Eliminates Reference Model! Cuts VRAM in half"]
-    B --> D["GRPO (DeepSeek / Shao et al., 2025)<br/>Group relative advantage normalization over G rollouts<br/>Enables pure RL reasoning loops without Critic"]
-    C --> E["Unified Execution in ms-swift<br/>Train Qwen2.5 with DPO, SimPO, or GRPO via single CLI flag"]
-    D --> E
+flowchart LR
+  SFT[("/ckpt/swift-sft-merged<br/>(Vol 07)")] --> J
+  D[("dpo.jsonl<br/>chosen = verified teacher<br/>rejected = student's wrong answer")] --> J
+  subgraph J["Job swift-rlhf (RLHF_TYPE = dpo | simpo | orpo)"]
+    direction TB
+    POL["policy = SFT + LoRA r16"]
+    REF["reference = SFT with LoRA off<br/>(DPO only; no second copy in memory)"]
+    LOSS["pairwise loss · β 0.1"]
+    POL --> LOSS
+    REF --> LOSS
+  end
+  J --> M1[("/ckpt/swift-dpo-merged")]
+  J --> M2[("/ckpt/swift-simpo-merged")]
+  M1 & M2 --> E["eval_harness math + json<br/>--gate vs SFT"]
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef obs fill:#fb8500,stroke:#9a5000,color:#000
+  class SFT,D,M1,M2 store
+  class POL,REF,LOSS gpu
+  class E obs
+  style J fill:#eef2ff,stroke:#1f6feb
 ```
 
 ---
 
-## 3. First-Principles Mathematics: Direct Preference Optimization (DPO)
+## 3. LLD
 
-In classical RLHF, a Reward Model $r_\psi(x, y)$ is trained to score answers, and a Policy $\pi_\theta$ is optimized using Proximal Policy Optimization (PPO) with a KL penalty against reference policy $\pi_{\text{ref}}$:
-$$\max_{\pi_\theta} \mathbb{E}_{x, y \sim \pi_\theta} [r_\psi(x, y)] - \beta D_{\text{KL}}(\pi_\theta(y \mid x) \parallel \pi_{\text{ref}}(y \mid x))$$
+### 3.1 The Job (`swift-rlhf.yaml`)
 
-### The Bradley-Terry Preference Model
-Human preference between winning answer $y_w$ and losing answer $y_l$ is governed by the Bradley-Terry formula:
-$$P(y_w \succ y_l \mid x) = \sigma(r^*(x, y_w) - r^*(x, y_l))$$
+| Argument | Value |
+|---|---|
+| `--rlhf_type` | `$RLHF_TYPE` (default `dpo`) |
+| `--model` | `/ckpt/swift-sft-merged` |
+| `--train_type lora` | rank 16, `all-linear` |
+| `--beta` | 0.1 |
+| lr / epochs | 5e-6 / 2 (preference training uses much smaller steps than SFT) |
+| batch | 2 × grad-accum 8 |
+| output | `/ckpt/swift-$RLHF_TYPE` → merged `/ckpt/swift-$RLHF_TYPE-merged` |
 
-### The DPO Breakthrough
-Rafailov et al. (2023) showed that the optimal policy $\pi^*$ under the KL-constrained objective can be inverted to express the ground-truth reward function **directly in terms of the language model probabilities**:
-$$r^*(x, y) = \beta \log \frac{\pi_\theta(y \mid x)}{\pi_{\text{ref}}(y \mid x)} + \beta \log Z(x)$$
+### 3.2 Signals to watch in the log (TRL-style names)
 
-Substituting this into the Bradley-Terry objective causes the partition function $Z(x)$ to cancel out completely, yielding the **DPO Loss Function**:
+| Metric | Healthy |
+|---|---|
+| `rewards/chosen` | rises or stays flat |
+| `rewards/rejected` | falls |
+| `rewards/margins` | grows from ~0 |
+| `rewards/accuracies` | climbs towards 0.8–1.0 (fraction of pairs where chosen > rejected) |
+| `logps/chosen` | must not collapse. A large drop means the model is unlearning good answers (lower lr or β) |
 
-$$\mathcal{L}_{\text{DPO}}(\pi_\theta; \pi_{\text{ref}}) = -\mathbb{E}_{(x, y_w, y_l)} \left[ \log \sigma \left( \beta \log \frac{\pi_\theta(y_w \mid x)}{\pi_{\text{ref}}(y_w \mid x)} - \beta \log \frac{\pi_\theta(y_l \mid x)}{\pi_{\text{ref}}(y_l \mid x)} \right) \right]$$
+SimPO logs its own reward and margin terms. The interpretation is the same.
 
-where:
-* $\beta$: Temperature hyperparameter (typically $0.1$ or $0.05$) controlling how tightly the policy clings to the reference model.
-* $\sigma$: Standard sigmoid function $\sigma(z) = \frac{1}{1 + e^{-z}}$.
+### 3.3 Data requirements
 
----
-
-## 4. Simple Preference Optimization (SimPO): Eliminating the Reference Model
-
-While DPO eliminated the separate reward and critic models, it still requires keeping two models in memory simultaneously:
-1. **The Active Policy Model** $\pi_\theta$ (trainable).
-2. **The Frozen Reference Model** $\pi_{\text{ref}}$ (evaluating baseline log-probabilities).
-
-Furthermore, DPO suffers from **Length Bias**: models learn that longer responses naturally accumulate higher log-probability ratios.
-
-### The SimPO Mathematical Formulation
-SimPO (Meng et al., 2024) introduces two radical improvements:
-1. **Length Normalization**: Divides the log-probability by response length $|y|$ to eliminate length exploitation.
-2. **Target Margin ($\gamma$)**: Enforces an explicit separation margin directly in the log-likelihood space, **completely eliminating the reference model $\pi_{\text{ref}}$**!
-
-$$\mathcal{L}_{\text{SimPO}}(\pi_\theta) = -\mathbb{E}_{(x, y_w, y_l)} \left[ \log \sigma \left( \frac{\beta}{|y_w|} \log \pi_\theta(y_w \mid x) - \frac{\beta}{|y_l|} \log \pi_\theta(y_l \mid x) - \gamma \right) \right]$$
-
-```
-Memory Footprint Comparison:
-DPO:   [ Active Policy (32.5 GB) ] + [ Frozen Reference (32.5 GB) ] = 65.0 GB VRAM!
-SimPO: [ Active Policy (32.5 GB) ]                                  = 32.5 GB VRAM! (50% SAVINGS)
-```
+| Requirement | Why |
+|---|---|
+| pairs share the same prompt | the loss compares two answers to one question |
+| chosen is genuinely better | verified answers guarantee that here |
+| rejected is a *plausible* mistake | pairs from the model's own errors teach the most. Random junk teaches little |
+| a few hundred pairs minimum | fewer can work for format behaviours. Accuracy behaviours need more |
 
 ---
 
-## 5. Group Relative Policy Optimization (GRPO) for Reasoning
+## 4. Integrations
 
-While DPO and SimPO operate on static pairs of human preferences $(y_w, y_l)$, **Group Relative Policy Optimization (GRPO)** (pioneered by DeepSeek and natively supported in `ms-swift`) is designed for **verifiable reasoning tasks** (such as mathematics and code):
-
-1. For prompt $x$, sample a group of $G$ candidate outputs $\{y_1, y_2, \dots, y_G\}$ from the current policy $\pi_{\theta_{\text{old}}}$.
-2. Evaluate each output using an automated compiler, unit test, or SymPy verifier to assign reward $r_i \in \{0.0, 1.0\}$.
-3. Normalize the rewards across the group to calculate relative advantage:
-$$A_i = \frac{r_i - \text{mean}(\{r_1, \dots, r_G\})}{\text{std}(\{r_1, \dots, r_G\}) + \epsilon}$$
-4. Update the policy using PPO's clipped surrogate loss:
-$$\mathcal{L}_{\text{GRPO}}(\theta) = -\frac{1}{G} \sum_{i=1}^G \left[ \min\left( \frac{\pi_\theta(y_i \mid x)}{\pi_{\text{old}}(y_i \mid x)} A_i, \text{clip}\left(\frac{\pi_\theta(y_i \mid x)}{\pi_{\text{old}}(y_i \mid x)}, 1-\epsilon, 1+\epsilon\right) A_i \right) - \beta D_{\text{KL}}(\pi_\theta \parallel \pi_{\text{ref}}) \right]$$
+- **Vol 07**: the SFT model is the starting point and the baseline for the gate.
+- **Vol 10**: produces `dpo.jsonl`. More student failures give more pairs.
+- **03 Vols 05, 25**: GRPO with TRL and vLLM rollouts. The online alternative to these offline methods.
 
 ---
 
-## 6. Comparative Trade-Off Matrix: The Alignment Zoo
+## 5. Lab
 
-| Alignment Method | Reward Model Required? | Reference Model Required? | Memory Multiplier vs SFT | Best Application Domain |
-| :--- | :--- | :--- | :--- | :--- |
-| **PPO (Classical RLHF)** | Yes (Separate) | Yes (Separate) | **$4.0\times$ (Actor, Critic, Ref, Reward)**| General dialogue (Obsolete) |
-| **DPO** | No (Implicit) | Yes (Frozen base) | **$2.0\times$ (Actor + Reference)** | General conversational alignment |
-| **SimPO** | **No** | **No (Eliminated)** | **$1.0\times$ (Actor Only - Same as SFT!)**| **Memory-constrained preference tuning** |
-| **KTO (Kahneman-Tversky)**| No | Yes | $2.0\times$ | Binary thumbs-up / thumbs-down data |
-| **GRPO** | Rule-Based Verifier | Yes (or KL-free) | **$1.2\times$ (Actor + Rollout buffer)**| **Mathematical & Coding Reasoning Loops** |
+### 5.1 Pairs from the student's mistakes
 
----
-
-## 7. Hands-On Production Lab: DPO, SimPO & GRPO Loss Simulator
-
-This self-contained Python script implements the exact loss functions for DPO, SimPO, and GRPO advantage normalization in pure PyTorch, verifying mathematical stability.
-
-Save this script as `swift_alignment_simulator.py` and run it:
-
-```python
-#!/usr/bin/env python3
-"""
-Production Lab: DPO, SimPO & GRPO Mathematical Loss Implementations
-Author: Advanced AI Architecture Group
-Target Hardware: NVIDIA DGX Spark (Grace Blackwell GB10)
-"""
-
-import math
-import torch
-import torch.nn.functional as F
-
-def compute_dpo_loss(
-    pi_win_logps: torch.Tensor,
-    pi_lose_logps: torch.Tensor,
-    ref_win_logps: torch.Tensor,
-    ref_lose_logps: torch.Tensor,
-    beta: float = 0.1
-) -> torch.Tensor:
-    """
-    Computes DPO Loss:
-    L = -log(sigmoid(beta * (log(pi_w/ref_w) - log(pi_l/ref_l))))
-    """
-    pi_ratio = pi_win_logps - pi_lose_logps
-    ref_ratio = ref_win_logps - ref_lose_logps
-    logits = beta * (pi_ratio - ref_ratio)
-    loss = -F.logsigmoid(logits)
-    return loss.mean()
-
-def compute_simpo_loss(
-    pi_win_logps: torch.Tensor,
-    pi_lose_logps: torch.Tensor,
-    len_win: torch.Tensor,
-    len_lose: torch.Tensor,
-    beta: float = 2.0,
-    gamma: float = 0.5
-) -> torch.Tensor:
-    """
-    Computes SimPO Loss:
-    L = -log(sigmoid(beta * (pi_w/len_w - pi_l/len_l) - gamma))
-    Zero reference model required!
-    """
-    norm_win = pi_win_logps / len_win
-    norm_lose = pi_lose_logps / len_lose
-    logits = beta * (norm_win - norm_lose) - gamma
-    loss = -F.logsigmoid(logits)
-    return loss.mean()
-
-def compute_grpo_advantages(rewards: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """
-    Computes group relative advantage normalization:
-    A_i = (r_i - mean(r)) / (std(r) + eps)
-    """
-    mean = rewards.mean()
-    std = rewards.std()
-    return (rewards - mean) / (std + eps)
-
-def main():
-    print("=" * 80)
-    print("      ADVANCED ALIGNMENT LOSS ENGINE: DPO, SimPO & GRPO")
-    print("=" * 80)
-
-    # 1. Simulate DPO Batch (Batch size = 2)
-    print("\n[STEP 1: DPO LOSS EVALUATION]")
-    # Simulated log-probabilities for winning and losing responses
-    pi_w  = torch.tensor([-12.5, -18.2])
-    pi_l  = torch.tensor([-15.8, -24.1])
-    ref_w = torch.tensor([-13.1, -19.0])
-    ref_l = torch.tensor([-14.2, -21.5])
-
-    dpo_loss = compute_dpo_loss(pi_w, pi_l, ref_w, ref_l, beta=0.1)
-    print(f"  • Calculated DPO Loss: {dpo_loss.item():.4f}")
-    assert not torch.isnan(dpo_loss), "NaN in DPO calculation!"
-    print("  ✅ DPO Numerical Stability Confirmed.")
-
-    # 2. Simulate SimPO Batch
-    print("\n[STEP 2: SimPO LOSS EVALUATION (ZERO REFERENCE MODEL)]")
-    lengths_w = torch.tensor([42.0, 68.0])
-    lengths_l = torch.tensor([55.0, 92.0])
-
-    simpo_loss = compute_simpo_loss(pi_w, pi_l, lengths_w, lengths_l, beta=2.0, gamma=0.5)
-    print(f"  • Calculated SimPO Loss: {simpo_loss.item():.4f}")
-    assert not torch.isnan(simpo_loss), "NaN in SimPO calculation!"
-    print("  ✅ SimPO Length-Normalized Margin Confirmed.")
-
-    # 3. Simulate GRPO Advantage Normalization (Group size = 8)
-    print("\n[STEP 3: GRPO GROUP RELATIVE ADVANTAGE]")
-    # 8 rollouts on math problem: 3 correct (reward=1.0), 5 incorrect (reward=0.0)
-    group_rewards = torch.tensor([1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
-    advantages = compute_grpo_advantages(group_rewards)
-
-    print(f"  • Group Rewards:     {group_rewards.tolist()}")
-    print(f"  • Mean Reward:       {group_rewards.mean().item():.3f}")
-    print(f"  • Normalized Advs:   {[round(a, 3) for a in advantages.tolist()]}")
-    print(f"  • Advantage Sum:     {advantages.sum().item():.6f} (Must be ~0.0)")
-    assert abs(advantages.sum().item()) < 1e-5, "Advantages do not center at zero!"
-    print("  ✅ GRPO Group Zero-Mean Advantage Verified.")
-
-    print("\n" + "=" * 80)
-    print("STATUS: All Modern Alignment Paradigms Verified for ms-swift!")
-    print("=" * 80)
-
-if __name__ == "__main__":
-    main()
-```
-
----
-
-## 8. Hardware Grounding for NVIDIA DGX Spark (Grace Blackwell GB10)
-
-Executing preference alignment on the **NVIDIA DGX Spark** highlights the immense memory efficiency of **SimPO**:
-
-```
-+────────────────────────────────────────────────────────────────────────────────────+
-|                      DGX SPARK PREFERENCE ALIGNMENT MEMORY BUDGET                  |
-+────────────────────────────────────────────────────────────────────────────────────+
-|  Configuration A: Classical DPO (Qwen2.5-32B LoRA):                                |
-|  - Active Policy Model (BF16):               65.0 GB                               |
-|  - Frozen Reference Model (BF16):            65.0 GB                               |
-|  - Total Model Weights Alone:                130.0 GB (EXCEEDS 128 GB VRAM -> OOM!)|
-|                                                                                    |
-|  Configuration B: SimPO (Qwen2.5-32B LoRA - ZERO REFERENCE MODEL):                 |
-|  - Active Policy Model (BF16):               65.0 GB                               |
-|  - Frozen Reference Model:                    0.0 GB (ELIMINATED!)                 |
-|  - LoRA Gradients & Optimizers:               3.6 GB                               |
-|  - Dynamic Activations (Seq=2048):            8.4 GB                               |
-|  - Host OS & CUDA Overhead:                  12.0 GB                               |
-|  Total Memory Allocated:                     89.0 GB / 128 GB (FITS COMFORTABLY!)  |
-+────────────────────────────────────────────────────────────────────────────────────+
-```
-
-> **Engineering Recommendation**: On single-node workstations like the DGX Spark, **SimPO** allows you to perform preference alignment on 32B models without requiring 4-bit quantization or multi-node clusters.
-
----
-
-## 9. Step-by-Step Practice Exercises with Full Solutions
-
-### Exercise 1: Executing DPO in ms-swift
-* **Objective**: Write the `ms-swift` CLI command to fine-tune `Qwen2.5-Coder-7B-Instruct` using DPO on a paired preference dataset.
-* **Solution**:
 ```bash
-swift dpo \
-    --model_type qwen2_5-7b-instruct \
-    --model_id_or_path /data/models/Qwen2.5-Coder-7B-Instruct \
-    --dataset /data/datasets/code_preference_pairs.jsonl \
-    --train_type lora \
-    --lora_target_modules ALL \
-    --lora_rank 16 \
-    --beta 0.1 \
-    --output_dir /data/checkpoints/qwen_coder_dpo \
-    --learning_rate 5e-6 \
-    --num_train_epochs 2 \
-    --batch_size 1 \
-    --gradient_accumulation_steps 4
+cd "04 Qwen/lab"
+# teacher on the main vLLM, student 0.5B next to it (03's side-by-side pattern, built from 04's catalog)
+scripts/serve-model.sh qwen2.5-32b-awq
+kubectl -n llm-serving port-forward svc/vllm 8000 &
+# run the student anywhere it fits; on one Spark the simplest is a second run after switching:
+python3 tools/synth_data.py --url http://localhost:8000 --teacher qwen2.5-32b-awq \
+  --student-url http://localhost:8000 --student qwen2.5-32b-awq -n 50 --out /tmp/selfcheck   # sanity: few pairs
 ```
 
----
+The cleaner setup gives the student its own endpoint. Serve `qwen2.5-0.5b` side by side (a `k8s/multi` overlay like Vol 03's), then:
 
-### Exercise 2: Converting Paired Preference Data to SimPO Format
-* **Objective**: Convert a standard DPO JSONL format (`prompt`, `chosen`, `rejected`) into the format expected by SimPO in `ms-swift`.
-* **Solution**:
-`ms-swift` natively parses standard DPO datasets for SimPO! Simply specify `--rlhf_type simpo` in the CLI:
 ```bash
-swift rlhf \
-    --rlhf_type simpo \
-    --model_type qwen2_5-32b-instruct \
-    --dataset /data/datasets/preferences.jsonl \
-    --simpo_gamma 0.5 \
-    --simpo_beta 2.0
+python3 tools/synth_data.py --url http://localhost:8000 --teacher qwen2.5-32b-awq \
+  --student-url http://localhost:8001 --student qwen2.5-0.5b -n 600 --out data/synth
+wc -l data/synth/dpo.jsonl
+kubectl -n batch create configmap swift-data --from-file=sft.jsonl=data/synth/sft.jsonl \
+  --from-file=dpo.jsonl=data/synth/dpo.jsonl --dry-run=client -o yaml | kubectl apply -f -
 ```
 
+### 5.2 DPO, then SimPO
+
+```bash
+kubectl -n llm-serving scale deploy vllm --replicas=0
+for t in dpo simpo; do
+  kubectl -n batch delete job swift-rlhf --ignore-not-found
+  yq "(.spec.template.spec.containers[0].env[] | select(.name == \"RLHF_TYPE\")).value = \"$t\"" k8s/jobs/swift-rlhf.yaml | kubectl apply -f -
+  kubectl -n batch wait --for=condition=complete job/swift-rlhf --timeout=3h
+  kubectl -n batch logs job/swift-rlhf | grep -E "rewards/(margins|accuracies)|train_runtime" | tail -4
+done
+```
+
+| method | final rewards/accuracies | final margin | train_runtime |
+|---|---|---|---|
+| DPO | | | |
+| SimPO | | | |
+
+### 5.3 Score SFT vs DPO vs SimPO behind the gate
+
+```bash
+for m in sft dpo simpo; do
+  "../../03 DeepSeek/lab/scripts/publish-adapter.sh" swift-$m-merged qwen2.5-7b-$m 2>/dev/null || true
+done
+scripts/serve-model.sh qwen2.5-7b
+for m in sft dpo simpo; do
+  kubectl -n llm-serving set env deploy/vllm MODEL=/models/adapters/qwen2.5-7b-$m SERVED_NAME=qwen2.5-7b-$m
+  kubectl -n llm-serving rollout status deploy/vllm --timeout=20m
+  kubectl -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 3
+  python3 "../../03 DeepSeek/lab/tools/eval_harness.py" --url http://localhost:8000 --model qwen2.5-7b-$m --suites math json \
+    --out results/$m-7b.json $( [[ $m != sft ]] && echo --gate results/sft-7b.json )
+  kill $pf
+done
+python3 "../../03 DeepSeek/lab/tools/eval_harness.py" --report results/sft-7b.json results/dpo-7b.json results/simpo-7b.json
+```
+
+(`publish-adapter.sh` for `swift-sft-merged` already ran in Vol 07.)
+
 ---
 
-### Exercise 3: Validating DPO Implicit Reward Scaling
-* **Objective**: Calculate the implicit reward difference $\Delta r$ when the policy ratio for the chosen answer is $2.5\times$ higher than the reference ratio, with $\beta = 0.1$.
-* **Formula**:
-  $$\Delta r = \beta \log \left( \frac{\pi_\theta(y_w \mid x)}{\pi_{\text{ref}}(y_w \mid x)} \right)$$
-* **Calculation**:
-  $$\Delta r = 0.1 \times \ln(2.5) \approx 0.1 \times 0.9163 = \mathbf{0.09163}$$
+## 6. Verify
+
+| Check | Expected |
+|---|---|
+| pairs | `dpo.jsonl` has hundreds of rows, each with a verified chosen answer |
+| training | `rewards/accuracies` rising. `logps/chosen` not collapsing |
+| results | three-row report. DPO/SimPO pass the gate vs SFT on json, and show any math change |
 
 ---
 
-## 10. Troubleshooting & Operational FAQ
+## 7. Troubleshooting
 
-### Q1: Why does DPO training loss rapidly plateau at $\approx 0.693$?
-**Root Cause**: $\ln(2) \approx 0.69315$. When the model cannot distinguish between winning and losing answers, the logits evaluate to $0.0$, and $-\ln(\sigma(0)) = -\ln(0.5) = \ln(2) \approx 0.693$.  
-**Remediation**: Check whether your learning rate is too low ($< 10^{-7}$) or if the dataset has noisy labels where $y_w$ and $y_l$ are nearly identical.
-
-### Q2: What is the optimal value for $\beta$ in DPO?
-**Best Practice**: Start with **$\beta = 0.1$**. If the model starts repeating degenerate phrases or suffers from catastrophic forgetting of general knowledge, reduce $\beta$ to **$0.05$** to penalize deviation from the reference model more strongly.
-
-### Q3: When should I choose GRPO over DPO?
-**Answer**: Choose **DPO or SimPO** for subjective tasks (creative writing, brand voice alignment, polite conversational tone). Choose **GRPO** for objective, verifiable tasks (competitive mathematics, Python code compilation, SQL execution) where answers can be definitively verified by unit tests.
+| Symptom | Cause | Fix |
+|---|---|---|
+| `rewards/accuracies` stuck at ~0.5 | pairs too easy or noisy, or lr too low | more and harder pairs. Check that chosen ≠ rejected text |
+| accuracy hits 1.0 fast, eval gets worse | over-optimisation (log-probs of chosen collapse) | lower lr or epochs, raise β (DPO) |
+| SimPO answers get very short or long | length term vs margin γ | keep defaults first. Tune γ only with evidence |
+| `rejected_response` KeyError | dataset row missing the field | `synth_data.py` only writes pairs when the student was wrong |
+| OOM | vLLM still up, or batch too large | scale vLLM to 0. Lower the batch |
 
 ---
 
-### Complete Qwen Curriculum Navigation
-| Previous Volume | Master Curriculum Navigation | Next Volume |
-| :--- | :---: | :---: |
-| [← 07. Distributed SFT with ms-swift](07-distributed-sft-with-ms-swift.md) | [Curriculum Index](README.md) | [09. Parameter-Efficient Tuning (PEFT) →](09-parameter-efficient-tuning-peft.md) |
+## 8. Scale-out path
+
+| One Spark | Production |
+|---|---|
+| synthetic arithmetic pairs | pairs from user feedback, red-team findings and production failures, reviewed |
+| offline DPO/SimPO | iterative/online DPO and GRPO with fresh samples each round (vLLM rollouts, 03 Vol 25) |
+| two methods compared once | an alignment pipeline with the release gate and safety evals at every step |
+
+---
+
+## 9. Checklist
+
+- [ ] I can write the DPO and SimPO objectives and say what β and γ do.
+- [ ] My preference pairs come from real, verified mistakes.
+- [ ] I read margins and preference accuracy during training.
+- [ ] I compared SFT, DPO and SimPO on the same suites behind a gate.

@@ -27,6 +27,9 @@ k -n $NS scale deploy sglang trtllm --replicas=0 2>/dev/null || true
 k apply -k "$DS_DIR/k8s/models/$name" >/dev/null
 info "waiting for vLLM ($name) — first start compiles CUDA graphs"
 k -n $NS rollout status deploy/vllm --timeout=45m && ok "vLLM ready with $name" || { bad "rollout failed: kubectl -n $NS logs deploy/vllm"; exit 1; }
+if [[ $(model_field "$name" smoke) == none ]]; then   # e.g. base models without a chat template
+  info "smoke test skipped for $name (catalog: smoke: none)"; summary; exit
+fi
 out=$(k -n $NS exec deploy/vllm -- curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
   -d "{\"model\":\"$name\",\"messages\":[{\"role\":\"user\",\"content\":\"What is 12*12? Answer with the number only.\"}],\"max_tokens\":1024}")
 content=$(python3 -c 'import json,sys; m=json.loads(sys.stdin.read())["choices"][0]["message"]; print((m.get("content") or "").strip()[:80]); print(len(m.get("reasoning_content") or ""))' <<<"$out" 2>/dev/null)
