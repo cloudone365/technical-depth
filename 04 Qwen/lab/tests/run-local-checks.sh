@@ -22,7 +22,7 @@ pids=(); cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; do
 echo "== yamllint";            yamllint -s .
 echo "== overlays in sync";    scripts/gen-overlays.sh --check
 echo "== kustomize + kubeconform"
-for d in . k8s/models/* breakfix/*; do "$KUBECTL" kustomize "$d" | kc -; done
+for d in . k8s/models/* k8s/multi/* breakfix/*; do "$KUBECTL" kustomize "$d" | kc -; done
 for f in k8s/jobs/*.yaml; do kc "$f"; done
 echo "== python compile";      python3 -m py_compile tools/*.py tests/*.py
 echo "== shellcheck";          shellcheck -S warning -x scripts/*.sh tests/*.sh
@@ -78,9 +78,9 @@ fi
 if [[ "${API:-0}" == 1 ]]; then
   echo "== server-side dry-run (API=1)"
   "$KUBECTL" apply --dry-run=server -k . >/dev/null
-  for d in k8s/models/* breakfix/*; do "$KUBECTL" apply --dry-run=server -k "$d" >/dev/null; done
+  for d in k8s/models/* k8s/multi/* breakfix/*; do "$KUBECTL" apply --dry-run=server -k "$d" >/dev/null; done
   for f in k8s/jobs/*.yaml; do "$KUBECTL" apply --dry-run=server -f "$f" >/dev/null; done
   echo "== pod templates vs PSA / CEL policies / quotas"
-  python3 "$K8S_LAB/tests/pod_template_check.py" k8s/models/* k8s/jobs/*.yaml
+  python3 "$K8S_LAB/tests/pod_template_check.py" k8s/models/* k8s/multi/* k8s/jobs/*.yaml
 fi
 echo "ALL LOCAL CHECKS PASSED"

@@ -15,6 +15,7 @@ configMapGenerator:
       - tools/synth_data.py
       - tools/quantize.py
       - tools/qwen_agent_demo.py
+      - tools/token_stats.py
   - name: qwen-data
     namespace: llm-serving
     files:

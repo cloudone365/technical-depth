@@ -1,0 +1,23 @@
+# The FIM base model NEXT TO the main vLLM (Volume 03): editors call this one for
+# completions, chat goes to the main deployment (e.g. qwen2.5-coder-7b). Same pattern
+# as 03's k8s/multi: renamed, relabelled, sharing the hf-token Secret.
+#   kubectl apply -k k8s/multi/qwen2.5-coder-7b-base     → svc/vllm-qwen2-5-coder-7b-base:8000
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../models/qwen2.5-coder-7b-base
+nameSuffix: -qwen2-5-coder-7b-base
+labels:
+  - pairs: {app: vllm-qwen2-5-coder-7b-base}
+    includeSelectors: true
+patches:
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Secret
+      metadata: {name: hf-token, namespace: llm-serving}
+  - target: {kind: ServiceMonitor}
+    patch: |-
+      - op: replace
+        path: /spec/selector/matchLabels/app
+        value: vllm-qwen2-5-coder-7b-base

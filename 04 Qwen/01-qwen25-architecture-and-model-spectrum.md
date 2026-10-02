@@ -1,464 +1,206 @@
-# 01. Qwen2.5 Architecture & Model Spectrum — Dense, MoE & Vocabulary Engineering
+# Volume 01 — Qwen2.5 Architecture and Model Spectrum: Choosing the Right Qwen for One GB10
 
-> **Target Audience**: AI Systems Architects, Machine Learning Engineers, Infrastructure Planners, and Model Developers evaluating the Alibaba Qwen2.5 model family for enterprise deployment.  
-> **Prerequisites**: Solid understanding of transformer autoregressive decoders, matrix dimensions, tokenization basics, and floating-point data types ([DeepSeek Volume 12](../DeepSeek/12-memory-math-for-30b-32b-on-gb10.md)).  
-> **Estimated Deep-Dive Time**: 45 minutes  
-> **What You Will Master**:
-> 1. The complete architectural blueprint of **Qwen2.5** across its dense spectrum (0.5B, 1.5B, 3B, 7B, 14B, 32B, 72B) and Mixture-of-Experts (**Qwen2-57B-A14B**).
-> 2. The mathematics and token economics of the **151,643-token vocabulary** and byte-level BPE tokenizer (compression ratio, multilingual efficiency, and KV cache impact).
-> 3. First-principles mechanics of **SwiGLU feed-forward networks** and pre-normalization with **RMSNorm**.
-> 4. Comparative trade-off matrix: Qwen2.5 vs. Meta Llama 3 vs. DeepSeek-V3 across parameter density, vocabulary footprint, and pretraining scale (18T tokens).
-> 5. A self-contained, runnable PyTorch script implementing a full Qwen2.5 transformer block with SwiGLU, RMSNorm, and GQA projection.
-> 6. Hardware grounding and unified memory sizing for the **NVIDIA DGX Spark (Grace Blackwell GB10)**.
+> **Module 04 · Part I — Architecture** · Next: [02 Attention engineering](02-attention-engineering-gqa-rope-and-dca.md) · Module map: [01 · Qwen ecosystem curriculum](01-qwen-ecosystem-master-curriculum.md)
 
----
-
-## 📑 Table of Contents
-1. [Zero-to-One Intuition: Why Qwen2.5 is the Open Enterprise Workhorse](#1-zero-to-one-intuition-why-qwen25-is-the-open-enterprise-workhorse)
-2. [Evolutionary Lineage: From Qwen1 to Qwen2.5](#2-evolutionary-lineage-from-qwen1-to-qwen25)
-3. [The Model Spectrum: Dense vs. Mixture-of-Experts (MoE)](#3-the-model-spectrum-dense-vs-mixture-of-experts-moe)
-4. [Vocabulary Engineering: The 152k Tokenizer Advantage](#4-vocabulary-engineering-the-152k-tokenizer-advantage)
-5. [First-Principles Mathematics: SwiGLU & RMSNorm](#5-first-principles-mathematics-swiglu--rmsnorm)
-6. [Comparative Trade-Off Matrix: Qwen2.5 vs. Llama 3 vs. DeepSeek-V3](#6-comparative-trade-off-matrix-qwen25-vs-llama-3-vs-deepseek-v3)
-7. [Hands-On Production Lab: End-to-End Qwen2.5 Block in PyTorch](#7-hands-on-production-lab-end-to-end-qwen25-block-in-pytorch)
-8. [Hardware Grounding for NVIDIA DGX Spark (Grace Blackwell GB10)](#8-hardware-grounding-for-nvidia-dgx-spark-grace-blackwell-gb10)
-9. [Step-by-Step Practice Exercises with Full Solutions](#9-step-by-step-practice-exercises-with-full-solutions)
-10. [Troubleshooting & Operational FAQ](#10-troubleshooting--operational-faq)
+| | |
+|---|---|
+| **You will build** | A measured map of the Qwen2.5 family on a DGX Spark. You'll get per-size parameters, KV cost per token, fit and concurrency at a given memory share, the bandwidth ceiling on decode speed, and what Qwen's tokenizer does to your token counts. Then you'll serve four sizes from one catalog and compare accuracy, latency and tokens per correct answer |
+| **Hardware** | spark-01 (any machine with internet for the tokenizer step) |
+| **Time** | 90 min (comparison runs unattended) |
+| **Risk** | Low |
+| **Lab files** | [`models.yaml`](lab/models.yaml), [`scripts/serve-model.sh`](lab/scripts/serve-model.sh), [`scripts/compare-models.sh`](lab/scripts/compare-models.sh), [`tools/token_stats.py`](lab/tools/token_stats.py), [`03 …/tools/model_math.py`](../03%20DeepSeek/lab/tools/model_math.py) |
 
 ---
 
-## 1. Zero-to-One Intuition: Why Qwen2.5 is the Open Enterprise Workhorse
+## 1. Why the size choice is the first engineering decision
 
-In the landscape of modern foundation models, different labs prioritize different engineering goals:
-* **DeepSeek** prioritizes extreme architectural efficiency (MLA latent compression and fine-grained 256-expert MoE).
-* **Meta Llama** prioritizes standard, brute-force dense transformers trained on vast compute clusters.
-* **Alibaba Qwen** prioritizes **practical engineering density, multilingual representation, and software versatility**.
+Qwen2.5 is a family of dense decoder-only transformers from 0.5B to 72B parameters, plus specialised branches: Coder (Vol 03), Math (Vol 04), VL (Vol 05), and the reasoning model QwQ. On one GB10, the size decides almost everything else:
 
-```text
-The Model Density Spectrum:
-┌────────────────────────────────────────────────────────────────────────┐
-│  Qwen2.5: Dense Granularity Across 7 Sizes (0.5B to 72B) + MoE (57B)   │
-└────────────────────────────────────────────────────────────────────────┘
-  0.5B / 1.5B / 3B         7B / 14B                 32B / 72B
-   Edge / Mobile        Mid-Tier Enterprise       Flagship Frontier
- (Local IoT, Phone)    (Microservices, RAG)     (Autonomous Coding, Math)
-```
+| Size | Memory for BF16 weights | What it's good for on a Spark |
+|---|---|---|
+| 0.5B / 1.5B / 3B | 1–6 GiB | drafts for speculative decoding, classifiers, routers, edge-style tests, very high throughput |
+| **7B** | 14 GiB | the workhorse: tools, JSON, RAG answers, with room for many concurrent 32K sequences |
+| 14B | 28 GiB | better reasoning and writing. Still fits next to the apps stack |
+| 32B | 61 GiB BF16 / ~15–18 GiB AWQ | the strongest that fits comfortably. AWQ keeps room for KV |
+| 72B | ~135 GiB BF16 / ~40 GiB 4-bit | 4-bit on one Spark with a small KV budget, or two Sparks |
 
-Qwen2.5 is trained on **18 Trillion tokens**—one of the largest and cleanest pretraining corpuses in existence—incorporating massive code repositories, formal mathematical proofs, and over 29 languages. Unlike models that offer only small or massive sizes (e.g., Llama 3 jumping from 8B directly to 70B), Qwen provides **14B and 32B models**, which represent the "sweet spot" for modern enterprise workstations like the **NVIDIA DGX Spark**.
+### 1.1 What the family shares
+
+| Component | Qwen2.5 choice | Why it matters here |
+|---|---|---|
+| attention | **GQA** with QKV bias | KV cache = 2 × layers × KV heads × head_dim × bytes. Small for its size (Vol 02) |
+| position | RoPE, base θ = **1,000,000** | long native context (32K). YaRN to 128K (Vol 02) |
+| MLP | SwiGLU | standard. vLLM kernels are mature |
+| norm | RMSNorm, pre-norm | — |
+| tokenizer | byte-level BPE, ~151.6K entries (embedding rows padded to 151,936 or 152,064) | fewer tokens for Chinese and code (§5.2) |
+| embeddings | tied for 0.5B–3B, untied from 7B up | small models save ~0.2–0.5B parameters |
+| training data | ~18T tokens pre-training, then SFT + DPO/GRPO-style RL post-training | — |
+| licence | Apache 2.0 for most sizes (3B and 72B use Qwen's own licences: check the model card) | matters for commercial use |
 
 ---
 
-## 2. Evolutionary Lineage: From Qwen1 to Qwen2.5
-
-The Qwen model family evolved through rapid iterations between 2023 and 2025:
+## 2. Architecture — HLD
 
 ```mermaid
-flowchart TD
-    Q1["Qwen-1.0 (Fall 2023)<br/>Dense 7B, 14B, 72B<br/>Standard MHA, 2k-8k Context, 3T Tokens"] --> Q15["Qwen-1.5 (Early 2024)<br/>Introduced GQA across sizes<br/>Initial MoE experiments (Qwen1.5-MoE-A2.7B)"]
-    Q15 --> Q2["Qwen-2.0 (Mid 2024)<br/>Trained on 7T Tokens<br/>Introduced Qwen2-57B-A14B MoE<br/>128k Context support via RoPE scaling"]
-    Q2 --> Q25["Qwen2.5 (Late 2024 / 2025)<br/>Trained on 18T Tokens<br/>Specialized: Qwen2.5-Coder & Qwen2.5-Math<br/>Dual Chunk Attention (DCA) + 152k Vocab"]
-```
-
-### Key Architectural Upgrades in Qwen2.5
-1. **Pretraining Token Volume**: Scaled from 7 Trillion tokens in Qwen2 to **18 Trillion tokens** in Qwen2.5, significantly raising parametric knowledge retention and zero-shot reasoning.
-2. **Context Window Expansion**: Native support for **128,000 tokens** across both the 7B, 14B, 32B, and 72B checkpoints, capable of generating up to **8,192 tokens** per output stream.
-3. **Domain Specialization**: Simultaneous release of dedicated **Coder** models (5.5T code tokens) and **Math** models (CoT and tool-integrated reasoning) built on the same base backbone.
-
----
-
-## 3. The Model Spectrum: Dense vs. Mixture-of-Experts (MoE)
-
-Qwen2.5 offers both **dense** transformer backbones and a **Mixture-of-Experts (MoE)** architecture:
-
-### Detailed Structural Parameters Across the Qwen2.5 Family
-
-| Parameter Dimension | Qwen2.5-0.5B | Qwen2.5-1.5B | Qwen2.5-3B | Qwen2.5-7B | Qwen2.5-14B | Qwen2.5-32B | Qwen2.5-72B | Qwen2-57B-A14B (MoE) |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Total Parameters** | 0.49B | 1.54B | 3.09B | 7.61B | 14.7B | 32.5B | 72.7B | 57.4B |
-| **Active Parameters** | 0.49B | 1.54B | 3.09B | 7.61B | 14.7B | 32.5B | 72.7B | **14.2B** |
-| **Layers ($L$)** | 24 | 28 | 36 | 28 | 48 | 64 | 80 | 28 |
-| **Hidden Dimension ($d_{\text{model}}$)** | 896 | 1,536 | 2,048 | 3,584 | 5,120 | 5,120 | 8,192 | 3,584 |
-| **FFN Intermediate Dimension** | 4,864 | 8,960 | 11,008 | 18,944 | 13,824 | 27,648 | 29,568 | 2,560 per expert |
-| **Query Heads ($H_q$)** | 14 | 12 | 16 | 28 | 40 | 40 | 64 | 28 |
-| **KV Heads ($H_{kv}$)** | 2 | 2 | 2 | 4 | 8 | 8 | 8 | 4 |
-| **GQA Ratio ($H_q / H_{kv}$)** | 7:1 | 6:1 | 8:1 | 7:1 | 5:1 | 5:1 | **8:1** | 7:1 |
-| **Vocabulary Size** | 151,643 | 151,643 | 151,643 | 152,064 | 152,064 | 152,064 | 152,064 | 151,936 |
-| **Native Max Context** | 32k | 32k | 32k | 128k | 128k | 128k | 128k | 64k |
-
-### Dense vs. MoE Trade-Offs
-* **Dense Models (32B / 72B)**: Every parameter participates in every forward pass. This maximizes memory efficiency per parameter (no wasted routing bandwidth or memory fragmentation) and simplifies single-GPU serving on workstations like the DGX Spark.
-* **Qwen2-57B-A14B (MoE)**: Features 64 routed experts with Top-8 expert selection plus shared experts. Total parameter size is 57.4B, but each token activates only 14.2B parameters, delivering 70B-grade intelligence at the inference speed of a 14B model.
-
----
-
-## 4. Vocabulary Engineering: The 152k Tokenizer Advantage
-
-One of Qwen's greatest technical advantages over Western foundation models (such as Llama 3 with 128k tokens or GPT-4 with 100k tokens) is its **151,643 / 152,064 token vocabulary**, powered by byte-level Byte-Pair Encoding (BPE) using `tiktoken`.
-
-```
-+───────────────────────────────────────────────────────────────────────────────────────────────+
-|                                 VOCABULARY COMPRESSION DYNAMICS                               |
-+───────────────────────────────────────────────────────────────────────────────────────────────+
-|  English Text: "Concurrent asynchronous database connection pool"                             |
-|  - Llama 3 Tokenizer (128k):   6 tokens                                                       |
-|  - Qwen 2.5 Tokenizer (152k):  5 tokens (16.7% compression gain)                              |
-|                                                                                               |
-|  Multilingual / Code: "def 计算矩阵逆(matrix: List[List[float]]) -> Tensor:"                  |
-|  - Llama 3 Tokenizer (128k):   22 tokens (Chinese characters fragmented into 2-3 bytes each)  |
-|  - Qwen 2.5 Tokenizer (152k):  11 tokens (50% compression gain!)                              |
-+───────────────────────────────────────────────────────────────────────────────────────────────+
-```
-
-### The Mathematics of Tokenizer Compression
-Let a document contain text characters $C$. The number of tokens produced by tokenizer $\mathcal{T}$ is $T = |\mathcal{T}(C)|$. The compression efficiency is:
-$$\eta = \frac{\text{Bytes}(C)}{T}$$
-In standard multilingual and programming corpuses:
-* **Llama 3 Tokenizer**: $\eta_{\text{code}} \approx 3.2\text{ bytes/token}$, $\eta_{\text{non-eng}} \approx 1.8\text{ bytes/token}$.
-* **Qwen 2.5 Tokenizer**: $\eta_{\text{code}} \approx 4.1\text{ bytes/token}$, $\eta_{\text{non-eng}} \approx 3.6\text{ bytes/token}$.
-
-### Impact on Inference Speed and KV Cache
-Because Qwen represents the same source code or document in **30% to 50% fewer tokens**:
-1. **Inference Latency**: The model requires fewer forward autoregressive steps to generate the exact same logical answer, yielding an effective **1.4x generation speedup**.
-2. **Context Memory**: A 100,000-word codebase consumes only ~55,000 tokens in Qwen2.5 versus ~85,000 tokens in Llama 3, halving KV cache memory consumption.
-
----
-
-## 5. First-Principles Mathematics: SwiGLU & RMSNorm
-
-Qwen2.5 replaces the traditional transformer ReLU/GELU activation and LayerNorm with **SwiGLU** and **RMSNorm**.
-
-```
-Standard Transformer Block (Attention is All You Need):
-Input ──> LayerNorm ──> Multi-Head Attention ──> Add ──> LayerNorm ──> GELU FFN ──> Add ──> Output
-
-Qwen2.5 Modern Architecture:
-Input ──> RMSNorm ──> Grouped Query Attention ──> Add ──> RMSNorm ──> SwiGLU FFN ──> Add ──> Output
-          (Pre-Norm)  (8 KV Heads + RoPE)                 (Pre-Norm)  (3 Linear Layers)
-```
-
-### 1. Root Mean Square Normalization (RMSNorm)
-Standard LayerNorm calculates both the mean $\mu$ and standard deviation $\sigma$ across the hidden dimension $d$:
-$$\text{LayerNorm}(x) = \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} \odot \gamma + \beta$$
-RMSNorm assumes that the shift-invariance property ($\mu$) is computationally redundant and normalizes strictly by the root mean square:
-$$\text{RMSNorm}(x) = \frac{x}{\text{RMS}(x)} \odot \gamma, \quad \text{where } \text{RMS}(x) = \sqrt{\frac{1}{d} \sum_{i=1}^d x_i^2 + \epsilon}$$
-* **Mathematical Advantage**: Eliminating mean subtraction reduces memory read/write cycles by 33% and accelerates kernel execution without degrading training stability.
-
-### 2. Swish Gated Linear Unit (SwiGLU)
-Standard FFN uses two matrices: $\text{FFN}(x) = \text{GELU}(x W_1) W_2$.  
-Qwen2.5 adopts **SwiGLU**, which introduces a bilinear gating mechanism across three parameter matrices ($W_{\text{gate}}, W_{\text{up}}, W_{\text{down}}$):
-$$\text{SwiGLU}(x) = \left( \text{Swish}(x W_{\text{gate}}) \odot (x W_{\text{up}}) \right) W_{\text{down}}$$
-where the Swish activation function (also known as SiLU) is:
-$$\text{Swish}_\beta(z) = z \cdot \sigma(\beta z) = \frac{z}{1 + e^{-\beta z}}$$
-For standard SiLU ($\beta = 1$):
-$$\text{SwiGLU}(x) = \left( (x W_{\text{gate}}) \cdot \frac{1}{1 + e^{-x W_{\text{gate}}}} \odot (x W_{\text{up}}) \right) W_{\text{down}}$$
-* **Intermediate Dimension Sizing**: To match the parameter count of a standard FFN with intermediate size $4d$, SwiGLU sets the intermediate dimension to approximately:
-$$d_{\text{ffn}} \approx \frac{8}{3} d_{\text{model}}$$
-In Qwen2.5-32B: $d_{\text{model}} = 5,120$, and $d_{\text{ffn}} = 27,648$, providing immense expressive capacity in the feed-forward layers.
-
----
-
-## 6. Comparative Trade-Off Matrix: Qwen2.5 vs. Llama 3 vs. DeepSeek-V3
-
-| Dimension | Meta Llama 3.1 / 3.3 | DeepSeek-V3 | Alibaba Qwen 2.5 |
-| :--- | :--- | :--- | :--- |
-| **Model Architectures** | Dense only (8B, 70B, 405B) | Fine-Grained MoE (671B / 37B active)| **Dense (0.5B–72B) & MoE (57B-A14B)** |
-| **Attention Mechanism** | Grouped Query Attention (GQA)| Multi-Head Latent Attention (MLA) | **Grouped Query Attention (GQA)** |
-| **Context Window** | 128k tokens | 128k tokens | **128k tokens (DCA + RoPE $\theta=1M$)** |
-| **Tokenizer Vocabulary** | 128,256 tokens | 129,280 tokens | **152,064 tokens (Largest in class)** |
-| **Pretraining Tokens** | 15 Trillion | 14.8 Trillion | **18 Trillion tokens** |
-| **Code Specialization** | Llama-3-Code (merged) | DeepSeek-Coder-V2 | **Qwen2.5-Coder (5.5T Code Tokens)** |
-| **Math Specialization** | Standard | DeepSeek-Math / R1 | **Qwen2.5-Math (TIR + CoT)** |
-| **Vision-Language** | Llama-3.2-Vision (11B, 90B) | DeepSeek-VL2 | **Qwen2-VL (NaViT Dynamic Res)** |
-| **Training Framework** | Torchtune / Megatron-LM | HAI-LLM (Internal) | **ModelScope ms-swift (300+ models)** |
-| **Workstation Feasibility**| 70B tight in FP8; 8B small | 671B requires multi-node | **32B & 14B fit natively on DGX Spark** |
-
----
-
-## 7. Hands-On Production Lab: End-to-End Qwen2.5 Block in PyTorch
-
-This self-contained Python script implements an exact, production-accurate **Qwen2.5 Transformer Block** in pure PyTorch, including RMSNorm, Grouped Query Attention (GQA) with rotary position embeddings, and the SwiGLU feed-forward network.
-
-Save this script as `qwen25_block_lab.py` and run it:
-
-```python
-#!/usr/bin/env python3
-"""
-Production Implementation of a Qwen2.5 Transformer Block in PyTorch
-Includes: RMSNorm, Grouped Query Attention (GQA), and SwiGLU Feed-Forward Network
-Author: Advanced AI Architecture Group
-Target Hardware: NVIDIA DGX Spark (Grace Blackwell GB10)
-"""
-
-import math
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-class Qwen2RMSNorm(nn.Module):
-    """Root Mean Square Layer Normalization as formulated in Qwen2.5."""
-    def __init__(self, hidden_size: int, eps: float = 1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return (self.weight * hidden_states).to(input_dtype)
-
-class Qwen2SwiGLU(nn.Module):
-    """Swish Gated Linear Unit (SwiGLU) Feed-Forward Network."""
-    def __init__(self, hidden_size: int, intermediate_size: int):
-        super().__init__()
-        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # SwiGLU: (SiLU(x * W_gate) * (x * W_up)) * W_down
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
-
-class Qwen2GQAAttention(nn.Module):
-    """Grouped Query Attention (GQA) with decoupled Key/Value Heads."""
-    def __init__(self, hidden_size: int, num_heads: int, num_kv_heads: int, head_dim: int):
-        super().__init__()
-        self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads
-        self.head_dim = head_dim
-        self.num_queries_per_kv = num_heads // num_kv_heads
-
-        self.q_proj = nn.Linear(hidden_size, num_heads * head_dim, bias=True)
-        self.k_proj = nn.Linear(hidden_size, num_kv_heads * head_dim, bias=True)
-        self.v_proj = nn.Linear(hidden_size, num_kv_heads * head_dim, bias=True)
-        self.o_proj = nn.Linear(num_heads * head_dim, hidden_size, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        batch_size, seq_len, _ = x.shape
-
-        q = self.q_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
-
-        # Expand Key and Value heads to match Query heads (GQA broadcast)
-        k = k.repeat_interleave(self.num_queries_per_kv, dim=1)
-        v = v.repeat_interleave(self.num_queries_per_kv, dim=1)
-
-        # Scaled Dot-Product Attention
-        scale = 1.0 / math.sqrt(self.head_dim)
-        scores = torch.matmul(q, k.transpose(-2, -1)) * scale
-
-        # Apply causal mask
-        causal_mask = torch.triu(torch.full((seq_len, seq_len), float('-inf'), device=x.device), diagonal=1)
-        scores = scores + causal_mask
-
-        attn_weights = F.softmax(scores, dim=-1)
-        context = torch.matmul(attn_weights, v)
-
-        # Reshape and project output
-        context = context.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
-        return self.o_proj(context)
-
-class Qwen25TransformerBlock(nn.Module):
-    """Complete Qwen2.5 Pre-Norm Transformer Decoder Block."""
-    def __init__(self, hidden_size: int, num_heads: int, num_kv_heads: int, head_dim: int, intermediate_size: int):
-        super().__init__()
-        self.input_layernorm = Qwen2RMSNorm(hidden_size)
-        self.self_attn = Qwen2GQAAttention(hidden_size, num_heads, num_kv_heads, head_dim)
-        self.post_attention_layernorm = Qwen2RMSNorm(hidden_size)
-        self.mlp = Qwen2SwiGLU(hidden_size, intermediate_size)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # Pre-Norm Attention Residual
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(hidden_states)
-        hidden_states = residual + hidden_states
-
-        # Pre-Norm SwiGLU MLP Residual
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-
-        return hidden_states
-
-def run_verification():
-    print("=" * 75)
-    print("      QWEN2.5 ARCHITECTURE BLOCK VERIFICATION & TENSOR AUDIT")
-    print("=" * 75)
-
-    # Architectural specs simulating Qwen2.5-7B scaled down for rapid unit test
-    batch_size = 2
-    seq_length = 64
-    hidden_dim = 1024
-    num_q_heads = 16
-    num_kv_heads = 2   # 8:1 GQA Compression ratio
-    head_dim = 64
-    intermediate_dim = 2816
-
-    print(f"Configuring Qwen2.5 Layer:")
-    print(f"  • Hidden Dimension ($d$):         {hidden_dim}")
-    print(f"  • Query Heads ($H_q$):             {num_q_heads}")
-    print(f"  • Key/Value Heads ($H_{{kv}}$):        {num_kv_heads} (GQA Factor: {num_q_heads//num_kv_heads}:1)")
-    print(f"  • Intermediate SwiGLU ($d_{{ffn}}$):  {intermediate_dim}")
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    block = Qwen25TransformerBlock(hidden_dim, num_q_heads, num_kv_heads, head_dim, intermediate_dim).to(device)
-
-    x = torch.randn(batch_size, seq_length, hidden_dim, device=device)
-    print(f"\n[1] Forward Pass Execution on {device.upper()}:")
-    print(f"    Input Tensor Shape:  {list(x.shape)}")
-
-    out = block(x)
-    print(f"    Output Tensor Shape: {list(out.shape)}")
-
-    # Verification assertions
-    assert out.shape == x.shape, "Shape mismatch in output tensor!"
-    assert not torch.isnan(out).any(), "NaN values detected in forward activation!"
-    print("  ✅ Tensor Shape Invariance Verified!")
-    print("  ✅ Mathematical Stability Confirmed (No NaNs/Infs).")
-
-    # Compute Parameter Distribution
-    attn_params = sum(p.numel() for p in block.self_attn.parameters())
-    mlp_params = sum(p.numel() for p in block.mlp.parameters())
-    norm_params = sum(p.numel() for p in block.input_layernorm.parameters()) + sum(p.numel() for p in block.post_attention_layernorm.parameters())
-    total_params = attn_params + mlp_params + norm_params
-
-    print(f"\n[2] Parameter Allocation per Block:")
-    print(f"  • Attention Sub-Layer:  {attn_params:,} parameters ({attn_params/total_params*100:.1f}%)")
-    print(f"  • SwiGLU MLP Sub-Layer: {mlp_params:,} parameters ({mlp_params/total_params*100:.1f}%)")
-    print(f"  • RMSNorm Parameters:   {norm_params:,} parameters ({norm_params/total_params*100:.2f}%)")
-    print(f"  • Total Block Params:   {total_params:,} parameters")
-
-    print("\n" + "=" * 75)
-    print("STATUS: Qwen2.5 Architectural Layer Ready for Production Compilation!")
-    print("=" * 75)
-
-if __name__ == "__main__":
-    run_verification()
-```
-
-### Execution Output
-```text
-================================================================================
-      QWEN2.5 ARCHITECTURE BLOCK VERIFICATION & TENSOR AUDIT
-================================================================================
-Configuring Qwen2.5 Layer:
-  • Hidden Dimension (d):         1024
-  • Query Heads (H_q):             16
-  • Key/Value Heads (H_kv):        2 (GQA Factor: 8:1)
-  • Intermediate SwiGLU (d_ffn):  2816
-
-[1] Forward Pass Execution on CPU:
-    Input Tensor Shape:  [2, 64, 1024]
-    Output Tensor Shape: [2, 64, 1024]
-  ✅ Tensor Shape Invariance Verified!
-  ✅ Mathematical Stability Confirmed (No NaNs/Infs).
-
-[2] Parameter Allocation per Block:
-  • Attention Sub-Layer:  2,360,320 parameters (20.5%)
-  • SwiGLU MLP Sub-Layer: 9,146,368 parameters (79.4%)
-  • RMSNorm Parameters:   2,048 parameters (0.02%)
-  • Total Block Params:   11,508,736 parameters
-
-================================================================================
-STATUS: Qwen2.5 Architectural Layer Ready for Production Compilation!
-================================================================================
+flowchart LR
+  subgraph FAM["Qwen2.5 dense family (same blocks, different depth/width)"]
+    direction TB
+    S["0.5B · 24 L · 14q/2kv · tied"] --- M["7B · 28 L · 28q/4kv"] --- L["14B · 48 L · 40q/8kv"] --- XL["32B · 64 L · 40q/8kv"] --- XXL["72B · 80 L · 64q/8kv"]
+  end
+  subgraph BRANCH["specialised branches"]
+    direction TB
+    C["Coder 1.5B–32B<br/>FIM · repo-level"]
+    MA["Math 1.5B–72B<br/>CoT + tool-integrated"]
+    VL["VL 3B–72B<br/>ViT + Qwen2.5 LM"]
+    Q["QwQ-32B<br/>RL reasoning"]
+  end
+  FAM --> BRANCH
+  CAT[("04 lab models.yaml<br/>11 entries")] --> SRV["03 serve-model.sh<br/>(DS_DIR = 04 lab)"] --> V["vLLM on GB10"]
+  BRANCH -.-> CAT
+  FAM -.-> CAT
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  class S,M,L,XL,XXL,V gpu
+  class C,MA,VL,Q ctrl
+  class CAT,SRV store
+  style FAM fill:#f4fbe8,stroke:#76b900
+  style BRANCH fill:#eef2ff,stroke:#1f6feb
 ```
 
 ---
 
-## 8. Hardware Grounding for NVIDIA DGX Spark (Grace Blackwell GB10)
+## 3. LLD
 
-The **NVIDIA DGX Spark** combines the **72-core Grace ARM CPU** and the **Blackwell GB10 GPU** across a **900 GB/s NVLink-C2C** coherent memory fabric with **128 GB of unified LPDDR5X memory**.
+### 3.1 The numbers that matter (`model_math.py`)
 
-```
-+────────────────────────────────────────────────────────────────────────────────────+
-|                        DGX SPARK (128 GB UNIFIED MEMORY POOL)                      |
-+────────────────────────────────────────────────────────────────────────────────────+
-|  Qwen2.5-32B Deployment (FP8 Precision):                                           |
-|  ┌───────────────────────────────┬───────────────────────────────┬──────────────┐  |
-|  │ Static Weights (FP8): 32.5 GB │ Dynamic KV Cache (64k): 42 GB │ OS: 14 GB    │  |
-|  └───────────────────────────────┴───────────────────────────────┴──────────────┘  |
-|  Total Memory Allocated: 88.5 GB / 128 GB (Leaves 39.5 GB buffer - OPTIMAL FIT!)   |
-|                                                                                    |
-|  Qwen2.5-72B Deployment (AWQ 4-Bit Precision):                                     |
-|  ┌───────────────────────────────┬───────────────────────────────┬──────────────┐  |
-|  │ Static Weights (INT4): 39.5 GB│ Dynamic KV Cache (32k): 24 GB │ OS: 14 GB    │  |
-|  └───────────────────────────────┴───────────────────────────────┴──────────────┘  |
-|  Total Memory Allocated: 77.5 GB / 128 GB (Leaves 50.5 GB buffer - OPTIMAL FIT!)   |
-+────────────────────────────────────────────────────────────────────────────────────+
-```
+| Model | Params | Layers · q/kv heads | KV per token (BF16) | Weights BF16 | Decode ceiling (1 stream) |
+|---|---|---|---|---|---|
+| Qwen2.5-0.5B | 0.5 B | 24 · 14/2 | 12 KiB | 0.9 GiB | ≈ 263 tok/s |
+| Qwen2.5-7B | 7.6 B | 28 · 28/4 | 56 KiB | 14.2 GiB | ≈ 18 tok/s |
+| Qwen2.5-14B | 14.8 B | 48 · 40/8 | 192 KiB | 27.5 GiB | ≈ 9 tok/s |
+| Qwen2.5-32B (AWQ) | 32.8 B | 64 · 40/8 | 256 KiB | 15.3 GiB | ≈ 16 tok/s |
 
-### Why the DGX Spark is the Ideal Platform for Qwen2.5
-1. **The 32B Sweet Spot**: On standard discrete GPUs with 24GB or 32GB VRAM, Qwen2.5-32B cannot be loaded at native 16-bit or 8-bit precision without severe context truncation. On the DGX Spark's 128 GB unified pool, **Qwen2.5-32B in FP8 runs with up to 64k concurrent context** with high concurrency.
-2. **72-Core ARM Neoverse V2 Preprocessing**: Qwen's large 152k vocabulary creates higher CPU overhead during tokenization. The 72 Grace ARM cores process input text and regex tokenization in parallel without starving the GPU Tensor Cores.
+The decode ceiling is 273 GB/s ÷ (bytes of active weights + KV read per token). Measured speed lands below it. Note how 4-bit AWQ makes the 32B *faster* than the BF16 14B on this bandwidth-bound GPU, at some accuracy cost (Vol 13).
 
----
+### 3.2 Concurrency at the catalog's memory share (8K-token conversations)
 
-## 9. Step-by-Step Practice Exercises with Full Solutions
+| Entry | util | KV left | Sequences of 8K |
+|---|---|---|---|
+| qwen2.5-7b | 0.30 | ~19 GiB | ~42 |
+| qwen2.5-14b | 0.40 | ~17 GiB | ~11 |
+| qwen2.5-32b-awq | 0.40 | ~30 GiB | ~14 |
 
-### Exercise 1: Computing KV-Cache Memory for Qwen2.5-32B at 128k Context
-* **Objective**: Calculate the exact byte size of the KV cache for a single sequence running at the maximum native 131,072 context window on Qwen2.5-32B in FP8 precision.
-* **Given**:
-  * Layers $L = 64$
-  * Key/Value Heads $H_{kv} = 8$
-  * Head Dimension $d_k = 128$
-  * Precision $P = 1\text{ byte (FP8)}$
-  * Sequence Length $S = 131,072$
-* **Formula**:
-  $$\text{KV Bytes} = 2 \times L \times H_{kv} \times d_k \times S \times P$$
-* **Calculation**:
-  $$\text{KV Bytes} = 2 \times 64 \times 8 \times 128 \times 131,072 \times 1 = 17,179,869,184 \text{ bytes} = \mathbf{16.0\text{ GiB}}$$
-* **Result**: In FP8, an entire 128k context consumes only **16.0 GiB** of memory on the DGX Spark!
+The 14B's 8 KV heads × 48 layers make its KV per token 3.4× the 7B's. That costs concurrency, not just weights.
+
+### 3.3 The 04 catalog
+
+| Name | Model | Notes |
+|---|---|---|
+| qwen2.5-0.5b | Qwen2.5-0.5B-Instruct | util 0.08 |
+| qwen2.5-7b | Qwen2.5-7B-Instruct | tools (hermes) |
+| qwen2.5-7b-128k | same weights | YaRN ×4 (Vol 02) |
+| qwen2.5-14b | Qwen2.5-14B-Instruct | BF16 |
+| qwen2.5-32b-awq | Qwen2.5-32B-Instruct-AWQ | awq_marlin |
+| qwen2.5-coder-7b / -base / -32b-awq | Coder | Vol 03 |
+| qwen2.5-math-7b | Math-7B-Instruct | 4K context (Vol 04) |
+| qwen2.5-vl-7b | VL-7B-Instruct | images/video (Vol 05) |
+| qwq-32b-awq | QwQ-32B-AWQ | reasoning parser |
+
+Overlays are generated by 03's generator (`scripts/gen-overlays.sh`), and `scripts/serve-model.sh` runs 03's serve script against this catalog. Same probes, same smoke test, same Deployment.
 
 ---
 
-### Exercise 2: Calculating SwiGLU FLOP Multiplier
-* **Objective**: Calculate the ratio of multiply-accumulate operations in a SwiGLU layer versus a standard 2-matrix FFN layer.
-* **Solution**:
-  1. Standard FFN: $x W_1$ (up) and $h W_2$ (down) $\to 2 \cdot d_{\text{in}} \cdot d_{\text{ffn}}$ operations.
-  2. SwiGLU FFN: $x W_{\text{gate}}$ (gate), $x W_{\text{up}}$ (up), and $h W_{\text{down}}$ (down) $\to 3 \cdot d_{\text{in}} \cdot d_{\text{ffn}}$ operations.
-  * **Result**: SwiGLU performs **1.5x more floating-point operations** per token than standard FFN for the same intermediate dimension, but provides significantly higher non-linear representational capacity.
+## 4. Integrations
+
+- **03 Vols 12, 15, 19**: memory math, the catalog mechanism, the base Deployment.
+- **03 Vol 35**: DeepSeek distills vs QwQ vs Qwen instruct on the same Qwen2.5 base.
+- **Vol 13**: quantisation choices for the bigger sizes.
+- **Vol 20**: LiteLLM aliases for the sizes you keep.
 
 ---
 
-### Exercise 3: Validating Vocabulary Token Id Range in Python
-* **Objective**: Write a verification test verifying that Qwen2.5 special tokens are correctly mapped above standard unicode text.
-* **Solution**:
-```python
-from transformers import AutoTokenizer
+## 5. Lab
 
-tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-Coder-32B-Instruct", trust_remote_code=True)
-vocab = tokenizer.get_vocab()
-print(f"Total Vocab Size: {len(vocab)}")
-assert "<|im_start|>" in vocab, "Missing ChatML start token!"
-assert "<|im_end|>" in vocab, "Missing ChatML end token!"
-print(f"<|im_start|> Token ID: {vocab['<|im_start|>']}")
-print(f"<|im_end|> Token ID:   {vocab['<|im_end|>']}")
+### 5.1 Predict
+
+```bash
+cd "04 Qwen/lab"
+M="../../03 DeepSeek/lab/tools/model_math.py"
+python3 $M --compare qwen2.5-0.5b qwen2.5-7b qwen2.5-14b qwen2.5-32b
+for a in "qwen2.5-7b --util 0.30" "qwen2.5-14b --util 0.40" "qwen2.5-32b --dtype awq --util 0.40"; do
+  python3 $M $a --ctx 8192 | grep -E '^model|KV cache|decode ceiling'; done
 ```
 
+### 5.2 Tokenizer economics
+
+```bash
+pip install "transformers==4.56.2"
+HF_TOKEN=… python3 tools/token_stats.py
+```
+
+Expected pattern (**record yours**): on the Chinese sample, Qwen needs noticeably fewer tokens than Llama 3.1 and Mistral, and code and JSON are in the same range or better. Fewer tokens means more context per KV GiB and less decode time per answer. Run it on a sample of your own documents with `--file`.
+
+### 5.3 Serve and compare four sizes
+
+```bash
+scripts/serve-model.sh list
+SUITES="math json" MAX_TOKENS=4096 scripts/compare-models.sh qwen2.5-0.5b qwen2.5-7b qwen2.5-14b qwen2.5-32b-awq
+```
+
+| model | math acc | json acc | out tok | p50 s | tok/ok | tok/s |
+|---|---|---|---|---|---|---|
+| qwen2.5-0.5b | | | | | | |
+| qwen2.5-7b | | | | | | |
+| qwen2.5-14b | | | | | | |
+| qwen2.5-32b-awq | | | | | | |
+
+### 5.4 Check single-stream speed against the ceiling
+
+```bash
+scripts/serve-model.sh qwen2.5-7b
+kubectl -n llm-serving port-forward svc/vllm 8000 &
+python3 "../../03 DeepSeek/lab/tools/stream_probe.py" --url http://localhost:8000 --model qwen2.5-7b --max-tokens 512 \
+  --prompt "Explain grouped-query attention in 250 words." | grep ITL
+```
+
+1000 ÷ ITL p50 should be below, and within reach of, the ≈18 tok/s ceiling from §3.1.
+
 ---
 
-## 10. Troubleshooting & Operational FAQ
+## 6. Verify
 
-### Q1: Why does Qwen2.5 throw `CUDA out of memory` during tokenizer loading on some systems?
-**Root Cause**: The embedding table matrix for a 152,064-token vocabulary with hidden dimension 8,192 (72B model) consumes:
-$$152,064 \times 8,192 \times 2\text{ bytes (BF16)} \approx 2.49\text{ GB}$$
-During weight initialization, PyTorch creates temporary copies of the vocabulary embedding table on GPU 0 before sharding across ranks.  
-**Remediation**: Use `device_map="auto"` or load weights with `torch_dtype=torch.float16` and ensure `low_cpu_mem_usage=True`.
-
-### Q2: What is the difference between Qwen2.5-32B and Qwen2.5-Coder-32B?
-**Answer**: While both share the identical transformer architecture ($L=64, d=5120, H_q=40, H_{kv}=8$), the base **Qwen2.5-32B** was pretrained on general multilingual text, mathematics, and code, whereas **Qwen2.5-Coder-32B** received an additional **5.5 Trillion tokens** of pure code, git repositories, and synthetically verified programming execution traces, making it significantly more capable on SWE-bench and repository refactoring.
-
-### Q3: Why does Qwen2.5 not use Multi-Head Latent Attention (MLA) like DeepSeek?
-**Architectural Decision**: DeepSeek developed MLA to aggressively compress the KV cache for the massive 671B model. For models up to 72B, standard **Grouped Query Attention (GQA)** with 8 KV heads already reduces KV cache by **87.5%**, which is sufficient for 128k context without introducing the complex low-rank matrix multiplications required by MLA.
+| Check | Expected |
+|---|---|
+| predictions | KV/token, fit and ceiling for four sizes recorded |
+| tokenizer | chars/token table for your languages and formats |
+| comparison | four-row table filled in |
+| speed | measured single-stream tok/s below the ceiling, same order of magnitude |
 
 ---
 
-### Complete Qwen Curriculum Navigation
-| Master Index | Next Volume |
-| :---: | :---: |
-| [Curriculum Index](README.md) | [02. Attention Engineering: GQA, RoPE & DCA →](02-attention-engineering-gqa-rope-and-dca.md) |
+## 7. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `serve-model.sh` uses the DeepSeek catalog | called 03's script directly | use `04 Qwen/lab/scripts/serve-model.sh` (sets `DS_DIR`) |
+| 14B slower than 32B-AWQ | expected: bandwidth-bound decode reads 2× the bytes | that's the point of §3.1. Choose by quality *and* speed |
+| AWQ model load error | kernel support in the image | `--quantization=awq` fallback, or a newer vLLM image (Vol 13) |
+| Llama tokenizer download fails | gated repo | `HF_TOKEN` with the licence accepted, or drop it from `--models` |
+
+---
+
+## 8. Scale-out path
+
+| One Spark | More |
+|---|---|
+| ≤ 32B (AWQ) comfortably, 72B 4-bit tightly | 72B BF16 across two Sparks (TP=2, 03 Vol 14/34 LWS pattern) |
+| one size at a time | 7B + 0.5B side by side (03 Vol 41 `k8s/multi` pattern) for routing or drafts |
+
+---
+
+## 9. Checklist
+
+- [ ] I can state KV/token, weights and decode ceiling for any Qwen2.5 size.
+- [ ] I know what Qwen's tokenizer saves on my data.
+- [ ] I measured four sizes on the same suites and can justify which I'd deploy.

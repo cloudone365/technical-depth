@@ -1,314 +1,208 @@
-# 06. ModelScope ms-swift Framework Core — Unified Training & Inference Architecture
+# Volume 06 — ms-swift (ModelScope SWIFT) Core: One CLI for Inference, Training, Alignment, Export and Deployment of Qwen Models
 
-> **Target Audience**: AI Platform Engineers, ML Training Architects, SREs, and Fine-Tuning Specialists responsible for scalable LLM/VLM customization.  
-> **Prerequisites**: Familiarity with PyTorch training loops, Hugging Face `transformers`/`datasets`, and parameter-efficient fine-tuning concepts ([Volume 01](01-qwen25-architecture-and-model-spectrum.md)).  
-> **Estimated Deep-Dive Time**: 45 minutes  
-> **What You Will Master**:
-> 1. The core design architecture of **Alibaba ModelScope `ms-swift`** (Scalable lightWeight Infrastructure for Fine-Tuning).
-> 2. The unified multi-model registry abstraction supporting **300+ LLMs and 50+ Multimodal Vision-Language Models**.
-> 3. The dataset pre-processing engine: template formatting, ChatML conversion, multimodal alignment, and token caching.
-> 4. Comparative matrix: `ms-swift` vs. LLaMA-Factory vs. Hugging Face TRL vs. Unsloth.
-> 5. A self-contained, runnable Python script demonstrating the `ms-swift` programmatic training API and dataset tokenization pipeline.
-> 6. Execution setup and environment configuration for the **NVIDIA DGX Spark (Grace Blackwell GB10)**.
+> **Module 04 · Part II — Training and alignment** · Prev: [05 Qwen2.5-VL](05-qwen2-vl-and-vision-language-processing.md) · Next: [07 Distributed SFT](07-distributed-sft-with-ms-swift.md)
 
----
-
-## 📑 Table of Contents
-1. [Zero-to-One Intuition: Why Enterprises Need a Unified Training Framework](#1-zero-to-one-intuition-why-enterprises-need-a-unified-training-framework)
-2. [Evolutionary Lineage: From Scattered Scripts to ms-swift](#2-evolutionary-lineage-from-scattered-scripts-to-ms-swift)
-3. [The 4-Layer ms-swift Framework Architecture](#3-the-4-layer-ms-swift-framework-architecture)
-4. [Dataset Engineering: Templates, ChatML & Multi-Turn Processing](#4-dataset-engineering-templates-chatml--multi-turn-processing)
-5. [Comparative Matrix: ms-swift vs. LLaMA-Factory vs. TRL vs. Unsloth](#5-comparative-matrix-ms-swift-vs-llama-factory-vs-trl-vs-unsloth)
-6. [Hands-On Production Lab: Programmatic ms-swift Pipeline](#6-hands-on-production-lab-programmatic-ms-swift-pipeline)
-7. [Hardware Grounding for NVIDIA DGX Spark (Grace Blackwell GB10)](#7-hardware-grounding-for-nvidia-dgx-spark-grace-blackwell-gb10)
-8. [Step-by-Step Practice Exercises with Full Solutions](#8-step-by-step-practice-exercises-with-full-solutions)
-9. [Troubleshooting & Operational FAQ](#9-troubleshooting--operational-faq)
+| | |
+|---|---|
+| **You will build** | A working ms-swift environment on the Spark, run as a Kueue-admitted interactive Job, with pinned versions that don't fight the NGC image. You'll use the core commands (`infer`, `sft`, `rlhf`, `export`, `deploy`), the dataset formats each expects, and the switch that decides whether models come from Hugging Face or ModelScope (drill Q04) |
+| **Hardware** | spark-01 |
+| **Time** | 60 min |
+| **Risk** | Low |
+| **Lab files** | [`k8s/jobs/swift-dev.yaml`](lab/k8s/jobs/swift-dev.yaml), [`versions.env`](lab/versions.env) (`PIP_SWIFT`), [`tools/synth_data.py`](lab/tools/synth_data.py), [`scripts/breakfix.sh`](lab/scripts/breakfix.sh) (Q04) |
 
 ---
 
-## 1. Zero-to-One Intuition: Why Enterprises Need a Unified Training Framework
+## 1. Why ms-swift for Qwen
 
-In standard academic workflows, fine-tuning an LLM requires stringing together disjointed libraries:
-* One library for tokenization and model loading (`transformers`).
-* Another library for LoRA adapter attachment (`peft`).
-* Another library for distributed memory sharding (`deepspeed` or `accelerate`).
-* Another library for preference alignment (`trl`).
-* Custom glue code to handle prompt templates (`<|im_start|>` vs. `[INST]` vs. `<start_of_turn>`).
+ms-swift is Alibaba ModelScope's training and deployment framework. It's the reference toolchain for Qwen: model-specific chat templates, the Qwen VL/Audio/Omni variants and new Qwen releases are usually supported there first. It wraps the same libraries you used in 03 (Transformers, PEFT, TRL, DeepSpeed, vLLM) behind one CLI:
 
-When switching models (e.g., from Qwen2.5 to DeepSeek to Gemma), small template formatting discrepancies or un-padded token errors corrupt the loss function.
+| Command | Does | 03 equivalent |
+|---|---|---|
+| `swift infer` | chat with a model or adapter (transformers or vLLM backend) | `curl` to vLLM |
+| `swift sft` | supervised fine-tuning: LoRA, QLoRA, full, many PEFT variants | `sft_lora.py` (TRL) |
+| `swift rlhf` | DPO, SimPO, ORPO, KTO, CPO, reward model, PPO, GRPO | `grpo_tiny.py` (TRL) |
+| `swift pt` | continued pre-training | — |
+| `swift export` | merge LoRA, quantise (AWQ/GPTQ/FP8), push to a hub | `merge_and_unload`, llm-compressor |
+| `swift deploy` | OpenAI-compatible server (vLLM/SGLang/LMDeploy backends) | the catalog Deployment |
+| `swift eval` | benchmark runs (EvalScope) | `eval_harness.py` |
+| `swift web-ui` | Gradio UI over all of the above | — |
 
-```text
-Fragmented Traditional Stack (Brittle & Error-Prone):
-[Dataset] ──> Custom Regex ──> HuggingFace PEFT ──> DeepSpeed JSON ──> Custom CUDA loop ──> Export Errors
+### 1.1 Version pins that coexist with NGC
 
-Alibaba ModelScope ms-swift (Unified & Battle-Tested):
-[Dataset] ────────────────────► [ ms-swift Unified Engine ] ────────────────────► [ Deployable Artifact ]
-                                │ - Auto Template Injection (300+ models)       │
-                                │ - SFT, DPO, SimPO, GRPO, KTO                   │
-                                │ - Megatron, DeepSpeed, FSDP, LoRA/DoRA         │
-                                └───────────────────────────────────────────────┘
-```
+| Package | Pin | Constraint it satisfies |
+|---|---|---|
+| ms-swift | 3.8.3 | 3.8.x requires `trl<0.21`, `datasets<4.0`, `transformers<4.57`, `peft<0.18` |
+| trl | 0.20.0 | (03 uses 0.23.0, which is too new for ms-swift 3.8) |
+| datasets | 3.6.0 | |
+| transformers / peft / accelerate | 4.56.2 / 0.17.1 / 1.10.1 | same as 03 |
 
-Alibaba's **`ms-swift`** solves this by providing a single, standardized command-line and Python API that handles the entire lifecycle: dataset ingestion, distributed training, reinforcement learning, evaluation, quantization, and deployment.
+Installed with plain `pip` on top of `nvcr.io/nvidia/pytorch:25.09-py3`. None of them pins torch, so NVIDIA's build stays.
 
 ---
 
-## 2. Evolutionary Lineage: From Scattered Scripts to ms-swift
+## 2. Architecture — HLD
 
 ```mermaid
-flowchart TD
-    A["Raw PyTorch & Hugging Face Scripts (2021-2022)<br/>Manual gradient accumulation, custom token loop"] --> B["Hugging Face TRL & PEFT (2023)<br/>Standardized LoRA, but fragmented template handling"]
-    B --> C["LLaMA-Factory (Late 2023)<br/>Popularized web-based and CLI fine-tuning"]
-    C --> D["ModelScope ms-swift (2024-2025)<br/>Enterprise-grade unified framework<br/>Native multi-modal VLM support (50+ models)<br/>Direct integration with Megatron, DeepSpeed, and vLLM"]
+flowchart LR
+  subgraph POD["Job swift-dev (batch · Kueue train · 1 slice · 4 h)"]
+    direction TB
+    CLI["swift CLI"] --> TPL["template<br/>(auto: qwen2_5 for Qwen2.5)"]
+    TPL --> DS["dataset loader<br/>messages · rejected_response"]
+    DS --> TR["trainer<br/>Transformers · PEFT · TRL · DeepSpeed"]
+    TR --> CK[("/ckpt (deepseek-ckpt PVC)<br/>checkpoint-N · merged")]
+    CLI --> INF["infer / deploy<br/>(transformers or vLLM backend)"]
+  end
+  HUB{{"USE_HF=1 → Hugging Face<br/>unset → ModelScope"}} --> CLI
+  CM[("ConfigMap swift-data<br/>sft.jsonl · dpo.jsonl")] --> DS
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef sec fill:#cf222e,stroke:#82071e,color:#fff
+  class CLI,TPL,DS ctrl
+  class TR,INF gpu
+  class CK,CM store
+  class HUB sec
+  style POD fill:#eef2ff,stroke:#1f6feb
 ```
 
 ---
 
-## 3. The 4-Layer ms-swift Framework Architecture
+## 3. LLD
 
-The `ms-swift` ecosystem is divided into four cleanly decoupled layers:
+### 3.1 Dataset formats
 
-```
-+───────────────────────────────────────────────────────────────────────────────────────────────+
-|                                    ms-swift SYSTEM ARCHITECTURE                               |
-+───────────────────────────────────────────────────────────────────────────────────────────────+
-|  [4] Application & Ops Layer  │ CLI (`swift sft / dpo`), WebUI, vLLM / Ollama Export          |
-|  [3] Alignment & Loss Layer   │ SFT, DPO, SimPO, ORPO, GRPO, PPO, Rejection Sampling          |
-|  [2] Tuner & Speedup Layer    │ LoRA, QLoRA, DoRA, GaLore, FlashAttention-2, Unsloth Kernels  |
-|  [1] Core Model & Data Layer  │ 300+ Model Registry, ChatML Template Engine, SafeTensors I/O  |
-+───────────────────────────────────────────────────────────────────────────────────────────────+
-```
+| Task | JSONL row |
+|---|---|
+| SFT (chat) | `{"messages": [{"role": "system", …}, {"role": "user", …}, {"role": "assistant", …}]}` |
+| preference (DPO/SimPO/ORPO/CPO) | same `messages` (last assistant = **chosen**) + `"rejected_response": "…"` |
+| KTO | `messages` + `"label": true/false` |
+| multimodal | `messages` with `<image>` placeholders + `"images": ["path or url", …]` |
 
-### 1. Core Model & Data Layer
-* Maintains an internal dictionary mapping model architectures (Qwen, Llama, Gemma, DeepSeek, Mistral) to their exact tokenizers, RoPE bases, and prompt templates.
-* Supports automatic downloading from **ModelScope** or **Hugging Face Hub** with fast multi-connection transfer.
+`synth_data.py` (Vol 10) writes exactly the SFT and preference shapes.
 
-### 2. Tuner & Speedup Layer
-* Implements all modern PEFT strategies: **LoRA**, **QLoRA** (4-bit bitsandbytes), **DoRA** (Weight-Decomposed LoRA), and **GaLore** (Gradient Low-Rank Projection for full-parameter pretraining memory reduction).
+### 3.2 Arguments you'll use most
 
-### 3. Alignment & Loss Layer
-* Directly unifies Supervised Fine-Tuning (SFT) with Direct Preference Optimization (DPO), Simple Preference Optimization (SimPO), and Group Relative Policy Optimization (GRPO).
+| Argument | Meaning |
+|---|---|
+| `--model` | HF repo id (with `USE_HF=1`), ModelScope id, or a local path |
+| `--train_type` | `lora`, `full`, `longlora`, `adalora`, … |
+| `--target_modules all-linear` | LoRA on every linear layer |
+| `--template` | usually auto-detected from the model. Set it for custom checkpoints |
+| `--torch_dtype bfloat16` | GB10 native |
+| `--deepspeed zero2/zero3` | built-in DeepSpeed configs (Vol 07) |
+| `--output_dir … --add_version false` | predictable paths (`checkpoint-N`) for automation |
+| `--infer_backend vllm` | for `infer`/`deploy`/`sample` |
 
----
+### 3.3 Where models come from
 
-## 4. Dataset Engineering: Templates, ChatML & Multi-Turn Processing
-
-A major cause of silent fine-tuning degradation is **mismatched special tokens**. Qwen2.5 strictly expects the **ChatML format**:
-
-```text
-<|im_start|>system
-You are a helpful coding assistant.<|im_end|>
-<|im_start|>user
-Write a binary search algorithm in Python.<|im_end|>
-<|im_start|>assistant
-def binary_search(arr, target):
-...<|im_end|>
-```
-
-`ms-swift` eliminates manual string formatting through its **Template Engine**:
-* It automatically reads the dataset schema (e.g. `{"instruction": "...", "input": "...", "output": "..."}` or `{"conversations": [...]}`).
-* Injects exact model-specific delimiters (`<|im_start|>`, `<|im_end|>`).
-* Computes cross-entropy loss **strictly over the assistant's response tokens**, automatically masking user and system prompt tokens with `-100` in PyTorch labels.
-
-```
-Loss Masking in ms-swift:
-Tokens: [ <|im_start|> system ... <|im_end|> ] [ <|im_start|> user ... <|im_end|> ] [ <|im_start|> assistant ... <|im_end|> ]
-Labels: [        -100 (MASKED)               ] [        -100 (MASKED)             ] [       TARGET PREDICTION TOKENS       ]
-```
+ms-swift defaults to **ModelScope** (modelscope.cn). With `USE_HF=1` it uses Hugging Face, which matches the rest of this curriculum (shared cache, Vault-held token, revision pins). Both hubs host Qwen weights. Pick one per environment and pin it.
 
 ---
 
-## 5. Comparative Matrix: ms-swift vs. LLaMA-Factory vs. TRL vs. Unsloth
+## 4. Integrations
 
-| Capability | Alibaba ms-swift | LLaMA-Factory | Hugging Face TRL | Unsloth |
-| :--- | :--- | :--- | :--- | :--- |
-| **Model Registry** | **300+ LLMs & 50+ VLMs**| 150+ LLMs, Few VLMs | Raw Transformers | Limited to supported backbones |
-| **Multimodal VLM Training** | **Native SOTA (Qwen2-VL, etc.)**| Experimental | Requires custom code| Limited |
-| **Reinforcement Learning** | **GRPO, DPO, SimPO, PPO**| DPO, ORPO, PPO | DPO, PPO | DPO |
-| **Distributed Backends** | **Megatron, DeepSpeed, FSDP**| DeepSpeed | Accelerate / DeepSpeed | Single-GPU primary |
-| **CLI & WebUI Support** | **Full CLI & WebUI** | Full CLI & WebUI | CLI only | Python code only |
-| **Inference Engine Export** | **vLLM, Ollama, TRT-LLM** | vLLM, Ollama | GGUF export | GGUF, vLLM |
-| **Workstation DGX Spark** | **Native ARM64 + GB10** | Native | Native | Requires custom CUDA build |
+- **03 Vol 22**: the dev Job is a Kueue workload. It counts against the `train` quota and can be preempted.
+- **03 Vol 23–24**: same PEFT concepts, different front end. Adapters are standard PEFT and serve the same way.
+- **Vol 07–10**: SFT, alignment, PEFT variants and data in ms-swift.
 
 ---
 
-## 6. Hands-On Production Lab: Programmatic ms-swift Pipeline
+## 5. Lab
 
-This runnable Python script demonstrates how to configure and execute a complete `ms-swift` training pipeline programmatically.
+### 5.1 Start the dev environment
 
-Save this script as `swift_training_pipeline.py`:
-
-```python
-#!/usr/bin/env python3
-"""
-Production Lab: Programmatic ms-swift SFT Configuration & Dataset Preparation
-Author: Advanced AI Architecture Group
-Target Hardware: NVIDIA DGX Spark (Grace Blackwell GB10)
-"""
-
-import os
-import sys
-
-def generate_sample_dataset():
-    """Creates a sample enterprise dataset in JSONL format."""
-    dataset_content = """{"system": "You are a DevOps expert.", "query": "How do I check GPU status?", "response": "Run nvidia-smi --query-gpu=utilization.gpu,temperature.gpu --format=csv."}
-{"system": "You are a DevOps expert.", "query": "How do I inspect pod logs?", "response": "Use kubectl logs -n <namespace> <pod-name> --tail=100 -f."}
-{"system": "You are a DevOps expert.", "query": "What is an Xid 79 error?", "response": "Xid 79 indicates the GPU has fallen off the bus. Cordon the node and power-cycle."}
-"""
-    os.makedirs("/tmp/swift_data", exist_ok=True)
-    file_path = "/tmp/swift_data/devops_qa.jsonl"
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(dataset_content)
-    return file_path
-
-def build_swift_cli_command(data_path: str) -> str:
-    """Generates the production ms-swift CLI command for Qwen2.5-32B LoRA fine-tuning."""
-    cmd = f"""swift sft \\
-    --model_type qwen2_5-32b-instruct \\
-    --model_id_or_path /data/models/Qwen2.5-Coder-32B-Instruct \\
-    --dataset {data_path} \\
-    --train_type lora \\
-    --lora_rank 16 \\
-    --lora_alpha 32 \\
-    --lora_target_modules ALL \\
-    --output_dir /data/checkpoints/qwen_devops_lora \\
-    --num_train_epochs 3 \\
-    --max_length 2048 \\
-    --batch_size 1 \\
-    --gradient_accumulation_steps 8 \\
-    --learning_rate 1e-4 \\
-    --warmup_ratio 0.05 \\
-    --eval_steps 50 \\
-    --save_steps 50 \\
-    --save_total_limit 2 \\
-    --use_flash_attn true \\
-    --fp16 false \\
-    --bf16 true
-"""
-    return cmd
-
-def main():
-    print("=" * 80)
-    print("      ALIBABA ModelScope ms-swift TRAINING PIPELINE ENGINE")
-    print("=" * 80)
-
-    # 1. Dataset Generation
-    print("\n[STEP 1: PREPARING MULTI-TURN JSONL DATASET]")
-    data_path = generate_sample_dataset()
-    print(f"  ✅ Dataset written to: {data_path}")
-
-    # 2. Command Assembly
-    print("\n[STEP 2: GENERATING PRODUCTION ms-swift EXECUTION COMMAND]")
-    cli_cmd = build_swift_cli_command(data_path)
-    print("--- Shell Command ---")
-    print(cli_cmd)
-    print("---------------------")
-
-    # 3. Parameter Validation
-    print("[STEP 3: CONFIGURATION AUDIT FOR DGX SPARK (GB10)]")
-    print("  • Model Target:         Qwen2.5-32B-Instruct")
-    print("  • Precision:            BF16 (Native Grace Blackwell acceleration)")
-    print("  • Effective Batch Size: 1 (micro) * 8 (accum) = 8 sequences")
-    print("  • Adapter Type:         LoRA (Rank=16, Alpha=32, Targets=ALL)")
-    print("  • Attention Kernel:     FlashAttention-2 Enabled")
-    print("  ✅ Configuration 100% Validated for 128 GB Unified Memory!")
-
-    print("\n" + "=" * 80)
-    print("STATUS: ms-swift Framework Ready for Distributed Execution!")
-    print("=" * 80)
-
-if __name__ == "__main__":
-    main()
-```
-
----
-
-## 7. Hardware Grounding for NVIDIA DGX Spark (Grace Blackwell GB10)
-
-Running `ms-swift` on the **NVIDIA DGX Spark** unlocks unique hardware capabilities:
-
-```
-+────────────────────────────────────────────────────────────────────────────────────+
-|                      DGX SPARK HARDWARE TUNING FOR ms-swift                        |
-+────────────────────────────────────────────────────────────────────────────────────+
-|  Resource Allocation for Qwen2.5-32B LoRA SFT:                                     |
-|  - Static Base Model Weights (BF16):               65.0 GB                         |
-|  - LoRA Adapter Weights & Gradients:                1.2 GB                         |
-|  - AdamW Optimizer States for LoRA:                 2.4 GB                         |
-|  - Activation Memory (Batch=1, Seq=2048, FlashAttn):5.8 GB                         |
-|  - Host OS & CUDA Overhead:                        12.0 GB                         |
-|  Total Memory Allocated:                           86.4 GB / 128 GB                |
-|  Headroom Available:                               41.6 GB (Zero OOM Risk!)        |
-+────────────────────────────────────────────────────────────────────────────────────+
-```
-
----
-
-## 8. Step-by-Step Practice Exercises with Full Solutions
-
-### Exercise 1: Installing ms-swift on Ubuntu ARM64 (Grace CPU)
-* **Objective**: Install `ms-swift` with all LLM and VLM training dependencies on an ARM64 Linux workstation.
-* **Solution**:
 ```bash
-# Ensure pip and setuptools are current
-python3 -m pip install --upgrade pip setuptools wheel
-
-# Install ms-swift with all extras
-pip install "ms-swift[llm,vlm]" -U
-swift --version
+cd "04 Qwen/lab"
+kubectl apply -f "../../03 DeepSeek/lab/k8s/jobs/train-common.yaml"     # /ckpt PVC
+kubectl apply -f k8s/jobs/swift-dev.yaml
+kubectl -n batch wait --for=condition=ready pod -l job-name=swift-dev --timeout=20m
+kubectl -n batch exec -it job/swift-dev -- bash
 ```
 
----
+### 5.2 First commands inside
 
-### Exercise 2: Merging LoRA Adapters into Base Model Weights
-* **Objective**: Use `ms-swift` to merge trained LoRA adapter weights back into the standalone base SafeTensors weights for zero-overhead vLLM deployment.
-* **Solution**:
 ```bash
-swift export \
-    --model_type qwen2_5-32b-instruct \
-    --model_id_or_path /data/models/Qwen2.5-Coder-32B-Instruct \
-    --adapters /data/checkpoints/qwen_devops_lora \
-    --merge_lora true \
-    --output_dir /data/models/Qwen2.5-Coder-32B-DevOps-Merged
+swift --help | head
+python -c "import swift, trl, transformers; print(swift.__version__, trl.__version__, transformers.__version__)"
+swift infer --model Qwen/Qwen2.5-0.5B-Instruct --stream true --max_new_tokens 128
+#  <<< What is a GPU time-slice? Answer in two sentences.
 ```
 
----
+### 5.3 A one-minute LoRA run
 
-### Exercise 3: Validating ChatML Token IDs
-* **Objective**: Write a verification test ensuring the `ms-swift` ChatML template attaches the correct token ID for `<|im_start|>` ($151,644$) and `<|im_end|>` ($151,645$).
-* **Solution**:
-```python
-from transformers import AutoTokenizer
-
-tokenizer = AutoTokenizer.from_pretrained("/data/models/Qwen2.5-Coder-32B-Instruct", trust_remote_code=True)
-im_start_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
-im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
-
-print(f"<|im_start|> ID: {im_start_id}")
-print(f"<|im_end|> ID:   {im_end_id}")
-
-assert im_start_id == 151644, "Invalid start token ID!"
-assert im_end_id == 151645, "Invalid end token ID!"
-print("✅ ChatML Token IDs Verified!")
+```bash
+cat > /tmp/tiny.jsonl <<'EOF'
+{"messages": [{"role": "user", "content": "Which lab serves models?"}, {"role": "assistant", "content": "The DGX Spark lab serves models with vLLM behind LiteLLM."}]}
+{"messages": [{"role": "user", "content": "What is the GPU in a DGX Spark?"}, {"role": "assistant", "content": "A GB10 Grace Blackwell superchip with 128 GB of unified memory."}]}
+EOF
+swift sft --model Qwen/Qwen2.5-0.5B-Instruct --train_type lora --dataset /tmp/tiny.jsonl#200 \
+  --num_train_epochs 1 --per_device_train_batch_size 4 --learning_rate 1e-4 --lora_rank 8 \
+  --output_dir /ckpt/swift-tiny --add_version false --logging_steps 5 --save_steps 50 --report_to none
+swift infer --adapters $(ls -d /ckpt/swift-tiny/checkpoint-* | sort -V | tail -1) --stream true
 ```
 
+`dataset#200` samples 200 rows (with repetition here) from the file. That's handy for smoke runs.
+
+### 5.4 Export and deploy
+
+```bash
+CK=$(ls -d /ckpt/swift-tiny/checkpoint-* | sort -V | tail -1)
+swift export --adapters "$CK" --merge_lora true --output_dir /ckpt/swift-tiny-merged
+swift deploy --model /ckpt/swift-tiny-merged --infer_backend vllm --port 8010 &
+sleep 60; curl -s localhost:8010/v1/models | python -m json.tool | head
+```
+
+`swift deploy` is a quick check. Production serving stays on the catalog Deployment: publish the merged model into the cache (03 `publish-adapter.sh`) and serve it from there.
+
+### 5.5 Drill Q04 — the hub switch
+
+```bash
+exit                                         # leave the dev pod
+scripts/breakfix.sh inject Q04               # swift-sft without USE_HF
+kubectl -n batch logs -f job/swift-sft | grep -iE 'modelscope|download|error' | head
+scripts/breakfix.sh answer Q04 && scripts/breakfix.sh reset Q04
+```
+
+Clean up: `kubectl -n batch delete job swift-dev`.
+
 ---
 
-## 9. Troubleshooting & Operational FAQ
+## 6. Verify
 
-### Q1: Why does `swift sft` throw `ImportError: FlashAttention-2 not found` on ARM64?
-**Root Cause**: FlashAttention-2 pre-built wheels are typically compiled for x86_64. On the Grace ARM CPU, you must compile from source or launch within the official NVIDIA PyTorch container (`nvcr.io/nvidia/pytorch:24.09-py3`).  
-**Remediation**: Set `--use_flash_attn false` to fall back to PyTorch's native `ScaledDotProductAttention (SDPA)`, which compiles natively on Grace ARM with near-identical performance.
-
-### Q2: Can `ms-swift` fine-tune DeepSeek and Llama models as well as Qwen?
-**Answer**: Yes. Despite being developed by Alibaba, `ms-swift` is a universal open-source framework supporting over 300 models from Meta, DeepSeek, Google, Mistral, and Anthropic formatting.
-
-### Q3: Where are intermediate checkpoint files stored during training?
-**Answer**: Intermediate weights and tensorboard logs are saved in `--output_dir` (e.g. `/data/checkpoints/`). Every `--save_steps` iteration, a new `checkpoint-XXX` directory containing the PEFT `adapter_model.safetensors` and `adapter_config.json` is committed.
+| Check | Expected |
+|---|---|
+| versions | ms-swift 3.8.3, trl 0.20.0, transformers 4.56.2 in the pod. torch is NVIDIA's |
+| infer | streamed answer from the 0.5B model |
+| tiny SFT | `checkpoint-*` written. The adapter answers with the trained sentences |
+| export | merged model loads in `swift deploy` |
+| Q04 | ModelScope download attempt seen and explained |
 
 ---
 
-### Complete Qwen Curriculum Navigation
-| Previous Volume | Master Curriculum Navigation | Next Volume |
-| :--- | :---: | :---: |
-| [← 05. Qwen2-VL & Vision-Language Processing](05-qwen2-vl-and-vision-language-processing.md) | [Curriculum Index](README.md) | [07. Distributed SFT with ms-swift →](07-distributed-sft-with-ms-swift.md) |
+## 7. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `pip` resolver conflict on trl/datasets | 03's pins mixed in | use `PIP_SWIFT` from `versions.env` only |
+| download from modelscope.cn hangs | `USE_HF` unset | `USE_HF=1` (Q04) |
+| `template not found` for a local checkpoint | auto-detection failed | `--template qwen2_5` (or the base model's template) |
+| `checkpoint-*` paths under `v0-2026…` | versioned output dir | `--add_version false` |
+| dev pod Pending: workload not admitted | Kueue quota in use | wait, or delete other batch Jobs (03 Vol 22) |
+
+---
+
+## 8. Scale-out path
+
+| One Spark | Cluster |
+|---|---|
+| one dev pod, one slice | ms-swift with DeepSpeed/FSDP over 2 Sparks (Vol 07). Megatron-SWIFT for large MoE |
+| CLI by hand | the same commands as Jobs (Vols 07–08) from a pipeline (Argo Workflows/Kubeflow) |
+
+---
+
+## 9. Checklist
+
+- [ ] I can install ms-swift on the NGC image without breaking torch.
+- [ ] I know the dataset shapes for SFT and preference training.
+- [ ] I ran infer → sft → export → deploy end to end.
+- [ ] My jobs pull from the hub I chose, explicitly.
