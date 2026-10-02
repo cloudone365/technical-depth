@@ -20,8 +20,8 @@ pids=(); cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; do
 echo "== yamllint";            yamllint -s .
 echo "== overlays in sync";    python3 scripts/gen_overlays.py --check
 echo "== kustomize + kubeconform"
-for d in . k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/sglang/* k8s/apps observability breakfix/*; do "$KUBECTL" kustomize "$d" | kc -; done
-for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml k8s/autoscale/*.yaml k8s/kserve/*.yaml; do kc "$f"; done
+for d in . k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/lora/* k8s/sglang/* k8s/apps observability breakfix/*; do "$KUBECTL" kustomize "$d" | kc -; done
+for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml k8s/autoscale/*.yaml k8s/kserve/*.yaml k8s/rl/*.yaml; do kc "$f"; done
 echo "== promtool";            promtool check rules <(python3 -c "
 import yaml
 for d in yaml.safe_load_all(open('observability/rules.yaml')): print(yaml.safe_dump({'groups': d['spec']['groups']}))")
@@ -72,6 +72,9 @@ expect "finish_reason=stop" python3 tools/stream_probe.py --url http://127.0.0.1
 ! python3 tools/stream_probe.py --url http://127.0.0.1:18770 --model m | grep -q BUFFERED
 expect "BUFFERED" python3 tools/stream_probe.py --url http://127.0.0.1:18771 --model m
 expect "TRUNCATED" python3 tools/stream_probe.py --url http://127.0.0.1:18772 --model m
+echo "== format check vs mock (format 100 %, correct 50 %)"
+python3 tests/mock_format.py 18773 & pids+=($!); sleep 1
+expect "format 40/40 (100%)  correct 20/40 (50%)" python3 tools/format_check.py --url http://127.0.0.1:18773 --model m -n 40 --concurrency 1
 echo "== weights manifest"
 w=$(mktemp -d); echo a > "$w/x.safetensors"; python3 tools/weights_verify.py snapshot "$w" --out "$w.json" >/dev/null
 python3 tools/weights_verify.py verify "$w" "$w.json" >/dev/null && echo b > "$w/x.safetensors" && ! python3 tools/weights_verify.py verify "$w" "$w.json" >/dev/null && echo "weights_verify OK"
@@ -91,10 +94,10 @@ if [[ "${API:-0}" == 1 ]]; then
   "$KUBECTL" apply -k "$K8S_LAB/manifests/00-platform" >/dev/null
   "$KUBECTL" apply -f k8s/multinode/namespace.yaml >/dev/null
   "$KUBECTL" apply --dry-run=server -k . >/dev/null
-  for d in k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/sglang/* k8s/apps observability; do "$KUBECTL" apply --dry-run=server -k "$d" >/dev/null; done
-  for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml k8s/autoscale/*.yaml; do "$KUBECTL" apply --dry-run=server -f "$f" >/dev/null; done
+  for d in k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/lora/* k8s/sglang/* k8s/apps observability; do "$KUBECTL" apply --dry-run=server -k "$d" >/dev/null; done
+  for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml k8s/autoscale/*.yaml k8s/rl/*.yaml; do "$KUBECTL" apply --dry-run=server -f "$f" >/dev/null; done
   echo "== pod templates vs PSA / CEL policies / quotas"
-  python3 "$K8S_LAB/tests/pod_template_check.py" k8s/models/* k8s/sglang/* k8s/apps k8s/jobs/*.yaml k8s/ops/*.yaml \
-    k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/lws-vllm-70b.yaml
+  python3 "$K8S_LAB/tests/pod_template_check.py" k8s/models/* k8s/lora/* k8s/sglang/* k8s/apps k8s/jobs/*.yaml k8s/ops/*.yaml \
+    k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/lws-vllm-70b.yaml k8s/rl/*.yaml
 fi
 echo "ALL LOCAL CHECKS PASSED"

@@ -1,416 +1,270 @@
-# 25. Distributed RL Rollout Infrastructure — The Actor-Rollout-Learner Loop at Scale
+# Volume 25 — RL Rollout Infrastructure: Where GRPO Spends Its Time, Colocated vs Disaggregated Rollouts, and Weight Sync over CX-7
 
-> **Target Audience**: AI Infrastructure Architects, Distributed Systems Engineers, and RL Specialists building large-scale reasoning training clusters for frontier models.  
-> **Prerequisites**: GRPO loss formulation (from [05-deepseek-r1-and-grpo-reasoning.md](05-deepseek-r1-and-grpo-reasoning.md)), high-throughput serving engines (from [15-vllm-serving-deepseek-and-qwen.md](15-vllm-serving-deepseek-and-qwen.md)), and distributed collectives.  
-> **Estimated Study Time**: 65 minutes.  
-> **What You Will Master**: The physical decoupling of **Rollout Generation, Sandboxed Verification, and Policy Learning**, solving the variable-length straggler bottleneck, mitigating **policy staleness via importance sampling**, and orchestrating asynchronous RL loops with **Ray** on the **NVIDIA DGX Spark**.
+> **Module 03 · Part VI — Fine-tuning and RL** · Prev: [24 Unsloth & LLaMA-Factory](24-unsloth-and-llama-factory-workflows.md) · Next: [26 DeepSpeed ZeRO-3 & FSDP](26-distributed-deepspeed-zero3-and-fsdp.md)
 
----
-
-## 📑 Table of Contents
-1. [Foundational Scaffolding: The Asymmetric Nature of Reasoning RL](#1-foundational-scaffolding-the-asymmetric-nature-of-reasoning-rl)
-2. [Co-Related Concepts & The Evolution of Distributed RL](#2-co-related-concepts--the-evolution-of-distributed-rl)
-3. [The Three-Tier Decoupled Architecture](#3-the-three-tier-decoupled-architecture)
-4. [The Variable-Length Straggler Crisis & Replay Buffers](#4-the-variable-length-straggler-crisis--replay-buffers)
-5. [The Policy Staleness Dilemma & Importance Sampling Math](#5-the-policy-staleness-dilemma--importance-sampling-math)
-6. [Comparative Analysis: DeepSeek vs. verl vs. OpenRLHF vs. Ray-PPO](#6-comparative-analysis-deepseek-vs-verl-vs-openrlhf-vs-ray-ppo)
-7. [Hardware Grounding: The Single-Node Spark vs. Multi-Node Cluster](#7-hardware-grounding-the-single-node-spark-vs-multi-node-cluster)
-8. [Hands-On Python Lab: Complete Async Actor-Rollout-Learner with Ray](#8-hands-on-python-lab-complete-async-actor-rollout-learner-with-ray)
-9. [Practice Exercises with Step-by-Step Solutions](#9-practice-exercises-with-step-by-step-solutions)
-10. [Troubleshooting Guide & Diagnostic Runbook](#10-troubleshooting-guide--diagnostic-runbook)
+| | |
+|---|---|
+| **You will build** | The R1-style GRPO loop from Vol 05 run three ways: rollouts from Hugging Face `generate`, from vLLM inside the trainer (colocate), and from a separate vLLM server on spark-02 that receives fresh weights over NCCL after every step (disaggregated). You'll measure where each step's time goes, size the weight-sync traffic, and finish with the SFT → GRPO recipe |
+| **Hardware** | spark-01. spark-02 + the QSFP cable for §5.5 |
+| **Time** | 2.5 h |
+| **Risk** | Low. Everything runs in `batch` |
+| **Lab files** | [`tools/grpo_tiny.py`](lab/tools/grpo_tiny.py), [`k8s/jobs/grpo.yaml`](lab/k8s/jobs/grpo.yaml), [`k8s/jobs/grpo-vllm.yaml`](lab/k8s/jobs/grpo-vllm.yaml), [`k8s/rl/grpo-2spark.yaml`](lab/k8s/rl/grpo-2spark.yaml), [`tools/format_check.py`](lab/tools/format_check.py) |
 
 ---
 
-## 1. Foundational Scaffolding: The Asymmetric Nature of Reasoning RL
+## 1. Why RL needs its own infrastructure
 
-### Why Pre-Training Clusters Collapse Under RL
-In classical LLM pre-training, the computing workload is **100% symmetric and synchronous**:
-* Every GPU receives a tensor of exactly $B \times S$ tokens (e.g., $4 \times 4,096$).
-* Every GPU performs identical forward matrix multiplications, identical backward passes, and synchronizes gradients via an `All-Reduce` collective.
-* Every GPU takes the exact same number of milliseconds to complete each step.
+Supervised fine-tuning reads fixed data. RL **generates its own data** every step with the current policy, scores it and learns from it. For GRPO (Vol 05):
 
-In **Reasoning Reinforcement Learning** (e.g., DeepSeek-R1 or OpenAI o1/o3 training), this symmetry shatters completely:
-1. **Asymmetric Compute Profiles**:
-   * **Rollout Generation** is memory-bandwidth bound (autoregressive token-by-token generation).
-   * **Policy Learning** is compute-bound (dense matrix multiplication on accumulated trajectories).
-2. **Extreme Sequence Length Variance**:
-   * For the exact same prompt, Trajectory A might find a simple proof and terminate in **400 tokens**.
-   * Trajectory B might enter an extensive exploratory derivation, backtracking multiple times and generating **14,000 tokens**!
-   * In a synchronous pre-training architecture, **all GPUs sit 100% idle waiting for the single slowest 14,000-token straggler to finish** before calculating a single gradient!
-
-```
-                  SYNCHRONOUS RL ROLLOUT COLLAPSE (85% IDLE TIME)
-GPU 0 (Traj 1: 500 tok)   : [===] [IDLE WAITING FOR STRAGGLER..................................]
-GPU 1 (Traj 2: 1200 tok)  : [======] [IDLE WAITING FOR STRAGGLER...............................]
-GPU 2 (Traj 3: 800 tok)   : [====] [IDLE WAITING FOR STRAGGLER.................................]
-GPU 3 (Traj 4: 14000 tok) : [==================================================================]
-                             ▲                                                                 ▲
-                             Start                                          All-Reduce Can Finally Run!
+```text
+per step:  for each prompt → sample G completions with the CURRENT weights   (rollout: inference)
+           score each completion with rule-based rewards                     (reward: CPU, cheap)
+           advantage_i = (r_i − mean(r)) / std(r) within the group            (no value network)
+           policy-gradient update                                            (learner: training)
+           push new weights to whatever generates rollouts                   (weight sync)
 ```
 
-### The Factory vs. Exploratory Expedition Analogy
-* **Pre-Training**: Like a stamping plant pressing identical sheet metal car doors every 3.0 seconds. High efficiency requires rigid synchronization.
-* **Reasoning RL**: Like sending 50 exploratory scouts into an uncharted forest to locate water springs. Some return in 10 minutes with nothing; some return in 4 hours with fresh water. If your entire army refuses to eat or drink until all 50 scouts return simultaneously, the army starves.
-You must **decouple the scouts (Rollout Workers) from the base camp cooks (Learner Engine)** via an asynchronous staging depot (**Replay Buffer**).
+Rollout usually dominates: completions are long (R1 chains run thousands of tokens), and autoregressive decoding is memory-bandwidth-bound. So RL frameworks put a fast inference engine (vLLM, SGLang) in the loop, and the main design question is **where that engine runs**:
+
+| Layout | Rollout engine | Weight sync | Fits |
+|---|---|---|---|
+| HF `generate` | the training model itself | none | tiny experiments |
+| **Colocate** | vLLM in the trainer process, same GPU, time-shared | in-process copy | one GPU or node, memory permitting |
+| **Disaggregated** | vLLM server(s) on other GPUs or nodes | NCCL broadcast learner → servers | when rollout and training need different scale |
+
+DeepSeek-R1's own RL ran on thousands of GPUs with separate rollout and training pools. This volume builds the same shapes at the smallest scale.
 
 ---
 
-## 2. Co-Related Concepts & The Evolution of Distributed RL
+## 2. Architecture — HLD
+
+### 2.1 The three layouts
 
 ```mermaid
-flowchart TD
-    DQN["Deep Q-Networks (DQN / Atari)<br/>Single GPU, basic circular experience replay"] --> IMPALA["IMPALA / A3C (DeepMind)<br/>Decoupled CPU actor threads streaming to GPU learner<br/>V-trace correction for off-policy lag"]
-    IMPALA --> PPO4["PPO 4-Model Cluster (InstructGPT)<br/>Actor + Critic + Reference + Reward Model<br/>Massive VRAM overhead, complex multi-GPU sync"]
-    PPO4 --> GRPO["DeepSeek GRPO Decoupled Architecture<br/>Critic eliminated; Rule-based Verifier sandboxes<br/>High-throughput vLLM rollout workers + FSDP learners"]
+flowchart TB
+  subgraph A["A · HF generate (grpo.yaml)"]
+    direction LR
+    A1["policy (Qwen2.5-0.5B)<br/>generate → reward → update"]
+  end
+  subgraph B["B · colocate (grpo-vllm.yaml)"]
+    direction LR
+    B1["learner<br/>policy + optimiser"] <-->|"load_weights<br/>in-process"| B2["vLLM engine<br/>util 0.2"]
+  end
+  subgraph C["C · disaggregated (rl/grpo-2spark.yaml)"]
+    direction LR
+    C1["spark-01<br/>Job grpo-learner"] -->|"HTTP /generate/<br/>prompts"| C2["spark-02<br/>trl vllm-serve :8000"]
+    C2 -->|"completions"| C1
+    C1 ==>|"NCCL broadcast weights<br/>group port 51216 · CX-7 RoCE"| C2
+  end
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
+  class A1,B2,C2 gpu
+  class B1,C1 ctrl
+  style A fill:#f6f8fa,stroke:#57606a
+  style B fill:#f4fbe8,stroke:#76b900
+  style C fill:#f3effc,stroke:#8250df
 ```
 
-### The Key Innovation in Modern Frontier RL:
-As established in [05-deepseek-r1-and-grpo-reasoning.md](05-deepseek-r1-and-grpo-reasoning.md), DeepSeek eliminated the neural **Critic network** and replaced it with **Group Relative Advantage Estimation** combined with **Deterministic Sandboxed Verifiers**. 
-This fundamentally changed infrastructure requirements: you no longer need an entire cluster of GPUs dedicated to training a Value Critic network!
+### 2.2 One disaggregated step
 
----
-
-## 3. The Three-Tier Decoupled Architecture
-
-Hyperscale reasoning infrastructure partitions the cluster into three distinct, asynchronously communicating tiers:
-
-```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                        TIER 1: ROLLOUT GENERATION FLEET                                │
-│  - Powered by high-throughput serving engines (vLLM / SGLang)                          │
-│  - Executes PagedAttention, Continuous Batching, and Radix Prefix Caching              │
-│  - Generates groups of G exploratory reasoning paths (with <think> tokens)             │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    │ Streaming JSON Raw Trajectories
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                        TIER 2: SANDBOXED REWARD VERIFIERS                              │
-│  - Isolated CPU worker pool (gVisor micro-containers or Firecracker micro-VMs)         │
-│  - Executes code against unit tests, runs SymPy symbolic math equation solvers         │
-│  - Assigns deterministic rewards: r_i ∈ {+1.0, 0.0, -1.0}                              │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    │ Scored Trajectories + Normalized Advantages
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                        ASYNC REPLAY BUFFER (Redis / Plasma Store)                      │
-│  - Absorbs arrival time jitter; tracks policy version timestamps                       │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    │ Batched Training Chunks
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                        TIER 3: GRADIENT POLICY LEARNER                                 │
-│  - High-performance training engine (PyTorch FSDP-2 / Megatron-Core)                   │
-│  - Computes GRPO loss and performs AdamW optimizer gradient updates                    │
-│  - Periodically broadcasts updated weights back to Tier 1 Rollout Workers              │
-└────────────────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+sequenceDiagram
+  autonumber
+  box rgb(31,111,235) spark-01
+    participant L as learner
+  end
+  box rgb(118,185,0) spark-02
+    participant R as vLLM rollout server
+  end
+  L->>R: POST generate, 1 prompt x G 8, per micro-batch
+  R-->>L: 8 completions with token ids
+  L->>L: rewards format and correct, group advantages
+  L->>L: forward and backward, 4 micro-batches, optimiser step
+  L->>R: update weights via NCCL broadcast, one tensor at a time
+  R->>R: reset prefix cache, stale KV is invalid
+  Note over L,R: next step samples from the new policy
 ```
 
 ---
 
-## 4. The Variable-Length Straggler Crisis & Replay Buffers
+## 3. LLD
 
-To prevent fast rollout workers from idling while long reasoning paths complete:
-1. **Asynchronous Push**: Rollout workers push completed trajectories directly into an **In-Memory Replay Buffer** (implemented via Redis or Apache Arrow Plasma Store) the moment they finish.
-2. **Group Completion Gate**: In GRPO, advantages are normalized across a group of $G$ outputs for the same prompt:
-   $$\hat{A}_i = \frac{r_i - \text{mean}(\{r\})}{\text{std}(\{r\})}$$
-   The buffer holds outputs until all $G$ candidates for prompt $P_k$ arrive, computes their normalized group advantage, and immediately releases them to the training queue.
+### 3.1 The lab's GRPO configuration (`grpo_tiny.py`)
 
----
+| Setting | Value | Effect |
+|---|---|---|
+| model | Qwen2.5-0.5B-Instruct (or an SFT checkpoint) | small enough that all three layouts fit on one GB10 |
+| `num_generations` (G) | 8 | completions per prompt. The group the advantage is computed over |
+| `per_device_train_batch_size` × grad-accum | 8 × 4 | 32 completions (4 prompts) per optimiser step |
+| `max_completion_length` | 256 | ≤ 8,192 generated tokens per step |
+| `temperature` | 0.9 | diversity within a group. With no diversity, std = 0 and there's no learning signal |
+| `beta` (KL) | 0.0 | no reference model in memory (common in recent GRPO practice) |
+| rewards | format 1.0, correct 2.0 | verifiable, no reward model |
+| lr | 1e-6 | RL updates are small |
 
-## 5. The Policy Staleness Dilemma & Importance Sampling Math
+### 3.2 Metrics that tell you it's working
 
-### The Off-Policy Lag Dilemma
-Because generating 10,000 reasoning tokens across a rollout cluster takes time, by the time the Learner engine computes a gradient step at time $T$, the trajectories in the buffer were generated by an older policy checkpoint from time $T - \tau$ (where $\tau$ is the **staleness lag**).
+| Logged metric (TRL) | Healthy trend |
+|---|---|
+| `reward` | rises from ~0–0.5 towards 2–3 |
+| `rewards/reward_format/mean` | rises first (the model learns the tags) |
+| `rewards/reward_correct/mean` | rises later and more slowly |
+| `reward_std` | stays above 0. If it collapses to 0, groups are identical and the gradient is zero |
+| `frac_reward_zero_std` | fraction of groups with no signal. Lower is better |
+| `completions/mean_length` | stable or slowly growing. Sudden growth hitting `max_completion_length` means truncation |
 
-If $\tau > 0$, the data is **off-policy**. Naively treating off-policy data as on-policy leads to mathematical divergence and catastrophic forgetting.
+### 3.3 Weight-sync budget
 
-### The Mathematical Correction: Importance Sampling Ratio
-The GRPO objective corrects for policy staleness using the **Importance Sampling Ratio**:
+Every optimiser step, the full policy goes from learner to rollout engine:
 
-$$r_t(\theta) = \frac{\pi_\theta(a_t | s_t)}{\pi_{\theta_{\text{stale}}}(a_t | s_t)}$$
+| Policy (bf16) | Bytes per sync | Over 200 GbE RoCE (~20 GB/s achievable, **record yours** with 02 Vol 17's all-reduce bench) | Colocate |
+|---|---|---|---|
+| 0.5B | ~1 GB | ~0.05 s | in-process |
+| 7B | ~15 GB | ~0.8 s | in-process |
+| 32B | ~65 GB | ~3.3 s | doesn't fit with optimiser state on one GB10 |
 
-The clipped surrogate objective bounds the update magnitude:
+With LoRA, only the adapter would need syncing (MBs), which is one reason LoRA-GRPO is popular. TRL merges the adapter before syncing to vLLM.
 
-$$\mathcal{L}_{\text{CLIP}}(\theta) = \frac{1}{G} \sum_{i=1}^G \frac{1}{|y_i|} \sum_{t=1}^{|y_i|} \min \left( r_t(\theta) \hat{A}_{i,t}, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon) \hat{A}_{i,t} \right)$$
+### 3.4 Memory on one GB10 (colocate, 0.5B)
 
-```
-                       IMPORTANCE SAMPLING RATIO CLIPPING
-     Surrogate Loss
-           ▲
-           │                         / (Unclipped if advantage > 0)
-           │     ┌──────────────────/
-           │     │ Clipped Plateau: (1 + ε) * A
-           │     │
-───────────┼─────┼─────────────────────────► Importance Ratio r_t(θ)
-           │    1-ε        1.0     1+ε
-           │     │
-           │     └──────────────────\
-           │                         \ (Clipped if advantage < 0)
-```
+| Component | Approx. |
+|---|---|
+| policy bf16 + grads + AdamW fp32 states | ~8 GiB |
+| vLLM engine (`vllm_gpu_memory_utilization` 0.2) | ~24 GiB (weights + KV) |
+| activations for 8 × (160 + 256) tokens | ~2 GiB |
 
-* If policy drift is small ($r_t(\theta) \in [1-\epsilon, 1+\epsilon]$, with $\epsilon = 0.2$), full gradient information flows through.
-* If a trajectory is too stale ($r_t(\theta) > 1.2$ or $< 0.8$), the gradient is **clipped to zero**, safely preventing outdated rollouts from corrupting the current policy weights!
-
----
-
-## 6. Comparative Analysis: DeepSeek vs. verl vs. OpenRLHF vs. Ray-PPO
-
-| Architecture Framework | Orchestration Layer | Rollout Backend | Critic Required? | Staleness Handling | Focus |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **DeepSeek Native RL** | Custom High-Speed C++ | Custom vLLM fork | **NO (Pure GRPO)** | Strict Clip + Buffer Drop | Large-scale frontier reasoning |
-| **verl (ByteDance / Open)** | Ray + PyTorch FSDP | Native vLLM | Optional | Importance Sampling | State-of-the-art open framework |
-| **OpenRLHF** | Ray | vLLM / SGLang | Yes (PPO) or No (DPO) | PPO clipping | Multi-node chat alignment |
-| **Vanilla Ray RLlib** | Ray Tune | Python Hugging Face | Yes (Actor-Critic) | Generalized Advantage Est. | General gaming / robotics RL |
+Colocate works when **learner state + rollout engine** fit together. For R1-32B that's impossible on one Spark. That's exactly where disaggregation (and in a datacenter, separate pools) comes in.
 
 ---
 
-## 7. Hardware Grounding: The Single-Node Spark vs. Multi-Node Cluster
+## 4. Integrations
 
-### Multi-Node Enterprise Topology (e.g., 16x H100s):
-* Nodes 1 & 2 (16 GPUs): Run vLLM serving workers exclusively generating rollouts.
-* CPU Cluster: Runs 256 parallel sandboxed Python execution pods.
-* Nodes 3 & 4 (16 GPUs): Run PyTorch FSDP-2 consuming batches from the replay buffer.
-
-### Single-Node DGX Spark Topology (Grace ARM + Blackwell GB10 128GB):
-On a single DGX Spark machine, you cannot physically dedicate 8 GPUs to rollout and 8 GPUs to learning. 
-Instead, we implement **Time-Multiplexed Phased Iterations**:
-1. **Phase 1: Rollout Generation (60% Time)**:
-   * vLLM runs on the GB10 GPU with FP8 weights, generating groups of $G = 8$ trajectories for 50 prompts.
-   * Model weights: 32 GB; KV Cache: 80 GB.
-2. **Phase 2: Sandboxed Verification (10% Time)**:
-   * The 72 Grace ARM CPU cores execute unit tests in parallel using Python subprocesses.
-3. **Phase 3: Policy Gradient Update (30% Time)**:
-   * The GB10 loads the LoRA training adapter and executes backprop over the scored trajectories.
-   * Result: Complete self-contained RL loop running entirely inside one machine!
+- **Vol 05**: the algorithm and the reward design. This volume covers the infrastructure.
+- **Vol 23**: SFT first, then GRPO from the merged SFT checkpoint (§5.6).
+- **Vol 22**: the single-Spark Jobs are Kueue workloads. The two-Spark layout is pinned to nodes and runs outside Kueue.
+- **02 Vol 17**: NCCL over the CX-7 link. Same environment variables.
 
 ---
 
-## 8. Hands-On Python Lab: Complete Async Actor-Rollout-Learner with Ray
+## 5. Lab
 
-This complete script implements a decoupled, asynchronous RL architecture using **Ray**. It coordinates simulated Rollout Workers, a Sandboxed Verifier, and a Learner Actor:
-
-```python
-#!/usr/bin/env python3
-"""
-async_rl_rollout_infrastructure.py
-Asynchronous Actor-Rollout-Learner architecture using Ray for reasoning models.
-"""
-
-import time
-import random
-import ray
-import torch
-import numpy as np
-
-# 1. Initialize Ray cluster
-ray.init(ignore_reinit_error=True)
-
-@ray.remote
-class MathVerifierActor:
-    """Tier 2: Sandboxed deterministic verification running on CPU cores."""
-    def verify(self, prompt: str, trajectory: str, ground_truth: str) -> float:
-        # Simulate sandboxed execution / symbolic regex evaluation
-        time.sleep(0.02)  # Verification latency
-        if f"Answer: {ground_truth}" in trajectory:
-            return 1.0   # Correct reasoning
-        return -1.0      # Incorrect answer
-
-@ray.remote
-class RolloutWorker:
-    """Tier 1: High-throughput generation worker."""
-    def __init__(self, worker_id: int):
-        self.worker_id = worker_id
-        self.policy_version = 0
-
-    def sync_weights(self, new_version: int):
-        self.policy_version = new_version
-
-    def generate_group(self, prompt: str, ground_truth: str, group_size: int = 4):
-        trajectories = []
-        # Simulate variable-length reasoning traces (<think> ... </think>)
-        for i in range(group_size):
-            # Stochastic token generation length (between 100 and 1500 tokens)
-            gen_len = random.randint(100, 1500)
-            is_correct = random.random() > 0.4  # 60% success probability
-            ans = ground_truth if is_correct else str(int(ground_truth) + 1)
-            
-            traj = f"<think> Reasoning steps ({gen_len} tokens) </think> Answer: {ans}"
-            trajectories.append({
-                "prompt": prompt,
-                "trajectory": traj,
-                "ground_truth": ground_truth,
-                "gen_length": gen_len,
-                "policy_version": self.policy_version
-            })
-        return trajectories
-
-@ray.remote
-class LearnerActor:
-    """Tier 3: Policy Gradient Learner running FSDP / GRPO updates."""
-    def __init__(self):
-        self.current_version = 0
-        self.step_count = 0
-
-    def train_step(self, batch_scored_trajectories):
-        self.step_count += 1
-        self.current_version += 1
-        
-        # Calculate policy staleness metrics
-        staleness_gaps = [self.current_version - item["policy_version"] for item in batch_scored_trajectories]
-        avg_staleness = np.mean(staleness_gaps)
-        
-        # Calculate group relative advantages
-        rewards = [item["reward"] for item in batch_scored_trajectories]
-        mean_r = np.mean(rewards)
-        std_r = np.std(rewards) + 1e-8
-        advantages = [(r - mean_r) / std_r for r in rewards]
-        
-        print(f"\n[Learner Step {self.step_count:03d}] Updating Policy...")
-        print(f"    Batch Size Trajectories : {len(batch_scored_trajectories)}")
-        print(f"    Mean Batch Reward        : {mean_r:.3f}")
-        print(f"    Average Policy Staleness : {avg_staleness:.2f} versions")
-        print(f"    Simulated GRPO Loss      : {random.uniform(0.15, 0.45):.4f}")
-        
-        return self.current_version
-
-def orchestrate_async_rl():
-    print("=" * 60)
-    print("LAUNCHING DECOUPLED ACTOR-ROLLOUT-LEARNER RL PIPELINE")
-    print("=" * 60)
-    
-    # Instantiate actors
-    num_rollout_workers = 2
-    rollout_workers = [RolloutWorker.remote(i) for i in range(num_rollout_workers)]
-    verifier = MathVerifierActor.remote()
-    learner = LearnerActor.remote()
-    
-    prompts_dataset = [
-        ("Solve 2x + 6 = 14", "4"),
-        ("What is the derivative of x^3?", "3x^2"),
-        ("Evaluate sum of 1 to 10", "55"),
-        ("Factorize x^2 - 9", "(x-3)(x+3)")
-    ]
-    
-    # 1. Trigger asynchronous rollout generation across workers
-    pending_rollout_tasks = []
-    for i, (prompt, ans) in enumerate(prompts_dataset):
-        worker = rollout_workers[i % num_rollout_workers]
-        task = worker.generate_group.remote(prompt, ans, group_size=4)
-        pending_rollout_tasks.append(task)
-        
-    print(f"[*] Dispatched {len(pending_rollout_tasks)} rollout tasks across workers.")
-    
-    # Gather completed rollouts as they arrive (asynchronous wait)
-    completed_trajectories = []
-    ready_tasks, pending_tasks = ray.wait(pending_rollout_tasks, num_returns=len(pending_rollout_tasks))
-    
-    for task_ref in ready_tasks:
-        group = ray.get(task_ref)
-        completed_trajectories.extend(group)
-        
-    print(f"[✓] Collected {len(completed_trajectories)} exploratory reasoning traces.")
-    
-    # 2. Dispatch verification tasks in parallel
-    verification_futures = []
-    for item in completed_trajectories:
-        vf = verifier.verify.remote(item["prompt"], item["trajectory"], item["ground_truth"])
-        verification_futures.append((item, vf))
-        
-    scored_batch = []
-    for item, vf in verification_futures:
-        reward = ray.get(vf)
-        item["reward"] = reward
-        scored_batch.append(item)
-        
-    print(f"[✓] Reward verification complete across all traces.")
-    
-    # 3. Learner step
-    new_version = ray.get(learner.train_step.remote(scored_batch))
-    
-    # 4. Broadcast updated weights to rollout fleet
-    for worker in rollout_workers:
-        worker.sync_weights.remote(new_version)
-        
-    print(f"[✓] Synchronized Rollout Fleet to Policy Version: v{new_version}")
-    print("=" * 60)
-
-if __name__ == "__main__":
-    orchestrate_async_rl()
-    ray.shutdown()
+```bash
+cd "03 DeepSeek/lab"
+kubectl apply -k . && kubectl apply -f k8s/jobs/train-common.yaml
+python3 tools/grpo_tiny.py --dry-run
 ```
 
+### 5.1 Layout A — HF generate
+
+```bash
+kubectl apply -f k8s/jobs/grpo.yaml
+kubectl -n batch logs -f job/grpo | grep -E "'reward'|it/s|s/it"
+```
+
+Record the seconds per step and the reward at steps 20, 100 and 200.
+
+### 5.2 Layout B — colocated vLLM
+
+```bash
+kubectl -n batch wait --for=condition=complete job/grpo --timeout=3h
+kubectl apply -f k8s/jobs/grpo-vllm.yaml
+kubectl -n batch logs -f job/grpo-vllm | grep -E "vLLM|KV cache|'reward'|s/it"
+```
+
+### 5.3 Compare
+
+| Layout | s/step (**record yours**) | reward @200 | peak `free -g` used |
+|---|---|---|---|
+| A · HF generate | | | |
+| B · colocate vLLM | | | |
+| C · disaggregated (2×) | | | |
+
+Expected: B's step time is several times shorter than A's, because generation dominates and vLLM batches the 8 completions with paged KV. Reward curves should look similar: same algorithm, same data.
+
+### 5.4 Check the learned behaviour
+
+The checkpoint is a full model (`/ckpt/grpo-vllm`). Publish and serve it:
+
+```bash
+scripts/publish-adapter.sh grpo-vllm
+kubectl apply -k k8s/models/r1-1.5b                          # any small base overlay
+kubectl -n llm-serving set env deploy/vllm MODEL=/models/adapters/grpo-vllm SERVED_NAME=grpo-0.5b
+kubectl -n llm-serving rollout status deploy/vllm --timeout=20m
+kubectl -n llm-serving port-forward svc/vllm 8000 &
+python3 tools/format_check.py --url http://localhost:8000 --model grpo-0.5b -n 50
+```
+
+The overlay keeps `--reasoning-parser=deepseek_r1`. `format_check.py` re-assembles the thinking either way, so the score is unaffected. Compare with the untrained Qwen2.5-0.5B (format ≈ 0 %).
+
+### 5.5 Layout C — disaggregated across two Sparks (2×)
+
+```bash
+kubectl apply -f k8s/rl/grpo-2spark.yaml
+kubectl -n batch rollout status deploy/grpo-rollout --timeout=30m
+curl -s http://192.168.100.12:8000/health/ && echo " rollout server up"
+kubectl -n batch patch job grpo-learner -p '{"spec":{"suspend":false}}'
+kubectl -n batch logs -f job/grpo-learner | grep -E "NCCL|communicator|'reward'|s/it"
+```
+
+On spark-02, watch the link during weight updates:
+
+```bash
+watch -n1 "ethtool -S enp1s0f1np1 | grep -E 'rx_bytes_phy|tx_bytes_phy'"
+```
+
+Expected: NCCL selects the `NET/IB` transport on the RoCE device, and a burst of ~1 GB crosses the link after every optimiser step. Clean up with `kubectl delete -f k8s/rl/grpo-2spark.yaml`.
+
+### 5.6 The R1 recipe in miniature: SFT, then GRPO
+
+```bash
+# from Vol 23: /ckpt/sft-lora-merged (R1-Distill-Qwen-1.5B taught the format)
+yq '.metadata.name = "grpo-from-sft"
+    | .spec.template.spec.containers[0].args[0] |= sub("--model Qwen/Qwen2.5-0.5B-Instruct"; "--model /ckpt/sft-lora-merged --max-len 512")
+    | .spec.template.spec.containers[0].args[0] |= sub("/ckpt/grpo-vllm"; "/ckpt/grpo-from-sft")' k8s/jobs/grpo-vllm.yaml | kubectl apply -f -
+```
+
+Expected: `reward_format` starts near its maximum (SFT already taught the tags), so the RL signal goes into `reward_correct`. That's the reason R1 used a "cold-start" SFT before RL.
+
 ---
 
-## 9. Practice Exercises with Step-by-Step Solutions
+## 6. Verify
 
-### Exercise 1: Quantifying Cluster Straggler Waste
-**Scenario**: You run a synchronous rollout cluster of **16 GPUs**.
-Each GPU generates 1 reasoning trajectory. The token generation lengths follow a normal distribution with mean $\mu = 2,000 \text{ tokens}$ and standard deviation $\sigma = 600 \text{ tokens}$.
-In a trial, 15 GPUs finish within 2,500 tokens (taking 25 seconds). The 16th GPU generates a 12,000-token trace (taking 120 seconds).
-**Question**: What percentage of total cluster compute capacity is wasted on idle stalls during this single step?
-
-#### Solution:
-1. **Total Available GPU Seconds**:
-   $$\text{Total Capacity} = 16 \text{ GPUs} \times 120 \text{ seconds} = 1,920 \text{ GPU-seconds}$$
-2. **Actual Compute Work Performed**:
-   * 15 fast GPUs compute for 25 seconds: $15 \times 25 = 375 \text{ GPU-seconds}$.
-   * 1 slow GPU computes for 120 seconds: $1 \times 120 = 120 \text{ GPU-seconds}$.
-   * Total Active Work = $375 + 120 = 495 \text{ GPU-seconds}$.
-3. **Compute Squandered in Idle Waiting**:
-   $$\text{Idle Wasted Seconds} = 1,920 - 495 = 1,425 \text{ GPU-seconds}$$
-4. **Percentage Wasted**:
-   $$\text{Waste Percentage} = \frac{1,425}{1,920} \times 100 = \mathbf{74.22\% \text{ of cluster compute wasted!}}$$
-*Insight*: This demonstrates why decoupling rollouts into an asynchronous replay buffer is mandatory.
+| Check | Expected |
+|---|---|
+| A and B complete | `reward` trending up, `reward_std` > 0 |
+| speed-up | B faster per step than A |
+| learned format | `format_check.py` format % ≫ base model |
+| (2×) sync | NCCL init logs on both sides. Link bursts once per step |
 
 ---
 
-### Exercise 2: Understanding Importance Ratio Bounding
-**Scenario**: During training, a rollout worker submits a trajectory where the log-probability under the generation policy was $\log \pi_{\text{old}} = -4.5$.
-The learner evaluates the tokens under the updated policy $\theta$ and finds $\log \pi_\theta = -3.8$.
-The advantage for this trajectory is $\hat{A} = +1.5$.
-Clipping threshold is set to $\epsilon = 0.2$.
-**Question**: Calculate the importance sampling ratio $r_t(\theta)$ and the surrogate loss value before and after clipping.
+## 7. Troubleshooting
 
-#### Solution:
-1. **Calculate Importance Sampling Ratio**:
-   $$r_t(\theta) = \frac{\pi_\theta}{\pi_{\text{old}}} = \exp(\log \pi_\theta - \log \pi_{\text{old}})$$
-   $$r_t(\theta) = \exp(-3.8 - (-4.5)) = \exp(0.7) \approx \mathbf{2.01375}$$
-2. **Unclipped Surrogate Value**:
-   $$\text{Unclipped} = r_t(\theta) \times \hat{A} = 2.01375 \times 1.5 \approx \mathbf{3.0206}$$
-3. **Clipped Surrogate Value**:
-   * Upper clip bound: $1 + \epsilon = 1 + 0.2 = 1.2$.
-   * Since $r_t(\theta) = 2.01 > 1.2$, the clipped ratio is $1.2$.
-   $$\text{Clipped} = 1.2 \times 1.5 = \mathbf{1.800}$$
-4. **Final Value (Minimum of the two)**:
-   $$\text{Final Objective} = \min(3.0206, 1.800) = \mathbf{1.800}$$
-*Result*: The gradient contribution is safely capped at $1.80$, preventing excessive policy updates from destabilizing training.
+| Symptom | Cause | Fix |
+|---|---|---|
+| `reward_std` ≈ 0, reward flat | every completion in a group gets the same reward | raise `temperature`, raise G, or make the task easier/harder so rewards differ |
+| reward rises, then collapses | lr too high, or reward hacking | lower lr. Check completions for exploits (e.g. empty think). Tighten the regex |
+| `completions/mean_length` pinned at max | truncation. Rewards stay low | raise `--max-len`. Check for repetition loops |
+| colocate: CUDA OOM at vLLM init | learner + vLLM exceed memory | lower `vllm_gpu_memory_utilization`. Use a smaller model or LoRA |
+| server mode: learner hangs at "Initializing communicator" | group port 51216 blocked, or NCCL picked the wrong NIC | hostNetwork both sides. `NCCL_SOCKET_IFNAME`. `NCCL_DEBUG=INFO` |
+| server mode: rewards don't improve | weights not reaching the server | `kubectl -n batch logs deploy/grpo-rollout | grep update_named_param` should show requests after every step. Start the server *before* the learner |
+| `pip` replaced vLLM's torch | dependency resolution | install only `trl` + the pins listed. Never `pip install vllm` on the NGC image |
 
 ---
 
-## 10. Troubleshooting Guide & Diagnostic Runbook
+## 8. Scale-out path
 
-### Issue 1: Replay Buffer Unbounded Growth Leading to System OOM
-* **Root Cause**: The Rollout fleet is producing trajectories faster than the Learner can consume them. The Redis / Arrow memory store expands until host RAM is exhausted.
-* **Remediation**: Implement a strict high-water mark with **backpressure flow control**:
-  ```python
-  if buffer.size() > MAX_BUFFER_CAPACITY:
-      rollout_workers.pause()
-  ```
-
-### Issue 2: Sandboxed Python Execution Hanging Indefinitely
-* **Root Cause**: An LLM-generated code solution contains an infinite loop (e.g., `while True:` without a break condition).
-* **Remediation**: Always wrap Python sandbox evaluations in a hard OS-level process timeout with `SIGKILL`:
-  ```python
-  subprocess.run(["python3", "-c", code], timeout=3)
-  ```
+| One Spark | Two Sparks | Datacenter |
+|---|---|---|
+| colocate, ≤ 1.5B full or LoRA 7B | learner on one, rollout on the other | rollout pool (many vLLM/SGLang replicas, DP) + learner pool (FSDP/Megatron). Async off-policy rollouts. Frameworks: verl, OpenRLHF, NeMo-RL |
+| sync every step | same | sync every N steps. Partial rollouts for long chains |
 
 ---
 
-## 🔗 Related Curriculum Modules
-* **Underlying GRPO Theory**: [05-deepseek-r1-and-grpo-reasoning.md](05-deepseek-r1-and-grpo-reasoning.md)
-* **High-Throughput Rollout Serving**: [15-vllm-serving-deepseek-and-qwen.md](15-vllm-serving-deepseek-and-qwen.md)
-* **Radix Prefix Caching for Rollouts**: [16-sglang-and-radix-attention-serving.md](16-sglang-and-radix-attention-serving.md)
-* **Distributed FSDP Training**: [26-distributed-deepspeed-zero3-and-fsdp.md](26-distributed-deepspeed-zero3-and-fsdp.md)
+## 9. Checklist
+
+- [ ] I can draw the GRPO step and say which part dominates time.
+- [ ] I ran HF-generate and colocated-vLLM rollouts and compared step time.
+- [ ] I can estimate weight-sync cost for a model size and link speed.
+- [ ] (2×) I ran disaggregated rollouts with weights pushed over NCCL.

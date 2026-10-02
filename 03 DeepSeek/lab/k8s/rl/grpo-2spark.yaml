@@ -1,0 +1,85 @@
+# Disaggregated GRPO across two Sparks (Volume 25): rollout server on spark-02,
+# learner on spark-01, weights pushed learner → server over NCCL on the CX-7 link
+# after every optimiser step (TRL server mode, group port 51216).
+#   kubectl apply -f k8s/rl/grpo-2spark.yaml
+#   kubectl -n batch rollout status deploy/grpo-rollout && kubectl -n batch patch job grpo-learner -p '{"spec":{"suspend":false}}'
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: grpo-rollout, namespace: batch, labels: {app: grpo-rollout}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: grpo-rollout}}
+  template:
+    metadata: {labels: {app: grpo-rollout}}
+    spec:
+      priorityClassName: spark-batch
+      nodeSelector: {kubernetes.io/hostname: spark-02}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: vllm
+          image: nvcr.io/nvidia/vllm:25.09-py3
+          command: ["bash", "-c"]
+          args:
+            - >-
+              pip install --quiet trl==0.23.0 transformers==4.56.2 &&
+              trl vllm-serve --model Qwen/Qwen2.5-0.5B-Instruct --host 0.0.0.0 --port 8000 --gpu_memory_utilization 0.4
+          env:
+            - {name: HF_HOME, value: /cache/hf}
+            - {name: NCCL_SOCKET_IFNAME, value: enp1s0f1np1}
+            - {name: NCCL_IB_HCA, value: "rocep1s0f1,roceP2p1s0f1"}
+            - {name: NCCL_IB_GID_INDEX, value: "3"}
+          ports: [{containerPort: 8000}, {containerPort: 51216}]
+          readinessProbe: {httpGet: {path: /health/, port: 8000}, periodSeconds: 10, failureThreshold: 60}
+          securityContext: {capabilities: {add: [IPC_LOCK]}}
+          resources:
+            requests: {cpu: "4", memory: 16Gi, nvidia.com/gpu: "1"}
+            limits: {memory: 64Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: cache, mountPath: /cache}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - {name: cache, emptyDir: {}}
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 8Gi}}
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: grpo-learner, namespace: batch}
+spec:
+  suspend: true                        # unsuspend once grpo-rollout is Ready
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      priorityClassName: spark-batch
+      nodeSelector: {kubernetes.io/hostname: spark-01}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: train
+          image: nvcr.io/nvidia/vllm:25.09-py3
+          command: ["bash", "-c"]
+          args:
+            - >-
+              pip install --quiet trl==0.23.0 peft==0.17.1 transformers==4.56.2 accelerate==1.10.1 datasets==4.1.1 &&
+              python3 /train/grpo_tiny.py --model Qwen/Qwen2.5-0.5B-Instruct --steps 200
+              --vllm --vllm-mode server --vllm-host 192.168.100.12 --vllm-port 8000 --out /ckpt/grpo-2spark
+          env:
+            - {name: HF_HOME, value: /ckpt/hf}
+            - {name: TOKENIZERS_PARALLELISM, value: "false"}
+            - {name: NCCL_SOCKET_IFNAME, value: enp1s0f1np1}
+            - {name: NCCL_IB_HCA, value: "rocep1s0f1,roceP2p1s0f1"}
+            - {name: NCCL_IB_GID_INDEX, value: "3"}
+          securityContext: {capabilities: {add: [IPC_LOCK]}}
+          resources:
+            requests: {cpu: "4", memory: 24Gi, nvidia.com/gpu: "1"}
+            limits: {memory: 64Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: train, mountPath: /train}
+            - {name: ckpt, mountPath: /ckpt}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - {name: train, configMap: {name: deepseek-train}}
+        - {name: ckpt, persistentVolumeClaim: {claimName: deepseek-ckpt}}
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 8Gi}}

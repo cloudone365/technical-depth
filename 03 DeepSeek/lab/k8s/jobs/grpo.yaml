@@ -4,7 +4,7 @@ kind: Job
 metadata:
   name: grpo
   namespace: batch
-  labels: {kueue.x-k8s.io/queue-name: train}
+  labels: {kueue.x-k8s.io/queue-name: train, kueue.x-k8s.io/priority-class: routine}
 spec:
   suspend: true
   backoffLimit: 0

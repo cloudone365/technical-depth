@@ -1,8 +1,10 @@
-# LoRA SFT for the <think>/<answer> format (Volume 23-24) — gang-admitted by Kueue in the batch namespace.
+# The Vol 23 SFT with Unsloth (Volume 24) — same data, rank and steps as k8s/jobs/sft.yaml.
+# Unsloth and unsloth_zoo are installed with --no-deps on top of the NGC PyTorch image so pip
+# never replaces NVIDIA's torch/triton build (the approach NVIDIA's DGX Spark playbook uses).
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: sft
+  name: unsloth
   namespace: batch
   labels: {kueue.x-k8s.io/queue-name: train, kueue.x-k8s.io/priority-class: routine}
 spec:
@@ -18,8 +20,10 @@ spec:
           command: ["bash", "-c"]
           args:
             - >-
-              pip install --quiet trl==0.23.0 peft==0.17.1 transformers==4.56.2 accelerate==1.10.1 datasets==4.1.1 &&
-              python3 /train/sft_lora.py --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --steps 300 --rank 16 --merge --out /ckpt/sft-lora
+              pip install --quiet trl==0.23.0 peft==0.17.1 transformers==4.56.2 accelerate==1.10.1 datasets==4.1.1
+              bitsandbytes==0.48.1 sentencepiece hf_transfer tyro torchao cut_cross_entropy msgspec &&
+              pip install --quiet --no-deps unsloth==2025.9.11 unsloth_zoo==2025.9.14 &&
+              python3 /train/unsloth_sft.py --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --steps 300 --rank 16 --out /ckpt/unsloth-lora
           env:
             - {name: HF_HOME, value: /ckpt/hf}
             - {name: TOKENIZERS_PARALLELISM, value: "false"}

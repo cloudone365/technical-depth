@@ -9,8 +9,11 @@ miniature): SFT for format  →  GRPO (grpo_tiny.py) for correctness.
   python3 sft_lora.py --dry-run                                  # show 2 training examples
   python3 sft_lora.py --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --steps 300 --rank 16
   python3 sft_lora.py --merge                                    # also write merged weights for vLLM
+  python3 sft_lora.py --export /ckpt/data/gpu_math.json          # write the dataset for Unsloth / LLaMA-Factory (Vol 24)
 """
 import argparse
+import json
+import os
 import random
 import sys
 
@@ -44,7 +47,15 @@ def train(a):
                       target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
     tr = SFTTrainer(model=a.model, args=cfg, train_dataset=Dataset.from_list(dataset(a.n)), peft_config=peft)
     tr.model.print_trainable_parameters()
+    import time
+    import torch
+    torch.cuda.reset_peak_memory_stats()
+    t0 = time.time()
     tr.train()
+    dt = time.time() - t0
+    print("STATS " + json.dumps({"engine": "trl+peft", "steps": a.steps, "seconds": round(dt, 1),
+                                 "steps_per_s": round(a.steps / dt, 3),
+                                 "peak_cuda_gib": round(torch.cuda.max_memory_allocated() / 2**30, 2)}))
     tr.save_model(a.out)                                            # adapter only (MiBs)
     if a.merge:
         merged = tr.model.merge_and_unload()
@@ -62,8 +73,14 @@ if __name__ == "__main__":
     ap.add_argument("--rank", type=int, default=16)
     ap.add_argument("--merge", action="store_true")
     ap.add_argument("--out", default="/ckpt/sft-lora")
+    ap.add_argument("--export", metavar="FILE", help="write the dataset as ShareGPT/OpenAI-messages JSON and exit")
     a = ap.parse_args()
-    if a.dry_run:
+    if a.export:
+        os.makedirs(os.path.dirname(os.path.abspath(a.export)), exist_ok=True)
+        with open(a.export, "w") as f:
+            json.dump(dataset(a.n), f, ensure_ascii=False)
+        print(f"wrote {a.n} examples → {a.export}")
+    elif a.dry_run:
         for ex in dataset(2):
             print(ex["messages"][1]["content"], "\n  →", ex["messages"][2]["content"])
     else:

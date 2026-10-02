@@ -20,6 +20,8 @@ configMapGenerator:
       - tools/ring_attention_demo.py
       - tools/vault_sync.py
       - tools/stream_probe.py
+      - tools/format_check.py
+      - tools/grpo_tiny.py
   - name: deepseek-evaldata
     namespace: llm-serving
     files:
@@ -31,6 +33,7 @@ configMapGenerator:
     files:
       - tools/grpo_tiny.py
       - tools/sft_lora.py
+      - tools/unsloth_sft.py
       - tools/fsdp_finetune.py
       - tools/model_math.py
       - tools/lora_calc.py
