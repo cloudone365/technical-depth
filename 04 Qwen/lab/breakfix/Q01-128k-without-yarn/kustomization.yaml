@@ -1,0 +1,11 @@
+# Q01: ask for 128K context on Qwen2.5-7B without the YaRN rope_scaling override.
+# Symptom: vLLM refuses to start ("max_model_len … greater than the derived max_model_len 32768").
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: [../../k8s/models/qwen2.5-7b]
+patches:
+  - target: {kind: Deployment, name: vllm}
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/args/5
+        value: --max-model-len=131072

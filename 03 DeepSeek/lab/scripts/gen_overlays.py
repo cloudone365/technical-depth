@@ -11,6 +11,9 @@ import sys
 import yaml
 
 LAB = pathlib.Path(__file__).resolve().parent.parent
+# Other modules (04 Qwen, …) reuse this generator for their own catalog:
+#   python3 "../../03 DeepSeek/lab/scripts/gen_overlays.py" --lab .  [--check]
+# Their lab must sit at the same depth (<module>/lab/k8s/models/<name>) so BASE resolves.
 
 
 def _str(dumper, data):
@@ -45,7 +48,10 @@ def overlay(m):
 
 
 def main():
+    global LAB
     check = "--check" in sys.argv
+    if "--lab" in sys.argv:
+        LAB = pathlib.Path(sys.argv[sys.argv.index("--lab") + 1]).resolve()
     models = yaml.safe_load(open(LAB / "models.yaml"))["models"]
     drift = 0
     for m in models:

@@ -1,0 +1,30 @@
+# tir_math.py against the served model, sandboxed (Volume 04): it executes model-written Python,
+# so it runs as non-root, without a ServiceAccount token, with a read-only root filesystem
+# and dropped capabilities. NetworkPolicy from 02 limits what the pod can reach.
+#   yq '.spec.template.spec.containers[0].args[3] = "<model>"' k8s/jobs/tir-eval.yaml | kubectl apply -f -
+apiVersion: batch/v1
+kind: Job
+metadata: {name: tir-eval, namespace: llm-serving}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: eval
+          image: python:3.12-slim
+          command: ["python3", "/app/tools/tir_math.py"]
+          args: ["--url", "http://vllm.llm-serving:8000", "--model", "qwen2.5-math-7b", "--mode", "tir"]
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: "1", memory: 256Mi}, limits: {cpu: "2", memory: 1Gi}}
+          volumeMounts:
+            - {name: tools, mountPath: /app/tools}
+            - {name: data, mountPath: /app/data}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: tools, configMap: {name: qwen-tools}}
+        - {name: data, configMap: {name: deepseek-evaldata}}   # 03 data: math_word.jsonl
+        - {name: tmp, emptyDir: {}}

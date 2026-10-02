@@ -1,0 +1,53 @@
+# CI for "04 Qwen/lab" — see 04 Qwen/25-hands-on-exercises-mastery-workbook.md §0
+name: qwen-lab
+
+on:
+  pull_request:
+    paths: ["04 Qwen/lab/**", "03 DeepSeek/lab/**", "02 Kubernetes/lab/**", ".github/workflows/qwen-lab-ci.yml"]
+  push:
+    branches: [main]
+    paths: ["04 Qwen/lab/**"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: "04 Qwen/lab"
+
+env:
+  KUBECONFORM: v0.6.7
+  QDRANT: v1.13.4
+
+jobs:
+  checks:
+    name: tools · mocks · multimodal RAG · kind dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with: {python-version: "3.12"}
+      - uses: azure/setup-kubectl@v4
+        with: {version: v1.32.5}
+      - name: Tools
+        run: |
+          pip install yamllint shellcheck-py pyyaml "pillow>=10.4,<12" "qwen-agent==0.0.29"
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM}/kubeconform-linux-amd64.tar.gz" | sudo tar xz -C /usr/local/bin kubeconform
+          curl -sSL "https://github.com/qdrant/qdrant/releases/download/${QDRANT}/qdrant-x86_64-unknown-linux-musl.tar.gz" | tar xz -C /tmp
+      - uses: helm/kind-action@v1
+        with: {cluster_name: spark-sim, node_image: "kindest/node:v1.32.2"}
+      - name: Platform from 02
+        working-directory: "02 Kubernetes/lab"
+        run: |
+          exec 2> >(tee /tmp/step.err >&2)
+          trap 'echo "::error title=platform step failed::${BASH_COMMAND} :: $(tail -c 1800 /tmp/step.err | tr "\n" " ")"' ERR
+          tests/fake-gpu-node.sh
+          source versions.env
+          kubectl apply --server-side -f "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml"
+          kubectl -n kueue-system rollout status deploy/kueue-controller-manager --timeout=5m
+          kubectl apply --server-side -f "https://github.com/prometheus-operator/prometheus-operator/releases/download/v0.81.0/stripped-down-crds.yaml"
+          kubectl apply --server-side -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
+          for c in traefik.io_middlewares traefik.io_ingressroutes; do
+            kubectl apply --server-side -f "https://raw.githubusercontent.com/traefik/traefik-helm-chart/v${TRAEFIK_CHART_VERSION}/traefik/crds/${c}.yaml"
+          done
+          scripts/apply-lab.sh
+      - name: All 04 checks (incl. multimodal RAG on real Qdrant and server-side dry-run)
+        run: QDRANT=/tmp/qdrant API=1 ../../02\ Kubernetes/lab/tests/ci-run.sh tests/run-local-checks.sh

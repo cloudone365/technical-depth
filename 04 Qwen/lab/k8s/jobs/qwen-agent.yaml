@@ -1,0 +1,37 @@
+# Qwen-Agent assistant in a sandboxed pod (Volume 16). Reuses 03's read-only ServiceAccount
+# (agent-readonly: list pods only) — apply "03 DeepSeek/lab/k8s/jobs/agent.yaml" once for it.
+# code_interpreter executes model-written Python: keep it in pods like this one.
+apiVersion: batch/v1
+kind: Job
+metadata: {name: qwen-agent, namespace: llm-serving}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: agent-readonly
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: agent
+          image: python:3.12-slim
+          command: ["sh", "-c"]
+          args:
+            - >-
+              pip install --quiet --user "qwen-agent[code_interpreter]==0.0.29" &&
+              python3 /app/tools/qwen_agent_demo.py --code
+              "How many GPU slices are in use per namespace, and what percent of 4 slices is that? Then use Python to check the percentage."
+          env:
+            - {name: HOME, value: /tmp}
+            - {name: MODEL, value: qwen2.5-7b}
+            - {name: OPENAI_BASE, value: "http://vllm.llm-serving:8000/v1"}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 500m, memory: 512Mi}, limits: {cpu: "2", memory: 2Gi}}
+          volumeMounts:
+            - {name: tools, mountPath: /app/tools}
+            - {name: ds-tools, mountPath: /app/ds-tools}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: tools, configMap: {name: qwen-tools}}
+        - {name: ds-tools, configMap: {name: deepseek-tools}}
+        - {name: tmp, emptyDir: {}}

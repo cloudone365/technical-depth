@@ -34,7 +34,7 @@ case $cmd in
   answer) echo "${ANSWER[$id]}" ;;
   inject)
     case $id in
-      D01|D02|D03|D05|D07) k apply -k "$DS_DIR/breakfix/$id"-* ;;
+      D01|D02|D03|D05|D07) k apply -k "$DS_LAB/breakfix/$id"-* ;;
       D04) k -n $NS patch cm litellm-config --type merge -p "$(k -n $NS get cm litellm-config -o json | python3 -c 'import json,sys; c=json.load(sys.stdin)["data"]["config.yaml"]; print(json.dumps({"data":{"config.yaml":c.replace("timeout: 900","timeout: 30").replace("request_timeout: 900","request_timeout: 30")}}))')" && k -n $NS rollout restart deploy/litellm ;;
       D06) info "run: python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math --limit 5 --temperature 0 --max-tokens 8192" ;;
       D08) info "run: python3 tools/eval_harness.py --url http://localhost:8000 --model deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --suites json --limit 2" ;;
@@ -42,8 +42,8 @@ case $cmd in
     esac
     echo "Injected $id: ${TITLE[$id]}" ;;
   reset)
-    if [[ -n ${BASE[$id]} ]]; then k apply -k "$DS_DIR/k8s/models/${BASE[$id]}"; fi
-    [[ $id == D04 ]] && k apply -f "$DS_DIR/k8s/apps/litellm.yaml" && k -n $NS rollout restart deploy/litellm
+    if [[ -n ${BASE[$id]} ]]; then k apply -k "$DS_LAB/k8s/models/${BASE[$id]}"; fi
+    [[ $id == D04 ]] && k apply -f "$DS_LAB/k8s/apps/litellm.yaml" && k -n $NS rollout restart deploy/litellm
     true ;;
   *) echo "usage: $0 list|inject ID|hint ID|answer ID|reset ID"; exit 2 ;;
 esac

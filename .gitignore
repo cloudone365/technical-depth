@@ -4,3 +4,4 @@ __pycache__/
 diag-*.tar.gz
 03 DeepSeek/lab/results/
 03 DeepSeek/lab/observability/rules.extracted.yaml
+04 Qwen/lab/results/

@@ -1,0 +1,23 @@
+# `kubectl apply -k "04 Qwen/lab"` ships this lab's tools and data as ConfigMaps.
+# Several Jobs also mount 03's ConfigMaps (deepseek-tools, deepseek-evaldata):
+# apply "03 DeepSeek/lab" first.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+configMapGenerator:
+  - name: qwen-tools
+    namespace: llm-serving
+    files:
+      - tools/rope_yarn.py
+      - tools/fim_eval.py
+      - tools/tir_math.py
+      - tools/vl_eval.py
+      - tools/mm_rag.py
+      - tools/synth_data.py
+      - tools/quantize.py
+      - tools/qwen_agent_demo.py
+  - name: qwen-data
+    namespace: llm-serving
+    files:
+      - data/fim_tasks.jsonl
+generatorOptions:
+  disableNameSuffixHash: true
