@@ -1,0 +1,130 @@
+# GitOps for the 03 DeepSeek lab with Argo CD (production-mlops.md).
+# Requires the 02 platform (its own gitops/applications.yaml) and Argo CD.
+#   kubectl apply -n argocd -f "03 DeepSeek/lab/gitops/applications.yaml"
+# Point repoURL at YOUR fork if you want to push changes.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: deepseek-00-tools                      # ConfigMaps: tools, eval data, catalog
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "03 DeepSeek/lab"
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 3
+      backoff: {duration: 30s, factor: 2, maxDuration: 10m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: deepseek-10-serving                      # the served model (pointer) + PostSync eval gate
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "03 DeepSeek/lab/k8s/serving"
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 3
+      backoff: {duration: 30s, factor: 2, maxDuration: 10m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: deepseek-20-apps                      # bge-m3, LiteLLM + Postgres, Open WebUI
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "20"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "03 DeepSeek/lab/k8s/apps"
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 3
+      backoff: {duration: 30s, factor: 2, maxDuration: 10m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: deepseek-30-ops                      # day-2 CronJobs (Vol 33)
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "30"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "03 DeepSeek/lab/k8s/ops"
+    directory: {recurse: false}
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 3
+      backoff: {duration: 30s, factor: 2, maxDuration: 10m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: deepseek-40-observability                      # alerts + dashboard (Vol 38)
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "40"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "03 DeepSeek/lab/observability"
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 3
+      backoff: {duration: 30s, factor: 2, maxDuration: 10m}

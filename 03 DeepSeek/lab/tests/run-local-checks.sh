@@ -20,8 +20,8 @@ pids=(); cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; do
 echo "== yamllint";            yamllint -s .
 echo "== overlays in sync";    python3 scripts/gen_overlays.py --check
 echo "== kustomize + kubeconform"
-for d in . k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/lora/* k8s/multi/* k8s/sglang/* k8s/apps observability breakfix/*; do "$KUBECTL" kustomize "$d" | kc -; done
-for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml k8s/autoscale/*.yaml k8s/kserve/*.yaml k8s/rl/*.yaml; do kc "$f"; done
+for d in . k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/lora/* k8s/multi/* k8s/serving k8s/sglang/* k8s/apps observability breakfix/*; do "$KUBECTL" kustomize "$d" | kc -; done
+for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml k8s/autoscale/*.yaml k8s/kserve/*.yaml k8s/rl/*.yaml gitops/*.yaml; do kc "$f"; done
 echo "== promtool";            promtool check rules <(python3 -c "
 import yaml
 for d in yaml.safe_load_all(open('observability/rules.yaml')): print(yaml.safe_dump({'groups': d['spec']['groups']}))")
@@ -137,10 +137,10 @@ if [[ "${API:-0}" == 1 ]]; then
   "$KUBECTL" apply -k "$K8S_LAB/manifests/00-platform" >/dev/null
   "$KUBECTL" apply -f k8s/multinode/namespace.yaml >/dev/null
   "$KUBECTL" apply --dry-run=server -k . >/dev/null
-  for d in k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/lora/* k8s/multi/* k8s/sglang/* k8s/apps observability; do "$KUBECTL" apply --dry-run=server -k "$d" >/dev/null; done
+  for d in k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/lora/* k8s/multi/* k8s/serving k8s/sglang/* k8s/apps observability; do "$KUBECTL" apply --dry-run=server -k "$d" >/dev/null; done
   for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml k8s/autoscale/*.yaml k8s/rl/*.yaml; do "$KUBECTL" apply --dry-run=server -f "$f" >/dev/null; done
   echo "== pod templates vs PSA / CEL policies / quotas"
-  python3 "$K8S_LAB/tests/pod_template_check.py" k8s/models/* k8s/lora/* k8s/multi/* k8s/sglang/* k8s/apps k8s/jobs/*.yaml k8s/ops/*.yaml \
+  python3 "$K8S_LAB/tests/pod_template_check.py" k8s/models/* k8s/lora/* k8s/multi/* k8s/serving k8s/sglang/* k8s/apps k8s/jobs/*.yaml k8s/ops/*.yaml \
     k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/lws-vllm-70b.yaml k8s/rl/*.yaml
 fi
 echo "ALL LOCAL CHECKS PASSED"
