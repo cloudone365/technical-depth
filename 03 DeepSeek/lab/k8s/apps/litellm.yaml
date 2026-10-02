@@ -13,6 +13,8 @@ data:
         litellm_params: {model: hosted_vllm/r1-7b, api_base: http://vllm.llm-serving:8000/v1, api_key: none}
       - model_name: reasoning-sglang
         litellm_params: {model: openai/r1-32b-fp8, api_base: http://sglang.llm-serving:30000/v1, api_key: none}
+      - model_name: agent                # tool calling (Vol 30): Qwen2.5 with the hermes parser
+        litellm_params: {model: hosted_vllm/qwen2.5-7b-tools, api_base: http://vllm.llm-serving:8000/v1, api_key: none}
       - model_name: embeddings
         litellm_params: {model: hosted_vllm/bge-m3, api_base: http://bge-m3.llm-serving:8000/v1, api_key: none}
       # Load balancing: two deployments behind one name. With one Spark both point at

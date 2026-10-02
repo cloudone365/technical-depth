@@ -61,7 +61,11 @@ python3 tools/eval_harness.py --url http://127.0.0.1:18765 --model mock --out "$
 python3 -c "import json,sys; d=json.load(open(sys.argv[1])); acc={k:v['accuracy'] for k,v in d['suites'].items()}; assert acc=={'math':0.5,'code':0.5,'json':0.5}, acc; print('eval harness OK', acc)" "$out/r.json"
 echo "== agent tool loop vs scripted mock"
 python3 tests/mock_tools_server.py 18767 & pids+=($!); sleep 1
-expect "20.35" python3 tools/agent_tools.py "What is 17% of 119.7?" --url http://127.0.0.1:18767
+expect "20.35" python3 tools/agent_tools.py "What is 17% of 119.7?" --url http://127.0.0.1:18767 --audit "$T.audit"
+python3 -c "import json,sys; r=json.loads(open(sys.argv[1]).readline()); assert r['tool']=='calculator' and r['result']['result']==20.349, r; print('agent audit OK')" "$T.audit"
+python3 -c "import sys; sys.path.insert(0,'tools'); import agent_tools as a
+assert a.validate('calculator', {}) and a.validate('search_docs', {'query': 'x', 'rm': 1}) and not a.validate('gpu_slices', {})
+print('agent argument validation OK')"
 echo "== needle test vs mock"
 python3 tests/mock_needle.py 18768 & pids+=($!); sleep 1
 expect "4/4 needles found" python3 tools/needle_test.py --url http://127.0.0.1:18768 --model m --lengths 1000 4000 --depths 0.2 0.8
@@ -75,6 +79,16 @@ expect "TRUNCATED" python3 tools/stream_probe.py --url http://127.0.0.1:18772 --
 echo "== format check vs mock (format 100 %, correct 50 %)"
 python3 tests/mock_format.py 18773 & pids+=($!); sleep 1
 expect "format 40/40 (100%)  correct 20/40 (50%)" python3 tools/format_check.py --url http://127.0.0.1:18773 --model m -n 40 --concurrency 1
+echo "== vault-sync vs mock Vault + Kubernetes API (create, unchanged, rotate → restart)"
+python3 tests/mock_vault_k8s.py 18769 & pids+=($!); sleep 1
+sa=$(mktemp -d); echo jwt > "$sa/token"; echo llm-serving > "$sa/namespace"
+vs() { VAULT_ADDR=http://127.0.0.1:18769 K8S_API=http://127.0.0.1:18769 SA_DIR="$sa" \
+  SYNC_MAP='[{"vault":"kv/data/spark-lab/deepseek/litellm","secret":"litellm-master-key","keys":{"key":"master_key"},"restart":["deployment/litellm"]}]' \
+  python3 tools/vault_sync.py; }
+expect "restart  deployment/litellm" vs
+expect "unchanged litellm-master-key" vs
+curl -s -X POST http://127.0.0.1:18769/_rotate >/dev/null
+expect "restart  deployment/litellm" vs
 echo "== weights manifest"
 w=$(mktemp -d); echo a > "$w/x.safetensors"; python3 tools/weights_verify.py snapshot "$w" --out "$w.json" >/dev/null
 python3 tools/weights_verify.py verify "$w" "$w.json" >/dev/null && echo b > "$w/x.safetensors" && ! python3 tools/weights_verify.py verify "$w" "$w.json" >/dev/null && echo "weights_verify OK"

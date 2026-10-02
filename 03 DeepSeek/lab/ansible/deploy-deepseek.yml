@@ -3,7 +3,9 @@
 # Runs on the control node with the 01 Ansible lab's collections and kubeconfig:
 #   cd "01 Ansible/lab"
 #   ansible-playbook "../../03 DeepSeek/lab/ansible/deploy-deepseek.yml" -e deepseek_model=r1-32b-fp8
-# Layers: tools ConfigMaps → model prefetch → vLLM overlay → embeddings/LiteLLM/Open WebUI → RAG index → verify.
+#   … --tags serve -e deepseek_model=r1-7b          # switch model only (also the rollback path)
+#   … --check --diff                                # what would change, without changing it
+# Layers (tags): preflight → tools → prefetch → serve → apps → rag → verify.
 - name: Deploy the DeepSeek serving stack on k3s
   hosts: localhost
   connection: local
@@ -12,13 +14,35 @@
     deepseek_model: r1-7b
     deepseek_with_apps: true
     deepseek_with_rag: true
+    deepseek_skip_prefetch: false
+    # UMA budget: chat model util + embeddings util must leave room for the OS, k3s and pods
+    deepseek_util_budget: 0.80
+    deepseek_embed_util: 0.06
     ds_lab: "{{ playbook_dir }}/.."
     k8s_lab: "{{ playbook_dir }}/../../../02 Kubernetes/lab"
     kubeconfig: "{{ lookup('ansible.builtin.env', 'KUBECONFIG') | default(playbook_dir ~ '/../../../01 Ansible/lab/.cache/kubeconfig-spark-lab.yaml', true) }}"
     catalog: "{{ lookup('ansible.builtin.file', ds_lab ~ '/models.yaml') | from_yaml }}"
-    model: "{{ catalog.models | selectattr('name', 'equalto', deepseek_model) | first }}"
+    catalog_names: "{{ catalog.models | map(attribute='name') | list }}"
+    model: "{{ catalog.models | selectattr('name', 'equalto', deepseek_model) | first | default({}) }}"
   tasks:
+    - name: Model is in the catalog
+      tags: [always]
+      ansible.builtin.assert:
+        that: deepseek_model in catalog_names
+        fail_msg: "unknown model '{{ deepseek_model }}'. Catalog: {{ catalog_names | join(', ') }}"
+        quiet: true
+
+    - name: UMA budget allows the chat model next to the embedder
+      tags: [always]
+      ansible.builtin.assert:
+        that: (model.util | float) + (deepseek_with_apps | ternary(deepseek_embed_util, 0) | float) <= (deepseek_util_budget | float)
+        fail_msg: >-
+          util {{ model.util }} + embeddings {{ deepseek_embed_util }} exceeds the budget {{ deepseek_util_budget }}
+          of the 119.7 GiB the GB10 reports. Pick a smaller model, -e deepseek_with_apps=false, or raise the budget knowingly.
+        quiet: true
+
     - name: Platform from 02 Kubernetes is present
+      tags: [preflight]
       kubernetes.core.k8s_info:
         kubeconfig: "{{ kubeconfig }}"
         kind: PersistentVolumeClaim
@@ -27,12 +51,32 @@
       register: ds_pvc
       failed_when: ds_pvc.resources | length == 0
 
+    - name: Record what is serving now (the rollback target)
+      tags: [preflight, serve]
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Deployment
+        namespace: llm-serving
+        name: vllm
+      register: ds_before
+
+    - name: Show the change
+      tags: [preflight, serve]
+      ansible.builtin.debug:
+        msg: >-
+          vLLM: {{ (ds_before.resources | first | default({})).metadata.labels.model | default('(none)') }}
+          → {{ deepseek_model }}  (rollback: --tags serve -e deepseek_model={{
+          (ds_before.resources | first | default({})).metadata.labels.model | default('<previous>') }})
+
     - name: Tool and eval-data ConfigMaps
+      tags: [tools]
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         definition: "{{ lookup('kubernetes.core.kustomize', dir=ds_lab) }}"
 
     - name: Remove the previous prefetch Job (Job templates are immutable)
+      tags: [prefetch]
+      when: not deepseek_skip_prefetch
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         state: absent
@@ -43,6 +87,8 @@
         wait: true
 
     - name: Prefetch {{ model.hf }}
+      tags: [prefetch]
+      when: not deepseek_skip_prefetch
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         state: present
@@ -54,31 +100,52 @@
           {{ lookup('ansible.builtin.file', k8s_lab ~ '/manifests/60-storage/model-prefetch-job.yaml')
              | replace('value: Qwen/Qwen2.5-0.5B-Instruct', 'value: ' ~ model.hf) | from_yaml }}
 
-    - name: Serve {{ deepseek_model }} with vLLM (util {{ model.util }})
+    - name: Serve with vLLM {{ deepseek_model }}
+      tags: [serve]
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         apply: true
         definition: "{{ lookup('kubernetes.core.kustomize', dir=ds_lab ~ '/k8s/models/' ~ deepseek_model) }}"
+      register: ds_serve
 
     - name: Wait for vLLM to become Ready
+      tags: [serve]
+      when: not ansible_check_mode
       kubernetes.core.k8s_info:
         kubeconfig: "{{ kubeconfig }}"
         kind: Deployment
         namespace: llm-serving
         name: vllm
       register: ds_vllm
-      until: (ds_vllm.resources[0].status.readyReplicas | default(0)) >= 1
+      until: >-
+        (ds_vllm.resources[0].status.readyReplicas | default(0)) >= 1 and
+        (ds_vllm.resources[0].status.updatedReplicas | default(0)) >= 1 and
+        ds_vllm.resources[0].metadata.labels.model == deepseek_model
       retries: 90
       delay: 30
 
-    - name: Embeddings, LiteLLM and Open WebUI
+    - name: Embeddings, LiteLLM (+ PostgreSQL) and Open WebUI
+      tags: [apps]
       when: deepseek_with_apps
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         apply: true
         definition: "{{ lookup('kubernetes.core.kustomize', dir=ds_lab ~ '/k8s/apps') }}"
 
-    - name: Index the repository for RAG
+    - name: Remove the previous RAG ingest Job
+      tags: [rag]
+      when: deepseek_with_apps and deepseek_with_rag
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: absent
+        kind: Job
+        namespace: llm-serving
+        name: rag-ingest
+        delete_options: {propagationPolicy: Foreground}
+        wait: true
+
+    - name: Index the repository for RAG (blue/green, quality-gated)
+      tags: [rag]
       when: deepseek_with_apps and deepseek_with_rag
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
@@ -89,11 +156,16 @@
         src: "{{ ds_lab }}/k8s/jobs/rag-ingest.yaml"
 
     - name: Verify the stack
+      tags: [verify]
+      when: not ansible_check_mode
       ansible.builtin.command: "{{ ds_lab }}/scripts/verify.sh"
       environment: {KUBECONFIG: "{{ kubeconfig }}"}
       register: ds_verify
       changed_when: false
+      failed_when: ds_verify.rc != 0          # verify.sh exits non-zero on any [FAIL]
 
     - name: Result
+      tags: [verify]
+      when: not ansible_check_mode
       ansible.builtin.debug:
         msg: "{{ ds_verify.stdout_lines[-6:] }}"

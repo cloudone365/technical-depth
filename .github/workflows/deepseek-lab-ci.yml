@@ -62,3 +62,13 @@ jobs:
           scripts/apply-lab.sh
       - name: All 03 checks (incl. RAG on real Qdrant and server-side dry-run)
         run: QDRANT=/tmp/qdrant API=1 ../../02\ Kubernetes/lab/tests/ci-run.sh tests/run-local-checks.sh
+      - name: Ansible one-click playbook — lint, check mode against the kind platform, preflight guards
+        run: |
+          pip install "ansible-core~=2.18.0" "ansible-lint>=24" "kubernetes>=30.1.0"
+          ansible-galaxy collection install "kubernetes.core:>=5.0.0"
+          export KUBECONFIG=$HOME/.kube/config
+          ansible-lint ansible/deploy-deepseek.yml
+          ansible-playbook ansible/deploy-deepseek.yml --check -e deepseek_model=r1-7b
+          if ansible-playbook ansible/deploy-deepseek.yml --check -e deepseek_model=r1-32b -e deepseek_util_budget=0.6; then
+            echo "::error::UMA budget guard did not stop an over-budget model"; exit 1
+          fi
