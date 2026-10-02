@@ -1,374 +1,239 @@
-# 26. Distributed DeepSpeed ZeRO-3 & PyTorch FSDP-2 — Full Parameter Fine-Tuning
+# Volume 26 — Full Fine-Tuning Beyond One GB10: FSDP2 Across Two Sparks, DeepSpeed ZeRO-3, and NVMe Offload on One
 
-> **Target Audience**: Distributed Training Engineers, ML Infrastructure Architects, and HPC Researchers scaling full parameter adaptation across multi-GPU clusters.  
-> **Prerequisites**: PyTorch `torchrun` distributed basics, NCCL collective communications (`All-Gather`, `Reduce-Scatter`), and memory arithmetic (from [23-peft-lora-qlora-parameter-sizing.md](23-peft-lora-qlora-parameter-sizing.md)).  
-> **Estimated Study Time**: 65 minutes.  
-> **What You Will Master**: The physical memory sharding mechanics of **DeepSpeed ZeRO-1/2/3**, the modern **PyTorch FSDP-2** per-parameter sharding standard, communication volume mathematics ($3\times$ parameter transfers), and supercharging ZeRO-Offload over **900 GB/s NVLink-C2C** on the **NVIDIA DGX Spark**.
+> **Module 03 · Part VI — Fine-tuning and RL** · Prev: [25 RL rollouts](25-distributed-rl-rollout-infrastructure.md) · Next: [27 Open WebUI](27-open-webui-deployment-and-integration.md)
 
----
-
-## 📑 Table of Contents
-1. [Foundational Scaffolding: The DDP Memory Wall](#1-foundational-scaffolding-the-ddp-memory-wall)
-2. [Co-Related Concepts & The Evolution of Sharded Data Parallelism](#2-co-related-concepts--the-evolution-of-sharded-data-parallelism)
-3. [Deep First-Principles: The 3 Stages of ZeRO Sharding](#3-deep-first-principles-the-3-stages-of-zero-sharding)
-4. [Communication Volume Mathematics: All-Gather vs. Reduce-Scatter](#4-communication-volume-mathematics-all-gather-vs-reduce-scatter)
-5. [PyTorch FSDP-2: The Modern Native PyTorch Standard](#5-pytorch-fsdp-2-the-modern-native-pytorch-standard)
-6. [Comparative Analysis: DeepSpeed ZeRO-3 vs. FSDP-2 vs. Megatron 3D](#6-comparative-analysis-deepspeed-zero-3-vs-fsdp-2-vs-megatron-3d)
-7. [Hardware Grounding: ZeRO-Offload Over 900 GB/s NVLink-C2C on DGX Spark](#7-hardware-grounding-zero-offload-over-900-gbs-nvlink-c2c-on-dgx-spark)
-8. [Hands-On Python Lab: Native PyTorch FSDP-2 Sharding Implementation](#8-hands-on-python-lab-native-pytorch-fsdp-2-sharding-implementation)
-9. [Production DeepSpeed ZeRO-3 Configuration Suite (`ds_config.json`)](#9-production-deepspeed-zero-3-configuration-suite-ds_configjson)
-10. [Practice Exercises with Step-by-Step Solutions](#10-practice-exercises-with-step-by-step-solutions)
-11. [Troubleshooting Guide & Diagnostic Runbook](#11-troubleshooting-guide--diagnostic-runbook)
+| | |
+|---|---|
+| **You will build** | Full-parameter fine-tuning of R1-Distill-Qwen-7B, which needs ~114 GiB of training state, two ways: FSDP2 sharding across two Sparks over the CX-7 link, and DeepSpeed ZeRO-3 with the optimizer offloaded to NVMe on a single Spark. You'll see sharding in per-rank memory, measure what each layout costs per step, and learn why "CPU offload" buys nothing on unified memory |
+| **Hardware** | spark-01 (§5.1, §5.3). spark-02 + QSFP cable for §5.2 |
+| **Time** | 2.5 h |
+| **Risk** | Medium. §5.3 writes ~180 GB per step to the NVMe. Fine for a lab run of 30 steps. Don't leave it running for days |
+| **Lab files** | [`tools/fsdp_finetune.py`](lab/tools/fsdp_finetune.py), [`tools/sft_lora.py`](lab/tools/sft_lora.py) (`--full --deepspeed`), [`k8s/jobs/fsdp-1spark.yaml`](lab/k8s/jobs/fsdp-1spark.yaml), [`k8s/jobs/fsdp-2spark.yaml`](lab/k8s/jobs/fsdp-2spark.yaml), [`k8s/jobs/zero3-nvme.yaml`](lab/k8s/jobs/zero3-nvme.yaml), [`tools/lora_calc.py`](lab/tools/lora_calc.py) |
 
 ---
 
-## 1. Foundational Scaffolding: The DDP Memory Wall
+## 1. Why sharding and offload exist
 
-### The Redundancy Flaw in Distributed Data Parallelism (DDP)
-In traditional Distributed Data Parallelism (DDP):
-* Every single GPU in the cluster maintains a **100% complete, identical replica** of the model weights, gradients, and AdamW optimizer states.
-* Each GPU processes a distinct slice of training data, calculates local gradients, and aggregates them across all GPUs using an `All-Reduce` collective.
+Mixed-precision AdamW keeps, per parameter:
 
-```
-                  TRADITIONAL DDP REDUNDANCY TRAP (16 BYTES/PARAM ON EVERY GPU)
-┌───────────────────────┐  ┌───────────────────────┐  ┌───────────────────────┐
-│         GPU 0         │  │         GPU 1         │  │         GPU 2         │
-├───────────────────────┤  ├───────────────────────┤  ├───────────────────────┤
-│ Weights: 2 bytes      │  │ Weights: 2 bytes      │  │ Weights: 2 bytes      │
-│ Gradients: 2 bytes    │  │ Gradients: 2 bytes    │  │ Gradients: 2 bytes    │
-│ AdamW States: 12 bytes│  │ AdamW States: 12 bytes│  │ AdamW States: 12 bytes│
-└───────────────────────┘  └───────────────────────┘  └───────────────────────┘
-  100% IDENTICAL!            100% IDENTICAL!            100% IDENTICAL!
-```
+| State | Bytes |
+|---|---|
+| bf16 weights (forward/backward) | 2 |
+| bf16 gradients | 2 |
+| fp32 master weights | 4 |
+| fp32 Adam first moment (m) | 4 |
+| fp32 Adam second moment (v) | 4 |
+| **total** | **16** |
 
-If a 32-billion parameter model requires **512 GB of static memory** during training, DDP requires **each individual GPU to possess >512 GB of VRAM**. Even if you have a cluster of 1,000 GPUs, **DDP crashes with Out-Of-Memory (OOM) on step 0** because no single GPU card can hold the replica!
+7.6 B parameters × 16 B ≈ **114 GiB** before activations, which is the whole GB10. You have three ways out:
 
-### The Classroom Whiteboard Analogy
-Imagine eight math students in a classroom solving a 1,000-step equation:
-* **DDP**: Forcing each of the eight students to buy an expensive giant whiteboard and write out all 1,000 steps identically on their own board.
-* **ZeRO / FSDP**: Student 1 writes steps 1–125; Student 2 writes 126–250, and so on. When Student 1 needs to review step 500, they simply look across the room at Student 4's board. By eliminating redundancy, the classroom solves an **8x larger problem without buying larger whiteboards**!
+| Technique | Idea | Cost |
+|---|---|---|
+| **LoRA** (Vols 23–24) | don't train most weights | not a full fine-tune |
+| **Shard** (FSDP, ZeRO-3) | each of N ranks keeps 1/N of the states. Weights are all-gathered just in time per layer | network traffic every layer, every step |
+| **Offload** (ZeRO-Offload/Infinity) | put optimizer states (and optionally params) in a bigger, slower tier | bandwidth to that tier every step |
+
+FSDP2 (PyTorch-native `fully_shard`) and DeepSpeed ZeRO-3 implement the same idea, sharding all three of params, grads and optimizer state. They differ in API, ecosystem and offload support.
 
 ---
 
-## 2. Co-Related Concepts & The Evolution of Sharded Data Parallelism
+## 2. Architecture — HLD
 
 ```mermaid
-flowchart TD
-    DDP["Distributed Data Parallel (DDP)<br/>Full replication on every GPU<br/>Hard memory ceiling = 1 GPU VRAM"] --> MegatronTP["Megatron Tensor Parallelism (TP)<br/>Split individual weight matrices across GPUs<br/>Restricted to intra-node NVLink"]
-    MegatronTP --> ZeRO["DeepSpeed ZeRO (Rajbhandari et al., 2020)<br/>Stage 1: Shard Optimizers<br/>Stage 2: Shard Gradients<br/>Stage 3: Shard Parameters"]
-    ZeRO --> FSDP1["PyTorch FSDP-1 (Fully Sharded Data Parallel)<br/>Native PyTorch implementation using module hooks"]
-    FSDP1 --> FSDP2["PyTorch FSDP-2 (PyTorch 2.4+)<br/>Per-parameter sharding, zero hook overhead, native torch.compile"]
+flowchart TB
+  subgraph F["A · FSDP2 across two Sparks (fsdp-2spark.yaml)"]
+    direction LR
+    R0["spark-01 · rank 0<br/>½ params · ½ grads · ½ Adam<br/>≈ 57 GiB + activations"]
+    R1["spark-02 · rank 1<br/>½ params · ½ grads · ½ Adam<br/>≈ 57 GiB + activations"]
+    R0 <==>|"per layer: all-gather weights (fwd, bwd)<br/>reduce-scatter grads (bwd)<br/>NCCL · RoCE · 200 GbE"| R1
+  end
+  subgraph Z["B · ZeRO-3 + NVMe offload on one Spark (zero3-nvme.yaml)"]
+    direction LR
+    G["GB10 (UMA)<br/>bf16 params 14 GiB<br/>bf16 grads 14 GiB<br/>activations"]
+    C["Grace CPU · 20 cores<br/>DeepSpeedCPUAdam"]
+    N[("NVMe · /swap (PVC ds-swap)<br/>fp32 master + m + v ≈ 91 GiB")]
+    G -->|"grads"| C
+    C <-->|"libaio · async read/write<br/>≈ 180 GB per step"| N
+    C -->|"updated bf16 params"| G
+  end
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  class R0,R1,G gpu
+  class C ctrl
+  class N store
+  style F fill:#f3effc,stroke:#8250df
+  style Z fill:#fff8e6,stroke:#bf8700
 ```
 
 ---
 
-## 3. Deep First-Principles: The 3 Stages of ZeRO Sharding
+## 3. LLD
 
-Invented by Microsoft Research, **ZeRO (Zero Redundancy Optimizer)** systematically eliminates state redundancy in three progressive stages:
+### 3.1 Memory per layout (7B, seq 512, batch 8, gradient checkpointing)
 
+| Layout | Per-GB10 state | Where the rest is | Fits? |
+|---|---|---|---|
+| plain AdamW, 1 Spark | ~114 GiB + activations | — | ✗ (`lora_calc.py … --method full`) |
+| FSDP2, world 2 | ~57 GiB + activations | the other Spark | ✓ |
+| ZeRO-3 + optimizer → NVMe, 1 Spark | ~28 GiB + activations + pinned buffers | ~91 GiB on NVMe | ✓, slowly |
+| ZeRO-3 + optimizer → "CPU", 1 Spark | ~114 GiB | the same LPDDR5x | ✗: on UMA "CPU memory" *is* GPU memory |
+
+### 3.2 Traffic per optimiser step
+
+| Layout | What moves | Approx. volume (7B) | Link |
+|---|---|---|---|
+| FSDP2 ×2 | all-gather params forward + backward, reduce-scatter grads | ≈ 3 × 15 GB ≈ 45 GB total, half of it per rank | CX-7 RoCE (**record** NCCL bus bandwidth from 02 Vol 17) |
+| ZeRO-3 NVMe ×1 | read and write m, v and master weights | ≈ 2 × 91 GB ≈ 182 GB | NVMe (**record** seq read/write from Vol 20's fio) |
+
+Rough step-time floor = volume ÷ bandwidth, plus compute. With ~20 GB/s RoCE and ~5 GB/s NVMe the floors are ≈ 1–2 s for FSDP and ≈ 35–40 s for NVMe offload. That's why offload is a capacity tool, not a speed tool.
+
+### 3.3 FSDP2 in `fsdp_finetune.py`
+
+| Line | Purpose |
+|---|---|
+| `fully_shard(layer, mp_policy=mp)` per decoder block, then the root | each block is its own all-gather/free unit, so only ~one block is unsharded at a time |
+| `MixedPrecisionPolicy(param_dtype=bf16, reduce_dtype=fp32)` | compute in bf16, reduce gradients in fp32 for stability |
+| `gradient_checkpointing_enable()` | recompute activations in backward |
+| per-rank `max_memory_allocated` print | evidence that each rank holds ~half |
+
+### 3.4 DeepSpeed config (`deepspeed-configs` ConfigMap)
+
+| Key | Value | Why |
+|---|---|---|
+| `zero_optimization.stage` | 3 | shard (or offload) params, grads and optimizer state |
+| `offload_optimizer.device` | `nvme`, `nvme_path: /swap` | ZeRO-Infinity: optimizer state on disk |
+| `aio.*` | 1 MiB blocks, queue depth 16 | async I/O via libaio (`apt-get install libaio-dev` in the Job) |
+| `optimizer` | `AdamW` with `"auto"` params | DeepSpeed builds DeepSpeedCPUAdam (vectorised on Grace) to update offloaded state |
+| `stage3_gather_16bit_weights_on_model_save` | true | `save_model` writes a normal HF checkpoint |
+| `"auto"` values | filled by the HF Trainer from `SFTConfig` | one source of truth for lr and batch |
+
+---
+
+## 4. Integrations
+
+- **02 Vol 17**: NCCL over CX-7. `fsdp-2spark.yaml` uses the same `NCCL_*` variables and hostNetwork.
+- **Vol 20**: the NVMe bandwidth you measured bounds §5.3's step time. `ds-swap` uses the `local-nvme` (Delete) class.
+- **Vol 22**: all three Jobs are Kueue workloads. `fsdp-2spark` needs 2 GPUs of quota, which is all of `spark-cq`.
+- **Vol 23**: `lora_calc.py --method full` predicts the single-Spark failure.
+
+---
+
+## 5. Lab
+
+```bash
+cd "03 DeepSeek/lab"
+kubectl apply -k . && kubectl apply -f k8s/jobs/train-common.yaml
+python3 tools/lora_calc.py deepseek-r1-distill-qwen-7b --method full      # ✗ needs 2 Sparks …
 ```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ ZeRO-1: Optimizer State Partitioning (4x Memory Reduction)                             │
-│ - Base weights (FP16: 2B) and Gradients (FP16: 2B) are replicated on all GPUs.         │
-│ - AdamW Optimizer States (FP32: 12B) are partitioned evenly across N_gpus.            │
-│ - Memory per GPU = 2 + 2 + (12 / N_gpus) bytes/param.                                  │
-├────────────────────────────────────────────────────────────────────────────────────────┤
-│ ZeRO-2: Gradient + Optimizer State Partitioning (8x Memory Reduction)                  │
-│ - Base weights are replicated on all GPUs.                                             │
-│ - Gradients and Optimizer States are partitioned across N_gpus.                        │
-│ - Memory per GPU = 2 + (14 / N_gpus) bytes/param.                                      │
-├────────────────────────────────────────────────────────────────────────────────────────┤
-│ ZeRO-3: Complete Parameter Partitioning (Linear Memory Scaling!)                       │
-│ - Weights, Gradients, and Optimizer States are all partitioned across N_gpus!          │
-│ - Each GPU stores ONLY 1/N_gpus of the entire model.                                   │
-│ - Memory per GPU = 16 / N_gpus bytes/param.                                            │
-└────────────────────────────────────────────────────────────────────────────────────────┘
+
+### 5.1 Baseline: FSDP on one Spark (no actual sharding)
+
+```bash
+kubectl apply -f k8s/jobs/fsdp-1spark.yaml
+kubectl -n batch logs -f job/fsdp-1spark | grep -E 'rank|done'
 ```
 
-### Static Memory Footprint on an 8-GPU Cluster for a 32B Model ($16 \text{ bytes/param}$ total):
-
-| Sharding Strategy | Weights / GPU | Gradients / GPU | Optimizer / GPU | Total Static Memory | Fits 80GB GPU? |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Traditional DDP** | 64.0 GiB | 64.0 GiB | 384.0 GiB | **512.0 GiB** | **NO (Fatal OOM)** |
-| **ZeRO-1** | 64.0 GiB | 64.0 GiB | 48.0 GiB ($384 / 8$) | **176.0 GiB** | **NO (OOM)** |
-| **ZeRO-2** | 64.0 GiB | 8.0 GiB ($64 / 8$) | 48.0 GiB ($384 / 8$) | **120.0 GiB** | **NO (OOM)** |
-| **ZeRO-3 / FSDP-2** | **8.0 GiB ($64 / 8$)**| **8.0 GiB ($64 / 8$)** | **48.0 GiB ($384 / 8$)** | **64.0 GiB** | **YES (Fits easily!)** |
-
----
-
-## 4. Communication Volume Mathematics: All-Gather vs. Reduce-Scatter
-
-ZeRO-3 trades communication bandwidth for memory capacity. To compute forward and backward passes when weights are sharded across $N$ GPUs:
-
-```
-FORWARD PASS:
-Layer 0 Begins ──► All-Gather: Collect missing weights from peer GPUs ──► Compute GEMM ──► Discard Weights!
-                                                                                           (Free VRAM)
-
-BACKWARD PASS:
-Layer 0 Backprop ──► All-Gather: Collect weights again ──► Compute Gradients ──► Reduce-Scatter Gradients!
-                                                                                 (Store only local 1/N slice)
+```text
+rank 0/1 step 0 loss 1.9… peak mem 2x.x GiB
+…
+done in …s
 ```
 
-### Mathematical Formulation of Communication Traffic
-Let $\Psi$ be the total number of model parameters:
-1. **Traditional DDP**:
-   * Forward pass: 0 communication.
-   * Backward pass: 1 `All-Reduce` on gradients = $2 \times \Psi$ words transmitted.
-   * **Total Traffic**: $2 \Psi$.
-2. **ZeRO-3 / FSDP-2**:
-   * Forward pass: 1 `All-Gather` on weights = $1 \times \Psi$ words.
-   * Backward pass: 1 `All-Gather` on weights = $1 \times \Psi$ words.
-   * Backward pass: 1 `Reduce-Scatter` on gradients = $1 \times \Psi$ words.
-   * **Total Traffic**: $1 \Psi + 1 \Psi + 1 \Psi = \mathbf{3 \Psi}$.
+World size 1 means each "shard" is the whole model. Peak memory ≈ the 1.5B full-FT estimate (~28 GiB). **Record yours.**
 
-$$\text{Communication Overhead Ratio} = \frac{3 \Psi}{2 \Psi} = \mathbf{1.5\times \text{ the traffic of DDP}}$$
+### 5.2 FSDP2 across two Sparks (2×)
 
-This proves that **ZeRO-3 requires high-speed interconnects (NVLink or 400 Gbps RoCEv2/InfiniBand)** to prevent communication stalls from throttling GPU compute cores.
+```bash
+kubectl apply -f k8s/jobs/fsdp-2spark.yaml
+kubectl -n batch get pods -l job-name=fsdp -o wide          # one pod per Spark
+kubectl -n batch logs -f -l job-name=fsdp --prefix | grep -E 'NCCL INFO.*NET|rank|done'
+```
 
----
+Expected: `rank 0/2` and `rank 1/2` each report a peak around half the 7B training state plus activations (≈ 60–70 GiB). Neither Spark could hold the whole thing. NCCL logs show the `NET/IB` transport. While it runs, on either Spark:
 
-## 5. PyTorch FSDP-2: The Modern Native PyTorch Standard
+```bash
+watch -n1 "ethtool -S enp1s0f1np1 | grep -E 'rx_bytes_phy|tx_bytes_phy'"
+```
 
-In PyTorch 2.4+, **FSDP-2 (`torch.distributed.fsdp`)** replaced legacy hook-based wrappers with a clean, per-parameter sharded tensor implementation:
-* **Per-Parameter Sharding**: Operates directly on individual `nn.Parameter` tensors rather than wrapping entire `nn.Module` subtrees in opaque hooks.
-* **Native `torch.compile` Support**: Fully compatible with Triton compiler optimizations.
-* **Asynchronous Communication-Computation Overlap**: Automatically issues non-blocking `All-Gather` CUDA calls for Layer $L+1$ while Layer $L$ is computing its GEMM operations!
+| | per-rank peak (GiB) | s/step | link GB/s during step |
+|---|---|---|---|
+| FSDP2 ×2, 7B (**record yours**) | | | |
 
----
+### 5.3 ZeRO-3 + NVMe offload on one Spark
 
-## 6. Comparative Analysis: DeepSpeed ZeRO-3 vs. FSDP-2 vs. Megatron 3D
+```bash
+kubectl apply -f k8s/jobs/zero3-nvme.yaml
+kubectl -n batch logs -f job/zero3-nvme | grep -E 'async_io|cpu_adam|ZeRO|nvme|loss|STATS'
+```
 
-| Metric / Dimension | DeepSpeed ZeRO-3 | PyTorch FSDP-2 | Megatron-Core 3D |
-| :--- | :--- | :--- | :--- |
-| **Origin / Maintainer** | Microsoft DeepSpeed | PyTorch Core (Meta) | NVIDIA |
-| **Target Scale** | 1 to 512 GPUs | 1 to 1024 GPUs | 1,000+ Supercomputing Nodes |
-| **Installation** | Requires external C++ build | **Native in PyTorch 2.4+** | Complex Git submodule |
-| **PyTorch 2.0 `torch.compile`**| Partial / Complex | **Flawless Native Support**| Custom integration |
-| **Offload to CPU** | ZeRO-Offload (Highly tuned)| CPU Offload supported | Slurm / Host swap |
-| **Recommended Use Case** | Legacy clusters, CLI tools | **Modern production PyTorch standard** | Extreme-scale pre-training |
+Expected: `ds_report` shows `async_io … [OKAY]` and `cpu_adam` buildable, then DeepSpeed logs the swap path `/swap`. In another shell:
 
----
+```bash
+iostat -xm 2 | grep -E 'Device|nvme'                       # sustained read+write during each optimizer step
+free -g                                                    # well under 119 GiB used
+```
 
-## 7. Hardware Grounding: ZeRO-Offload Over 900 GB/s NVLink-C2C on DGX Spark
+| | GB10 peak (GiB) | s/step | NVMe MB/s during step |
+|---|---|---|---|
+| ZeRO-3 NVMe ×1, 7B (**record yours**) | | | |
 
-### The Traditional PCIe Offloading Bottleneck
-In an x86 workstation, offloading AdamW optimizer states to CPU RAM requires streaming 384 GB of data across a narrow **PCIe Gen5 bus (32–64 GB/s)** during every training step, stalling the GPU for 8 to 12 seconds per step.
+Compare with §5.2: same model and data, a fraction of the memory per box, many times slower per step.
 
-### The DGX Spark Grace Blackwell Breakthrough
-The **NVIDIA DGX Spark** connects the Grace ARM CPU to the Blackwell GB10 GPU via **NVLink-C2C**:
-* **Bandwidth**: **900 GB/s bidirectional coherent bandwidth** (14x to 28x faster than PCIe!).
-* **Zero-Latency CPU Offload**: AdamW optimizer updates execute on Grace CPU cores while streaming updated weights back into the GB10 GPU at near-HBM speeds.
-* **Capacity**: Enables full fine-tuning of **up to 70B parameter models** directly on a single DGX Spark node!
+### 5.4 (Optional) See why CPU offload doesn't help on UMA
 
----
+Edit a copy of `zero3-nvme.json` with `"device": "cpu"` and run it. Expected: the Job is OOM-killed (or the node runs out of memory). The "offloaded" states land in the same LPDDR5x the GPU uses. On a discrete-GPU server the same config would move ~91 GiB into host RAM and succeed.
 
-## 8. Hands-On Python Lab: Native PyTorch FSDP-2 Sharding Implementation
+### 5.5 Use the result
 
-This script demonstrates native PyTorch FSDP-2 configuration with mixed-precision, gradient checkpointing, and activation prefetching:
+`/ckpt/r1-7b-full-zero3` is a normal HF checkpoint. Publish and evaluate it like Vol 23's merged model:
 
-```python
-#!/usr/bin/env python3
-"""
-train_fsdp2_native.py
-Native PyTorch FSDP-2 distributed training implementation for 32B models.
-"""
-
-import os
-import torch
-import torch.nn as nn
-import torch.distributed as dist
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import (
-    MixedPrecision,
-    BackwardPrefetch,
-    ShardingStrategy,
-    CPUOffload
-)
-from transformers import AutoModelForCausalLM
-
-def setup_distributed():
-    dist.init_process_group("nccl")
-    local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
-    return local_rank
-
-def clean_distributed():
-    dist.destroy_process_group()
-
-def run_fsdp2_training():
-    local_rank = setup_distributed()
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-
-    if rank == 0:
-        print(f"[*] Initializing FSDP-2 across {world_size} GPU ranks...")
-
-    # 1. Configure FSDP Mixed Precision Policy (BF16 computation, FP32 buffers)
-    mixed_precision_policy = MixedPrecision(
-        param_dtype=torch.bfloat16,
-        reduce_dtype=torch.bfloat16,
-        buffer_dtype=torch.float32
-    )
-
-    # 2. Configure ZeRO-3 Style Full Parameter Sharding
-    sharding_policy = ShardingStrategy.FULL_SHARD  # ZeRO-3 equivalent!
-
-    # 3. Load base model architecture
-    model_name = "Qwen/Qwen2.5-Coder-32B-Instruct"
-    if rank == 0:
-        print(f"[*] Loading model architecture: {model_name}...")
-        
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.bfloat16,
-        low_cpu_mem_usage=True
-    )
-
-    # 4. Wrap with FSDP
-    fsdp_model = FSDP(
-        model,
-        sharding_strategy=sharding_policy,
-        mixed_precision=mixed_precision_policy,
-        backward_prefetch=BackwardPrefetch.BACKWARD_PRE,  # Overlap All-Gather with compute!
-        device_id=torch.cuda.current_device(),
-        limit_all_gathers=True,  # Prevent memory spikes
-        use_orig_params=True     # Essential for torch.compile
-    )
-
-    if rank == 0:
-        print("[✓] Model successfully sharded across cluster using FSDP-2 FULL_SHARD.")
-        print("    - Each GPU stores exactly 1/N of parameters, gradients, and optimizer states.")
-
-    # 5. Define AdamW Optimizer over sharded parameters
-    optimizer = torch.optim.AdamW(fsdp_model.parameters(), lr=1e-5, weight_decay=0.01)
-
-    # Simulated Forward + Backward Pass
-    dummy_input = torch.randint(0, 1000, (2, 512), device=torch.cuda.current_device())
-    outputs = fsdp_model(dummy_input, labels=dummy_input)
-    loss = outputs.loss
-
-    loss.backward()
-    optimizer.step()
-    optimizer.zero_grad()
-
-    if rank == 0:
-        print(f"[✓] Step completed successfully! Loss: {loss.item():.4f}")
-
-    clean_distributed()
-
-if __name__ == "__main__":
-    # Launch via: torchrun --nproc_per_node=4 train_fsdp2_native.py
-    run_fsdp2_training()
+```bash
+scripts/publish-adapter.sh r1-7b-full-zero3
+kubectl apply -k k8s/models/r1-7b
+kubectl -n llm-serving set env deploy/vllm MODEL=/models/adapters/r1-7b-full-zero3 SERVED_NAME=r1-7b-ft
 ```
 
 ---
 
-## 9. Production DeepSpeed ZeRO-3 Configuration Suite (`ds_config.json`)
+## 6. Verify
 
-For DeepSpeed CLI workflows, save this configuration into `/data/config/ds_zero3_spark.json`:
-
-```json
-{
-  "train_batch_size": "auto",
-  "train_micro_batch_size_per_gpu": "auto",
-  "gradient_accumulation_steps": "auto",
-  "bf16": {
-    "enabled": true
-  },
-  "zero_optimization": {
-    "stage": 3,
-    "offload_optimizer": {
-      "device": "cpu",
-      "pin_memory": true
-    },
-    "offload_param": {
-      "device": "none"
-    },
-    "overlap_comm": true,
-    "contiguous_gradients": true,
-    "sub_group_size": 1e9,
-    "reduce_bucket_size": "auto",
-    "stage3_prefetch_bucket_size": "auto",
-    "stage3_param_persistence_threshold": "auto",
-    "stage3_max_live_parameters": 1e9,
-    "stage3_max_reuse_distance": 1e9,
-    "stage3_gather_16bit_weights_on_model_save": true
-  },
-  "gradient_clipping": 1.0,
-  "steps_per_print": 10,
-  "wall_clock_breakdown": false
-}
-```
+| Check | Expected |
+|---|---|
+| prediction | `lora_calc.py` says full 7B doesn't fit one Spark |
+| FSDP ×2 | two ranks, each ≈ half the state, loss falling |
+| ZeRO-3 NVMe | completes 30 steps. GB10 peak far below 119 GiB. NVMe busy during optimizer steps |
+| comparison | the step-time ratio between §5.2 and §5.3 roughly matches link vs NVMe bandwidth |
 
 ---
 
-## 10. Practice Exercises with Step-by-Step Solutions
+## 7. Troubleshooting
 
-### Exercise 1: Memory Sharding Calculation for 70B Models
-**Scenario**: You want to perform full fine-tuning of `Llama-3-70B` in 16-bit precision.
-* Parameters $\Psi = 70 \times 10^9$.
-* Precision: BF16 ($2 \text{ bytes/param}$).
-* Gradients: BF16 ($2 \text{ bytes/param}$).
-* AdamW optimizer states: FP32 master weights + 2 momentum vectors = $12 \text{ bytes/param}$.
-* Cluster hardware: $4\times \text{NVIDIA H100 (80 GB SXM5)}$ GPUs.
-
-**Question**: Calculate the static VRAM requirement per GPU under:
-1. Traditional DDP.
-2. DeepSpeed ZeRO-2.
-3. DeepSpeed ZeRO-3 / FSDP-2.
-Will ZeRO-3 fit within the 80 GB cards?
-
-#### Solution:
-1. **Total State Memory**:
-   $$\text{Total Memory} = 70 \times 10^9 \times (2 + 2 + 12) = 70 \times 16 \text{ GB} = \mathbf{1,120 \text{ Gigabytes!}}$$
-2. **Traditional DDP per GPU**:
-   $$\text{DDP Memory} = 1,120 \text{ GB per GPU} \implies \mathbf{\text{Fatal OOM (Requires 14x 80GB cards per GPU!)}}$$
-3. **ZeRO-2 per GPU ($N = 4$)**:
-   $$\text{Weights (Replicated)} = 70 \times 2 = 140 \text{ GB}$$
-   $$\text{Gradients + Optimizer (Sharded)} = \frac{70 \times 14}{4} = \frac{980}{4} = 245 \text{ GB}$$
-   $$\text{ZeRO-2 Total} = 140 + 245 = \mathbf{385 \text{ GB per GPU}} \implies \mathbf{\text{Fatal OOM}}$$
-4. **ZeRO-3 per GPU ($N = 4$)**:
-   $$\text{ZeRO-3 Total} = \frac{1,120 \text{ GB}}{4} = \mathbf{280 \text{ GB per GPU}} \implies \mathbf{\text{Exceeds 80GB VRAM!}}$$
-*Takeaway*: To fit a 70B model in full fine-tuning without CPU offloading, you need at least **$1,120 / 60 \approx 19 \to 16 \text{ to } 32\times \text{H100 GPUs}$**, or you must enable **ZeRO-Offload** to Grace CPU RAM!
+| Symptom | Cause | Fix |
+|---|---|---|
+| FSDP ranks hang at init | rendezvous on the wrong IP, or a firewall | `--master-addr 192.168.100.11`, hostNetwork, port 29500 open |
+| NCCL uses `NET/Socket`, slow | RDMA not picked | `NCCL_IB_HCA`, `NCCL_IB_GID_INDEX=3`, `IPC_LOCK`. Check `ibv_devices` |
+| `fsdp` pod Pending: anti-affinity | only one node | needs spark-02 |
+| `async_io … [NO]` in `ds_report` | libaio missing | `apt-get install libaio-dev` (in the Job) |
+| `cpu_adam` build fails | compiler/CUDA headers missing | use the NGC PyTorch image. Check `ds_report` |
+| ZeRO-3 step time ≫ estimate | NVMe shared with model loads or another job, or `/swap` on a slow path | run alone. Confirm the `ds-swap` PV is on the NVMe |
+| OOM with NVMe offload | pinned buffers + activations + other pods | lower batch, `buffer_count` 2. Scale serving down (Vol 22) |
+| `save_model` writes shards, not HF weights | ZeRO-3 gather disabled | `stage3_gather_16bit_weights_on_model_save: true` |
 
 ---
 
-### Exercise 2: Communication Volume Calculation in ZeRO-3
-**Scenario**: You train a 32B model using ZeRO-3 across 8 GPUs. Each training step takes **1.2 seconds**.
-**Question**: What is the average network throughput in Gigabits per second (Gbps) required to prevent NCCL communication from stalling training?
+## 8. Scale-out path
 
-#### Solution:
-1. **Calculate total bytes transferred per step**:
-   $$\text{Words transferred} = 3 \times \Psi = 3 \times 32 \times 10^9 = 96 \times 10^9 \text{ elements}$$
-   $$\text{Bytes (BF16)} = 96 \times 10^9 \times 2 \text{ bytes} = 192 \times 10^9 \text{ Bytes} = 192 \text{ GB}$$
-2. **Calculate required bandwidth over 1.2 seconds**:
-   $$\text{Bandwidth (GB/s)} = \frac{192 \text{ GB}}{1.2 \text{ s}} = 160 \text{ GB/sec}$$
-3. **Convert to Gigabits per second (Gbps)**:
-   $$\text{Bandwidth (Gbps)} = 160 \times 8 = \mathbf{1,280 \text{ Gbps}}$$
-*Takeaway*: Divided across 8 GPUs, each GPU must sustain $\frac{1280}{8} = \mathbf{160 \text{ Gbps}}$ line-rate network bandwidth. This requires at least **200 Gbps or 400 Gbps InfiniBand/RoCEv2 cards**!
+| One Spark | Two Sparks | Datacenter |
+|---|---|---|
+| ZeRO-3 NVMe for capacity, LoRA for speed | FSDP2 full FT of 7B | FSDP2/ZeRO-3 within a node + TP/PP across nodes (Megatron, NeMo), HSDP (shard in-node, replicate across) |
+| `local-nvme` swap | NVMe on both | parallel file system for checkpoints. Offload rarely needed with HBM pools |
 
 ---
 
-## 11. Troubleshooting Guide & Diagnostic Runbook
+## 9. Checklist
 
-### Issue 1: `RuntimeError: Expected to have finished reduction in the prior iteration before starting a new one`
-* **Root Cause**: Module hooks in FSDP or ZeRO are being called out of order because some layers were skipped in the forward pass (e.g., unused conditional branches).
-* **Remediation**: Set `find_unused_parameters=False` and verify that all registered submodules participate in the loss computation.
-
-### Issue 2: Severe Slowdown During Backward Pass (`NCCL AllGather Stalls`)
-* **Root Cause**: Insufficient NCCL buffer memory leading to communication ring stalls.
-* **Remediation**: Tune NCCL environment variables in your launch script:
-  ```bash
-  export NCCL_BUFFSIZE=16777216
-  export NCCL_NET_GDR_LEVEL=5
-  export NCCL_CROSS_NIC=1
-  ```
-
----
-
-## 🔗 Related Curriculum Modules
-* **Hardware Memory Architecture**: [12-memory-math-for-30b-32b-on-gb10.md](12-memory-math-for-30b-32b-on-gb10.md)
-* **Single-Node PEFT Alternative**: [23-peft-lora-qlora-parameter-sizing.md](23-peft-lora-qlora-parameter-sizing.md)
-* **Turnkey Workflows**: [24-unsloth-and-llama-factory-workflows.md](24-unsloth-and-llama-factory-workflows.md)
-* **Distributed RL Infrastructure**: [25-distributed-rl-rollout-infrastructure.md](25-distributed-rl-rollout-infrastructure.md)
+- [ ] I can derive the 16 bytes per parameter of mixed-precision AdamW.
+- [ ] I saw per-rank memory halve with FSDP across two Sparks.
+- [ ] I ran a full 7B fine-tune on one Spark with NVMe offload and know its cost.
+- [ ] I can explain why CPU offload adds no capacity on unified memory.

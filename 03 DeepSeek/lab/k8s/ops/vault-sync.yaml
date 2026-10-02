@@ -11,7 +11,7 @@ metadata: {name: vault-sync, namespace: llm-serving}
 rules:
   - apiGroups: [""]
     resources: [secrets]
-    resourceNames: [hf-token, litellm-master-key]
+    resourceNames: [hf-token, litellm-master-key, open-webui-secret]
     verbs: [get, update]
   - apiGroups: [""]
     resources: [secrets]
@@ -50,7 +50,8 @@ spec:
                 - name: SYNC_MAP
                   value: >-
                     [{"vault": "kv/data/spark-lab/deepseek/hf", "secret": "hf-token", "keys": {"token": "token"}},
-                     {"vault": "kv/data/spark-lab/deepseek/litellm", "secret": "litellm-master-key", "keys": {"key": "master_key"}}]
+                     {"vault": "kv/data/spark-lab/deepseek/litellm", "secret": "litellm-master-key", "keys": {"key": "master_key"}},
+                     {"vault": "kv/data/spark-lab/deepseek/webui", "secret": "open-webui-secret", "keys": {"secret-key": "secret_key"}}]
               securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
               resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 128Mi}}
               volumeMounts:

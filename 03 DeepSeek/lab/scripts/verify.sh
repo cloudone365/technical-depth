@@ -26,7 +26,9 @@ if want apps; then
   for d in bge-m3 litellm; do
     [[ $(k -n $NS get deploy $d -o jsonpath='{.status.readyReplicas}' 2>/dev/null) -ge 1 ]] && ok "$d ready" || warn "$d not ready"
   done
-  [[ $(k -n $NS get sts open-webui -o jsonpath='{.status.readyReplicas}' 2>/dev/null) -ge 1 ]] && ok "open-webui ready" || warn "open-webui not ready"
+  for s in litellm-db open-webui; do
+    [[ $(k -n $NS get sts $s -o jsonpath='{.status.readyReplicas}' 2>/dev/null) -ge 1 ]] && ok "$s ready" || warn "$s not ready"
+  done
   key=$(k -n $NS get secret litellm-master-key -o jsonpath='{.data.key}' 2>/dev/null | base64 -d)
   if [[ -n $key ]] && k -n $NS get deploy litellm >/dev/null 2>&1; then
     n=$(k -n $NS exec deploy/litellm -- python3 -c "import urllib.request,json;r=urllib.request.Request('http://localhost:4000/v1/models',headers={'Authorization':'Bearer $key'});print(len(json.load(urllib.request.urlopen(r))['data']))" 2>/dev/null)
@@ -36,7 +38,8 @@ fi
 if want rag; then
   echo "── rag"
   k -n $NS port-forward svc/qdrant 16333:6333 >/dev/null 2>&1 & pf=$!; sleep 2
-  cnt=$(curl -s localhost:16333/collections/technical-depth | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["points_count"])' 2>/dev/null)
+  cnt=$(curl -s -X POST localhost:16333/collections/technical-depth/points/count -H 'Content-Type: application/json' -d '{"exact":true}' \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["count"])' 2>/dev/null)   # works through the alias
   kill $pf 2>/dev/null
   [[ ${cnt:-0} -gt 100 ]] && ok "Qdrant collection technical-depth: $cnt points" || warn "RAG index missing (k8s/jobs/rag-ingest.yaml)"
 fi

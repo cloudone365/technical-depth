@@ -86,7 +86,14 @@ if [[ -n "${QDRANT:-}" ]]; then
   python3 tools/rag_demo.py ingest --repo ../.. --dirs "02 Kubernetes" --qdrant http://127.0.0.1:6333 --embed-url http://127.0.0.1:18766 >/dev/null
   expect "21-vllm-high-throughput-llm-serving.md" python3 tools/rag_demo.py ask "preStop sleep grace period streams rollout" \
     --qdrant http://127.0.0.1:6333 --embed-url http://127.0.0.1:18766 --chat-url http://127.0.0.1:18766
-  echo "rag OK"
+  expect "questions  hit@1" python3 tools/rag_demo.py eval --dirs "02 Kubernetes" --qdrant http://127.0.0.1:6333 --embed-url http://127.0.0.1:18766
+  python3 tools/rag_demo.py ingest --repo ../.. --dirs "02 Kubernetes" --qdrant http://127.0.0.1:6333 --embed-url http://127.0.0.1:18766 >/dev/null
+  expect "alias technical-depth: technical-depth-" python3 tools/rag_demo.py rollback --qdrant http://127.0.0.1:6333 --embed-url http://127.0.0.1:18766
+  if python3 tools/rag_demo.py ingest --repo ../.. --dirs "02 Kubernetes" --gate 0.99 --qdrant http://127.0.0.1:6333 --embed-url http://127.0.0.1:18766 >"$T" 2>&1; then
+    cat "$T"; echo "quality gate should have failed"; exit 1
+  fi
+  grep -q "GATE FAILED" "$T" || { cat "$T"; exit 1; }
+  echo "rag OK (blue/green ingest, eval, rollback, quality gate)"
 fi
 
 if [[ "${API:-0}" == 1 ]]; then

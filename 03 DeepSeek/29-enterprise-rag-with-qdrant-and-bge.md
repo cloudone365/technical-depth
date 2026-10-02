@@ -1,396 +1,272 @@
-# 29. Enterprise RAG with Qdrant, BGE & DeepSeek-R1 — High-Speed Semantic Search
+# Volume 29 — Enterprise RAG on the Spark: bge-m3 Embeddings, Qdrant, Blue/Green Re-Indexing with a Quality Gate, and Measured Retrieval
 
-> **Target Audience**: AI Application Engineers, Search Specialists, and Enterprise Knowledge Architects building grounded, zero-hallucination document intelligence pipelines.  
-> **Prerequisites**: Embedding vector mathematics (Cosine similarity, Dot product), REST API querying, and vLLM serving (from [15-vllm-serving-deepseek-and-qwen.md](15-vllm-serving-deepseek-and-qwen.md)).  
-> **Estimated Study Time**: 60 minutes.  
-> **What You Will Master**: The physical mechanics of **Bi-Encoder vs. Cross-Encoder** architectures, **Dense + Sparse (Lexical) Hybrid Search**, **Reciprocal Rank Fusion (RRF)**, HNSW graph vector indexing in **Qdrant**, and citation-grounded reasoning with **DeepSeek-R1** on the **NVIDIA DGX Spark**.
+> **Module 03 · Part VII — Applications** · Prev: [28 LiteLLM gateway](28-litellm-proxy-gateway-load-balancing.md) · Next: [30 Tool calling & agents](30-tool-calling-and-agentic-json.md)
 
----
-
-## 📑 Table of Contents
-1. [Foundational Scaffolding: The Naive RAG Failure Modes](#1-foundational-scaffolding-the-naive-rag-failure-modes)
-2. [Co-Related Concepts & The Evolution of Enterprise Search](#2-co-related-concepts--the-evolution-of-enterprise-search)
-3. [Deep First-Principles: Bi-Encoder vs. Cross-Encoder Mathematics](#3-deep-first-principles-bi-encoder-vs-cross-encoder-mathematics)
-4. [Hybrid Retrieval Mechanics: Combining Dense Semantics & Sparse Lexical BM25](#4-hybrid-retrieval-mechanics-combining-dense-semantics--sparse-lexical-bm25)
-5. [Qdrant Vector Database Architecture: HNSW Graphs & Payload Filtering](#5-qdrant-vector-database-architecture-hnsw-graphs--payload-filtering)
-6. [Comparative Analysis: Qdrant vs. Milvus vs. pgvector vs. ChromaDB](#6-comparative-analysis-qdrant-vs-milvus-vs-pgvector-vs-chromadb)
-7. [Hardware Grounding: Resource Allocation on DGX Spark (GB10 Unified Memory)](#7-hardware-grounding-resource-allocation-on-dgx-spark-gb10-unified-memory)
-8. [Hands-On Python Lab: Complete End-to-End Enterprise RAG Pipeline](#8-hands-on-python-lab-complete-end-to-end-enterprise-rag-pipeline)
-9. [Practice Exercises with Step-by-Step Solutions](#9-practice-exercises-with-step-by-step-solutions)
-10. [Troubleshooting Guide & Diagnostic Runbook](#10-troubleshooting-guide--diagnostic-runbook)
+| | |
+|---|---|
+| **You will build** | Retrieval-augmented generation over this repository, run like a production service. bge-m3 embeds on the GB10 next to the chat model. Qdrant stores the vectors behind an alias, so a re-index builds a new collection, is scored against a gold question set, and only then goes live. You can roll back in one command. Answers come from R1 with numbered citations |
+| **Hardware** | spark-01 |
+| **Time** | 90 min |
+| **Risk** | Low. Re-indexing never touches the live collection until it passes the gate |
+| **Lab files** | [`tools/rag_demo.py`](lab/tools/rag_demo.py), [`data/rag_gold.jsonl`](lab/data/rag_gold.jsonl), [`k8s/jobs/rag-ingest.yaml`](lab/k8s/jobs/rag-ingest.yaml), [`k8s/apps/bge-m3.yaml`](lab/k8s/apps/bge-m3.yaml), [`02 …/50-workloads/qdrant-statefulset.yaml`](../02%20Kubernetes/lab/manifests/50-workloads/qdrant-statefulset.yaml) |
 
 ---
 
-## 1. Foundational Scaffolding: The Naive RAG Failure Modes
+## 1. Why RAG, and why "enterprise" changes how you build it
 
-### Why Basic Vector Search Collapses in Enterprise
-In naive Retrieval-Augmented Generation (RAG):
-1. Documents are chopped into arbitrary 500-token chunks.
-2. A small embedding model (e.g., MiniLM) converts each chunk into a single dense vector.
-3. When a user asks a question, the vector database returns the top 5 chunks based on Cosine Similarity.
-4. The chunks are dumped into the LLM prompt.
+A model only knows what it was trained on. RAG retrieves relevant passages at question time and asks the model to answer *from them*, with citations. A demo can stop there. A service needs more:
 
-In enterprise data centers, this naive workflow breaks down across three vectors:
-* **The Alphanumeric Keyword Failure**: If an SRE asks *"What is the mitigation for error Xid 79 on PCIe Bus 0000:03:00.0?"*, vector embedding models compress these specific strings into generic semantic clouds. Chunks about general PCIe errors are returned, missing the exact documentation describing `Xid 79`!
-* **The "Lost in the Middle" Dilemma**: Research shows that when an LLM is given 10 or 20 retrieved chunks, its attention mechanism heavily favors chunks at the very beginning and very end of the prompt, completely ignoring critical evidence placed in the middle.
-* **Semantic Noise & Hallucination**: If the vector search returns irrelevant or conflicting paragraphs, smaller models hallucinate plausible-sounding falsehoods.
-
-### The Library Research Assistant Analogy
-* **Naive RAG**: Like an untrained library page who runs to the book stacks, grabs 20 random books that contain the word "networking", dumps all 20 books on your desk, and demands you read them all immediately.
-* **Advanced RAG (Retrieve-and-Rerank)**: Like an experienced research librarian. The librarian retrieves 30 candidate books from the stacks (**Recall Phase**), sits at a desk, carefully cross-references each paragraph against your exact research query (**Cross-Encoder Reranking Phase**), discards 27 irrelevant books, and hands you the top 3 exact paragraphs with highlighted citations.
-**DeepSeek-R1** then acts as the lead scientist, analyzing the highlighted evidence step-by-step inside its `<think>` block before writing the executive summary.
-
-```
-                          ADVANCED 4-STAGE RAG TOPOLOGY
-┌────────────────────────────────────────────────────────────────────────┐
-│ User Query: "What is our failover policy when RoCE NIC packet drops > 1%?"│
-└────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ STAGE 1: HYBRID RETRIEVAL (BAAI/BGE-M3 + Qdrant)                       │
-│ - Dense Vector Search: Captures semantic intent                        │
-│ - Sparse Lexical Search: Matches exact acronyms ("RoCE", "NIC")        │
-│ ──► Recovers Top 30 Candidate Chunks (High Recall)                     │
-└────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ STAGE 2: CROSS-ENCODER RERANKING (BAAI/bge-reranker-large)             │
-│ - Computes full cross-attention over [Query ↔ Candidate Document]      │
-│ - Filters semantic noise and resolves subtle negations                 │
-│ ──► Filters to Top 3 High-Precision Context Chunks                     │
-└────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ STAGE 3: CITATION PROMPT COMPOSITION & GROUNDING                       │
-│ - Packs chunks with unique XML citations: <doc id="1"> ... </doc>      │
-└────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ STAGE 4: DEEPSEEK-R1 SELF-VERIFYING REASONING                          │
-│ - <think> Validates evidence consistency across Doc 1 and Doc 2 </think>│
-│ ──► Final Grounded Answer with Explicit Source Citations               │
-└────────────────────────────────────────────────────────────────────────┘
-```
+| Concern | Demo | This lab |
+|---|---|---|
+| Re-indexing | drop and rebuild the collection. Queries fail meanwhile | build `technical-depth-<timestamp>`, then atomically move alias `technical-depth` |
+| Quality | "looks right" | `rag_demo.py eval`: hit@1, hit@5 and MRR on 16 gold questions |
+| Bad index | discovered by users | **gate**: a new index below hit@5 0.6 is deleted and never goes live |
+| Rollback | re-run ingest and hope | `rag_demo.py rollback` re-points the alias to the previous collection |
+| Where embeddings run | a hosted API | bge-m3 on the GB10 (6 % of memory). No data leaves the box |
+| Answers | free text | numbered sources, `[n]` citations, "say so" when the answer isn't in them |
 
 ---
 
-## 2. Co-Related Concepts & The Evolution of Enterprise Search
+## 2. Architecture — HLD
 
 ```mermaid
-flowchart TD
-    BM25["Lexical Search (BM25 / Lucene)<br/>Exact keyword matching, zero semantic understanding<br/>Fails on synonyms (doctor vs physician)"] --> DenseVectors["Dense Vector Search (FAISS / Pinecone)<br/>High semantic conceptual matching<br/>Fails on exact part numbers & error codes"]
-    DenseVectors --> HybridRRF["Hybrid Search (Dense + Sparse with RRF)<br/>Combines dense vectors with BM25 lexical weights<br/>Overcomes vocabulary mismatch"]
-    HybridRRF --> CrossEncoder["Two-Stage Retrieve & Rerank<br/>Stage 1: Fast Vector DB Search (Recall)<br/>Stage 2: Cross-Encoder Reranking (Precision)"]
-    CrossEncoder --> ReasonerRAG["Self-Verifying Reasoner RAG (DeepSeek-R1)<br/>Model critically interrogates evidence in &lt;think&gt; before answering"]
+flowchart TB
+  subgraph ING["Ingest — Job rag-ingest (nightly or on merge)"]
+    direction LR
+    G["git clone --depth 1<br/>technical-depth"] --> C["chunk by heading<br/>≤ 1,200 chars · mermaid stripped"]
+    C --> E1["bge-m3 /v1/embeddings<br/>batch 32 · 1024-dim"]
+    E1 --> N["new collection<br/>technical-depth-20261002…"]
+    N --> GATE{"gold set<br/>hit@5 ≥ 0.6?"}
+    GATE -->|yes| SW["move alias technical-depth<br/>keep previous for rollback"]
+    GATE -->|no| DEL["delete new collection<br/>alias unchanged · Job fails"]
+  end
+  subgraph Q["Query"]
+    direction LR
+    U["question"] --> E2["bge-m3 embed"] --> S["Qdrant search via alias<br/>HNSW · cosine · top-k 5"]
+    S --> P["prompt: numbered sources<br/>+ cite rules"] --> L["R1 via vLLM or LiteLLM"]
+    L --> A["answer with [n] citations<br/>(thinking dropped)"]
+  end
+  SW -.-> S
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef sec fill:#cf222e,stroke:#82071e,color:#fff
+  classDef ext fill:#24292f,stroke:#000,color:#fff
+  class G,C,SW,P ctrl
+  class E1,E2,L gpu
+  class N,S store
+  class GATE,DEL sec
+  class U,A ext
+  style ING fill:#fff8e6,stroke:#bf8700
+  style Q fill:#e6f4f5,stroke:#0e7c86
 ```
 
 ---
 
-## 3. Deep First-Principles: Bi-Encoder vs. Cross-Encoder Mathematics
+## 3. LLD
 
-To understand why a two-stage retrieval pipeline is mandatory, we must examine the architectural differences between **Bi-Encoders** and **Cross-Encoders**:
+### 3.1 Components and budgets
 
-```
-           BI-ENCODER (EMBEDDING MODEL)           │         CROSS-ENCODER (RERANKER)
-                                                  │
-Query (Q) ──► [ Transformer ] ──► Vector u        │ [Query ∘ Sep ∘ Document]
-                                      │           │            │
-                                Cosine Similarity │            ▼
-                                      │           │     [ Transformer ]
-Doc   (D) ──► [ Transformer ] ──► Vector v        │     (Full All-to-All Self-Attention)
-                                                  │            │
-                                                  │            ▼
-Fast (Indexable in Vector DB), but shallow!      │     Single Relevance Score s ∈ [0, 1]
-Zero token-level cross-interaction!               │     High Accuracy, Token-Level Alignment!
-```
+| Component | Setting | Footprint |
+|---|---|---|
+| bge-m3 (vLLM `--task=embed`) | 1024-dim, max 8,192 tokens, multilingual | util 0.06 ≈ 7 GiB, 1 time-slice |
+| Qdrant v1.13 | StatefulSet, `local-nvme-retain` 20Gi, REST :6333 | ~1–2 GiB RAM for this corpus |
+| Collection | Cosine distance, HNSW defaults (m 16, ef_construct 100) | ~1,400 points × 1024 × 4 B ≈ 6 MB of vectors |
+| Chat | r1-7b or r1-32b-fp8 | as served |
 
-### 1. Bi-Encoder (Embedding Models like BGE-M3)
-* The query $Q$ and document $D$ are passed through the transformer **completely independently**.
-* They are compressed into single 1,024-dimensional vectors $\mathbf{u}, \mathbf{v} \in \mathbb{R}^{1024}$.
-* Similarity is a simple dot product:
-  $$s(Q, D) = \frac{\mathbf{u} \cdot \mathbf{v}}{\|\mathbf{u}\| \|\mathbf{v}\|}$$
-* **Advantage**: Vectors can be precomputed and indexed into an HNSW vector database for sub-10ms lookup across millions of chunks.
-* **Limitation**: Compressing a 500-word document into a single vector inevitably loses fine-grained nuances, negations, and token-level relationships.
+### 3.2 Chunking rules (`rag_demo.py`)
 
-### 2. Cross-Encoder (Reranker Models like BGE-Reranker-Large)
-* The query and candidate document are concatenated into a **single token sequence**:
-  $$\text{Input} = [\text{CLS}] \circ Q \circ [\text{SEP}] \circ D \circ [\text{SEP}]$$
-* The entire concatenated sequence passes through 24 transformer layers.
-* Every token in the query attends directly to every token in the document via **multi-head self-attention**.
-* The $[\text{CLS}]$ token representation is projected to a single scalar relevance probability:
-  $$\text{Score} = \sigma(W \cdot h_{[\text{CLS}]})$$
-* **Limitation**: Extremely compute-intensive; cannot be precomputed or indexed in a database.
-* **The Synergistic Architecture**: Use the Bi-Encoder in Qdrant to retrieve candidate chunks ($N = 30$), and then use the Cross-Encoder to rerank only those 30 chunks, taking the top 3!
+| Rule | Why |
+|---|---|
+| split at `#`, `##` and `###` headings, keep the heading as payload | sections are semantic units. The heading becomes the citation label |
+| ≤ 1,200 characters per chunk, drop pieces < 80 characters | fits comfortably in bge-m3's window. Avoids empty fragments |
+| strip Mermaid blocks | diagram syntax embeds as noise |
+| embed `heading + text` | the heading adds context that short chunks lack |
+| deterministic point IDs (sha1 of path, heading, text) | the same content gives the same ID, so upserts are idempotent |
 
----
+### 3.3 Blue/green collections
 
-## 4. Hybrid Retrieval Mechanics: Combining Dense Semantics & Sparse Lexical BM25
-
-**BAAI BGE-M3** is unique because it outputs three distinct representations in a single forward pass:
-1. **Dense Vector**: 1,024-dimensional semantic embedding.
-2. **Sparse Lexical Vector**: BM25-style term weights (token ID $\to$ weight magnitude).
-3. **Multi-Vector ColBERT**: Token-level late interaction embeddings.
-
-### Reciprocal Rank Fusion (RRF)
-When querying Qdrant with both dense and sparse representations, results are merged using **Reciprocal Rank Fusion (RRF)**:
-
-$$RRF(d) = \sum_{m \in \{\text{Dense}, \text{Sparse}\}} \frac{1}{k + \text{rank}_m(d)}$$
-
-Where $k$ is a smoothing constant (typically $k = 60$). Documents appearing near the top of *both* dense semantic and sparse keyword lists receive the highest rank, completely eliminating blind spots.
-
----
-
-## 5. Qdrant Vector Database Architecture: HNSW Graphs & Payload Filtering
-
-**Qdrant** is an enterprise-grade vector search engine written in pure **Rust**:
-* **HNSW (Hierarchical Navigable Small World)**: Builds multi-layer proximity graphs where top layers allow rapid jumping across vector space, and bottom layers provide fine-grained nearest neighbor convergence in logarithmic time ($O(\log N)$).
-* **Payload-Aware Indexing**: Allows storing JSON metadata (e.g., `{"department": "engineering", "access_level": 3, "doc_date": "2026-04"}`). Filters are evaluated *during* graph traversal rather than post-filtering, preventing graph fragmentation.
-
----
-
-## 6. Comparative Analysis: Qdrant vs. Milvus vs. pgvector vs. ChromaDB
-
-| Vector Database | Implementation Language | Indexing Engine | Sparse + Dense Hybrid? | In-Memory / Disk Hybrid | Target Production Scale |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Qdrant** | **Rust (Ultra-Fast & Safe)** | **HNSW with Payload Index**| **Yes (Native First-Class)**| **Yes (mmap disk backed)** | 100M+ Vectors |
-| **Milvus** | Go / C++ | Knowhere / HNSW / DiskANN | Yes | Distributed Cluster | 1B+ Vectors (Large Scale) |
-| **pgvector (Postgres)**| C (PostgreSQL Extension) | HNSW / IVFFlat | Via pg_trgm / full-text | Managed by Postgres buffer | < 5M Vectors (Small Apps) |
-| **ChromaDB** | Python / C++ | HNSW | Basic | Embedded SQLite | Local Prototyping |
-
----
-
-## 7. Hardware Grounding: Resource Allocation on DGX Spark (GB10 Unified Memory)
-
-The **NVIDIA DGX Spark** features **128 GB of unified LPDDR5X memory** shared across the Grace ARM CPU and Blackwell GB10 GPU.
-
-### Master Co-Existence Memory Budget:
-* **DeepSeek-R1-Distill-32B (Inference)**: 32 GB FP8 weights + 60 GB KV Cache = **92 GB**.
-* **BAAI BGE-M3 (Embedder)**: **~2.2 GB** VRAM.
-* **BAAI BGE-Reranker-Large (Reranker)**: **~2.2 GB** VRAM.
-* **Qdrant Engine (Rust Service)**: Runs on Grace ARM CPU, consuming **~1.5 GB system RAM**.
-* **Total Stack Footprint**: **~98 GB**, leaving **30 GB of headroom** for OS and CUDA buffers!
-
----
-
-## 8. Hands-On Python Lab: Complete End-to-End Enterprise RAG Pipeline
-
-This complete script initializes Qdrant, inverts knowledge chunks with BGE-M3, executes hybrid search, filters via BGE-Reranker-Large, and prompts DeepSeek-R1 with grounded citations:
-
-```python
-#!/usr/bin/env python3
-"""
-enterprise_rag_pipeline.py
-Production 4-Stage Enterprise RAG: BGE-M3 + Qdrant + BGE-Reranker + DeepSeek-R1.
-"""
-
-import json
-import requests
-from qdrant_client import QdrantClient
-from qdrant_client.http.models import Distance, VectorParams, PointStruct
-from sentence_transformers import SentenceTransformer, CrossEncoder
-
-# 1. Initialize Clients & Models
-print("[*] Connecting to Qdrant vector database...")
-qdrant = QdrantClient(host="localhost", port=6333)
-
-print("[*] Loading BGE-M3 Multi-Lingual Embedder onto GB10 GPU...")
-embedder = SentenceTransformer("BAAI/bge-m3", device="cuda")
-
-print("[*] Loading BGE-Reranker-Large Cross-Encoder onto GB10 GPU...")
-reranker = CrossEncoder("BAAI/bge-reranker-large", device="cuda")
-
-COLLECTION_NAME = "datacenter_knowledge_base"
-
-# 2. Setup Qdrant Collection
-if not qdrant.collection_exists(COLLECTION_NAME):
-    qdrant.create_collection(
-        collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(size=1024, distance=Distance.COSINE)
-    )
-    print(f"[✓] Created Qdrant collection: {COLLECTION_NAME}")
-
-# 3. Ingest Enterprise Datacenter Documents
-raw_documents = [
-    {
-        "id": 1,
-        "text": "NVIDIA DGX Spark features Grace ARM CPU and Blackwell GB10 GPU linked via 900 GB/s NVLink-C2C bidirectional coherent memory fabric.",
-        "category": "hardware"
-    },
-    {
-        "id": 2,
-        "text": "When RoCEv2 network packet drop exceeds 0.5%, the cluster orchestrator must trigger PFC (Priority Flow Control) pause frames on queue 3.",
-        "category": "networking"
-    },
-    {
-        "id": 3,
-        "text": "DeepSeek-V3 671B MoE shards 256 routed experts across nodes using All-to-All collective dispatch over InfiniBand fabric.",
-        "category": "architecture"
-    },
-    {
-        "id": 4,
-        "text": "K3s multi-tenancy namespaces k3s-alpha and k3s-beta enforce a strict 5% resource quota on Grace CPU cores and memory.",
-        "category": "kubernetes"
-    }
-]
-
-print(f"[*] Ingesting {len(raw_documents)} documents into vector storage...")
-points = []
-for doc in raw_documents:
-    vector = embedder.encode(doc["text"]).tolist()
-    points.append(PointStruct(
-        id=doc["id"],
-        vector=vector,
-        payload={"text": doc["text"], "category": doc["category"]}
-    ))
-qdrant.upsert(collection_name=COLLECTION_NAME, points=points)
-print("[✓] Documents successfully indexed with HNSW embeddings.")
-
-# 4. Execute Retrieval & Reranking Pipeline
-def answer_user_query(query: str):
-    print("\n" + "=" * 60)
-    print(f"QUERY: {query}")
-    print("=" * 60)
-    
-    # Stage 1: Dense Vector Retrieval (Recall Phase)
-    query_vector = embedder.encode(query).tolist()
-    search_hits = qdrant.search(
-        collection_name=COLLECTION_NAME,
-        query_vector=query_vector,
-        limit=4
-    )
-    
-    candidate_docs = [hit.payload["text"] for hit in search_hits]
-    print(f"[*] Stage 1 (Recall): Retrieved {len(candidate_docs)} candidate chunks from Qdrant.")
-    
-    # Stage 2: Cross-Encoder Precision Reranking
-    rerank_pairs = [[query, doc] for doc in candidate_docs]
-    scores = reranker.predict(rerank_pairs)
-    
-    # Pair documents with cross-encoder scores and sort descending
-    scored_candidates = sorted(zip(scores, candidate_docs), key=lambda x: x[0], reverse=True)
-    
-    print("[*] Stage 2 (Rerank Scores):")
-    for score, doc in scored_candidates:
-        print(f"    - Score: {score:.4f} | Content: {doc[:70]}...")
-        
-    # Take top 2 verified chunks
-    top_verified_docs = [doc for score, doc in scored_candidates[:2]]
-    
-    # Stage 3: Construct Grounded Citation Prompt
-    context_str = ""
-    for idx, doc_text in enumerate(top_verified_docs, 1):
-        context_str += f"<document id=\"{idx}\">\n{doc_text}\n</document>\n"
-        
-    system_prompt = (
-        "You are DeepSeek-R1, an enterprise research assistant. Answer the user question strictly using "
-        "the provided verified documents. Every factual assertion MUST cite its source document (e.g. [Doc 1]). "
-        "If the documents do not contain the answer, state that you do not know."
-    )
-    
-    user_prompt = f"Context:\n{context_str}\n\nQuestion: {query}\n\nAnswer:"
-    
-    # Stage 4: Query Local DeepSeek-R1 Serving Engine
-    print("[*] Stage 4: Dispatching grounded prompt to DeepSeek-R1...")
-    response = requests.post(
-        "http://localhost:8000/v1/chat/completions",
-        json={
-            "model": "deepseek-r1",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "temperature": 0.2
-        },
-        timeout=120
-    )
-    
-    result_json = response.json()
-    model_output = result_json["choices"][0]["message"]["content"]
-    
-    print("\n" + "-" * 60)
-    print("DEEPSEEK-R1 GROUNDED CITATION RESPONSE")
-    print("-" * 60)
-    print(model_output)
-    print("=" * 60)
-
-if __name__ == "__main__":
-    # Test query requiring specific hardware figures
-    answer_user_query("What is the interconnect bandwidth between Grace CPU and Blackwell GPU?")
+```text
+technical-depth            → alias (what every reader queries)
+technical-depth-20261001…  → previous (kept for rollback)
+technical-depth-20261002…  → live
 ```
 
----
+Qdrant applies alias changes atomically (`POST /collections/aliases` with `delete_alias` + `create_alias` in one request). Searches and point counts work through the alias name.
 
-## 9. Practice Exercises with Step-by-Step Solutions
+### 3.4 Retrieval metrics
 
-### Exercise 1: Computing Reranking Latency Overhead
-**Scenario**: You are architecting an enterprise RAG pipeline serving **50 queries per second (QPS)**.
-* Stage 1 Bi-Encoder search in Qdrant takes **8 milliseconds**.
-* You evaluate candidate set sizes of $N = 5$ vs $N = 30$ chunks for Stage 2 Cross-Encoder reranking.
-* The Cross-Encoder takes **1.2 milliseconds per pair** on the GB10 GPU.
+| Metric | Definition | Use |
+|---|---|---|
+| hit@1 | expected file is the top result | precision of the first source |
+| hit@k | expected file appears in the top k | does the context contain the answer at all |
+| MRR | mean of 1/rank of the expected file | rewards ranking it higher |
 
-**Question**: 
-1. What is the reranking latency for $N = 5$ candidates?
-2. What is the reranking latency for $N = 30$ candidates?
-3. Which candidate size satisfies an SLA requiring total retrieval time under **30 ms**?
+The gold set (`data/rag_gold.jsonl`) holds 16 questions with the file that answers each. Grow it every time a user reports a bad answer. It's your regression suite for retrieval.
 
-#### Solution:
-1. **Latency for $N = 5$**:
-   $$\text{Rerank Time} = 5 \times 1.2 \text{ ms} = \mathbf{6.0 \text{ ms}}$$
-   $$\text{Total Time} = 8.0 \text{ ms (Qdrant)} + 6.0 \text{ ms (Reranker)} = \mathbf{14.0 \text{ ms}}$$
-2. **Latency for $N = 30$**:
-   $$\text{Rerank Time} = 30 \times 1.2 \text{ ms} = \mathbf{36.0 \text{ ms}}$$
-   $$\text{Total Time} = 8.0 \text{ ms (Qdrant)} + 36.0 \text{ ms (Reranker)} = \mathbf{44.0 \text{ ms}}$$
-3. **SLA Determination**:
-   * An SLA ceiling of 30 ms is violated by $N = 30$ ($44 \text{ ms} > 30 \text{ ms}$).
-   * **Recommendation**: Set candidate recall size to **$N = 10 \text{ or } 15$** ($15 \times 1.2 = 18 \text{ ms} \implies 26 \text{ ms total}$), achieving optimal precision within SLA bounds!
+### 3.5 The answer prompt
 
----
+```text
+system: Answer only from the numbered sources. Cite them like [1].
+        If the sources do not contain the answer, say so.
+user:   Sources:
+        [1] (02 Kubernetes/21-…md § 3. LLD) …
+        [2] …
+        Question: …
+```
 
-### Exercise 2: Designing Alphanumeric Chunking Strategies
-**Scenario**: An engineering wiki contains thousands of code snippets, bash commands, and configuration YAMLs.
-A junior engineer chunks documents strictly by splitting every 200 words.
-**Question**: Explain why fixed-word chunking destroys code and table semantics in RAG, and describe the correct hierarchical parsing strategy.
-
-#### Solution:
-* **The Failure of Fixed-Word Chunking**:
-  * If a 200-word split occurs in the middle of a YAML block or Python function, opening braces and indentations are severed.
-  * The embedding model receives half a function without function signatures or variable declarations, rendering the chunk mathematically incoherent in vector space.
-* **The Solution (Hierarchical Semantic Chunking)**:
-  1. Parse markdown documents by structural AST nodes (Header `#`, `##`, Table `|---|`, and Code Blocks ` ``` `).
-  2. Treat entire code blocks and tables as **atomic indivisible chunks**.
-  3. Prepend document title and section hierarchy (e.g. `[Documentation > DGX Spark > NVLink]`) to every chunk's header to maintain contextual grounding!
+`temperature 0.3` for grounded answers. For R1 models the thinking is dropped before display (the parser puts it in `reasoning_content`, and the tool also strips any `</think>` prefix).
 
 ---
 
-## 10. Troubleshooting Guide & Diagnostic Runbook
+## 4. Integrations
 
-### Issue 1: Model Ignores Retrieved Documents and Hallucinates
-* **Root Cause**: The prompt lacks explicit grounding enforcement, or the temperature is set too high ($> 0.7$), causing the model to prioritize its pre-trained parametric memory over the provided context.
-* **Remediation**: Set temperature to **`0.1` or `0.2`** and enforce a strict system prompt constraint:
-  ```text
-  Answer ONLY using the provided documents. If the context does not explicitly mention the answer, reply: 'I cannot find that in the internal documentation.'
-  ```
-
-### Issue 2: Qdrant Connection Refused on Port 6333
-* **Root Cause**: The Qdrant container is stopped, crashed due to an unmounted storage volume, or blocked by local Linux firewall rules (`ufw`).
-* **Remediation**:
-  ```bash
-  # Check container status
-  docker ps -a | grep qdrant
-  # Inspect container logs
-  docker logs qdrant --tail 50
-  # Verify port binding
-  sudo netstat -tulpn | grep 6333
-  ```
+- **02 Vol 10**: Qdrant's StatefulSet, PVC and headless Service.
+- **Vol 27**: Open WebUI's own RAG covers ad-hoc uploads. This index covers the shared corpus.
+- **Vol 28**: in production, call embeddings and chat through LiteLLM (`embeddings`, `reasoning`) with a scoped key.
+- **Vol 30**: the agent's `search_docs` tool can call this retrieval.
+- **Vol 33**: run `rag-ingest` nightly. The gate stops a broken corpus or embedder from going live.
 
 ---
 
-## 🔗 Related Curriculum Modules
-* **Underlying Serving Engine**: [15-vllm-serving-deepseek-and-qwen.md](15-vllm-serving-deepseek-and-qwen.md)
-* **Radix Prefix Caching**: [16-sglang-and-radix-attention-serving.md](16-sglang-and-radix-attention-serving.md)
-* **UI Document Uploads**: [27-open-webui-deployment-and-integration.md](27-open-webui-deployment-and-integration.md)
-* **Structured Tool Calling**: [30-tool-calling-and-agentic-json.md](30-tool-calling-and-agentic-json.md)
+## 5. Lab
+
+### 5.1 Prerequisites
+
+```bash
+kubectl apply -k "02 Kubernetes/lab/manifests/50-workloads"         # Qdrant (if not already)
+cd "03 DeepSeek/lab"
+kubectl apply -k . && kubectl apply -k k8s/apps
+kubectl -n llm-serving rollout status deploy/bge-m3 --timeout=20m
+scripts/serve-model.sh r1-7b
+```
+
+### 5.2 Index with the gate
+
+```bash
+kubectl -n llm-serving delete job rag-ingest --ignore-not-found
+kubectl apply -f k8s/jobs/rag-ingest.yaml
+kubectl -n llm-serving logs -f job/rag-ingest
+```
+
+```text
+…  files → 1,4xx chunks
+collection technical-depth-2026100215….: 1,4xx points, dim 1024
+16 questions  hit@1 0.xx  hit@5 0.xx  MRR 0.xx
+gate passed
+alias technical-depth: (none) → technical-depth-2026100215…
+```
+
+**Record yours.** With bge-m3, expect hit@5 well above the gate.
+
+### 5.3 Measure retrieval from your workstation
+
+```bash
+kubectl -n llm-serving port-forward svc/qdrant 6333 &
+kubectl -n llm-serving port-forward svc/bge-m3 8001:8000 &
+E="--qdrant http://localhost:6333 --embed-url http://localhost:8001"
+for k in 1 3 5 10; do python3 tools/rag_demo.py eval $E -k $k | tail -1; done
+```
+
+| k | hit@k | MRR |
+|---|---|---|
+| 1 | | |
+| 3 | | |
+| 5 | | |
+| 10 | | |
+
+Every `MISS` line names the question, the wanted file and what came first. Read two misses and decide whether to fix chunking, the question or the document.
+
+### 5.4 Ask with citations
+
+```bash
+kubectl -n llm-serving port-forward svc/vllm 8000 &
+python3 tools/rag_demo.py ask "Why does the vLLM Deployment use Recreate and a preStop sleep?" $E \
+  --chat-url http://localhost:8000 --chat-model r1-7b --show-context | tail -15
+python3 tools/rag_demo.py ask "What is the capital of Australia?" $E --chat-url http://localhost:8000 --chat-model r1-7b | head -3
+```
+
+Expected: the first answer cites sources from `02 Kubernetes/21-…`. The second says the sources don't contain the answer. That's the refusal behaviour the system prompt asks for.
+
+### 5.5 Rollback drill
+
+```bash
+python3 tools/rag_demo.py ingest --repo ../.. --dirs "02 Kubernetes" "03 DeepSeek" $E      # a second, newer index
+curl -s localhost:6333/aliases | jq '.result.aliases'
+python3 tools/rag_demo.py rollback $E
+curl -s localhost:6333/aliases | jq '.result.aliases'
+```
+
+Expected: the alias points at the older collection. Queries never failed during either switch.
+
+### 5.6 Gate drill
+
+```bash
+python3 tools/rag_demo.py ingest --repo ../.. --dirs "02 Kubernetes" "03 DeepSeek" $E --gate 0.99; echo "exit $?"
+```
+
+Expected: `GATE FAILED … alias technical-depth unchanged` and exit 1. Nothing users see changed.
+
+### 5.7 Latency budget
+
+```bash
+time python3 tools/rag_demo.py ask "How does GRPO compute advantages?" $E --chat-url http://localhost:8000 --chat-model r1-7b >/dev/null
+```
+
+| Stage | Typical (**record yours**) |
+|---|---|
+| embed question (bge-m3) | tens of ms |
+| Qdrant search (top-5) | a few ms |
+| R1 generation | seconds to minutes. Dominates |
+
+Retrieval is almost never the bottleneck. Reasoning length is.
+
+---
+
+## 6. Verify
+
+```bash
+scripts/verify.sh rag
+```
+
+| Check | Expected |
+|---|---|
+| alias | `technical-depth` resolves. `points/count` > 100 |
+| quality | hit@5 ≥ 0.6 on the gold set |
+| citations | answers cite `[n]` and the sources list matches |
+| rollback | alias moves to the previous collection |
+| gate | a failing index is deleted. Exit code 1 |
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Wrong input: Vector dimension error` | collection created with another embedder's dimension | the alias scheme creates a fresh collection per ingest. Don't mix embedders in one |
+| hit@5 low everywhere | wrong embedding model, or the query wasn't embedded with the same model | same `--embed-model` for ingest and query. Check `/v1/models` on bge-m3 |
+| hit@5 fine, answers wrong | chat model ignores sources, or the context is truncated | lower k, raise `max_tokens`. Check `--show-context` |
+| answer has no citations | model or prompt drift | keep the system prompt. A stronger model (r1-32b-fp8) follows it better |
+| `409 Conflict` creating an alias | a plain collection has the alias's name | `rag_demo.py` migrates it automatically on the next ingest |
+| ingest Job slow | bge-m3 on a busy time-slice | run ingest when chat traffic is low. Raise `--batch` |
+| bge-m3 OOM at start | util too high next to a big chat model | keep util 0.06. Check `free -g` |
+
+---
+
+## 8. Scale-out path
+
+| One Spark | Production |
+|---|---|
+| dense bge-m3, top-k | hybrid search (bge-m3 sparse + dense, or BM25), plus a cross-encoder reranker (bge-reranker) on the top 50 |
+| one Qdrant node | Qdrant cluster with replication and sharding. Snapshots to object storage |
+| gold set of 16 | hundreds of graded questions, answer-level eval (faithfulness, citation accuracy) in CI |
+| repo Markdown | connectors to wikis and tickets, document ACLs stored as payload filters per user |
+
+---
+
+## 9. Checklist
+
+- [ ] I can re-index without downtime and roll back in one command.
+- [ ] I measure retrieval with hit@k and MRR, not by eye.
+- [ ] A bad index can't go live because the gate stops it.
+- [ ] Answers cite sources and refuse when the sources are silent.

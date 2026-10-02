@@ -1,393 +1,232 @@
-# 27. Open-WebUI Deployment & Thinking-Token Integration
+# Volume 27 — Open WebUI for Reasoning Models: A Hardened Chat Front End, Visible Thinking, Built-In RAG, and Tested Backups
 
-> **Target Audience**: Full-Stack AI Engineers, Platform Administrators, and Enterprise Solution Architects deploying turnkey ChatGPT-style interfaces for internal business teams.  
-> **Prerequisites**: Docker / Docker Compose basics, Kubernetes Services & Ingress (from [19-kubernetes-manifests-for-deepseek.md](19-kubernetes-manifests-for-deepseek.md) and [21-ingress-and-realtime-streaming-gateways.md](21-ingress-and-realtime-streaming-gateways.md)), and vLLM OpenAI API endpoints.  
-> **Estimated Study Time**: 50 minutes.  
-> **What You Will Master**: The system architecture of **Open-WebUI**, parsing and rendering collapsible **`<think>` reasoning accordions**, multi-model routing between **DeepSeek-R1** and **Qwen2.5**, enterprise role-based access control (RBAC), and deployment on the **NVIDIA DGX Spark**.
+> **Module 03 · Part VII — Applications** · Prev: [26 FSDP & ZeRO-3](26-distributed-deepspeed-zero3-and-fsdp.md) · Next: [28 LiteLLM gateway](28-litellm-proxy-gateway-load-balancing.md)
 
----
-
-## 📑 Table of Contents
-1. [Foundational Scaffolding: Why Raw Endpoints Fail in Enterprise](#1-foundational-scaffolding-why-raw-endpoints-fail-in-enterprise)
-2. [Co-Related Concepts & The Evolution of Self-Hosted AI Interfaces](#2-co-related-concepts--the-evolution-of-self-hosted-ai-interfaces)
-3. [Deep First-Principles: Thinking-Token Regex Parsing & Accordion UI](#3-deep-first-principles-thinking-token-regex-parsing--accordion-ui)
-4. [Comparative Analysis: Open-WebUI vs. LibreChat vs. Dify vs. Chainlit](#4-comparative-analysis-open-webui-vs-librechat-vs-dify-vs-chainlit)
-5. [Hardware Grounding: Resource Allocation on DGX Spark (Grace ARM64)](#5-hardware-grounding-resource-allocation-on-dgx-spark-grace-arm64)
-6. [Production Deployment Suite (Docker Compose with PostgreSQL & K8s)](#6-production-deployment-suite-docker-compose-with-postgresql--k8s)
-7. [Enterprise RBAC, OAuth / SSO & System Prompt Defaults](#7-enterprise-rbac-oauth--sso--system-prompt-defaults)
-8. [Hands-On Python Lab: Custom Open-WebUI Pipeline Filter](#8-hands-on-python-lab-custom-open-webui-pipeline-filter)
-9. [Practice Exercises with Step-by-Step Solutions](#9-practice-exercises-with-step-by-step-solutions)
-10. [Troubleshooting Guide & Diagnostic Runbook](#10-troubleshooting-guide--diagnostic-runbook)
+| | |
+|---|---|
+| **You will build** | Open WebUI as the team's chat front end for the Spark. It talks only to LiteLLM, shows R1's thinking as a collapsible block, admits new users only after admin approval, keeps sessions across restarts, uses the lab's bge-m3 for document RAG, and has a nightly SQLite backup that you restore in a drill |
+| **Hardware** | spark-01 |
+| **Time** | 75 min |
+| **Risk** | Low. The restore drill replaces the database with last night's copy. Take a manual backup first (§5.6) |
+| **Lab files** | [`k8s/apps/open-webui.yaml`](lab/k8s/apps/open-webui.yaml), [`k8s/ops/webui-backup.yaml`](lab/k8s/ops/webui-backup.yaml), [`k8s/apps/litellm.yaml`](lab/k8s/apps/litellm.yaml), [`k8s/apps/bge-m3.yaml`](lab/k8s/apps/bge-m3.yaml) |
 
 ---
 
-## 1. Foundational Scaffolding: Why Raw Endpoints Fail in Enterprise
+## 1. Why a front end needs engineering too
 
-### The Developer vs. Enterprise User Disconnect
-While ML engineers are comfortable querying inference models using `curl`, Python scripts, or terminal shells:
-* **Business Users**: Non-technical employees (lawyers, doctors, financial analysts, product managers) require an intuitive, graphical web application.
-* **Persistent Sessions**: Users need persistent conversation histories, organized folders, search, and session bookmarking.
-* **Document Grounding**: Users expect drag-and-drop document upload (PDF, DOCX, CSV) for instant conversational Question-and-Answering (RAG).
-* **Enterprise Governance**: Security teams require Single Sign-On (SSO / OAuth / SAML), audit logging, and Role-Based Access Control (RBAC) to ensure unapproved users cannot consume expensive GPU tokens.
+Open WebUI is the fastest way to give people a ChatGPT-like experience on your own hardware. Run with defaults, it's also an open sign-up page that forgets its signing key on restart, keeps every chat in one unbacked SQLite file, and talks to model servers directly. Production use needs:
 
-### The Raw Telegraph vs. Executive Workstation Analogy
-Interacting with an LLM via raw terminal `curl` is like receiving a stream of Morse code over a telegraph wire. 
-**Open-WebUI** is like a modern executive desktop computer with color monitors, categorized filing cabinets, interactive drop-down menus, and mathematical LaTeX equation rendering.
-
-```
-                          ENTERPRISE WEBUI FLOW
-┌────────────────────────────────────────────────────────────────────────┐
-│ Open-WebUI Frontend (SvelteKit + TailwindCSS)                          │
-│ - Markdown & KaTeX Math Rendering                                      │
-│ - Collapsible Reasoning Accordion ("Thought for 12.4s")                │
-│ - Multi-Model Dropdown: [DeepSeek-R1-32B ▾] [Qwen2.5-Coder ▾]          │
-└────────────────────────────────────────────────────────────────────────┘
-                                    │
-                         Internal REST API Calls
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ Open-WebUI Backend (FastAPI + SQLAlchemy)                              │
-│ - Role-Based Access Control (Admin / User / Pending)                   │
-│ - Chat History Storage (PostgreSQL / SQLite)                           │
-│ - Document Ingestion & Vector Storage (Built-in ChromaDB / Qdrant)     │
-└────────────────────────────────────────────────────────────────────────┘
-                                    │
-                         OpenAI-Compatible Streaming
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ Upstream Inference Layer (vLLM / LiteLLM Proxy on DGX Spark)          │
-└────────────────────────────────────────────────────────────────────────┘
-```
+| Concern | Default | Lab setting |
+|---|---|---|
+| Who can sign up | anyone. The first user becomes admin | `DEFAULT_USER_ROLE=pending`: new users wait for approval |
+| Session signing key | generated at start, outside the PVC | `WEBUI_SECRET_KEY` from a Secret (Vault-synced). Logins survive restarts |
+| Model access | whatever the backend lists | only LiteLLM aliases (`reasoning`, `reasoning-fast`). Per-group visibility in the admin panel |
+| Long answers | client timeout 300 s | `AIOHTTP_CLIENT_TIMEOUT=900` (matches Vol 21) |
+| Data | `webui.db` on a PVC | `local-nvme-retain` PVC + nightly online backup, integrity-checked, 14 kept |
+| Embeddings for uploads | built-in CPU model | the lab's `bge-m3` via LiteLLM alias `embeddings` |
 
 ---
 
-## 2. Co-Related Concepts & The Evolution of Self-Hosted AI Interfaces
+## 2. Architecture — HLD
 
 ```mermaid
-flowchart TD
-    Gradio["Early Gradio / Streamlit Demos<br/>Single-user, session resets on refresh, no auth"] --> Oobabooga["Text-Generation-WebUI (Oobabooga)<br/>Local hobbyist focus, brittle multi-user state"]
-    Oobabooga --> LibreChat["LibreChat<br/>Node.js / React full-stack ChatGPT clone"]
-    Oobabooga --> OpenWebUI["Open-WebUI (formerly Ollama WebUI)<br/>SvelteKit + FastAPI, native Ollama/vLLM integration, pipeline filters"]
-    OpenWebUI --> Dify["Dify / Flowise<br/>Complex visual node-based workflow orchestration"]
+flowchart LR
+  U["Browser<br/>webui.lab.local"] --> GW["Traefik Gateway<br/>HTTPRoute open-webui · 900 s"]
+  GW --> OW
+  subgraph OWS["StatefulSet open-webui (llm-serving)"]
+    OW["Open WebUI v0.6.30 :8080<br/>auth · chats · knowledge · admin"]
+    DB[("PVC data-open-webui-0<br/>local-nvme-retain<br/>webui.db · uploads · vector data")]
+    OW --- DB
+  end
+  OW -->|"OPENAI_API_BASE_URLS<br/>Bearer LiteLLM key"| LL["LiteLLM :4000<br/>aliases reasoning · reasoning-fast · embeddings"]
+  LL --> V["vLLM (R1)"]
+  LL --> E["bge-m3 embeddings"]
+  SEC["Secret open-webui-secret<br/>(vault-sync, Vol 32)"] -.-> OW
+  BK["CronJob webui-backup 02:41<br/>sqlite backup API · integrity_check"] -->|"read-only"| DB
+  BK --> BP[("PVC webui-backups<br/>14 nightly copies")]
+  classDef ext fill:#24292f,stroke:#000,color:#fff
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef sec fill:#cf222e,stroke:#82071e,color:#fff
+  class U ext
+  class GW net
+  class OW,LL ctrl
+  class V,E gpu
+  class DB,BP,BK store
+  class SEC sec
+  style OWS fill:#e6f4f5,stroke:#0e7c86
 ```
 
 ---
 
-## 3. Deep First-Principles: Thinking-Token Regex Parsing & Accordion UI
+## 3. LLD
 
-When **DeepSeek-R1** generates reasoning, it outputs thousands of tokens encapsulated inside XML delimiter tags:
+### 3.1 Environment variables in the manifest
+
+| Variable | Value | Purpose |
+|---|---|---|
+| `OPENAI_API_BASE_URLS` / `OPENAI_API_KEYS` | `http://litellm.llm-serving:4000/v1` / the LiteLLM key | the only backend |
+| `ENABLE_OLLAMA_API` | false | no direct Ollama path that bypasses LiteLLM |
+| `WEBUI_URL` | `http://webui.lab.local` | links in emails and OAuth callbacks |
+| `RAG_EMBEDDING_ENGINE` / `RAG_OPENAI_API_BASE_URL` / `RAG_EMBEDDING_MODEL` | `openai` / LiteLLM / `embeddings` | document embeddings on the GB10 via bge-m3 |
+| `DEFAULT_USER_ROLE` | `pending` | approval workflow |
+| `AIOHTTP_CLIENT_TIMEOUT` | 900 | long reasoning streams |
+| `WEBUI_SECRET_KEY` | from `open-webui-secret` | stable JWT signing |
+
+### 3.2 Why a StatefulSet
+
+One replica, a stable pod name (`open-webui-0`) and a `volumeClaimTemplate` that gives a PVC (`data-open-webui-0`) that outlives the pod. Open WebUI's default SQLite database doesn't support multiple writers. For more than one replica, switch to PostgreSQL (`DATABASE_URL`, `POSTGRES_IMAGE` is pinned in `versions.env`) and a shared vector store.
+
+### 3.3 How thinking is shown
+
+vLLM's reasoning parser streams `delta.reasoning_content` before `delta.content` (Vol 21). LiteLLM passes it through, and Open WebUI renders it as a collapsible **"Thought for N seconds"** block above the answer. If a backend has no parser, Open WebUI also recognises raw `<think>…</think>` in the content.
+
+### 3.4 Backup design
+
+| Choice | Reason |
+|---|---|
+| SQLite **online backup API** (not `cp`) | consistent snapshot while the app writes. A file copy can capture a half-written page |
+| source opened `mode=ro` | the backup can't modify the live database |
+| `PRAGMA integrity_check` on the copy | a backup you haven't checked isn't a backup |
+| separate Retain PVC, keep 14 | survives deleting the app. Bounded size |
+
+---
+
+## 4. Integrations
+
+- **Vol 21**: same Gateway and timeouts. Open WebUI is just another client on the path.
+- **Vol 28**: give Open WebUI its own LiteLLM virtual key with a budget instead of the master key.
+- **Vol 29**: Open WebUI's built-in RAG is for ad-hoc uploads. The repository-wide index lives in Qdrant.
+- **Vol 32**: `open-webui-secret` and the LiteLLM key come from Vault through `vault-sync`.
+
+---
+
+## 5. Lab
+
+### 5.1 Deploy with a real secret
+
+```bash
+cd "03 DeepSeek/lab"
+kubectl apply -k k8s/apps
+kubectl -n llm-serving create secret generic open-webui-secret --from-literal=secret-key="$(openssl rand -hex 32)" \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n llm-serving rollout restart sts/open-webui
+kubectl -n llm-serving rollout status sts/open-webui --timeout=10m
+curl -s http://webui.lab.local/health                     # {"status":true}
+```
+
+### 5.2 Admin account and approval workflow
+
+1. Open `http://webui.lab.local` and sign up. The first account becomes **admin**.
+2. In a private window, sign up a second user. Expected: an "account activation pending" screen.
+3. As admin: **Admin Panel → Users** → set the new user to *user*.
+
+### 5.3 Models and visibility
+
+**Admin Panel → Settings → Connections** shows the LiteLLM connection. **Workspace → Models** lists `reasoning`, `reasoning-fast`, `reasoning-sglang` and `embeddings`. Hide `embeddings` from chat, and restrict `reasoning` (the 32B) to a group if you want to ration it.
+
+### 5.4 Watch thinking stream
+
+Ask `reasoning-fast`: *"A training run saves a checkpoint every 7 steps. How many checkpoints exist after 100 steps? Explain briefly."* Expected: a "Thinking…" block that streams and then collapses to "Thought for N seconds", followed by the answer **14**. Cross-check the timing with `stream_probe.py` through the same Gateway (Vol 21).
+
+### 5.5 Document RAG with bge-m3
+
+**Workspace → Knowledge → +**: create "DeepSeek lab" and upload `03 DeepSeek/21-ingress-and-realtime-streaming-gateways.md`. In a new chat, type `#` and pick the collection, then ask: *"What request timeout does the LiteLLM HTTPRoute use?"* Expected: **900 s**, with a citation to the uploaded file. Confirm the embeddings went to the GB10:
+
+```bash
+kubectl -n llm-serving logs deploy/bge-m3 | grep -c 'POST /v1/embeddings'
+```
+
+### 5.6 Back up, then prove you can restore
+
+```bash
+kubectl apply -f k8s/ops/webui-backup.yaml
+kubectl -n llm-serving create job --from=cronjob/webui-backup webui-backup-now
+kubectl -n llm-serving logs -f job/webui-backup-now
+```
 
 ```text
-<think>
-1. The user is asking to prove that sqrt(2) is irrational.
-2. Let's assume for contradiction that sqrt(2) = a / b, where gcd(a, b) = 1.
-3. Then 2 = a^2 / b^2, so a^2 = 2 * b^2.
-... (300 lines of rigorous intermediate algebraic steps) ...
-</think>
-To prove that $\sqrt{2}$ is irrational, we proceed by contradiction...
+webui-20261002T150412Z.db 1032192 bytes, integrity: ok
 ```
 
-### The Unhandled UI Disaster
-If an unspecialized web UI renders this stream:
-* The user's screen is flooded with 15 pages of dense internal thought derivation.
-* The actual final answer is pushed off the bottom of the screen.
+Restore drill: delete a chat in the UI, then roll the database back to the backup.
 
-### The Open-WebUI Streaming State Machine
-Open-WebUI implements an active token stream parser:
-1. **Enter State (`<think>`)**: When the tokenizer encounters `<think>`, it opens an HTML `<details class="thought-accordion">` container and starts an elapsed-time stopwatch.
-2. **Streaming Thought State**: All subsequent tokens are piped into the collapsed accordion body with muted typography (`opacity: 0.75`).
-3. **Exit State (`</think>`)**: When `</think>` arrives, the stopwatch stops, the accordion is collapsed by default, and a summary header is injected: *"Thought for 14 seconds (Click to expand)"*.
-4. **Answer State**: The remaining tokens stream as standard Markdown with KaTeX math rendering.
-
----
-
-## 4. Comparative Analysis: Open-WebUI vs. LibreChat vs. Dify vs. Chainlit
-
-| Platform Feature | Open-WebUI | LibreChat | Dify | Chainlit |
-| :--- | :--- | :--- | :--- | :--- |
-| **Frontend Framework** | SvelteKit (Ultra-fast) | React / Next.js | Next.js | React |
-| **Backend Framework** | FastAPI (Python) | Node.js / Express | Python Flask / Celery | Python |
-| **Native `<think>` Parsing**| **Built-in Native Accordion**| Requires custom plugin| Partial | Custom UI components |
-| **Document RAG Ingestion**| Built-in (Drag-and-drop) | MeiliSearch / pgvector | Native multi-modal RAG | External integration |
-| **Custom Pipeline Filters**| Native Python Pipelines | Custom endpoints | Visual flow editor | Python hooks |
-| **Resource Footprint** | **Very Low (< 450 MB RAM)** | Medium (~1.2 GB RAM) | High (~3.5 GB RAM) | **Very Low** |
-
----
-
-## 5. Hardware Grounding: Resource Allocation on DGX Spark (Grace ARM64)
-
-The **NVIDIA DGX Spark** features:
-* **CPU**: 72-core NVIDIA Grace ARM Neoverse V2.
-* **GPU**: NVIDIA Blackwell GB10 (128 GB Unified Memory).
-
-Because Open-WebUI is a web server (CPU and RAM bound), it **does not require GPU resources**.
-* It runs entirely on the **Grace ARM CPU cores**, consuming less than **500 MB of system RAM**.
-* 100% of the Blackwell GB10 GPU remains dedicated to vLLM inference and PEFT training!
-* Official multi-arch Docker images (`ghcr.io/open-webui/open-webui:main`) include native `linux/arm64` binaries, eliminating emulation overhead.
-
----
-
-## 6. Production Deployment Suite (Docker Compose with PostgreSQL & K8s)
-
-### 1. Production Docker Compose (`docker-compose.yaml`):
-
-```yaml
-version: '3.8'
-
-services:
-  db:
-    image: postgres:16-alpine
-    container_name: open-webui-postgres
-    restart: always
-    environment:
-      POSTGRES_DB: openwebui
-      POSTGRES_USER: webui_admin
-      POSTGRES_PASSWORD: SecretEnterprisePassword123!
-    volumes:
-      - /data/openwebui-postgres:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U webui_admin -d openwebui"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  open-webui:
-    image: ghcr.io/open-webui/open-webui:main
-    container_name: open-webui
-    restart: always
-    depends_on:
-      db:
-        condition: service_healthy
-    ports:
-      - "3000:8080"
-    environment:
-      # Database Connection
-      - DATABASE_URL=postgresql://webui_admin:SecretEnterprisePassword123!@db:5432/openwebui
-      # Upstream Inference Engine (vLLM on host)
-      - OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1
-      - OPENAI_API_KEY=none
-      # Enterprise Governance
-      - WEBUI_NAME=Enterprise DGX Spark AI Hub
-      - ENABLE_SIGNUP=false          # Disable open public signup (Admin invite only)
-      - DEFAULT_MODELS=deepseek-r1    # Default model pre-selected
-      - ENABLE_RAG_WEB_SEARCH=false   # Keep purely local and offline
-      - SHOW_ADMIN_DETAILS=false
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - /data/openwebui-storage:/app/backend/data
-```
-
-Launch with:
 ```bash
-docker compose up -d
-```
-
-### 2. Kubernetes Production Manifest (`open-webui-k8s.yaml`):
-
-```yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: openwebui-data-pvc
-  namespace: ai-serving
+B=$(kubectl -n llm-serving logs job/webui-backup-now | awk '/integrity: ok/{print $1}')
+kubectl -n llm-serving scale sts open-webui --replicas=0
+kubectl -n llm-serving apply -f - <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata: {name: webui-restore, namespace: llm-serving}
 spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: local-path
-  resources:
-    requests:
-      storage: 20Gi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: open-webui
-  namespace: ai-serving
-  labels:
-    app: open-webui
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: open-webui
+  backoffLimit: 0
   template:
-    metadata:
-      labels:
-        app: open-webui
     spec:
+      restartPolicy: Never
       containers:
-      - name: webui
-        image: ghcr.io/open-webui/open-webui:main
-        imagePullPolicy: IfNotPresent
-        ports:
-          - containerPort: 8080
-            name: http
-        resources:
-          requests:
-            cpu: "2"
-            memory: "2Gi"
-          limits:
-            cpu: "8"
-            memory: "8Gi"
-        env:
-          - name: OPENAI_API_BASE_URL
-            value: "http://deepseek-r1-service.ai-inference.svc.cluster.local:8000/v1"
-          - name: OPENAI_API_KEY
-            value: "none"
-          - name: WEBUI_NAME
-            value: "DGX Spark AI Hub"
-          - name: ENABLE_SIGNUP
-            value: "false"
-        volumeMounts:
-          - name: storage
-            mountPath: /app/backend/data
+        - name: restore
+          image: python:3.12-slim
+          command: ["sh", "-c", "cp /data/webui.db /data/webui.db.before-restore && cp /backups/$B /data/webui.db && ls -l /data"]
+          resources: {requests: {cpu: 100m, memory: 64Mi}, limits: {memory: 128Mi}}
+          volumeMounts: [{name: data, mountPath: /data}, {name: backups, mountPath: /backups, readOnly: true}]
       volumes:
-        - name: storage
-          persistentVolumeClaim:
-            claimName: openwebui-data-pvc
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: open-webui-service
-  namespace: ai-serving
-spec:
-  type: ClusterIP
-  selector:
-    app: open-webui
-  ports:
-    - port: 80
-      targetPort: 8080
+        - {name: data, persistentVolumeClaim: {claimName: data-open-webui-0}}
+        - {name: backups, persistentVolumeClaim: {claimName: webui-backups}}
+EOF
+kubectl -n llm-serving wait --for=condition=complete job/webui-restore --timeout=2m
+kubectl -n llm-serving scale sts open-webui --replicas=1
 ```
 
----
+Expected: after logging in again, the deleted chat is back. Record how long the restore took. That's your recovery time for the chat service.
 
-## 7. Enterprise RBAC, OAuth / SSO & System Prompt Defaults
+### 5.7 Sessions survive a restart
 
-### Hardening Open-WebUI for Production:
-1. **Disable Public Signups**: Ensure `ENABLE_SIGNUP=false` is set in the environment. The first registered user automatically becomes the **Super Admin**. All subsequent users must be invited or approved manually.
-2. **SSO / OAuth Integration**: Connect to corporate Identity Providers (Keycloak, Okta, Microsoft Entra ID) using OpenID Connect (OIDC):
-   ```ini
-   ENABLE_OAUTH_SIGNUP=true
-   OAUTH_CLIENT_ID="enterprise-dgx-hub"
-   OAUTH_CLIENT_SECRET="xxxx-secret-key"
-   OPENID_PROVIDER_URL="https://auth.company.internal/realms/enterprise"
-   ```
-3. **Global Reasoning System Prompt**: Enforce standard reasoning instructions across all users in Admin Settings $\to$ Models:
-   ```text
-   You are DeepSeek-R1 running locally on NVIDIA DGX Spark hardware. 
-   Formulate your mathematical and logical proofs methodically step-by-step.
-   ```
+Stay logged in, then `kubectl -n llm-serving delete pod open-webui-0`. When the pod returns, refresh: you're still logged in, because the signing key comes from the Secret.
 
 ---
 
-## 8. Hands-On Python Lab: Custom Open-WebUI Pipeline Filter
+## 6. Verify
 
-Open-WebUI supports **Pipelines**—custom Python filters that intercept and mutate prompts or responses.
-This script demonstrates an enterprise **PII (Personally Identifiable Information) Redaction Filter** that scrubs credit card numbers and social security numbers before sending the prompt to the model:
-
-```python
-#!/usr/bin/env python3
-"""
-openwebui_pii_filter.py
-Custom Open-WebUI pipeline filter intercepting and scrubbing sensitive enterprise PII.
-"""
-
-import re
-from typing import List, Dict, Any
-
-class Pipeline:
-    def __init__(self):
-        self.name = "Enterprise Security & PII Redaction Filter"
-        # Regex patterns for Credit Cards and US Social Security Numbers
-        self.cc_pattern = re.compile(r'\b(?:\d[ -]*?){13,16}\b')
-        self.ssn_pattern = re.compile(r'\b\d{3}-\d{2}-\d{4}\b')
-
-    async def on_startup(self):
-        print(f"[*] Pipeline '{self.name}' initialized successfully.")
-
-    async def on_shutdown(self):
-        print(f"[*] Pipeline '{self.name}' shut down.")
-
-    def pipe(self, user_message: str, model_id: str, messages: List[Dict[str, Any]], body: Dict[str, Any]) -> str:
-        """
-        Intercepts incoming user prompts and redacts PII before model ingestion.
-        """
-        original_prompt = user_message
-        
-        # Redact credit card numbers
-        sanitized_prompt = self.cc_pattern.sub("[REDACTED CREDIT CARD]", original_prompt)
-        
-        # Redact SSNs
-        sanitized_prompt = self.ssn_pattern.sub("[REDACTED SSN]", sanitized_prompt)
-        
-        if sanitized_prompt != original_prompt:
-            print("[!] Security Alert: PII detected and scrubbed from user input!")
-            
-        return sanitized_prompt
-
-if __name__ == "__main__":
-    # Test filter locally
-    filter_instance = Pipeline()
-    test_query = "Please audit transaction for account 4532-1189-9021-3456 and SSN 000-12-3456."
-    result = filter_instance.pipe(test_query, "deepseek-r1", [], {})
-    print(f"Original : {test_query}")
-    print(f"Scrubbed : {result}")
-```
+| Check | Expected |
+|---|---|
+| health | `/health` → `{"status":true}` |
+| sign-up | second user is `pending` until approved |
+| thinking | collapsible block, then the answer |
+| RAG | answer cites the uploaded file. bge-m3 log shows embedding calls |
+| backup | `integrity: ok`. File in `webui-backups` |
+| restore | deleted chat reappears |
 
 ---
 
-## 9. Practice Exercises with Step-by-Step Solutions
+## 7. Troubleshooting
 
-### Exercise 1: Configuring Multi-Model Routing in Open-WebUI
-**Scenario**: You have two models served by local vLLM instances:
-* `deepseek-r1-32b` on port `8000`.
-* `qwen-coder-32b` on port `8001`.
-
-**Question**: How do you configure Open-WebUI's `OPENAI_API_BASE_URLS` and `OPENAI_API_KEYS` to let users switch between both models in the web interface dropdown?
-
-#### Solution:
-* Open-WebUI natively supports multiple semicolon-separated base URLs:
-  ```yaml
-  environment:
-    - OPENAI_API_BASE_URLS=http://host.docker.internal:8000/v1;http://host.docker.internal:8001/v1
-    - OPENAI_API_KEYS=none;none
-  ```
-* Open-WebUI queries `/v1/models` across both endpoints, merges the model lists, and exposes them in the top-left model selection dropdown!
+| Symptom | Cause | Fix |
+|---|---|---|
+| no models in the picker | wrong LiteLLM key, or LiteLLM down | `kubectl -n llm-serving logs sts/open-webui | grep -i openai`. Check the key Secret |
+| answer stops after ~5 min | `AIOHTTP_CLIENT_TIMEOUT` (or another hop) too short | 900 everywhere (Vol 21) |
+| thinking shown as plain text | backend lacks a reasoning parser | `--reasoning-parser=deepseek_r1` on vLLM (D01) |
+| everyone logged out after a restart | `WEBUI_SECRET_KEY` unset or changed | set it from the Secret. Don't rotate it casually |
+| RAG upload fails `embedding` error | `embeddings` alias missing, or bge-m3 not ready | `kubectl get deploy bge-m3`. Check the LiteLLM model list |
+| `database is locked` | two replicas on SQLite | one replica, or PostgreSQL |
+| backup Job Pending | PVC bound to another node (two-Spark cluster) | schedule the Job on the node holding `data-open-webui-0` |
 
 ---
 
-### Exercise 2: Auditing Docker Host Networking
-**Scenario**: When running Open-WebUI via Docker Compose on Linux, the web interface reports:
-`Connection error: Unable to connect to http://host.docker.internal:8000/v1`.
-**Question**: Explain why this occurs on Linux Docker, and state the exact configuration required to resolve it.
+## 8. Scale-out path
 
-#### Solution:
-* **The Cause**: On macOS and Windows, Docker Desktop automatically provides the DNS entry `host.docker.internal`. On native Linux, `host.docker.internal` does not exist by default.
-* **The Resolution**: In `docker-compose.yaml`, map the host gateway explicitly:
-  ```yaml
-  extra_hosts:
-    - "host.docker.internal:host-gateway"
-  ```
-  This maps `host.docker.internal` to the Docker bridge gateway IP (`172.17.0.1`), allowing containers to seamlessly communicate with host-bound ports!
+| One Spark | Production |
+|---|---|
+| SQLite + nightly backup | PostgreSQL (HA) with PITR. Uploads in object storage. A shared vector DB (Qdrant/pgvector) |
+| local accounts with approval | SSO via OIDC (`ENABLE_OAUTH_SIGNUP`, `OAUTH_*`) and group mapping from the IdP |
+| one replica | several replicas behind the Gateway, Redis for websockets/sessions |
 
 ---
 
-## 10. Troubleshooting Guide & Diagnostic Runbook
+## 9. Checklist
 
-### Issue 1: `<think>` Tags Render as Raw Unstyled Text
-* **Root Cause**: The active Open-WebUI version is outdated or the "Enable Web Thinking Accordion" toggle in Admin Settings $\to$ Interface is disabled.
-* **Remediation**: Pull the latest container image (`docker compose pull open-webui`) and verify in Admin Settings that **Enable Thought Display** is enabled.
-
-### Issue 2: PostgreSQL Migration Error on Container Boot
-* **Root Cause**: Open-WebUI attempted to connect to PostgreSQL before the database container finished initializing its tables.
-* **Remediation**: Use Docker Compose `service_healthy` condition on the database container as demonstrated in Section 6.
-
----
-
-## 🔗 Related Curriculum Modules
-* **Underlying Serving Engine**: [15-vllm-serving-deepseek-and-qwen.md](15-vllm-serving-deepseek-and-qwen.md)
-* **Real-Time Streaming Gateways**: [21-ingress-and-realtime-streaming-gateways.md](21-ingress-and-realtime-streaming-gateways.md)
-* **Load Balancing Reverse Proxy**: [28-litellm-proxy-gateway-load-balancing.md](28-litellm-proxy-gateway-load-balancing.md)
-* **Enterprise RAG Integration**: [29-enterprise-rag-with-qdrant-and-bge.md](29-enterprise-rag-with-qdrant-and-bge.md)
+- [ ] New users can't use the GPU until an admin approves them.
+- [ ] Thinking renders separately from the answer.
+- [ ] Uploaded documents are embedded on the Spark, not on a CPU fallback.
+- [ ] I restored the chat database from a backup and know how long it took.

@@ -1,0 +1,16 @@
+{"question": "How do etcd compaction and defragmentation reclaim database space?", "expect": "02 Kubernetes/03-etcd-database-deep-dive.md"}
+{"question": "Why does a pod resolve external names slowly because of ndots and search domains in resolv.conf?", "expect": "02 Kubernetes/08-coredns-and-service-discovery.md"}
+{"question": "How does a Triton ensemble chain the preprocess model and the scorer model?", "expect": "02 Kubernetes/22-nvidia-triton-inference-server.md"}
+{"question": "How is the KV cache transferred from the prefill instance to the decode instance?", "expect": "02 Kubernetes/24-disaggregated-prefill-and-decode-serving.md"}
+{"question": "Why does vLLM use the Recreate strategy, a preStop sleep and a long termination grace period?", "expect": "02 Kubernetes/21-vllm-high-throughput-llm-serving.md"}
+{"question": "How do I measure NCCL all-reduce bus bandwidth between two Sparks over RoCE?", "expect": "02 Kubernetes/17-distributed-ai-training-and-nccl.md"}
+{"question": "How much KV cache per token does multi-head latent attention need compared with multi-head attention?", "expect": "03 DeepSeek/01-multi-head-latent-attention-mla.md"}
+{"question": "How does the auxiliary-loss-free bias term balance load across routed experts?", "expect": "03 DeepSeek/02-deepseek-moe-fine-grained-routing.md"}
+{"question": "What speed-up does speculative decoding give for a given acceptance rate and number of draft tokens?", "expect": "03 DeepSeek/03-multi-token-prediction-mtp.md"}
+{"question": "Why does FP8 training use 128x128 block scales for weights and 1x128 tiles for activations?", "expect": "03 DeepSeek/04-fp8-mixed-precision-framework.md"}
+{"question": "How does GRPO compute the advantage relative to the group without a value network?", "expect": "03 DeepSeek/05-deepseek-r1-and-grpo-reasoning.md"}
+{"question": "How does ring attention pass key and value blocks between ranks for long context?", "expect": "03 DeepSeek/08-context-parallelism-and-long-context-attention.md"}
+{"question": "How does 3FS use chain replication with apportioned queries (CRAQ)?", "expect": "03 DeepSeek/10-3fs-fire-flyer-file-system.md"}
+{"question": "How can I tell that a proxy is buffering the SSE stream of a reasoning model?", "expect": "03 DeepSeek/21-ingress-and-realtime-streaming-gateways.md"}
+{"question": "How does KEDA scale vLLM to zero outside office hours so Kueue can run training?", "expect": "03 DeepSeek/22-autoscaling-with-kserve-and-kueue.md"}
+{"question": "How does DeepSpeed ZeRO-3 offload the optimizer state to NVMe on one Spark?", "expect": "03 DeepSeek/26-distributed-deepspeed-zero3-and-fsdp.md"}

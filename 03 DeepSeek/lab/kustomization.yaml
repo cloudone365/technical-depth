@@ -28,6 +28,7 @@ configMapGenerator:
       - data/math_word.jsonl
       - data/code_tasks.jsonl
       - data/json_tasks.jsonl
+      - data/rag_gold.jsonl
   - name: deepseek-train
     namespace: batch
     files:

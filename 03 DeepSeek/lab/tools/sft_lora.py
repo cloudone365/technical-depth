@@ -10,6 +10,7 @@ miniature): SFT for format  →  GRPO (grpo_tiny.py) for correctness.
   python3 sft_lora.py --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --steps 300 --rank 16
   python3 sft_lora.py --merge                                    # also write merged weights for vLLM
   python3 sft_lora.py --export /ckpt/data/gpu_math.json          # write the dataset for Unsloth / LLaMA-Factory (Vol 24)
+  torchrun --nproc-per-node 1 sft_lora.py --full --deepspeed zero3-nvme.json --model …-7B   # full FT, ZeRO-3 (Vol 26)
 """
 import argparse
 import json
@@ -40,24 +41,26 @@ def train(a):
     from peft import LoraConfig
     from trl import SFTConfig, SFTTrainer
     cfg = SFTConfig(output_dir=a.out, max_steps=a.steps, per_device_train_batch_size=8, gradient_accumulation_steps=2,
-                    learning_rate=2e-4, lr_scheduler_type="cosine", warmup_ratio=0.05, logging_steps=10,
+                    learning_rate=1e-5 if a.full else 2e-4, deepspeed=a.deepspeed, lr_scheduler_type="cosine", warmup_ratio=0.05, logging_steps=10,
                     save_steps=a.steps, bf16=True, gradient_checkpointing=True, max_length=512,
                     assistant_only_loss=False, report_to="none")
     peft = LoraConfig(r=a.rank, lora_alpha=2 * a.rank, lora_dropout=0.05, task_type="CAUSAL_LM",
                       target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
-    tr = SFTTrainer(model=a.model, args=cfg, train_dataset=Dataset.from_list(dataset(a.n)), peft_config=peft)
-    tr.model.print_trainable_parameters()
+    tr = SFTTrainer(model=a.model, args=cfg, train_dataset=Dataset.from_list(dataset(a.n)),
+                    peft_config=None if a.full else peft)
+    if not a.full:
+        tr.model.print_trainable_parameters()
     import time
     import torch
     torch.cuda.reset_peak_memory_stats()
     t0 = time.time()
     tr.train()
     dt = time.time() - t0
-    print("STATS " + json.dumps({"engine": "trl+peft", "steps": a.steps, "seconds": round(dt, 1),
+    print("STATS " + json.dumps({"engine": "trl+deepspeed" if a.deepspeed else "trl+peft", "full": a.full, "steps": a.steps, "seconds": round(dt, 1),
                                  "steps_per_s": round(a.steps / dt, 3),
                                  "peak_cuda_gib": round(torch.cuda.max_memory_allocated() / 2**30, 2)}))
-    tr.save_model(a.out)                                            # adapter only (MiBs)
-    if a.merge:
+    tr.save_model(a.out)                                            # adapter only (MiBs), or the full model with --full
+    if a.merge and not a.full:
         merged = tr.model.merge_and_unload()
         merged.save_pretrained(a.out + "-merged")
         tr.processing_class.save_pretrained(a.out + "-merged")
@@ -73,6 +76,8 @@ if __name__ == "__main__":
     ap.add_argument("--rank", type=int, default=16)
     ap.add_argument("--merge", action="store_true")
     ap.add_argument("--out", default="/ckpt/sft-lora")
+    ap.add_argument("--full", action="store_true", help="full-parameter fine-tune (no LoRA)")
+    ap.add_argument("--deepspeed", metavar="JSON", help="DeepSpeed config (ZeRO-3, offload); launch with torchrun")
     ap.add_argument("--export", metavar="FILE", help="write the dataset as ShareGPT/OpenAI-messages JSON and exit")
     a = ap.parse_args()
     if a.export:

@@ -20,12 +20,18 @@ spec:
       containers:
         - name: ingest
           image: python:3.12-slim
-          command: ["python3", "/tools/rag_demo.py", "ingest", "--repo", "/work/repo",
-                    "--dirs", "01 Ansible", "02 Kubernetes", "03 DeepSeek"]
+          # builds technical-depth-<timestamp>, evaluates it on data/rag_gold.jsonl, and only then
+          # moves the alias technical-depth to it (blue/green with a quality gate, Volume 29)
+          command: ["python3", "/app/tools/rag_demo.py", "ingest", "--repo", "/work/repo",
+                    "--dirs", "01 Ansible", "02 Kubernetes", "03 DeepSeek", "--gate", "0.6"]
           env: [{name: HOME, value: /work}]
           securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
           resources: {requests: {cpu: 500m, memory: 256Mi}, limits: {memory: 1Gi}}
-          volumeMounts: [{name: work, mountPath: /work}, {name: tools, mountPath: /tools}]
+          volumeMounts:
+            - {name: work, mountPath: /work}
+            - {name: tools, mountPath: /app/tools}
+            - {name: data, mountPath: /app/data}
       volumes:
         - {name: work, emptyDir: {}}
         - {name: tools, configMap: {name: deepseek-tools}}
+        - {name: data, configMap: {name: deepseek-evaldata}}

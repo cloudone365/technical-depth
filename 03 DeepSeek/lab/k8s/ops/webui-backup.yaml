@@ -1,0 +1,51 @@
+# Nightly online backup of Open WebUI's SQLite database (Volume 27).
+# Uses SQLite's backup API (consistent while the app is running) and keeps 14 days.
+# Both PVCs are local-path (hostPath) volumes on the same node, so mounting the
+# StatefulSet's RWO volume from a second pod works on a single Spark.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: webui-backups, namespace: llm-serving}
+spec:
+  storageClassName: local-nvme-retain
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 5Gi}}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: webui-backup, namespace: llm-serving}
+spec:
+  schedule: "41 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          containers:
+            - name: backup
+              image: python:3.12-slim
+              command: ["python3", "-c"]
+              args:
+                - |
+                  import datetime, os, pathlib, sqlite3
+                  src = sqlite3.connect("file:/data/webui.db?mode=ro", uri=True)
+                  name = f"webui-{datetime.datetime.utcnow():%Y%m%dT%H%M%SZ}.db"
+                  dst = sqlite3.connect(f"/backups/{name}")
+                  src.backup(dst); dst.close(); src.close()
+                  chk = sqlite3.connect(f"/backups/{name}").execute("PRAGMA integrity_check").fetchone()[0]
+                  print(name, os.path.getsize(f"/backups/{name}"), "bytes, integrity:", chk)
+                  assert chk == "ok"
+                  old = sorted(pathlib.Path("/backups").glob("webui-*.db"))[:-14]
+                  for p in old:
+                      p.unlink(); print("pruned", p.name)
+              resources: {requests: {cpu: 100m, memory: 64Mi}, limits: {memory: 256Mi}}
+              volumeMounts:
+                - {name: data, mountPath: /data, readOnly: true}
+                - {name: backups, mountPath: /backups}
+          volumes:
+            - {name: data, persistentVolumeClaim: {claimName: data-open-webui-0}}
+            - {name: backups, persistentVolumeClaim: {claimName: webui-backups}}

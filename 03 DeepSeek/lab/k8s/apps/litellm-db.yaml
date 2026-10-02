@@ -1,0 +1,47 @@
+# PostgreSQL for LiteLLM (Volume 28): virtual keys, teams, budgets and spend logs
+# live here. Without a database LiteLLM only knows the master key.
+apiVersion: v1
+kind: Secret
+metadata: {name: litellm-db, namespace: llm-serving}
+type: Opaque
+stringData:
+  password: "change-me-db"                 # replace from Vault (Volume 32)
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: litellm-db, namespace: llm-serving, labels: {app: litellm-db}}
+spec:
+  serviceName: litellm-db
+  replicas: 1
+  selector: {matchLabels: {app: litellm-db}}
+  template:
+    metadata: {labels: {app: litellm-db}}
+    spec:
+      securityContext: {runAsUser: 70, runAsGroup: 70, fsGroup: 70, runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: postgres
+          image: postgres:16.10-alpine
+          env:
+            - {name: POSTGRES_USER, value: litellm}
+            - {name: POSTGRES_DB, value: litellm}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: litellm-db, key: password}}
+          ports: [{name: pg, containerPort: 5432}]
+          readinessProbe: {exec: {command: ["pg_isready", "-U", "litellm"]}, periodSeconds: 10}
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 1Gi}}
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        storageClassName: local-nvme-retain
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 5Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: litellm-db, namespace: llm-serving}
+spec:
+  selector: {app: litellm-db}
+  ports: [{name: pg, port: 5432, targetPort: pg}]
