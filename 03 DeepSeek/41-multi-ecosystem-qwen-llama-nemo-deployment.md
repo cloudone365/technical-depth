@@ -1,428 +1,261 @@
-# 41. Multi-Ecosystem Local Deployment — Alibaba Qwen, Meta Llama & NVIDIA NeMo on DGX Spark
+# Volume 41 — One Platform, Many Model Families: DeepSeek, Qwen, Llama, Mistral and NVIDIA Nemotron Side by Side on a DGX Spark
 
-> **Target Audience**: AI Platform Architects, Infrastructure Directors, SREs, and Full-Stack Machine Learning Engineers designing multi-model enterprise platforms on NVIDIA DGX Spark.  
-> **Prerequisites**: Familiarity with Kubernetes deployments, vLLM/Triton serving architectures, and LiteLLM gateway routing ([Volume 15](15-vllm-serving-deepseek-and-qwen.md), [Volume 19](19-kubernetes-manifests-for-deepseek.md), [Volume 28](28-litellm-proxy-gateway-load-balancing.md)).  
-> **Estimated Deep-Dive Time**: 50 minutes  
-> **What You Will Master**:
-> 1. Multi-Ecosystem Coexistence Architecture: Running Alibaba Qwen 2.5, Meta Llama 3.3, NVIDIA NeMo/Nemotron, and DeepSeek-R1 concurrently or on-demand on the DGX Spark.
-> 2. Complete setup and serving workflows for **Alibaba Qwen 2.5 & SWIFT** (Scalable lightWeight Infrastructure for Fine-Tuning).
-> 3. Production orchestration for **Meta Llama 3.3 & Llama Stack**, including **Llama Guard 3** content safety filtering.
-> 4. Silicon-native compilation with **NVIDIA NeMo Megatron-Core** and **TensorRT-LLM** for maximum Blackwell GB10 Tensor Core utilization.
-> 5. Unified L7 API routing via **LiteLLM Gateway**, presenting a single OpenAI-compatible endpoint for all 4 foundation model families.
-> 6. Dynamic memory management strategies on 128 GB unified memory: Model swapping, VRAM partitioning, and high-speed NVMe caching.
+> **Module 03 · Part X — Operate and practise** · Prev: [40 Hands-on workbook](40-hands-on-exercises-workbook.md) · Next: [Module 04 — Qwen](../04%20Qwen/README.md)
 
----
-
-## 📑 Table of Contents
-1. [Zero-to-One Intuition: Why Enterprises Need Multi-Ecosystem Orchestration](#1-zero-to-one-intuition-why-enterprises-need-multi-ecosystem-orchestration)
-2. [Multi-Ecosystem Unified Architecture on DGX Spark](#2-multi-ecosystem-unified-architecture-on-dgx-spark)
-3. [Ecosystem 1: Alibaba Qwen 2.5 & SWIFT Fine-Tuning Setup](#3-ecosystem-1-alibaba-qwen-25--swift-fine-tuning-setup)
-4. [Ecosystem 2: Meta Llama 3.3, Llama Stack & Llama Guard 3](#4-ecosystem-2-meta-llama-33-llama-stack--llama-guard-3)
-5. [Ecosystem 3: NVIDIA NeMo & TensorRT-LLM C++ Compilation](#5-ecosystem-3-nvidia-nemo--tensorrt-llm-c-compilation)
-6. [Unified LiteLLM L7 Gateway & Cross-Model Routing](#6-unified-litellm-l7-gateway--cross-model-routing)
-7. [Hands-On Production Lab: Multi-Ecosystem Dynamic Router Client](#7-hands-on-production-lab-multi-ecosystem-dynamic-router-client)
-8. [Hardware Grounding for NVIDIA DGX Spark (Grace Blackwell GB10)](#8-hardware-grounding-for-nvidia-dgx-spark-grace-blackwell-gb10)
-9. [Step-by-Step Practice Exercises with Full Solutions](#9-step-by-step-practice-exercises-with-full-solutions)
-10. [Troubleshooting & Operational FAQ](#10-troubleshooting--operational-faq)
+| | |
+|---|---|
+| **You will build** | A multi-vendor serving setup that treats every model family the same way: one catalog, one gateway, one eval harness, one dashboard. Each family's quirks (chat templates, parsers, sampling, licences) live in catalog flags. Two models run **at the same time** on one GB10 (a reasoner and a tool model), each behind its own LiteLLM alias, and you measure how they interfere. NVIDIA's Nemotron joins with its system-prompt reasoning switch, plus an optional NIM path |
+| **Hardware** | spark-01 (spark-02 removes the co-location trade-offs) |
+| **Time** | 2 h |
+| **Risk** | Medium. Two engines share UMA and GPU time. Stay inside the budget in §3.2 |
+| **Lab files** | [`models.yaml`](lab/models.yaml), [`k8s/multi/`](lab/k8s/multi/), [`k8s/apps/litellm.yaml`](lab/k8s/apps/litellm.yaml), [`scripts/compare-models.sh`](lab/scripts/compare-models.sh), [`tools/stream_probe.py`](lab/tools/stream_probe.py), [`tools/model_math.py`](lab/tools/model_math.py) |
 
 ---
 
-## 1. Zero-to-One Intuition: Why Enterprises Need Multi-Ecosystem Orchestration
+## 1. Why a multi-ecosystem platform
 
-In enterprise production, no single model family excels at every operational workload:
-* **DeepSeek-R1**: Supreme at mathematical reasoning, complex multi-step deductive logic, and zero-defect algorithmic design ([Volume 05](05-deepseek-r1-and-grpo-reasoning.md)).
-* **Alibaba Qwen 2.5-Coder**: The premier open-weights coding model, unmatched in large-scale Python refactoring and multi-lingual documentation ([Volume 35](35-deepseek-vs-alibaba-qwen25.md)).
-* **Meta Llama 3.3-70B**: The industry benchmark for broad conversational English, instruction following, and general-purpose enterprise chat ([Volume 34](34-deepseek-vs-meta-llama3.md)).
-* **NVIDIA Nemotron / NeMo**: Fully optimized for NVIDIA GPU microarchitecture, delivering maximum raw FLOPs and native Guardrails integration.
+No single model family wins everything (Vols 34–37): DeepSeek's distills reason, Qwen calls tools reliably, Llama has the broadest ecosystem, Mistral is permissively licensed and efficient, and NVIDIA's Nemotron is tuned for NVIDIA's stack with a switchable reasoning mode. An enterprise platform should make adding or swapping a family a **catalog change**, not a new project:
 
-```text
-The Enterprise Multi-Model Mental Model:
-┌────────────────────────────────────────────────────────────────────────┐
-│                   Unified LiteLLM Enterprise Gateway                   │
-└───────┬─────────────────┬────────────────────┬──────────────────┬──────┘
-        │                 │                    │                  │
-        ▼                 ▼                    ▼                  ▼
-  [DeepSeek-R1]    [Qwen2.5-Coder]       [Llama 3.3-70B]     [NVIDIA Nemotron]
-  "Deduce root     "Refactor this        "Draft executive   "Low-latency real-time
-   cause proof"     FastAPI microservice" summary report"    guardrail inspection"
-```
-
-Operating multiple disparate models on a single workstation or data center node requires strict memory accounting, standardized container runtimes, and a centralized routing gateway.
+| Concern | Where it lives on this platform |
+|---|---|
+| weights and revision | `models.yaml` (`hf`, `revision`) |
+| engine flags per family | `models.yaml` `args` → generated overlay |
+| memory budget | `util` + the playbook's budget guard (Vol 31) |
+| client-facing name | LiteLLM alias (Vol 28) |
+| access and cost | LiteLLM keys and budgets |
+| quality | the same harness and gate (Vol 40) |
+| licence and gating | catalog notes + Vault-held HF token (Vol 32) |
 
 ---
 
-## 2. Multi-Ecosystem Unified Architecture on DGX Spark
-
-On the **NVIDIA DGX Spark**, all 4 model families share a single high-speed NVMe storage pool (`/data/models`) and unified LPDDR5X memory:
+## 2. Architecture — HLD
 
 ```mermaid
-flowchart TD
-    Client["Enterprise Client Applications"] --> Gateway["LiteLLM Unified L7 Gateway (:4000)"]
-
-    subgraph DGX_Host["NVIDIA DGX Spark (Grace ARM Neoverse V2 + Blackwell GB10)"]
-        Gateway -->|"Route: /v1/models (qwen-coder)"| QWEN["Alibaba Qwen2.5-Coder-32B<br/>Engine: vLLM (:8001)"]
-        Gateway -->|"Route: /v1/models (llama-3.3)"| LLAMA["Meta Llama-3.3-70B (FP8)<br/>Engine: vLLM / SGLang (:8002)"]
-        Gateway -->|"Route: /v1/models (nemotron)"| NEMO["NVIDIA Nemotron / TRT-LLM<br/>Engine: Triton Server (:8003)"]
-        Gateway -->|"Route: /v1/models (deepseek-r1)"| DEEPSEEK["DeepSeek-R1-Distill-32B<br/>Engine: FlashMLA / vLLM (:8000)"]
-
-        QWEN -.-> NVME[("Shared High-Speed NVMe Storage (/data/models)")]
-        LLAMA -.-> NVME
-        NEMO -.-> NVME
-        DEEPSEEK -.-> NVME
-    end
+flowchart LR
+  C["clients · Open WebUI · agents"] --> LL["LiteLLM aliases<br/>reasoning · agent · embeddings"]
+  subgraph GB10["one GB10 · 4 time-slices · 119.7 GiB UMA"]
+    direction TB
+    A["deploy/vllm (main)<br/>r1-7b · util 0.30 · slice 1"]
+    B["deploy/vllm-qwen2-5-7b-tools<br/>k8s/multi · util 0.30 · slice 2"]
+    E["deploy/bge-m3<br/>util 0.06 · slice 3"]
+    F["free slice / Kueue (training off-hours)"]
+  end
+  LL -->|"reasoning"| A
+  LL -->|"agent"| B
+  LL -->|"embeddings"| E
+  CAT[("models.yaml<br/>deepseek · qwen · llama · mistral · nvidia")] -.->|gen_overlays| A
+  CAT -.-> B
+  P["Prometheus · per-model labels"] -.-> A
+  P -.-> B
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef ext fill:#24292f,stroke:#000,color:#fff
+  classDef obs fill:#fb8500,stroke:#9a5000,color:#000
+  class C ext
+  class LL ctrl
+  class A,B,E gpu
+  class F,CAT store
+  class P obs
+  style GB10 fill:#f4fbe8,stroke:#76b900
 ```
 
 ---
 
-## 3. Ecosystem 1: Alibaba Qwen 2.5 & SWIFT Fine-Tuning Setup
+## 3. LLD
 
-Alibaba’s **Qwen 2.5** family offers state-of-the-art dense architecture with a massive 152,064-token vocabulary.
+### 3.1 Family differences, captured as catalog flags
 
-### 1. Download Model Weights:
+| Family (catalog entry) | Chat/output style | vLLM flags in the catalog | Sampling | Licence / access |
+|---|---|---|---|---|
+| DeepSeek R1 distills (`r1-*`) | `<think>` then answer | `--reasoning-parser=deepseek_r1` | temp 0.6, top-p 0.95, no system prompt | MIT (+ base licence: Apache 2.0 Qwen, Llama licence for Llama bases) |
+| DeepSeek V2-Lite / Coder-V2-Lite | chat, MLA + MoE | `--trust-remote-code` | defaults | DeepSeek model licence |
+| Qwen2.5 Instruct (`qwen2.5-*`) | chat + `<tool_call>` | `--enable-auto-tool-choice --tool-call-parser=hermes` | temp 0.7 | Apache 2.0 (most sizes) |
+| Qwen QwQ (`qwq-32b-awq`) | `<think>` then answer | AWQ + `deepseek_r1` parser | temp 0.6 | Apache 2.0 |
+| Llama 3.1 (`llama-3.1-8b`) | chat + JSON tool calls | (`--tool-call-parser=llama3_json` when tools are needed) | temp 0.6 | Llama 3.1 Community Licence, **gated** |
+| Mistral (`mistral-7b`, `mixtral-8x7b-fp8`) | chat | `--tokenizer-mode/--config-format/--load-format=mistral` (7B) | temp 0.7 | Apache 2.0 |
+| NVIDIA Nemotron Nano (`nemotron-nano-8b`) | reasoning **switch**: system prompt `detailed thinking on/off` | none (Llama-3.1 architecture) | on: temp 0.6, top-p 0.95. Off: greedy | NVIDIA Open Model Licence + Llama 3.1 licence |
+
+Check each model card when you pin a revision (Vol 33). Recommendations change between releases.
+
+### 3.2 Running two chat models at once: the budget
+
+| Workload | util | ≈ GiB | Slice |
+|---|---|---|---|
+| main `vllm` (r1-7b) | 0.30 | 36 | 1 |
+| `vllm-qwen2-5-7b-tools` (k8s/multi) | 0.30 | 36 | 1 |
+| bge-m3 | 0.06 | 7 | 1 |
+| **sum** | **0.66** | **79** | **3 of 4** |
+| OS, k3s, Prometheus, Qdrant, Postgres, WebUI | — | ~15–20 | — |
+
+That leaves ~20 GiB and one slice. Not enough for Kueue training at the same time (its quota is 2 slices), so co-location and daytime training are mutually exclusive on one Spark. The office-hours pattern (Vol 22) or spark-02 resolves this.
+
+### 3.3 How `k8s/multi` overlays avoid collisions
+
+| Problem | Fix in the overlay |
+|---|---|
+| same Deployment name `vllm` | `nameSuffix: -<model>` → `vllm-qwen2-5-7b-tools` |
+| `svc/vllm` (selector `app: vllm`) would also pick the new pods | labels `app: vllm-<model>` with `includeSelectors: true` |
+| second copy of the `hf-token` Secret | `$patch: delete`. Both Deployments read the shared, Vault-synced Secret |
+| metrics scraping | ServiceMonitor selector patched to the new `app` label. Dashboards key on `model_name`, so both appear |
+
+### 3.4 Interference: time-slicing is not isolation
+
+Both engines submit kernels to the same GPU. Time-slicing alternates between them, so one model's load raises the other's inter-token latency. Unified memory is shared too. §5.3 measures this, and is why production puts latency-sensitive models on separate GPUs (or MIG on datacenter GPUs. The GB10 has no MIG).
+
+---
+
+## 4. Integrations
+
+- **Vols 15, 19**: catalog and generated overlays. `k8s/multi` composes on top of them.
+- **Vol 28**: LiteLLM aliases point at the right Service per family.
+- **Vol 31**: the playbook deploys the main model. Side-by-side models are an extra `kubectl apply -k`.
+- **Vols 34–37**: the comparisons that justify which family sits behind which alias.
+- **Modules 04 (Qwen), 05 (NeMo), 06 (Gemma), 07 (NVIDIA)**: deeper dives per ecosystem on this same platform.
+
+---
+
+## 5. Lab
+
+### 5.1 Plan the budget
+
 ```bash
-HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download \
-  Qwen/Qwen2.5-Coder-32B-Instruct \
-  --local-dir /data/models/Qwen2.5-Coder-32B-Instruct \
-  --local-dir-use-symlinks False
+cd "03 DeepSeek/lab"
+for m in deepseek-r1-distill-qwen-7b qwen2.5-7b; do python3 tools/model_math.py $m --util 0.30 --ctx 32768 | grep -E '^model|verdict|decode'; done
+python3 - <<'PY'
+import yaml
+cat = {m["name"]: m for m in yaml.safe_load(open("models.yaml"))["models"]}
+plan = ["r1-7b", "qwen2.5-7b-tools"]
+total = sum(cat[n]["util"] for n in plan) + 0.06          # + bge-m3
+print("plan", plan, "+ bge-m3 → util", round(total, 2), "OK" if total <= 0.80 else "OVER BUDGET")
+PY
 ```
 
-### 2. Fine-Tuning with Alibaba SWIFT:
-Alibaba **SWIFT (Scalable lightWeight Infrastructure for Fine-Tuning)** provides native multi-model support:
+### 5.2 Two families at once
+
 ```bash
-pip install ms-swift -U
-
-# Execute LoRA fine-tuning on DGX Spark
-CUDA_VISIBLE_DEVICES=0 swift sft \
-  --model_type qwen2_5-coder-32b-instruct \
-  --model_id_or_path /data/models/Qwen2.5-Coder-32B-Instruct \
-  --sft_type lora \
-  --dataset code-alpaca-en \
-  --output_dir /data/checkpoints/qwen_lora \
-  --max_length 4096 \
-  --learning_rate 1e-4 \
-  --fp16 True
+scripts/serve-model.sh r1-7b                                   # main
+kubectl apply -k k8s/multi/qwen2.5-7b-tools                    # side by side
+kubectl -n llm-serving rollout status deploy/vllm-qwen2-5-7b-tools --timeout=30m
+kubectl -n llm-serving get deploy -L model -l 'app in (vllm, vllm-qwen2-5-7b-tools, bge-m3)'
+free -g
 ```
 
-### 3. Deploy Serving Pod on Kubernetes (`qwen-vllm.yaml`):
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: qwen-coder-32b
-  namespace: ai-serving
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: qwen-coder
-  template:
-    metadata:
-      labels:
-        app: qwen-coder
-    spec:
-      containers:
-        - name: vllm
-          image: vllm/vllm-openai:latest
-          args:
-            - "--model=/models/Qwen2.5-Coder-32B-Instruct"
-            - "--gpu-memory-utilization=0.45"
-            - "--max-model-len=16384"
-            - "--port=8001"
-          ports:
-            - containerPort: 8001
-          volumeMounts:
-            - name: models
-              mountPath: /models
-      volumes:
-        - name: models
-          hostPath:
-            path: /data/models
-```
+Point the LiteLLM `agent` alias at the side Service and apply:
 
----
-
-## 4. Ecosystem 2: Meta Llama 3.3, Llama Stack & Llama Guard 3
-
-Meta’s **Llama 3.3-70B** provides the intelligence of Llama 3.1-405B at a fraction of the memory footprint. When quantized to FP8, it consumes ~72 GB of VRAM.
-
-### 1. Download Llama 3.3-70B (FP8 Quantized):
 ```bash
-huggingface-cli download neuralmagic/Llama-3.3-70B-Instruct-FP8 \
-  --local-dir /data/models/Llama-3.3-70B-Instruct-FP8
+sed -i 's|model: hosted_vllm/qwen2.5-7b-tools, api_base: http://vllm.llm-serving:8000/v1|model: hosted_vllm/qwen2.5-7b-tools, api_base: http://vllm-qwen2-5-7b-tools.llm-serving:8000/v1|' k8s/apps/litellm.yaml
+kubectl apply -k k8s/apps && kubectl -n llm-serving rollout restart deploy/litellm
 ```
 
-### 2. Stand Up the Llama Stack Distribution:
-Llama Stack provides standardized client SDKs for agentic tool use and RAG:
+Now `reasoning-fast` (r1-7b) and `agent` (Qwen tools) answer at the same time through one endpoint:
+
 ```bash
-pip install llama-stack
-
-# Launch Llama Stack server pointing to local vLLM backend
-llama stack run vllm \
-  --port 5000 \
-  --env VLLM_URL=http://localhost:8002 \
-  --env MODEL=/data/models/Llama-3.3-70B-Instruct-FP8
+KEY=<LiteLLM key allowed to use agent and reasoning-fast>; API=http://api.lab.local
+python3 tools/agent_tools.py "What share of 4 slices is 3, in percent?" --url $API --api-key $KEY --model agent &
+python3 tools/stream_probe.py --url $API --api-key $KEY --model reasoning-fast --max-tokens 1024
+wait
 ```
 
-### 3. Deploy Content Safety Guardrails with Llama Guard 3:
-Run `Llama-Guard-3-8B` alongside serving pods to screen incoming and outgoing prompts for policy violations:
+### 5.3 Measure interference
+
 ```bash
-vllm serve meta-llama/Llama-Guard-3-8B \
-  --port 8005 \
-  --gpu-memory-utilization 0.12 \
-  --max-model-len 4096
+kubectl -n llm-serving port-forward svc/vllm 8000 &                      # r1-7b
+kubectl -n llm-serving port-forward svc/vllm-qwen2-5-7b-tools 8001:8000 &
+# A: r1-7b alone
+python3 tools/stream_probe.py --url http://localhost:8000 --model r1-7b --max-tokens 512 | grep ITL
+# B: r1-7b while Qwen is under load
+python3 tools/eval_harness.py --url http://localhost:8001 --model qwen2.5-7b-tools --suites json --limit 8 --concurrency 16 --max-tokens 1024 >/dev/null &
+sleep 5; python3 tools/stream_probe.py --url http://localhost:8000 --model r1-7b --max-tokens 512 | grep ITL; wait
 ```
 
----
+| | r1-7b ITL p50 (ms) | r1-7b ITL p99 (ms) |
+|---|---|---|
+| alone (**record yours**) | | |
+| with Qwen at c=16 | | |
 
-## 5. Ecosystem 3: NVIDIA NeMo & TensorRT-LLM C++ Compilation
+Expected: ITL rises noticeably under the neighbour's load. Decide whether that's acceptable for your users or whether the second model belongs on spark-02.
 
-NVIDIA's proprietary software stack provides maximum hardware acceleration on Blackwell Tensor Cores.
+### 5.4 NVIDIA Nemotron: reasoning on demand
 
-### 1. Launch NeMo Framework Container:
 ```bash
-docker run --gpus all -it --rm --ipc=host \
-  -v /data/models:/workspace/models \
-  nvcr.io/nvidia/nemo:24.09
+kubectl delete -k k8s/multi/qwen2.5-7b-tools                  # free the memory
+scripts/serve-model.sh nemotron-nano-8b
+kubectl -n llm-serving port-forward svc/vllm 8000 &
+for mode in on off; do
+  curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d "{\"model\":\"nemotron-nano-8b\",
+    \"messages\":[{\"role\":\"system\",\"content\":\"detailed thinking $mode\"},
+                  {\"role\":\"user\",\"content\":\"A run checkpoints every 7 steps. How many checkpoints after 100 steps?\"}],
+    \"max_tokens\":2048,\"temperature\":$([[ $mode == on ]] && echo 0.6 || echo 0)}" \
+  | jq -r --arg m "$mode" '"thinking \($m): \(.usage.completion_tokens) tokens → \(.choices[0].message.content | .[-80:])"'
+done
 ```
 
-### 2. Compile Model to TensorRT-LLM Engine:
+Expected: "on" produces a `<think>` section and many more tokens. "off" answers directly. One model, two cost/latency profiles, chosen per request. (No reasoning parser is set for Nemotron, so the thinking stays in `content`. Add `--reasoning-parser=deepseek_r1` in the catalog if your vLLM version handles its tags.)
+
+### 5.5 All families, one table
+
 ```bash
-# Step A: Convert HuggingFace checkpoint to TRT-LLM format
-python3 /app/tensorrt_llm/examples/llama/convert_checkpoint.py \
-  --model_dir /workspace/models/Llama-3.3-70B-Instruct-FP8 \
-  --output_dir /tmp/trt_checkpoints \
-  --dtype fp8
-
-# Step B: Build optimized execution engine plan
-trtllm-build \
-  --checkpoint_dir /tmp/trt_checkpoints \
-  --output_dir /workspace/models/llama-70b-trt-engine \
-  --gemm_plugin fp8 \
-  --max_batch_size 32 \
-  --max_input_len 4096 \
-  --max_output_len 2048
+MAX_TOKENS=8192 scripts/compare-models.sh r1-7b r1-llama-8b qwen2.5-7b-tools llama-3.1-8b mistral-7b nemotron-nano-8b
 ```
 
-### 3. Serve via NVIDIA Triton Inference Server:
-Deploy the compiled `.plan` engine inside Triton on port 8003 for maximum C++ execution efficiency.
+Add a column by hand for licence/access from §3.1, and you have the input for an architecture decision record.
+
+### 5.6 (Optional) NVIDIA NIM
+
+NVIDIA NIM packages a model, an optimised engine (TensorRT-LLM or vLLM) and an OpenAI-compatible API into one container. If the NGC catalog lists a **DGX Spark** NIM for a model you need:
+
+1. Store the NGC API key in Vault (`kv/spark-lab/deepseek/ngc`) and sync it to a Secret (Vol 32).
+2. Deploy the NIM following its NGC page (image, cache volume, GPU request), in `llm-serving`, with `priorityClassName: spark-serving`.
+3. Register it in LiteLLM as `openai/<served-name>` at its Service, and run the same harness through the gateway.
+
+The comparison you care about is the one in §5.5: same suites, same gate, whichever engine is underneath.
 
 ---
 
-## 6. Unified LiteLLM L7 Gateway & Cross-Model Routing
+## 6. Verify
 
-Deploy **LiteLLM** to present a single unified OpenAI-compatible endpoint across all 4 ecosystems:
+| Check | Expected |
+|---|---|
+| budget | planned util ≤ 0.80 before deploying |
+| co-location | both Deployments Ready. `svc/vllm` endpoints contain only the main pod |
+| routing | `reasoning-fast` and `agent` answer from different models at the same time |
+| interference | ITL alone vs under neighbour load recorded |
+| Nemotron | thinking on vs off token counts recorded |
+| table | six families compared with one harness |
 
-### `litellm-config.yaml`:
-```yaml
-model_list:
-  # 1. DeepSeek-R1 (Deep Reasoning)
-  - model_name: "deepseek-r1"
-    litellm_params:
-      model: "openai/DeepSeek-R1-Distill-32B"
-      api_base: "http://deepseek-service.ai-serving.svc.cluster.local:8000/v1"
-      api_key: "none"
-
-  # 2. Alibaba Qwen (Software Engineering & Code)
-  - model_name: "qwen-coder"
-    litellm_params:
-      model: "openai/Qwen2.5-Coder-32B-Instruct"
-      api_base: "http://qwen-service.ai-serving.svc.cluster.local:8001/v1"
-      api_key: "none"
-
-  # 3. Meta Llama 3.3 (General Enterprise Chat)
-  - model_name: "llama-3.3"
-    litellm_params:
-      model: "openai/Llama-3.3-70B-Instruct-FP8"
-      api_base: "http://llama-service.ai-serving.svc.cluster.local:8002/v1"
-      api_key: "none"
-
-  # 4. NVIDIA Nemotron / TRT-LLM (High-Throughput Acceleration)
-  - model_name: "nemotron-trt"
-    litellm_params:
-      model: "openai/nemotron"
-      api_base: "http://triton-service.ai-serving.svc.cluster.local:8003/v1"
-      api_key: "none"
-
-router_settings:
-  routing_strategy: "least-busy"
-  timeout: 300
-```
-
----
-
-## 7. Hands-On Production Lab: Multi-Ecosystem Dynamic Router Client
-
-This runnable Python script queries each ecosystem through the unified LiteLLM endpoint, automatically validating routing accuracy, latency, and streaming capability.
-
-Save this script as `multi_model_client.py` and run it:
-
-```python
-#!/usr/bin/env python3
-"""
-Multi-Ecosystem Dynamic Router Client
-Target: DGX Spark LiteLLM Gateway (:4000)
-"""
-
-import json
-import time
-import urllib.request
-
-GATEWAY_URL = "http://localhost:4000/v1/chat/completions"
-
-WORKLOAD_TESTS = [
-    {
-        "model": "deepseek-r1",
-        "role": "Reasoning Specialist",
-        "prompt": "Prove why the square root of 2 is irrational."
-    },
-    {
-        "model": "qwen-coder",
-        "role": "Code Synthesis Specialist",
-        "prompt": "Write a high-performance asyncio HTTP connection pool in Python."
-    },
-    {
-        "model": "llama-3.3",
-        "role": "General Enterprise Assistant",
-        "prompt": "Draft a professional email summarizing a 15% increase in Q3 cloud margins."
-    }
-]
-
-def query_model(model_name: str, prompt: str) -> None:
-    print(f"\n[🚀 Routing Query to Ecosystem: {model_name}]")
-    payload = {
-        "model": model_name,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 128,
-        "temperature": 0.6
-    }
-    
-    headers = {"Content-Type": "application/json"}
-    req = urllib.request.Request(GATEWAY_URL, data=json.dumps(payload).encode("utf-8"), headers=headers)
-    
-    start_t = time.time()
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            elapsed = time.time() - start_t
-            res = json.loads(resp.read().decode("utf-8"))
-            answer = res["choices"][0]["message"]["content"]
-            print(f"  ⏱️ Latency:     {elapsed:.2f} seconds")
-            print(f"  📝 Response:    {answer[:120]}...\n")
-    except Exception as e:
-        print(f"  ⚠️ Mock Dispatch: Gateway connection simulated ({e})")
-
-def main():
-    print("=" * 75)
-    print("   NVIDIA DGX SPARK MULTI-ECOSYSTEM ROUTING DISPATCHER")
-    print("=" * 75)
-    
-    for test in WORKLOAD_TESTS:
-        print(f"Workload: {test['role']}")
-        query_model(test["model"], test["prompt"])
-        
-    print("=" * 75)
-    print("Multi-ecosystem validation complete. All backends operational.")
-    print("=" * 75)
-
-if __name__ == "__main__":
-    main()
-```
-
----
-
-## 8. Hardware Grounding for NVIDIA DGX Spark (Grace Blackwell GB10)
-
-Managing multiple models on a single **NVIDIA DGX Spark** requires disciplined memory accounting within its **128 GB unified memory**:
-
-```
-+------------------------------------------------------------------------------------+
-|                         DGX SPARK MULTI-MODEL MEMORY SIZING                        |
-+------------------------------------------------------------------------------------+
-|  Configuration A: Dual 32B Coexistence (Concurrently Active)                      |
-|  - DeepSeek-R1-Distill-32B (FP8):       33 GB                                      |
-|  - Qwen 2.5-Coder-32B (FP8):            33 GB                                      |
-|  - Combined Paged KV-Caches:            48 GB                                      |
-|  - Host OS & CUDA Runtime:              14 GB                                      |
-|  Total Memory:                          128 GB (100% capacity - FITS!)             |
-|                                                                                    |
-|  Configuration B: Single 70B Dedicated Serving                                    |
-|  - Llama 3.3-70B (FP8):                 72 GB                                      |
-|  - Paged KV-Cache (64k context):        42 GB                                      |
-|  - Host OS & CUDA Runtime:              14 GB                                      |
-|  Total Memory:                          128 GB (FITS!)                             |
-+------------------------------------------------------------------------------------+
-```
-
-> **Operational Rule**: Do **NOT** attempt to run Llama 3.3-70B (72 GB) and DeepSeek-R1-32B (33 GB) simultaneously with large KV-caches on a single GB10. Instead, use Kubernetes Scale-to-Zero ([Volume 22](22-autoscaling-with-kserve-and-kueue.md)) or atomic NVMe model swapping ([Volume 33](33-automated-weight-sync-and-day2-ops.md)).
-
----
-
-## 9. Step-by-Step Practice Exercises with Full Solutions
-
-### Exercise 1: Calculating Memory Budgets for Multi-Model Coexistence
-* **Objective**: Calculate whether DeepSeek-R1-32B (FP8) and Qwen2.5-Coder-14B (FP16) can run concurrently on a DGX Spark node with 32k shared KV cache.
-* **Given**:
-  * DeepSeek-32B FP8 = 32.8 GB
-  * Qwen-14B FP16 = 28.0 GB
-  * 32k KV Cache for both = ~20 GB
-  * OS / CUDA overhead = 12 GB
-* **Calculation**:
-  $$\text{Total} = 32.8 + 28.0 + 20.0 + 12.0 = 92.8\text{ GB}$$
-* **Result**: **Feasible!** $92.8\text{ GB} < 128\text{ GB}$, leaving $35.2\text{ GB}$ buffer for batch concurrency.
-
----
-
-### Exercise 2: Implementing Graceful Model Eviction with K3s
-* **Objective**: Write a shell command to safely terminate the Qwen serving deployment before spinning up Llama 3.3-70B.
-* **Solution**:
 ```bash
-# Scale down Qwen to 0 replicas to free 45 GB VRAM
-kubectl scale deployment/qwen-coder-32b -n ai-serving --replicas=0
-
-# Wait for container termination
-kubectl wait --for=delete pod -l app=qwen-coder -n ai-serving --timeout=30s
-
-# Scale up Llama 3.3-70B deployment
-kubectl scale deployment/llama-3.3-70b -n ai-serving --replicas=1
+kubectl -n llm-serving get endpoints vllm -o jsonpath='{.subsets[*].addresses[*].targetRef.name}'; echo   # only vllm-… main pod
 ```
 
 ---
 
-### Exercise 3: Adding Fallback Routing in LiteLLM
-* **Objective**: Configure LiteLLM to route to local DeepSeek-R1 by default, but fall back to local Qwen-Coder if DeepSeek returns HTTP 503 (overloaded).
-* **Solution**:
-In `litellm-config.yaml`:
-```yaml
-router_settings:
-  fallbacks:
-    - deepseek-r1: ["qwen-coder"]
-  allowed_fails: 1
-```
+## 7. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| main `svc/vllm` sometimes answers as Qwen | side overlay without the `app` relabel | use `k8s/multi/*` as provided. Check endpoints |
+| side Deployment Pending: `Insufficient nvidia.com/gpu` | slices taken by Kueue jobs | scale training down or remove the side model |
+| OOM after adding the second model | util sum too high, page cache | stay ≤ 0.80. Drop caches. Smaller or FP8 models |
+| Mistral-7B load errors | missing Mistral formats | catalog flags (Vol 36) |
+| Nemotron ignores the switch | system prompt not exactly `detailed thinking on/off` | match the model card wording |
+| Llama 403 | gated, token missing | Vol 32, drill D05 |
 
 ---
 
-## 10. Troubleshooting & Operational FAQ
+## 8. Scale-out path
 
-### Q1: Why does LiteLLM return `502 Bad Gateway` when switching between models?
-**Root Cause**: The target serving pod is still in its prefill/weight loading phase and the Kubernetes Readiness probe has not yet passed.  
-**Remediation**: Configure `initialDelaySeconds: 45` on the container readiness probe and enable `retry_on_status_codes: [502, 503]` in LiteLLM router settings.
-
-### Q2: Can Llama Stack and vLLM run in the same Kubernetes pod?
-**Architecture Recommendation**: No. Run vLLM in a dedicated GPU pod allocating `nvidia.com/gpu: "1"`, and run Llama Stack as a lightweight CPU sidecar container or separate microservice communicating over the internal cluster network (`http://localhost:8000`).
-
-### Q3: What is the optimal NVMe directory layout for 4 model families?
-**Standard Layout**:
-```text
-/data/models/
-├── DeepSeek-R1-Distill-Qwen-32B/
-├── Qwen2.5-Coder-32B-Instruct/
-├── Llama-3.3-70B-Instruct-FP8/
-└── Nemotron-4-340B-Instruct-FP8/
-```
-Mount this path as a read-only `hostPath` volume across all Kubernetes serving pods to eliminate redundant weight downloads.
+| One Spark | Two Sparks | Datacenter |
+|---|---|---|
+| ≤ 2 chat models + embeddings, shared slices | one family per Spark, no interference. LiteLLM routes across both | dozens of models across GPU pools. Per-model autoscaling. MIG isolation on datacenter GPUs |
+| catalog per lab | same | central model registry with approvals per family and licence |
+| manual aliasing | same | policy-driven routing by task, tenant and cost |
 
 ---
 
-### Complete Curriculum Navigation
-| Previous Volume | Master Curriculum Navigation | Final Certificate |
-| :--- | :---: | :---: |
-| [← 40. 40 Hands-On Practice Exercises Workbook](40-hands-on-exercises-workbook.md) | [Curriculum Index](README.md) | [Mastery Certification Complete 🎓](40-hands-on-exercises-workbook.md#curriculum-mastery-verification-script) |
+## 9. Checklist
+
+- [ ] Adding a model family is a catalog change plus an eval run, not a project.
+- [ ] I ran two families at once on one GB10 and measured the interference.
+- [ ] Each family's quirks are captured as flags, sampling defaults and licence notes.
+- [ ] I can justify which family serves which alias, with numbers.

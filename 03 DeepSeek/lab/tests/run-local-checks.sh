@@ -20,7 +20,7 @@ pids=(); cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; do
 echo "== yamllint";            yamllint -s .
 echo "== overlays in sync";    python3 scripts/gen_overlays.py --check
 echo "== kustomize + kubeconform"
-for d in . k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/lora/* k8s/sglang/* k8s/apps observability breakfix/*; do "$KUBECTL" kustomize "$d" | kc -; done
+for d in . k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/lora/* k8s/multi/* k8s/sglang/* k8s/apps observability breakfix/*; do "$KUBECTL" kustomize "$d" | kc -; done
 for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml k8s/autoscale/*.yaml k8s/kserve/*.yaml k8s/rl/*.yaml; do kc "$f"; done
 echo "== promtool";            promtool check rules <(python3 -c "
 import yaml
@@ -66,6 +66,11 @@ out=$(mktemp -d)
 python3 tools/eval_harness.py --url http://127.0.0.1:18765 --model mock --out "$out/r.json" >/dev/null
 python3 -c "import json,sys; d=json.load(open(sys.argv[1])); acc={k:v['accuracy'] for k,v in d['suites'].items()}; assert acc=={'math':0.5,'code':0.5,'json':0.5}, acc; print('eval harness OK', acc)" "$out/r.json"
 expect "tok/ok" python3 tools/eval_harness.py --report "$out/r.json"
+expect "GATE PASSED" python3 tools/eval_harness.py --url http://127.0.0.1:18765 --model mock --suites json --gate "$out/r.json"
+python3 -c "import json,sys; d=json.load(open(sys.argv[1])); d['suites']['json']['accuracy']=0.9; json.dump(d, open(sys.argv[2],'w'))" "$out/r.json" "$out/high.json"
+if python3 tools/eval_harness.py --url http://127.0.0.1:18765 --model mock --suites json --gate "$out/high.json" >"$T"; then
+  cat "$T"; echo "eval gate should have failed"; exit 1; fi
+grep -q "GATE FAILED" "$T" && echo "eval gate OK"
 expect "hosted model: cost = provider price (\$8.00" python3 tools/eval_harness.py --url http://127.0.0.1:18765 --model api --suites json --hosted --api-price-out 8
 echo "== agent tool loop vs scripted mock"
 python3 tests/mock_tools_server.py 18767 & pids+=($!); sleep 1
@@ -132,10 +137,10 @@ if [[ "${API:-0}" == 1 ]]; then
   "$KUBECTL" apply -k "$K8S_LAB/manifests/00-platform" >/dev/null
   "$KUBECTL" apply -f k8s/multinode/namespace.yaml >/dev/null
   "$KUBECTL" apply --dry-run=server -k . >/dev/null
-  for d in k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/lora/* k8s/sglang/* k8s/apps observability; do "$KUBECTL" apply --dry-run=server -k "$d" >/dev/null; done
+  for d in k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/lora/* k8s/multi/* k8s/sglang/* k8s/apps observability; do "$KUBECTL" apply --dry-run=server -k "$d" >/dev/null; done
   for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml k8s/autoscale/*.yaml k8s/rl/*.yaml; do "$KUBECTL" apply --dry-run=server -f "$f" >/dev/null; done
   echo "== pod templates vs PSA / CEL policies / quotas"
-  python3 "$K8S_LAB/tests/pod_template_check.py" k8s/models/* k8s/lora/* k8s/sglang/* k8s/apps k8s/jobs/*.yaml k8s/ops/*.yaml \
+  python3 "$K8S_LAB/tests/pod_template_check.py" k8s/models/* k8s/lora/* k8s/multi/* k8s/sglang/* k8s/apps k8s/jobs/*.yaml k8s/ops/*.yaml \
     k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/lws-vllm-70b.yaml k8s/rl/*.yaml
 fi
 echo "ALL LOCAL CHECKS PASSED"

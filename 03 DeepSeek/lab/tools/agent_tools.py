@@ -111,18 +111,18 @@ def validate(fn, args):
     return None
 
 
-def chat(url, model, messages):
+def chat(url, model, messages, api_key=None):
     body = {"model": model, "messages": messages, "tools": TOOLS, "tool_choice": "auto", "temperature": 0.2}
-    req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions", data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json"})
+    h = {"Content-Type": "application/json", **({"Authorization": f"Bearer {api_key}"} if api_key else {})}
+    req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions", data=json.dumps(body).encode(), headers=h)
     return json.loads(urllib.request.urlopen(req, timeout=600).read())["choices"][0]["message"]
 
 
-def run(url, model, question, max_steps=6, audit=None):
+def run(url, model, question, max_steps=6, audit=None, api_key=None):
     msgs = [{"role": "system", "content": "Use tools when they help. Answer concisely."},
             {"role": "user", "content": question}]
     for step in range(max_steps):
-        m = chat(url, model, msgs)
+        m = chat(url, model, msgs, api_key)
         calls = m.get("tool_calls") or []
         msgs.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": calls} if calls else
                     {"role": "assistant", "content": m.get("content") or ""})
@@ -163,5 +163,6 @@ if __name__ == "__main__":
     ap.add_argument("--model", default="qwen2.5-7b-tools")
     ap.add_argument("--max-steps", type=int, default=6)
     ap.add_argument("--audit", metavar="FILE", help="append one JSON line per tool call")
+    ap.add_argument("--api-key", default=os.environ.get("OPENAI_API_KEY"), help="e.g. a LiteLLM virtual key")
     a = ap.parse_args()
-    run(a.url, a.model, a.question, a.max_steps, a.audit)
+    run(a.url, a.model, a.question, a.max_steps, a.audit, a.api_key)

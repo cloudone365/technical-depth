@@ -155,6 +155,24 @@ def run(a):
         pathlib.Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         json.dump(results, open(a.out, "w"), indent=1)
         print(f"saved {a.out}")
+    return gate(results, a) if a.gate else 0
+
+
+def gate(results, a):
+    """Release gate (Volumes 33, 40): every suite must stay within --tolerance of the baseline."""
+    base = json.load(open(a.gate))
+    failed = 0
+    print(f"\ngate vs {a.gate} (tolerance {a.tolerance:.2f}):")
+    for suite, cur in results["suites"].items():
+        if suite not in base["suites"]:
+            print(f"  {suite:5} no baseline — skipped")
+            continue
+        b, c = base["suites"][suite]["accuracy"], cur["accuracy"]
+        ok = c >= b - a.tolerance
+        failed += not ok
+        print(f"  {suite:5} baseline {b:.2f}  now {c:.2f}  {'PASS' if ok else 'FAIL'}")
+    print("GATE PASSED" if not failed else f"GATE FAILED ({failed} suite(s) regressed)")
+    return 1 if failed else 0
 
 
 def econ(out_tokens, wall_s, a):
@@ -208,10 +226,12 @@ if __name__ == "__main__":
     ap.add_argument("--api-price-out", type=float, help="USD per 1M output tokens of the API you compare with")
     ap.add_argument("--out")
     ap.add_argument("--report", nargs="+")
+    ap.add_argument("--gate", metavar="BASELINE.json", help="exit 1 if any suite's accuracy drops below the baseline")
+    ap.add_argument("--tolerance", type=float, default=0.02, help="allowed accuracy drop per suite for --gate")
     a = ap.parse_args()
     if a.report:
         report(a.report)
     else:
         if not a.model:
             ap.error("--model is required")
-        run(a)
+        sys.exit(run(a))
