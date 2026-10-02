@@ -31,3 +31,4 @@ vault write auth/kubernetes/role/deepseek-serving bound_service_account_names=va
 echo "✓ Vault Kubernetes auth ready. Store secrets with e.g.:"
 echo "  vault kv put kv/spark-lab/deepseek/hf token=hf_xxx"
 echo "  vault kv put kv/spark-lab/deepseek/litellm master_key=sk-\$(openssl rand -hex 16)"
+echo "  vault kv put kv/spark-lab/deepseek/webui secret_key=\$(openssl rand -hex 32)"

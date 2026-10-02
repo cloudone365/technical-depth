@@ -1,0 +1,81 @@
+# The Vol 23 SFT with LLaMA-Factory (Volume 24): no Python, one YAML recipe.
+# The dataset is exported by sft_lora.py --export (same generator, same 5,000 examples)
+# and registered in dataset_info.json in ShareGPT/OpenAI-messages form.
+# llamafactory 0.9.4 needs datasets<=4.0.0, hence the different pin from the other Jobs.
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: llamafactory-recipe, namespace: batch}
+data:
+  dataset_info.json: |
+    {"gpu_math": {"file_name": "gpu_math.json", "formatting": "sharegpt",
+      "columns": {"messages": "messages"},
+      "tags": {"role_tag": "role", "content_tag": "content", "user_tag": "user",
+               "assistant_tag": "assistant", "system_tag": "system"}}}
+  sft_lora.yaml: |
+    model_name_or_path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+    stage: sft
+    do_train: true
+    finetuning_type: lora
+    lora_rank: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    lora_target: all
+    dataset: gpu_math
+    dataset_dir: /ckpt/data
+    template: deepseekr1
+    cutoff_len: 512
+    output_dir: /ckpt/lf-lora
+    overwrite_output_dir: true
+    per_device_train_batch_size: 8
+    gradient_accumulation_steps: 2
+    learning_rate: 2.0e-4
+    lr_scheduler_type: cosine
+    warmup_ratio: 0.05
+    max_steps: 300
+    logging_steps: 10
+    save_steps: 300
+    bf16: true
+    gradient_checkpointing: true
+    report_to: none
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: llamafactory
+  namespace: batch
+  labels: {kueue.x-k8s.io/queue-name: train, kueue.x-k8s.io/priority-class: routine}
+spec:
+  suspend: true
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      priorityClassName: spark-batch
+      containers:
+        - name: train
+          image: nvcr.io/nvidia/pytorch:25.09-py3
+          command: ["bash", "-c"]
+          args:
+            - >-
+              pip install --quiet llamafactory==0.9.4 trl==0.23.0 peft==0.17.1 transformers==4.56.2
+              accelerate==1.10.1 datasets==4.0.0 &&
+              python3 /train/sft_lora.py --export /ckpt/data/gpu_math.json --n 5000 &&
+              cp /recipe/dataset_info.json /ckpt/data/ &&
+              llamafactory-cli train /recipe/sft_lora.yaml
+          env:
+            - {name: HF_HOME, value: /ckpt/hf}
+            - {name: TOKENIZERS_PARALLELISM, value: "false"}
+            - {name: DISABLE_VERSION_CHECK, value: "1"}
+          resources:
+            requests: {cpu: "4", memory: 24Gi, nvidia.com/gpu: "1"}
+            limits: {cpu: "4", memory: 48Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: train, mountPath: /train}
+            - {name: recipe, mountPath: /recipe}
+            - {name: ckpt, mountPath: /ckpt}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - {name: train, configMap: {name: deepseek-train}}
+        - {name: recipe, configMap: {name: llamafactory-recipe}}
+        - {name: ckpt, persistentVolumeClaim: {claimName: deepseek-ckpt}}
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 8Gi}}

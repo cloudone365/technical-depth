@@ -12,6 +12,8 @@ Rewards:
 
   python3 grpo_tiny.py --dry-run                      # dataset + reward self-test, no GPU, no TRL
   python3 grpo_tiny.py --steps 200                    # on the Spark (NGC PyTorch + pip install trl …)
+  python3 grpo_tiny.py --vllm                         # rollouts by vLLM in the same process (colocate)
+  python3 grpo_tiny.py --vllm --vllm-mode server --vllm-host 192.168.100.12   # rollouts on spark-02 (Vol 25)
 Watch the logged reward/format and reward/correct climb; completions get <think> tags.
 """
 import argparse
@@ -79,7 +81,8 @@ def train(a):
         per_device_train_batch_size=a.group, num_generations=a.group,  # one prompt × G samples per step
         gradient_accumulation_steps=4, max_prompt_length=160, max_completion_length=a.max_len,
         temperature=0.9, beta=0.0, bf16=True, report_to="none", log_completions=True,
-        use_vllm=a.vllm, vllm_mode="colocate", vllm_gpu_memory_utilization=0.2,
+        use_vllm=a.vllm, vllm_mode=a.vllm_mode, vllm_gpu_memory_utilization=0.2,
+        vllm_server_host=a.vllm_host, vllm_server_port=a.vllm_port,
     )
     trainer = GRPOTrainer(model=a.model, reward_funcs=[reward_format, reward_correct], args=cfg,
                           train_dataset=Dataset.from_list(dataset(a.prompts)))
@@ -96,7 +99,11 @@ if __name__ == "__main__":
     ap.add_argument("--prompts", type=int, default=2000)
     ap.add_argument("--max-len", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-6)
-    ap.add_argument("--vllm", action="store_true", help="generate with vLLM colocated (faster rollouts)")
+    ap.add_argument("--vllm", action="store_true", help="generate rollouts with vLLM instead of HF generate")
+    ap.add_argument("--vllm-mode", choices=["colocate", "server"], default="colocate",
+                    help="colocate: vLLM inside the trainer process; server: a separate `trl vllm-serve`")
+    ap.add_argument("--vllm-host", default="127.0.0.1")
+    ap.add_argument("--vllm-port", type=int, default=8000)
     ap.add_argument("--out", default="/ckpt/grpo-tiny")
     a = ap.parse_args()
     self_test() if a.dry_run else train(a)

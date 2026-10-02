@@ -1,552 +1,251 @@
-# 38. DCGM, Prometheus & Grafana Telemetry — Full-Stack AI Metrics & Observability
+# Volume 38 — Telemetry for the DeepSeek Stack: vLLM Metrics, GB10 and Unified-Memory Signals, Day-2 Job Health, Tested Alerts and One Dashboard
 
-> **Target Audience**: AI Site Reliability Engineers (SREs), MLOps Architects, Kubernetes Cluster Operators, and Infrastructure Engineers responsible for production GPU telemetry and SLA guarantees.  
-> **Prerequisites**: Working knowledge of Prometheus metrics formats, Kubernetes DaemonSets/Services, and vLLM inference engine architecture ([Volume 15](15-vllm-serving-deepseek-and-qwen.md), [Volume 19](19-kubernetes-manifests-for-deepseek.md)).  
-> **Estimated Deep-Dive Time**: 45 minutes  
-> **What You Will Master**:
-> 1. The 3-Tier Observability Architecture: Silicon Hardware (NVIDIA DCGM), Inference Runtime Engine (vLLM/SGLang), and Application Gateway (LiteLLM).
-> 2. Key NVIDIA DCGM Field Identifiers (FIDs) for GPU core utilization, unified memory allocation, power limits, and hardware Xid error monitoring.
-> 3. Production PromQL queries for critical LLM Service Level Indicators (SLIs): Time to First Token (TTFT), Inter-Token Latency (ITL), and KV-cache saturation.
-> 4. Production Kubernetes manifests: DCGM Exporter DaemonSet, Prometheus Scrape Configs, and Alertmanager Alerting Rules.
-> 5. A self-contained Python multi-tier Prometheus metric simulator with real-time scraping and PromQL math.
-> 6. Hardware-specific monitoring considerations for the NVIDIA DGX Spark (Grace Blackwell GB10 NVLink-C2C interconnect and unified LPDDR5X memory).
+> **Module 03 · Part X — Operate and practise** · Prev: [37 DeepSeek vs hosted APIs](37-deepseek-vs-openai-o1-and-claude.md) · Next: [39 Master troubleshooting](39-master-troubleshooting-playbook.md)
 
----
-
-## 📑 Table of Contents
-1. [Zero-to-One Intuition: Why Standard APM Fails for AI Inference](#1-zero-to-one-intuition-why-standard-apm-fails-for-ai-inference)
-2. [The 3-Tier AI Observability Architecture](#2-the-3-tier-ai-observability-architecture)
-3. [Silicon Layer: NVIDIA DCGM Architecture & Field Identifiers](#3-silicon-layer-nvidia-dcgm-architecture--field-identifiers)
-4. [Engine Layer: vLLM & SGLang Inference Metrics](#4-engine-layer-vllm--sglang-inference-metrics)
-5. [Gateway Layer: LiteLLM Traffic & Error Telemetry](#5-gateway-layer-litellm-traffic--error-telemetry)
-6. [Production Kubernetes Configurations & Prometheus Scrapes](#6-production-kubernetes-configurations--prometheus-scrapes)
-7. [Production Alertmanager Rules & PromQL SLA Formulas](#7-production-alertmanager-rules--promql-sla-formulas)
-8. [Hands-On Production Lab: End-to-End AI Telemetry Simulator](#8-hands-on-production-lab-end-to-end-ai-telemetry-simulator)
-9. [Hardware Grounding for NVIDIA DGX Spark (Grace Blackwell GB10)](#9-hardware-grounding-for-nvidia-dgx-spark-grace-blackwell-gb10)
-10. [Step-by-Step Practice Exercises with Full Solutions](#10-step-by-step-practice-exercises-with-full-solutions)
-11. [Troubleshooting & Operational FAQ](#11-troubleshooting--operational-faq)
+| | |
+|---|---|
+| **You will build** | Observability for everything Module 03 deployed. vLLM's serving metrics (throughput, TTFT, inter-token latency, reasoning length, KV pressure, finish reasons), GB10 health and power from DCGM or the 01 Ansible textfile collector, unified-memory pressure, gateway traffic, and the day-2 CronJobs. You'll get a 27-panel Grafana dashboard generated from code, nine alerts with promtool unit tests, and a load test you watch move every panel |
+| **Hardware** | spark-01 |
+| **Time** | 90 min |
+| **Risk** | Low |
+| **Lab files** | [`observability/rules.yaml`](lab/observability/rules.yaml), [`observability/rules.test.yaml`](lab/observability/rules.test.yaml), [`observability/gen_dashboard.py`](lab/observability/gen_dashboard.py), [`observability/deepseek-serving-dashboard.json`](lab/observability/deepseek-serving-dashboard.json), [`02 …/95-observability/`](../02%20Kubernetes/lab/manifests/95-observability/), [`02 …/addons/dcgm-exporter-values.md`](../02%20Kubernetes/lab/addons/dcgm-exporter-values.md) |
 
 ---
 
-## 1. Zero-to-One Intuition: Why Standard APM Fails for AI Inference
+## 1. Why reasoning models need different telemetry
 
-In traditional microservices (e.g., REST APIs, databases), system health is monitored via standard metrics: **CPU utilization**, **host RAM usage**, **HTTP request rate**, and **P99 latency**. 
+Classic API monitoring watches request rate, errors and latency. For reasoning models those three hide the important facts:
 
-If you apply these traditional metrics to an LLM serving cluster on NVIDIA DGX Spark, your monitoring will mislead you:
-
-```text
-Traditional Microservice Mental Model (Fails for AI):
-- CPU at 95% = Overloaded (Scale Out!)
-- RAM at 90% = Memory Leak Detected!
-- P99 HTTP Latency at 8 seconds = Massive System Failure!
-
-AI Inference Reality (NVIDIA DGX Spark / vLLM):
-- GPU VRAM at 90% = NORMAL! (vLLM pre-allocates 90% of memory for KV-cache on boot).
-- CPU at 5% = NORMAL! (Inference compute runs on Blackwell Tensor Cores, not the host CPU).
-- P99 HTTP Latency at 45 seconds = NORMAL! (Model generated 2,000 reasoning tokens over SSE).
-```
-
-### The Invisible Bottlenecks of LLM Serving
-Without dedicated AI telemetry, an engineering team is blind to the actual failure modes of foundation models:
-1. **KV-Cache Fragmentation & Starvation**: If GPU memory cache factor hits 100%, vLLM stops admitting requests. Requests queue silently in memory, TTFT skyrockets from 80ms to 25 seconds, and standard HTTP health checks still report `200 OK`.
-2. **Thermal & Power Throttling**: If ambient data center temperature rises, the GPU silently dials down clock frequencies from 2.1 GHz to 900 MHz. The service doesn't crash, but generation throughput drops by 60%.
-3. **Hardware Xid Errors**: Silicon memory faults or NVLink-C2C bus dropouts occur at the driver layer without generating application-level stack traces.
+| Question | Misleading signal | Right signal |
+|---|---|---|
+| "Is it slow?" | end-to-end latency (minutes is *normal* for R1) | TTFT (queue + prefill) and inter-token latency (decode health) |
+| "Are answers complete?" | HTTP 200 | `finished_reason="length"` share (chains cut off at `max_tokens`) |
+| "Do we have capacity?" | GPU utilisation (a time-sliced GB10 reads ~100 % whenever anything runs) | `num_requests_waiting`, KV cache usage, preemptions |
+| "Is the box healthy?" | node up | UMA available vs page cache, Xid events, clock-throttle reasons |
+| "Is day-2 working?" | nothing (CronJobs fail silently) | failed Jobs, hours since last successful run per CronJob |
+| "Is it efficient?" | tokens/s alone | tokens per joule |
 
 ---
 
-## 2. The 3-Tier AI Observability Architecture
-
-To achieve full-stack observability, metrics must be captured across three coordinated layers:
+## 2. Architecture — HLD
 
 ```mermaid
-flowchart TD
-    subgraph Tier1["1. Silicon Hardware Layer (Physical Node)"]
-        GPU["Blackwell GB10 GPU + Grace CPU"] --> DCGM["NVIDIA DCGM Exporter (:9400)<br/>- GPU Core Utilization (%)<br/>- Framebuffer VRAM Used (MB)<br/>- Board Temperature (°C) & Power (W)<br/>- Hardware Xid Error Counters"]
-    end
-
-    subgraph Tier2["2. Runtime Serving Engine (Kubernetes Pod)"]
-        VLLM["vLLM / SGLang Pod (:8000/metrics)"] --> VLLM_Exp["Inference Engine Telemetry<br/>- TTFT & ITL Histograms<br/>- Generation Throughput (tok/s)<br/>- KV-Cache Allocation Factor<br/>- Pending Request Queue Depth"]
-    end
-
-    subgraph Tier3["3. Enterprise Application Gateway (L7 Gateway)"]
-        LITE["LiteLLM Proxy (:4000/metrics)"] --> LITE_Exp["Gateway Proxy Telemetry<br/>- RPM / TPM per API Key<br/>- Budget Spend & Token Count<br/>- Upstream Failover Events<br/>- HTTP 429 / 503 Rates"]
-    end
-
-    DCGM --> Prom["Prometheus Time-Series DB (TSDB)"]
-    VLLM_Exp --> Prom
-    LITE_Exp --> Prom
-
-    Prom --> Grafana["Enterprise Grafana Dashboards"]
-    Prom --> Alert["Alertmanager -> PagerDuty / Slack"]
+flowchart LR
+  subgraph SRC["Sources"]
+    direction TB
+    V["vLLM /metrics<br/>ServiceMonitor vllm (15 s)"]
+    G["DCGM exporter (if GB10 supported)<br/>or 01 Ansible textfile: spark_gpu_* · spark_uma_*"]
+    N["node-exporter · cAdvisor"]
+    K["kube-state-metrics<br/>Jobs · CronJobs · pods"]
+    T["Traefik /metrics<br/>per-route requests"]
+  end
+  SRC --> P[("Prometheus (kps)<br/>observability ns")]
+  P --> R["PrometheusRule spark-reasoning<br/>9 alerts · promtool-tested"]
+  R --> AM["Alertmanager<br/>→ your channel"]
+  P --> GF["Grafana<br/>dashboard spark-llm-serving<br/>(ConfigMap, label grafana_dashboard)"]
+  GEN["gen_dashboard.py<br/>(CI: JSON must match)"] -.-> GF
+  classDef obs fill:#fb8500,stroke:#9a5000,color:#000
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef sec fill:#cf222e,stroke:#82071e,color:#fff
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
+  class V,G gpu
+  class N,K ctrl
+  class T net
+  class P store
+  class R,AM sec
+  class GF,GEN obs
+  style SRC fill:#f6f8fa,stroke:#57606a
 ```
 
 ---
 
-## 3. Silicon Layer: NVIDIA DCGM Architecture & Field Identifiers
+## 3. LLD
 
-The **NVIDIA Data Center GPU Manager (DCGM)** is a low-overhead profiling and telemetry suite built directly into the NVIDIA driver stack. The `dcgm-exporter` queries the NVIDIA driver via the NVML (NVIDIA Management Library) API and publishes standard Prometheus metrics over port 9400.
+### 3.1 The vLLM metrics that matter
 
-```
-+-----------------------------------------------------------------------------------------------+
-|                                DCGM ARCHITECTURE & METRIC FLOW                                 |
-+-----------------------------------------------------------------------------------------------+
-|  Blackwell GB10 Silicon Counters (Hardware Clocks, Sensors, NVLink Registers)                  |
-|                                       │                                                       |
-|                                       ▼                                                       |
-|  NVIDIA Kernel Driver (nvidia.ko) & NVML API (libnvidia-ml.so)                                |
-|                                       │                                                       |
-|                                       ▼                                                       |
-|  NVIDIA DCGM Daemon (nv-hostengine)                                                           |
-|                                       │                                                       |
-|                                       ▼                                                       |
-|  dcgm-exporter (Go binary in Kubernetes DaemonSet)                                            |
-|                                       │                                                       |
-|                                       ▼                                                       |
-|  HTTP Endpoint http://<node-ip>:9400/metrics                                                  |
-+-----------------------------------------------------------------------------------------------+
-```
+| Metric | Type | Use |
+|---|---|---|
+| `vllm:generation_tokens_total`, `vllm:prompt_tokens_total` | counter | output/input tokens/s |
+| `vllm:time_to_first_token_seconds` | histogram | TTFT p50/p95: queueing + prefill |
+| `vllm:inter_token_latency_seconds` (older: `time_per_output_token_seconds`) | histogram | decode health. 1/ITL ≈ tok/s per stream |
+| `vllm:e2e_request_latency_seconds` | histogram | whole request. Dominated by reasoning length |
+| `vllm:request_generation_tokens` | histogram | reasoning length distribution |
+| `vllm:num_requests_running` / `_waiting` | gauge | concurrency and queue (the KEDA trigger, Vol 22) |
+| `vllm:kv_cache_usage_perc` (older: `gpu_cache_usage_perc`) | gauge | KV pressure. Near 1.0 → preemptions |
+| `vllm:num_preemptions_total` | counter | sequences evicted for lack of KV |
+| `vllm:request_success_total{finished_reason}` | counter | `stop` vs `length` (truncation) |
+| `vllm:prefix_cache_hits_total` / `_queries_total` | counter | prefix-cache effectiveness (Vol 16) |
+| `vllm:spec_decode_num_accepted_tokens_total` / `_draft_tokens_total` | counter | speculative acceptance α (Vol 03) |
 
-### Critical DCGM Field Identifiers (FIDs)
+Metric names changed between vLLM releases. The dashboard queries use `or` across old and new names where needed.
 
-| Field Identifier (FID) | Prometheus Metric Name | Unit | Critical Threshold | Engineering Meaning |
-| :--- | :--- | :--- | :--- | :--- |
-| **FID 150** | `DCGM_FI_DEV_GPU_UTIL` | % | $< 10\%$ (Underutilized) | Percentage of time GPU Tensor Cores are active. |
-| **FID 252** | `DCGM_FI_DEV_FB_USED` | MiB | $> 120,000\text{ MiB}$ | Used Framebuffer (VRAM) memory. |
-| **FID 155** | `DCGM_FI_DEV_POWER_USAGE`| Watts | $> 350\text{ W}$ | Real-time electrical power consumption. |
-| **FID 156** | `DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION` | mJ | Monotonic counter | Cumulative energy consumed for billing/ESG auditing. |
-| **FID 140** | `DCGM_FI_DEV_GPU_TEMP` | °C | $> 82^\circ\text{C}$ | GPU silicon die temperature. |
-| **FID 141** | `DCGM_FI_DEV_MEMORY_TEMP`| °C | $> 85^\circ\text{C}$ | High-Bandwidth / LPDDR5X memory temperature. |
-| **FID 230** | `DCGM_FI_DEV_XID_ERRORS` | Integer | $> 0$ (Critical) | Hardware/driver fault identifier logged by kernel. |
-| **FID 240** | `DCGM_FI_DEV_PCIE_REPLAY_COUNTER` | Counter | $> 50 / \text{min}$ | PCIe/NVLink transmission retries (indicates bus degradation).|
+### 3.2 GB10 and UMA signals
 
----
+| Signal | DCGM (if supported) | 01 Ansible textfile fallback |
+|---|---|---|
+| utilisation | `DCGM_FI_DEV_GPU_UTIL` | `spark_gpu_utilization_ratio` |
+| power | `DCGM_FI_DEV_POWER_USAGE` | `spark_gpu_power_watts` |
+| temperature | `DCGM_FI_DEV_GPU_TEMP` | `spark_gpu_temperature_celsius` |
+| clock events | — | `spark_gpu_throttle_reasons_bitmask` (bit 0 = idle) |
+| Xid errors | `DCGM_FI_DEV_XID_ERRORS` | `spark_gpu_xid_events_24h` |
+| unified memory | — (no separate framebuffer) | `spark_uma_available_bytes`, `spark_uma_page_cache_bytes` |
 
-## 4. Engine Layer: vLLM & SGLang Inference Metrics
+On the GB10, "GPU memory used" from frame-buffer metrics is not the number to watch. The CPU and GPU share LPDDR5x, so **MemAvailable** is the real headroom.
 
-The inference runtime engine exposes fine-grained internal scheduling metrics over `/metrics`. In vLLM and SGLang, these metrics provide direct visibility into the PagedAttention memory manager and continuous batch scheduler:
+### 3.3 Alerts (`rules.yaml`)
 
-```
-+-----------------------------------------------------------------------------------------------+
-|                                  vLLM INTERNAL METRIC POINTS                                  |
-+-----------------------------------------------------------------------------------------------+
-|                                                                                               |
-|  Incoming Requests ────> [ Waiting Queue ] ───────> [ Running Batch ] ───────> Output Stream  |
-|                                 │                            │                                |
-|                                 ▼                            ▼                                |
-|                     num_requests_waiting          num_requests_running                        |
-|                                                              │                                |
-|                                                              ▼                                |
-|                                                   gpu_cache_usage_factor                      |
-|                                                   (PagedAttention blocks)                     |
-+-----------------------------------------------------------------------------------------------+
-```
+| Alert | Fires when | First action |
+|---|---|---|
+| `ReasoningTruncated` | > 20 % of requests end with `length` for 15 min | raise `max_tokens`. Check temperature (D06) |
+| `VLLMDown` | no vLLM target up for 5 min | `kubectl -n llm-serving get pods -l app=vllm` |
+| `PrefixCacheIneffective` | hit rate < 5 % at real traffic | variable text before the shared prefix (Vol 16) |
+| `ReasoningTTFTSlow` | p95 TTFT > 10 s for 15 min | queue depth, prompt sizes, scale out |
+| `SparkGPUXid` | any Xid in 24 h | `journalctl -k | grep -i xid` (02 Vol 19) |
+| `SparkGPUThrottling` | throttle bits beyond idle while > 50 % busy for 15 min | airflow, power, ambient |
+| `DayTwoJobFailed` | a day-2 Job failed | its logs + the Vol 33 runbook |
+| `VaultSyncStale` | no successful `vault-sync` for 1 h | Vault sealed or auth broken (Vol 32) |
+| `BackupStale` | no successful backup for 2 days | backup CronJob logs |
 
-### Key vLLM Prometheus Metrics
+02's platform rules (`SparkUMAPressure`, `VLLMQueueBacklog`, `VLLMKVCacheFull`, etcd…) complement these.
 
-| Metric Name | Type | Description & SLA Relevance |
-| :--- | :--- | :--- |
-| `vllm:avg_generation_throughput_tok_per_s` | Gauge | Output token generation speed across all active requests. Primary system throughput SLI. |
-| `vllm:avg_prompt_throughput_tok_per_s` | Gauge | Input token ingestion speed (prefill phase). Measures prompt evaluation bandwidth. |
-| `vllm:time_to_first_token_seconds` | Histogram | Time elapsed between request arrival and generation of token #1. Target: P95 $< 250\text{ ms}$. |
-| `vllm:time_per_output_token_seconds` | Histogram | Inter-Token Latency (ITL). Time between consecutive tokens. Target: P95 $< 35\text{ ms}$ (~30 tok/s). |
-| `vllm:gpu_cache_usage_factor` | Gauge | Fraction of allocated KV-cache blocks currently in use ($0.00$ to $1.00$). If $> 0.95$, queue stalls. |
-| `vllm:num_requests_waiting` | Gauge | Number of requests sitting in memory waiting for free KV-cache blocks. Must alert if $> 0$ for $> 60\text{s}$. |
-| `vllm:num_requests_running` | Gauge | Number of concurrent requests actively being executed in the current continuous batch. |
-| `vllm:num_requests_swapped` | Gauge | Number of requests whose KV-cache was evicted to host CPU memory. Must remain 0 on healthy nodes. |
+### 3.4 Dashboard rows (27 panels)
+
+| Row | Panels |
+|---|---|
+| Throughput | output tokens/s, prompt tokens/s |
+| Latency | TTFT p50/p95, ITL p50/p95, e2e p95, generated tokens per request (reasoning length) |
+| Capacity | running/waiting, KV usage, preemptions/s |
+| Quality signals | finish reasons, prefix-cache hit rate, speculative acceptance, **output tokens per joule** |
+| GB10 and unified memory | utilisation, power and temperature, throttle and Xid, UMA available vs page cache, pod working sets |
+| Gateway and day-2 jobs | Traefik requests/s by route, failed day-2 Jobs, hours since each CronJob last succeeded |
 
 ---
 
-## 5. Gateway Layer: LiteLLM Traffic & Error Telemetry
+## 4. Integrations
 
-The application gateway (LiteLLM) mediates client traffic, enforces rate limits, manages fallbacks, and tracks financial token budgets.
-
-### Critical LiteLLM Metrics (`:4000/metrics`)
-* `litellm_proxy_total_requests_metric`: Counter partitioned by `model`, `api_key_alias`, and `status_code`.
-* `litellm_spend_metric`: Counter tracking cumulative dollar cost by user/key.
-* `litellm_deployment_latency_per_output_token`: Gauge tracking upstream model responsiveness.
-* `litellm_remaining_team_budget_metric`: Gauge monitoring enterprise quota depletion.
+- **02 Vols 16 and 19 + `95-observability`**: kube-prometheus-stack, ServiceMonitors, host exporters and the platform dashboard. **01 Ansible** installs the GPU textfile collector.
+- **Vol 22**: KEDA scales on the same `num_requests_*` series the dashboard shows.
+- **Vols 32–33**: the day-2 panels and alerts watch their CronJobs.
+- **Vol 39**: each alert maps to a section of the troubleshooting playbook.
 
 ---
 
-## 6. Production Kubernetes Configurations & Prometheus Scrapes
+## 5. Lab
 
-To deploy full observability on your Kubernetes cluster (such as K3s on DGX Spark), deploy the following production manifests:
+### 5.1 Deploy rules and dashboard
 
-### 1. NVIDIA DCGM Exporter DaemonSet (`dcgm-exporter.yaml`)
-```yaml
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: nvidia-dcgm-exporter
-  namespace: monitoring
-  labels:
-    app.kubernetes.io/name: nvidia-dcgm-exporter
-spec:
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: nvidia-dcgm-exporter
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: nvidia-dcgm-exporter
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9400"
-    spec:
-      tolerations:
-        - key: "nvidia.com/gpu"
-          operator: "Exists"
-          effect: "NoSchedule"
-      containers:
-        - name: dcgm-exporter
-          image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.5-3.4.0-ubuntu22.04
-          ports:
-            - name: metrics
-              containerPort: 9400
-          securityContext:
-            privileged: true
-            runAsUser: 0
-          volumeMounts:
-            - name: nvidia-driver
-              mountPath: /usr/local/nvidia
-              readOnly: true
-      volumes:
-        - name: nvidia-driver
-          hostPath:
-            path: /usr/local/nvidia
+```bash
+cd "03 DeepSeek/lab"
+python3 observability/gen_dashboard.py | diff -q - observability/deepseek-serving-dashboard.json && echo "dashboard in sync"
+kubectl apply -k observability
+kubectl -n observability get prometheusrule spark-reasoning -o jsonpath='{.spec.groups[*].name}'; echo
+kubectl -n observability get cm deepseek-serving-dashboard -o jsonpath='{.metadata.labels}'; echo
 ```
 
-### 2. Prometheus Scrape Configuration (`prometheus.yml`)
-```yaml
-global:
-  scrape_interval: 5s
-  evaluation_interval: 5s
+Expected: groups `spark-reasoning spark-gb10 spark-day2`, and label `grafana_dashboard: "1"` so the Grafana sidecar loads it.
 
-scrape_configs:
-  # 1. Silicon Hardware Metrics (DCGM)
-  - job_name: "nvidia-dcgm"
-    kubernetes_sd_configs:
-      - role: pod
-        namespaces:
-          names: ["monitoring"]
-    relabel_configs:
-      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
-        action: keep
-        regex: nvidia-dcgm-exporter
-      - source_labels: [__meta_kubernetes_pod_ip]
-        target_label: __address__
-        replacement: "${1}:9400"
+### 5.2 Check every source is scraped
 
-  # 2. Serving Engine Metrics (vLLM / SGLang)
-  - job_name: "vllm-inference"
-    kubernetes_sd_configs:
-      - role: pod
-        namespaces:
-          names: ["ai-serving"]
-    relabel_configs:
-      - source_labels: [__meta_kubernetes_pod_label_app]
-        action: keep
-        regex: (deepseek-r1|qwen-coder|llama-serving)
-      - source_labels: [__meta_kubernetes_pod_ip]
-        target_label: __address__
-        replacement: "${1}:8000"
-    metric_relabel_configs:
-      - source_labels: [__name__]
-        action: keep
-        regex: "vllm:.*"
-
-  # 3. Enterprise Gateway (LiteLLM)
-  - job_name: "litellm-gateway"
-    static_configs:
-      - targets: ["litellm-proxy.ai-serving.svc.cluster.local:4000"]
+```bash
+kubectl -n observability port-forward svc/kps-prometheus 9090 &
+for q in 'up{job=~".*vllm.*"}' 'spark_gpu_up' 'DCGM_FI_DEV_GPU_UTIL' 'kube_cronjob_status_last_successful_time{namespace="llm-serving"}' \
+         'traefik_service_requests_total'; do
+  printf '%-75s %s\n' "$q" "$(curl -s localhost:9090/api/v1/query --data-urlencode "query=$q" | jq '.data.result | length')"
+done
 ```
 
----
+Expected: non-zero for vLLM, `spark_gpu_up` (or DCGM if enabled), CronJobs and Traefik. If DCGM shows 0, that's fine when the textfile collector is in use (see `dcgm-exporter-values.md`).
 
-## 7. Production Alertmanager Rules & PromQL SLA Formulas
+### 5.3 Unit-test the alerts
 
-Deploy these alerting rules into `/etc/prometheus/rules/ai-sla-alerts.yml` to trigger immediate alerts on PagerDuty or Slack when hardware or SLA limits are breached:
-
-```yaml
-groups:
-  - name: ai-infrastructure-sla-alerts
-    rules:
-      # Alert 1: Hardware Xid Error (Immediate Severity Critical)
-      - alert: NVIDIAHardwareXidFault
-        expr: increase(DCGM_FI_DEV_XID_ERRORS[1m]) > 0
-        labels:
-          severity: critical
-          tier: hardware
-        annotations:
-          summary: "NVIDIA Hardware Xid error logged on GPU {{ $labels.gpu }}"
-          description: "Hardware Xid {{ $value }} logged. Node may have experienced memory ECC fault or PCIe bus drop."
-
-      # Alert 2: KV-Cache Saturation & Request Starvation
-      - alert: LLMQueueSaturation
-        expr: vllm:num_requests_waiting > 5
-        for: 2m
-        labels:
-          severity: warning
-          tier: serving
-        annotations:
-          summary: "vLLM request queue is saturated on {{ $labels.pod }}"
-          description: "Over 5 inference requests have been queued for >2m. KV-cache capacity exceeded."
-
-      # Alert 3: TTFT Latency SLA Breach (P95 > 2.0 seconds)
-      - alert: TTFTSLABreach
-        expr: histogram_quantile(0.95, sum(rate(vllm:time_to_first_token_seconds_bucket[5m])) by (le)) > 2.0
-        for: 3m
-        labels:
-          severity: warning
-          tier: sla
-        annotations:
-          summary: "P95 TTFT is exceeding enterprise SLA (2.0s)"
-          description: "Current P95 TTFT is {{ $value | printf \"%.2f\" }}s. Investigate prompt prefill load."
-
-      # Alert 4: GPU Thermal Throttling Threat
-      - alert: GPUTemperatureHigh
-        expr: DCGM_FI_DEV_GPU_TEMP > 82
-        for: 1m
-        labels:
-          severity: critical
-          tier: hardware
-        annotations:
-          summary: "GPU thermal limit approached on {{ $labels.instance }}"
-          description: "Die temp is {{ $value }}°C. Fan failure or chassis airflow obstruction likely."
+```bash
+python3 -c "
+import yaml; g=[x for d in yaml.safe_load_all(open('observability/rules.yaml')) for x in d['spec']['groups']]
+open('observability/rules.extracted.yaml','w').write(yaml.safe_dump({'groups': g}))"
+(cd observability && promtool test rules rules.test.yaml) && rm observability/rules.extracted.yaml
 ```
 
----
+Expected: `SUCCESS`. The tests prove that 30 % truncation fires `ReasoningTruncated`, 5 % doesn't, a failed `weights-verify` Job fires `DayTwoJobFailed`, and an idle-only throttle bit stays quiet.
 
-## 8. Hands-On Production Lab: End-to-End AI Telemetry Simulator
+### 5.4 Load it and watch the panels move
 
-This self-contained Python script spins up a multi-threaded mock telemetry server exposing DCGM, vLLM, and LiteLLM metrics over an HTTP endpoint, and executes real-time PromQL mathematical queries against the simulated cluster.
-
-Save this file as `ai_telemetry_simulator.py` and run it:
-
-```python
-#!/usr/bin/env python3
-"""
-Full-Stack AI Telemetry Simulator: DCGM, vLLM & LiteLLM
-Target Hardware: NVIDIA DGX Spark (Grace Blackwell GB10)
-"""
-
-import http.server
-import random
-import socketserver
-import threading
-import time
-
-PORT = 9999
-
-# Simulated State
-state = {
-    "gpu_temp": 64.0,
-    "gpu_power": 240.0,
-    "gpu_util": 82.5,
-    "fb_used_mb": 42000.0,
-    "xid_errors": 0,
-    "ttft_p95": 0.125,
-    "itl_p95": 0.028,
-    "gen_throughput": 42.8,
-    "cache_usage": 0.68,
-    "requests_waiting": 0,
-    "requests_running": 4
-}
-
-def generate_prometheus_payload() -> str:
-    """Generates standard Prometheus exposition format text."""
-    lines = [
-        "# HELP DCGM_FI_DEV_GPU_TEMP GPU Temperature in Celsius",
-        "# TYPE DCGM_FI_DEV_GPU_TEMP gauge",
-        f'DCGM_FI_DEV_GPU_TEMP{{gpu="0",device="GB10"}} {state["gpu_temp"]:.1f}',
-        
-        "# HELP DCGM_FI_DEV_POWER_USAGE GPU Power draw in Watts",
-        "# TYPE DCGM_FI_DEV_POWER_USAGE gauge",
-        f'DCGM_FI_DEV_POWER_USAGE{{gpu="0",device="GB10"}} {state["gpu_power"]:.1f}',
-        
-        "# HELP DCGM_FI_DEV_GPU_UTIL GPU Tensor Core utilization percentage",
-        "# TYPE DCGM_FI_DEV_GPU_UTIL gauge",
-        f'DCGM_FI_DEV_GPU_UTIL{{gpu="0",device="GB10"}} {state["gpu_util"]:.1f}',
-
-        "# HELP DCGM_FI_DEV_FB_USED Framebuffer Memory Used in MiB",
-        "# TYPE DCGM_FI_DEV_FB_USED gauge",
-        f'DCGM_FI_DEV_FB_USED{{gpu="0",device="GB10"}} {state["fb_used_mb"]:.1f}',
-
-        "# HELP DCGM_FI_DEV_XID_ERRORS Critical Hardware Error Counter",
-        "# TYPE DCGM_FI_DEV_XID_ERRORS counter",
-        f'DCGM_FI_DEV_XID_ERRORS{{gpu="0",device="GB10"}} {state["xid_errors"]}',
-
-        "# HELP vllm:avg_generation_throughput_tok_per_s Output token speed",
-        "# TYPE vllm:avg_generation_throughput_tok_per_s gauge",
-        f'vllm:avg_generation_throughput_tok_per_s{{model="DeepSeek-R1-32B"}} {state["gen_throughput"]:.2f}',
-
-        "# HELP vllm:gpu_cache_usage_factor PagedAttention KV-Cache fraction",
-        "# TYPE vllm:gpu_cache_usage_factor gauge",
-        f'vllm:gpu_cache_usage_factor{{model="DeepSeek-R1-32B"}} {state["cache_usage"]:.3f}',
-
-        "# HELP vllm:num_requests_waiting Pending requests in memory queue",
-        "# TYPE vllm:num_requests_waiting gauge",
-        f'vllm:num_requests_waiting{{model="DeepSeek-R1-32B"}} {state["requests_waiting"]}',
-
-        "# HELP vllm:num_requests_running Concurrently executing requests",
-        "# TYPE vllm:num_requests_running gauge",
-        f'vllm:num_requests_running{{model="DeepSeek-R1-32B"}} {state["requests_running"]}'
-    ]
-    return "\n".join(lines) + "\n"
-
-class MetricsHandler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path in ["/metrics", "/"]:
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-            self.end_headers()
-            payload = generate_prometheus_payload()
-            self.wfile.write(payload.encode("utf-8"))
-        else:
-            self.send_response(404)
-            self.end_headers()
-            
-    def log_message(self, format, *args):
-        pass  # Suppress console HTTP logs
-
-def run_server():
-    with socketserver.TCPServer(("", PORT), MetricsHandler) as httpd:
-        httpd.serve_forever()
-
-def run_telemetry_dashboard():
-    print("=" * 80)
-    print("   NVIDIA DGX SPARK FULL-STACK TELEMETRY ENGINE & SLA MONITOR")
-    print(f"   Listening on http://localhost:{PORT}/metrics")
-    print("=" * 80)
-
-    for i in range(1, 6):
-        time.sleep(1.5)
-        # Update metrics with realistic jitter
-        state["gpu_temp"] += random.uniform(-0.5, 0.5)
-        state["gpu_power"] = 240.0 + random.uniform(-10, 20)
-        state["gen_throughput"] = 42.0 + random.uniform(-2, 3)
-        state["cache_usage"] = min(0.92, state["cache_usage"] + random.uniform(0.01, 0.04))
-        state["requests_running"] = random.randint(3, 6)
-
-        # PromQL-like evaluation
-        status = "HEALTHY" if state["cache_usage"] < 0.85 else "WARN: CACHE CONGESTION"
-        
-        print(f"\n[Tick {i:02d}] PromQL Evaluation:")
-        print(f"  • DCGM GPU Core Temp:   {state['gpu_temp']:.1f}°C (Limit: 82°C)")
-        print(f"  • DCGM Power Draw:      {state['gpu_power']:.1f} W")
-        print(f"  • Token Generation:     {state['gen_throughput']:.1f} tok/s")
-        print(f"  • KV-Cache Usage:       {state['cache_usage'] * 100:.1f}%")
-        print(f"  • Active Streams:       {state['requests_running']} running, {state['requests_waiting']} queued")
-        print(f"  • Health Status:        [{status}]")
-
-    print("\n" + "=" * 80)
-    print("Metrics endpoint validated. Ready for Prometheus / Grafana ingestion.")
-    print("=" * 80)
-
-if __name__ == "__main__":
-    t = threading.Thread(target=run_server, daemon=True)
-    t.start()
-    run_telemetry_dashboard()
+```bash
+scripts/serve-model.sh r1-7b
+kubectl -n llm-serving port-forward svc/vllm 8000 &
+python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math --concurrency 16 --max-tokens 8192
 ```
 
----
+Open Grafana → **Spark · LLM serving (DeepSeek)**. During the run (**record yours**):
 
-## 9. Hardware Grounding for NVIDIA DGX Spark (Grace Blackwell GB10)
+| Panel | Value under load |
+|---|---|
+| output tokens/s | |
+| TTFT p95 | |
+| ITL p50 | |
+| generated tokens p95 | |
+| KV cache usage peak | |
+| tokens per joule | |
+| UMA available (min) | |
 
-The **NVIDIA DGX Spark** combines the 72-core **Grace ARM Neoverse V2 CPU** and the **Blackwell GB10 GPU** across a **900 GB/s NVLink-C2C** coherent memory fabric:
+### 5.5 Make an alert fire for real
 
-```
-+------------------------------------------------------------------------------------+
-|                         DGX SPARK TELEMETRY MAPPING                                |
-+------------------------------------------------------------------------------------+
-|  Grace ARM Subsystem                        Blackwell GB10 Subsystem               |
-|  - Node Exporter (:9100)                    - DCGM Exporter (:9400)                |
-|  - Metrics: node_cpu_seconds_total          - Metrics: DCGM_FI_DEV_GPU_UTIL        |
-|  - Metrics: node_memory_MemTotal_bytes      - Metrics: DCGM_FI_DEV_FB_USED         |
-|  - Metrics: node_network_receive_bytes_total- Metrics: DCGM_FI_DEV_POWER_USAGE     |
-|                      │                                    │                        |
-|                      └───────────── NVLink-C2C ───────────┘                        |
-|                                     │                                              |
-|                       DCGM_FI_DEV_NVLINK_BANDWIDTH_TOTAL                          |
-|                       Target: Peak 900 GB/s bi-directional                         |
-+------------------------------------------------------------------------------------+
+```bash
+python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math --concurrency 8 --max-tokens 256 --temperature 0
 ```
 
-### Critical Hardware Telemetry Nuances on GB10
-1. **Unified Memory Reporting (`DCGM_FI_DEV_FB_USED`)**: On discrete H100 PCIe GPUs, VRAM is strictly separated from system DRAM. On the GB10, the 128 GB LPDDR5X pool is unified. DCGM reports the GPU-mapped address space. Ensure your Prometheus alerts account for OS kernel buffers (~8 GB) and do not alert if VRAM usage is at 75%—this is intentional pre-allocation by vLLM.
-2. **NVLink-C2C Link Health**: Monitor `DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT`. On GB10, any non-zero value indicates physical signal degradation across the chip-to-chip interposer, requiring an automated node cordon in Kubernetes.
+`max_tokens 256` truncates almost every R1 chain. Within ~15 minutes of sustained traffic, `ReasoningTruncated` goes Pending, then Firing. Check `localhost:9090/alerts` and Alertmanager. The `finish reasons` panel shows `length` dominating.
 
----
+### 5.6 Day-2 panels
 
-## 10. Step-by-Step Practice Exercises with Full Solutions
-
-### Exercise 1: Writing a PromQL Query for P90 Inter-Token Latency (ITL)
-* **Objective**: Formulate the PromQL expression to calculate the 90th percentile Inter-Token Latency across all serving pods in namespace `ai-serving` over a 5-minute rolling window.
-* **Solution**:
-```promql
-histogram_quantile(
-  0.90,
-  sum(rate(vllm:time_per_output_token_seconds_bucket{namespace="ai-serving"}[5m])) by (le, pod)
-)
-```
-* **Explanation**: `vllm:time_per_output_token_seconds_bucket` stores histogram buckets. `rate(...[5m])` calculates per-second request increments per bucket. `sum(...) by (le, pod)` aggregates across request dimensions while preserving the bucket boundary `le` and pod name. `histogram_quantile(0.90, ...)` computes the 90th percentile value in seconds.
-
----
-
-### Exercise 2: Detecting Silent GPU Thermal Throttling
-* **Objective**: Write an alert rule that detects when GPU clock speeds drop below 1,200 MHz while GPU utilization is $> 80\%$, indicating thermal throttling.
-* **Solution**:
-```yaml
-- alert: GPUSilentThermalThrottling
-  expr: (DCGM_FI_DEV_SM_CLOCK < 1200) and (DCGM_FI_DEV_GPU_UTIL > 80)
-  for: 1m
-  labels:
-    severity: warning
-  annotations:
-    summary: "GPU clock frequencies throttled on {{ $labels.instance }}"
-    description: "GPU core clock has dropped to {{ $value }} MHz despite heavy compute load."
+```bash
+kubectl -n llm-serving create job --from=cronjob/catalog-drift cd-test
 ```
 
----
-
-### Exercise 3: Constructing a Master Grafana Dashboard Row
-* **Objective**: Define the 4 core PromQL expressions for a real-time SRE Grafana panel row.
-* **Solution**:
-1. **Total Output Token Generation Rate (tok/s)**:
-   ```promql
-   sum(vllm:avg_generation_throughput_tok_per_s)
-   ```
-2. **Cluster-Wide PagedAttention Memory Utilization (%)**:
-   ```promql
-   avg(vllm:gpu_cache_usage_factor) * 100
-   ```
-3. **Queue Saturation Count (Requests Blocked)**:
-   ```promql
-   sum(vllm:num_requests_waiting)
-   ```
-4. **P99 Time to First Token (TTFT)**:
-   ```promql
-   histogram_quantile(0.99, sum(rate(vllm:time_to_first_token_seconds_bucket[5m])) by (le))
-   ```
+With an unpinned or moved catalog the Job may fail on purpose (Vol 33). Watch **Failed day-2 Jobs** and `DayTwoJobFailed`. Then delete the Job.
 
 ---
 
-## 11. Troubleshooting & Operational FAQ
+## 6. Verify
 
-### Q1: Why does `DCGM_FI_DEV_GPU_UTIL` show 0% even though tokens are actively streaming?
-**Root Cause**: The client prompt may be extremely long (e.g., 32,000 tokens), causing a high prefill calculation followed by single-token generation steps. During the single-token autoregressive decoding phase, memory bandwidth is the primary bottleneck rather than raw compute utilization. The GPU's Tensor Cores are active for only a few microseconds per token cycle.  
-**Remediation**: Check `vllm:avg_generation_throughput_tok_per_s` and `DCGM_FI_DEV_FB_USED`. If throughput is $> 30\text{ tok/s}$, the serving engine is operating normally regardless of low instantaneous core utilization.
-
-### Q2: Why does `dcgm-exporter` fail to start in Kubernetes with `Error: Failed to connect to NVML`?
-**Root Cause**: The Kubernetes pod lacks access to the host NVIDIA device drivers or the NVIDIA Container Toolkit runtime is not configured as the default container runtime in `/etc/containerd/config.toml`.  
-**Remediation**: Ensure `runtimeClassName: nvidia` is declared in the pod spec, or verify that `/dev/nvidia*` devices and `/usr/local/nvidia` volumes are mounted with `privileged: true`.
-
-### Q3: How frequently should Prometheus scrape DCGM and vLLM?
-**Best Practice**: Scrape at **5-second intervals** for real-time inference clusters. A standard 15s or 30s scrape interval misses brief 2-second KV-cache allocation spikes that cause transient request dropouts (HTTP 503).
+| Check | Expected |
+|---|---|
+| rules loaded | PrometheusRule `spark-reasoning`: three groups, nine rules |
+| dashboard | 27 panels. Generated JSON matches the committed file (CI) |
+| sources | vLLM, GPU (DCGM or textfile), kube-state-metrics, Traefik all return series |
+| alert tests | `promtool test rules` SUCCESS |
+| live alert | `ReasoningTruncated` fired under §5.5 and cleared afterwards |
 
 ---
 
-### Complete Curriculum Navigation
-| Previous Volume | Master Curriculum Navigation | Next Volume |
-| :--- | :---: | :---: |
-| [← 37. DeepSeek vs. OpenAI o1 & Claude 3.5](37-deepseek-vs-openai-o1-and-claude.md) | [Curriculum Index](README.md) | [39. Master Troubleshooting Playbook →](39-master-troubleshooting-playbook.md) |
+## 7. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| no vLLM series | ServiceMonitor missing the `release: kps` label, or wrong port name | the base Deployment's ServiceMonitor has both. `kubectl get servicemonitor -A` |
+| panels empty, others fine | metric renamed in your vLLM version | `curl localhost:8000/metrics | grep vllm:` and adjust `gen_dashboard.py` |
+| GPU panels empty | DCGM off and textfile collector not installed | 01 Ansible `gpu_telemetry` role |
+| dashboard not in Grafana | sidecar label/namespace mismatch | label `grafana_dashboard: "1"` in a namespace the sidecar watches |
+| `promtool test` fails after editing an alert | annotation text or labels changed | update `rules.test.yaml`. That's the test doing its job |
+| tokens/J looks absurd | power metric missing (division by empty) | check the `POWER` expression sources |
+
+---
+
+## 8. Scale-out path
+
+| One Spark | Fleet |
+|---|---|
+| one Prometheus | Prometheus per cluster + long-term store (Thanos/Mimir) |
+| alerts to one channel | SLOs (TTFT, ITL, truncation rate) with error budgets and burn-rate alerts per tenant |
+| GPU via textfile | DCGM exporter everywhere. Per-GPU and per-NVLink metrics on HGX/GB200 |
+| request metrics | distributed tracing (OpenTelemetry) through gateway → LiteLLM → engine |
+
+---
+
+## 9. Checklist
+
+- [ ] I watch TTFT, ITL, truncation and queue depth, not just latency and errors.
+- [ ] I know which memory number is real headroom on a GB10.
+- [ ] Day-2 jobs can't fail silently.
+- [ ] My alerts have unit tests, and I've seen one fire for real.

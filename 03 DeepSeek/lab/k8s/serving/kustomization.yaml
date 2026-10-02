@@ -1,0 +1,9 @@
+# THE serving pointer for GitOps (production-mlops.md): which catalog model runs on the
+# Spark is decided by the one line under `resources` below. Changing it in a pull request,
+# merging, and letting Argo CD sync is the whole model-switch procedure. A PostSync hook
+# then runs the eval gate against the baseline in ConfigMap deepseek-eval-baseline.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../models/r1-7b
+  - eval-gate-hook.yaml

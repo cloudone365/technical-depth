@@ -1,5 +1,13 @@
 # Open WebUI (Volume 27): chat UI with collapsible "thinking" for R1 models,
-# talking to LiteLLM. Data (users, chats) on a Retain PVC.
+# talking to LiteLLM. Data (users, chats, webui.db) on a Retain PVC; nightly
+# backup in k8s/ops/webui-backup.yaml.
+apiVersion: v1
+kind: Secret
+metadata: {name: open-webui-secret, namespace: llm-serving}
+type: Opaque
+stringData:
+  secret-key: "change-me-32-random-bytes"   # signs sessions/JWTs; replace from Vault (Volume 32)
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata: {name: open-webui, namespace: llm-serving, labels: {app: open-webui}}
@@ -22,6 +30,10 @@ spec:
             - {name: RAG_EMBEDDING_ENGINE, value: openai}
             - {name: RAG_OPENAI_API_BASE_URL, value: "http://litellm.llm-serving:4000/v1"}
             - {name: RAG_EMBEDDING_MODEL, value: embeddings}
+            - {name: DEFAULT_USER_ROLE, value: pending}        # sign-ups wait for an admin to approve them
+            - {name: AIOHTTP_CLIENT_TIMEOUT, value: "900"}     # long reasoning answers (Vol 21)
+            - name: WEBUI_SECRET_KEY                           # stable across restarts → sessions survive
+              valueFrom: {secretKeyRef: {name: open-webui-secret, key: secret-key}}
           ports: [{name: http, containerPort: 8080}]
           readinessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, initialDelaySeconds: 20}
           resources: {requests: {cpu: 250m, memory: 1Gi}, limits: {memory: 4Gi}}

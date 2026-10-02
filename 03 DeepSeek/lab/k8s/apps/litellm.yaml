@@ -1,5 +1,6 @@
 # LiteLLM proxy (Volume 28): one OpenAI-compatible endpoint with virtual model
 # names, per-key budgets/rate limits and fallbacks in front of the lab's engines.
+# Virtual keys and spend logs are stored in PostgreSQL (litellm-db.yaml).
 apiVersion: v1
 kind: ConfigMap
 metadata: {name: litellm-config, namespace: llm-serving}
@@ -12,10 +13,23 @@ data:
         litellm_params: {model: hosted_vllm/r1-7b, api_base: http://vllm.llm-serving:8000/v1, api_key: none}
       - model_name: reasoning-sglang
         litellm_params: {model: openai/r1-32b-fp8, api_base: http://sglang.llm-serving:30000/v1, api_key: none}
+      - model_name: agent                # tool calling (Vol 30): Qwen2.5 with the hermes parser
+        litellm_params: {model: hosted_vllm/qwen2.5-7b-tools, api_base: http://vllm.llm-serving:8000/v1, api_key: none}
       - model_name: embeddings
         litellm_params: {model: hosted_vllm/bge-m3, api_base: http://bge-m3.llm-serving:8000/v1, api_key: none}
+      # Load balancing: two deployments behind one name. With one Spark both point at
+      # engines on the same GPU; with spark-02 the second api_base moves there.
+      - model_name: reasoning-pool
+        litellm_params: {model: hosted_vllm/r1-32b-fp8, api_base: http://vllm.llm-serving:8000/v1, api_key: none, rpm: 60}
+        model_info: {id: pool-vllm, input_cost_per_token: 0.0000001, output_cost_per_token: 0.0000004}
+      - model_name: reasoning-pool
+        litellm_params: {model: openai/r1-32b-fp8, api_base: http://sglang.llm-serving:30000/v1, api_key: none, rpm: 60}
+        model_info: {id: pool-sglang, input_cost_per_token: 0.0000001, output_cost_per_token: 0.0000004}
     router_settings:
+      routing_strategy: least-busy        # fewest in-flight requests wins
       num_retries: 2
+      allowed_fails: 3                    # a deployment failing 3×/min is cooled down
+      cooldown_time: 60
       timeout: 900                      # long reasoning chains
       fallbacks: [{"reasoning": ["reasoning-sglang", "reasoning-fast"]}]
     litellm_settings:
@@ -23,6 +37,7 @@ data:
       request_timeout: 900
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY
+      database_url: os.environ/DATABASE_URL
 ---
 apiVersion: v1
 kind: Secret
@@ -47,8 +62,13 @@ spec:
           env:
             - name: LITELLM_MASTER_KEY
               valueFrom: {secretKeyRef: {name: litellm-master-key, key: key}}
+            - name: DB_PASSWORD
+              valueFrom: {secretKeyRef: {name: litellm-db, key: password}}
+            - {name: DATABASE_URL, value: "postgresql://litellm:$(DB_PASSWORD)@litellm-db.llm-serving:5432/litellm"}
+            - {name: STORE_MODEL_IN_DB, value: "False"}      # models come from this ConfigMap (GitOps), not the UI
           ports: [{name: http, containerPort: 4000}]
           readinessProbe: {httpGet: {path: /health/readiness, port: http}, periodSeconds: 10}
+          startupProbe: {httpGet: {path: /health/liveliness, port: http}, periodSeconds: 10, failureThreshold: 30}   # DB migrations on first start
           livenessProbe: {httpGet: {path: /health/liveliness, port: http}, periodSeconds: 20, initialDelaySeconds: 30}
           resources: {requests: {cpu: 200m, memory: 512Mi}, limits: {memory: 2Gi}}
           volumeMounts: [{name: cfg, mountPath: /app/config.yaml, subPath: config.yaml}]

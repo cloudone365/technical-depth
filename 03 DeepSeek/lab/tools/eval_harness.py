@@ -139,9 +139,14 @@ def run(a):
     results["economics"] = econ(out_tokens, wall, a)
     e = results["economics"]
     print(f"\nrun: {out_tokens} output tokens in {wall:.0f}s = {e['tokens_per_s']:.1f} tok/s aggregate")
-    print(f"local cost: ${e['local_usd_per_mtok']:.2f} per 1M output tokens "
-          f"(power {a.power_w} W @ ${a.kwh_price}/kWh + hardware ${a.hw_price} over {a.hw_years} y at {a.duty*100:.0f}% duty)")
-    if a.api_price_out:
+    if a.hosted:
+        price = a.api_price_out
+        print(f"hosted model: cost = provider price ({'$%.2f' % price if price else 'not given'} per 1M output tokens); "
+              f"this run ≈ ${(price or 0) * out_tokens / 1e6:.4f} in output tokens")
+    else:
+        print(f"local cost: ${e['local_usd_per_mtok']:.2f} per 1M output tokens "
+              f"(power {a.power_w} W @ ${a.kwh_price}/kWh + hardware ${a.hw_price} over {a.hw_years} y at {a.duty*100:.0f}% duty)")
+    if a.api_price_out and not a.hosted:
         print(f"API price: ${a.api_price_out:.2f} per 1M output tokens → local is "
               f"{a.api_price_out / e['local_usd_per_mtok']:.1f}× cheaper at this throughput"
               if e["local_usd_per_mtok"] < a.api_price_out else
@@ -150,6 +155,24 @@ def run(a):
         pathlib.Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         json.dump(results, open(a.out, "w"), indent=1)
         print(f"saved {a.out}")
+    return gate(results, a) if a.gate else 0
+
+
+def gate(results, a):
+    """Release gate (Volumes 33, 40): every suite must stay within --tolerance of the baseline."""
+    base = json.load(open(a.gate))
+    failed = 0
+    print(f"\ngate vs {a.gate} (tolerance {a.tolerance:.2f}):")
+    for suite, cur in results["suites"].items():
+        if suite not in base["suites"]:
+            print(f"  {suite:5} no baseline — skipped")
+            continue
+        b, c = base["suites"][suite]["accuracy"], cur["accuracy"]
+        ok = c >= b - a.tolerance
+        failed += not ok
+        print(f"  {suite:5} baseline {b:.2f}  now {c:.2f}  {'PASS' if ok else 'FAIL'}")
+    print("GATE PASSED" if not failed else f"GATE FAILED ({failed} suite(s) regressed)")
+    return 1 if failed else 0
 
 
 def econ(out_tokens, wall_s, a):
@@ -157,20 +180,30 @@ def econ(out_tokens, wall_s, a):
     energy_usd_per_s = a.power_w / 1000 * a.kwh_price / 3600
     hw_usd_per_s = a.hw_price / (a.hw_years * 365 * 24 * 3600 * a.duty)
     per_mtok = (energy_usd_per_s + hw_usd_per_s) / tps * 1e6 if tps else float("inf")
-    return {"tokens_per_s": tps, "local_usd_per_mtok": per_mtok}
+    if getattr(a, "hosted", False):            # a hosted API: the price per token IS the cost
+        per_mtok = a.api_price_out if a.api_price_out else float("nan")
+    return {"tokens_per_s": tps, "local_usd_per_mtok": per_mtok, "hosted": bool(getattr(a, "hosted", False))}
 
 
 def report(paths):
     rows = [json.load(open(p)) for p in paths]
     suites = sorted({s for r in rows for s in r["suites"]})
-    hdr = f"{'model':34}" + "".join(f"{s+' acc':>10}" for s in suites) + f"{'out tok':>9}{'reason%':>9}{'tok/s':>8}{'$/Mtok':>8}"
+    hdr = (f"{'model':34}" + "".join(f"{s+' acc':>10}" for s in suites)
+           + f"{'out tok':>9}{'reason%':>9}{'p50 s':>7}{'tok/ok':>8}{'tok/s':>8}{'$/Mtok':>8}")
     print(hdr)
     print("-" * len(hdr))
     for r in rows:
-        toks = statistics.mean(s["mean_completion_tokens"] for s in r["suites"].values())
-        reas = statistics.mean(s["reasoning_share"] for s in r["suites"].values())
+        su = r["suites"].values()
+        toks = statistics.mean(s["mean_completion_tokens"] for s in su)
+        reas = statistics.mean(s["reasoning_share"] for s in su)
+        p50 = statistics.mean(s["latency_p50"] for s in su)
+        # output tokens spent per CORRECT answer: what a right answer actually costs
+        spent = sum(s["mean_completion_tokens"] * s["n"] for s in su)
+        ok = sum(s["correct"] for s in su)
+        per_ok = f"{spent / ok:8.0f}" if ok else f"{'inf':>8}"
         print(f"{r['model'][:34]:34}" + "".join(f"{r['suites'].get(s, {}).get('accuracy', float('nan')):10.2f}" for s in suites)
-              + f"{toks:9.0f}{reas*100:8.0f}%{r['economics']['tokens_per_s']:8.1f}{r['economics']['local_usd_per_mtok']:8.2f}")
+              + f"{toks:9.0f}{reas*100:8.0f}%{p50:7.1f}{per_ok}{r['economics']['tokens_per_s']:8.1f}"
+              + f"{r['economics']['local_usd_per_mtok']:8.2f}")
 
 
 if __name__ == "__main__":
@@ -188,13 +221,17 @@ if __name__ == "__main__":
     ap.add_argument("--hw-price", type=float, default=4000.0)
     ap.add_argument("--hw-years", type=float, default=3.0)
     ap.add_argument("--duty", type=float, default=0.5, help="fraction of time the box does useful work")
+    ap.add_argument("--hosted", action="store_true",
+                    help="the endpoint is a paid API: $/Mtok = --api-price-out, not local power + hardware")
     ap.add_argument("--api-price-out", type=float, help="USD per 1M output tokens of the API you compare with")
     ap.add_argument("--out")
     ap.add_argument("--report", nargs="+")
+    ap.add_argument("--gate", metavar="BASELINE.json", help="exit 1 if any suite's accuracy drops below the baseline")
+    ap.add_argument("--tolerance", type=float, default=0.02, help="allowed accuracy drop per suite for --gate")
     a = ap.parse_args()
     if a.report:
         report(a.report)
     else:
         if not a.model:
             ap.error("--model is required")
-        run(a)
+        sys.exit(run(a))

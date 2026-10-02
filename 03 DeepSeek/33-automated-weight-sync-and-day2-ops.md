@@ -1,405 +1,275 @@
-# 33. Automated Weight Sync & Day-2 Operations — Health, Maintenance & Audits
+# Volume 33 — Day-2 Operations: Pinned Weights, Upstream Drift Detection, Integrity Checks, Backups and an Upgrade Runbook
 
-> **Target Audience**: SREs, AI Platform Operators, and Systems Administrators maintaining production LLM clusters over long-term lifecycles.  
-> **Prerequisites**: Linux systemd administration, shell scripting, Kubernetes Deployments (from [19-kubernetes-manifests-for-deepseek.md](19-kubernetes-manifests-for-deepseek.md)), and NVMe storage management (from [20-nvme-local-storage-and-weight-caching.md](20-nvme-local-storage-and-weight-caching.md)).  
-> **Estimated Study Time**: 55 minutes.  
-> **What You Will Master**: Designing **automated Day-2 maintenance pipelines**, atomic model synchronization from S3/GCS, **SafeTensors SHA-256 cryptographic integrity verification**, SSD `fstrim` wear leveling, and managing systemd maintenance timers on the **NVIDIA DGX Spark**.
+> **Module 03 · Part VIII — Automation and operations** · Prev: [32 Vault](32-hashicorp-vault-secrets-integration.md) · Next: [34 DeepSeek vs Llama 3](34-deepseek-vs-meta-llama3.md)
 
----
-
-## 📑 Table of Contents
-1. [Foundational Scaffolding: The Day-1 vs. Day-2 Reality](#1-foundational-scaffolding-the-day-1-vs-day-2-reality)
-2. [Co-Related Concepts & The Evolution of Platform Operations](#2-co-related-concepts--the-evolution-of-platform-operations)
-3. [Deep First-Principles: Cryptographic Model Integrity & Bit Rot Prevention](#3-deep-first-principles-cryptographic-model-integrity--bit-rot-prevention)
-4. [The Single-GPU Rolling Update Paradox (`Recreate` vs. `Surge`)](#4-the-single-gpu-rolling-update-paradox-recreate-vs-surge)
-5. [Comparative Analysis: Systemd Timers vs. Cron vs. K8s CronJobs](#5-comparative-analysis-systemd-timers-vs-cron-vs-k8s-cronjobs)
-6. [Hardware Grounding: NVMe Wear Leveling & ECC Monitoring on DGX Spark](#6-hardware-grounding-nvme-wear-leveling--ecc-monitoring-on-dgx-spark)
-7. [Hands-On Python Lab: SafeTensors Cryptographic Audit Script](#7-hands-on-python-lab-safetensors-cryptographic-audit-script)
-8. [Automated Nightly Sync & Atomic Cutover Pipeline](#8-automated-nightly-sync--atomic-cutover-pipeline)
-9. [Systemd Production Maintenance Service & Timer Pair](#9-systemd-production-maintenance-service--timer-pair)
-10. [Practice Exercises with Step-by-Step Solutions](#10-practice-exercises-with-step-by-step-solutions)
-11. [Troubleshooting Guide & Diagnostic Runbook](#11-troubleshooting-guide--diagnostic-runbook)
+| | |
+|---|---|
+| **You will build** | The routine that keeps the stack trustworthy after day 1. Every catalog model is pinned to an exact Hugging Face commit. A weekly job reports when upstream moves. A nightly job proves the cached weights haven't changed by a single byte. The chat and gateway databases are backed up and restore-tested. A written upgrade runbook goes from "upstream changed" to "new revision serving, old one ready for rollback" |
+| **Hardware** | spark-01 |
+| **Time** | 90 min |
+| **Risk** | Low. The tamper drill modifies a *copy* of a weight file |
+| **Lab files** | [`tools/catalog_drift.py`](lab/tools/catalog_drift.py), [`tools/weights_verify.py`](lab/tools/weights_verify.py), [`k8s/ops/`](lab/k8s/ops/) (`catalog-drift`, `weights-verify`, `webui-backup`, `litellm-db-backup`, `vault-sync`), [`models.yaml`](lab/models.yaml) (`revision`), [`02 …/60-storage/model-prefetch-job.yaml`](../02%20Kubernetes/lab/manifests/60-storage/model-prefetch-job.yaml) (`REVISION`) |
 
 ---
 
-## 1. Foundational Scaffolding: The Day-1 vs. Day-2 Reality
+## 1. Why day-2 is where AI stacks fail quietly
 
-### Day-1 Glory vs. Day-2 Entropy
-In AI infrastructure engineering, **Day-1** represents initial deployment: setting up the GPU drivers, downloading model weights, standing up vLLM, and watching the first token stream successfully.
-**Day-2 Operations** represent the subsequent 365 days of continuous production execution:
-* **Checkpoints Evolve**: Data scientists train new LoRA adapters or deploy fine-tuned model revisions weekly.
-* **Disk Entropy**: Dangling container layers, abandoned Hugging Face lockfiles, and crashed core dumps silently fill the NVMe drive.
-* **Silent Tensor Bit Rot**: Cosmic rays or physical NAND flash wear can corrupt a single floating-point weight in a 32 GB SafeTensors file, causing the model to silently emit gibberish or `NaN` outputs weeks later without an explicit crash.
-* **Memory Leaks**: Long-running background processes slowly fragment unified system memory.
-
-### The Vehicle Oil Change Analogy
-Buying a high-performance sports car and driving it off the showroom floor is Day 1. Changing the synthetic motor oil, rotating the tires, flushing the brake fluid, and checking wheel alignment every 5,000 miles is Day 2. If you ignore Day 2 operations, your engine seizes at 80 MPH on the highway.
-Automated Day-2 operations ensure the DGX Spark remains **perpetually clean, cryptographically verified, and performant**.
-
-```
-                           DAY-2 LIFECYCLE RECONCILIATION
-┌────────────────────────────────────────────────────────────────────────┐
-│ Scheduled Systemd Maintenance Timer (Runs Nightly at 03:00 UTC)        │
-└────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ PHASE 1: DISK HYGIENE & NVMe MAINTENANCE                               │
-│ - Delete orphaned Hugging Face locks (*.lock, *.incomplete)            │
-│ - Prune dangling Docker images & build caches (> 7 days old)           │
-│ - Execute 'fstrim -v /data' to restore NAND block write endurance      │
-└────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ PHASE 2: CRYPTOGRAPHIC INTEGRITY AUDIT                                 │
-│ - Verify SHA-256 hashes of all resident *.safetensors shards           │
-│ - Reject corrupted checkpoints before production ingestion             │
-└────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ PHASE 3: ATOMIC MODEL SYNC & GRACEFUL ROLLOUT                          │
-│ - Pull newly converged adapter weights from S3 / 3FS                   │
-│ - Atomic symlink flip: active_model -> /data/models/v2                 │
-│ - Graceful vLLM rolling reload (Zero dropped user requests)            │
-└────────────────────────────────────────────────────────────────────────┘
-```
+| Failure | How it happens | What catches it here |
+|---|---|---|
+| model changes under you | `main` on Hugging Face gets a new commit (re-uploaded weights, new chat template) and the next prefetch silently pulls it | `revision:` pins in the catalog. `catalog-drift` reports upstream moves weekly |
+| weights corrupted or tampered with | disk error, partial copy, malicious edit | `weights-verify`: sha256 of every file against a manifest recorded at download |
+| keys and chats lost | PVC deleted, node rebuilt | nightly `webui-backup` and `litellm-db-backup` + quarterly restore drill |
+| stale secrets | leaked key never rotated | `vault-sync` every 15 min, rotation drill (Vol 32) |
+| disk full | every model and revision ever tried stays cached | `hf cache scan` / `hf cache delete` against the catalog |
+| upgrade breaks quality | new revision behaves differently | upgrade runbook with an eval gate before rollout (§3.4) |
 
 ---
 
-## 2. Co-Related Concepts & The Evolution of Platform Operations
+## 2. Architecture — HLD
+
+### 2.1 The schedule
 
 ```mermaid
-flowchart TD
-    ManualOps["Manual Sysadmin SSH<br/>Engineers manually delete files when disk reaches 100%"] --> LegacyCron["Crontab Scripts (/etc/cron.d)<br/>Silent failures, overlapping jobs, zero execution telemetry"]
-    LegacyCron --> SystemdTimers["Systemd Service & Timer Units<br/>Monotonic clocking, journald log aggregation, service dependencies"]
-    SystemdTimers --> K8sCronJobs["Kubernetes Native CronJobs<br/>Containerized scheduled tasks, but cannot manage host NVMe fstrim"]
-    SystemdTimers --> GitOpsSync["Automated GitOps & Object Storage Reconciliation<br/>Declarative, auditable, self-healing continuous delivery"]
+flowchart LR
+  subgraph EVERY15["every 15 min"]
+    VS["vault-sync<br/>Vault → Secrets → roll consumers"]
+  end
+  subgraph NIGHTLY["nightly (UTC)"]
+    direction TB
+    WB["02:41 webui-backup<br/>SQLite online backup · integrity_check"]
+    LB["02:51 litellm-db-backup<br/>pg_dump -Fc · keep 14"]
+    WV["03:17 weights-verify<br/>sha256 every snapshot vs manifest"]
+  end
+  subgraph WEEKLY["weekly Mon 06:23"]
+    CD["catalog-drift<br/>pinned revision vs upstream main"]
+  end
+  subgraph HUMAN["quarterly · on change"]
+    direction TB
+    RD["restore drills<br/>(Vols 27, 28)"]
+    UP["upgrade runbook §3.4"]
+    GC["cache GC §5.5"]
+  end
+  CD -->|"MOVED → Job fails → alert"| UP
+  WV -->|"mismatch → Job fails → alert"| INC["incident: quarantine snapshot,<br/>re-download pinned revision"]
+  classDef sec fill:#cf222e,stroke:#82071e,color:#fff
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef obs fill:#fb8500,stroke:#9a5000,color:#000
+  class VS,WV sec
+  class WB,LB store
+  class CD obs
+  class RD,UP,GC,INC ctrl
+  style EVERY15 fill:#fdecee,stroke:#cf222e
+  style NIGHTLY fill:#fff8e6,stroke:#bf8700
+  style WEEKLY fill:#fff1e6,stroke:#fb8500
+  style HUMAN fill:#eef2ff,stroke:#1f6feb
+```
+
+### 2.2 A model upgrade, end to end
+
+```mermaid
+flowchart LR
+  A["catalog-drift:<br/>r1-7b MOVED"] --> B["branch: catalog_drift.py pin --only r1-7b<br/>gen_overlays.py → --revision=&lt;new&gt;"]
+  B --> C["PR → CI<br/>overlays in sync · dry-run · admission"]
+  C --> D["on the Spark: serve new revision<br/>as r1-7b (or a canary name)"]
+  D --> E["eval gate (Vol 40)<br/>math/json/code ≥ previous − tolerance"]
+  E -->|pass| F["merge → playbook --tags serve<br/>weights-verify records the new manifest"]
+  E -->|fail| G["close PR · keep old pin<br/>report upstream issue"]
+  F --> H["old snapshot kept in cache<br/>= instant rollback"]
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef sec fill:#cf222e,stroke:#82071e,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef obs fill:#fb8500,stroke:#9a5000,color:#000
+  class A obs
+  class B,C,F,H ctrl
+  class D gpu
+  class E,G sec
 ```
 
 ---
 
-## 3. Deep First-Principles: Cryptographic Model Integrity & Bit Rot Prevention
+## 3. LLD
 
-### The Danger of Silent Weight Corruption
-A 32-billion parameter model in 16-bit precision contains:
-$$N_{\text{bits}} = 32 \times 10^9 \text{ params} \times 16 \text{ bits} = 5.12 \times 10^{11} \text{ bits}$$
+### 3.1 Pinning
 
-Over months of storage on high-density NAND flash, physical bit flips (silent bit rot) have a non-zero probability:
-* If a bit flips in a text description, a typo occurs.
-* If a bit flips in the exponent of a floating-point attention weight, a value like `0.021` suddenly becomes `1.4e+38`!
-* In the forward pass, this explosive number causes the Softmax denominator to overflow to `Infinity`, generating **`NaN` (Not a Number)** across all subsequent token activations. The model abruptly begins generating blank spaces or repeated exclamation points!
+| Where | What changes with `revision: <sha>` |
+|---|---|
+| `models.yaml` | `revision:` under the model (written by `catalog_drift.py pin`) |
+| overlay (generated) | vLLM gets `--revision=<sha> --tokenizer-revision=<sha>` |
+| prefetch Job | `hf download <repo> --revision <sha>` (env `REVISION`, set by `serve-model.sh` and the playbook) |
+| cache | `/models/hf/models--…/snapshots/<sha>/`: several revisions can coexist |
 
-### The Solution: Cryptographic SafeTensors Hashing
-Every production model directory contains `model.safetensors.index.json`, which indexes each weight tensor to its corresponding shard file. By maintaining an immutable SHA-256 manifest:
+Unpinned entries keep working (`main`), and the drift report lists them as `UNPINNED`.
 
-$$\text{Hash} = \text{SHA256}(M_{\text{shard}})$$
+### 3.2 Integrity: trust on first use
 
-The maintenance daemon verifies every file's cryptographic hash against the upstream registry before allowing the inference engine to load it.
+`weights-verify` walks every `snapshots/<sha>/` directory. The first time it sees one, it writes `/models/manifests/<repo>@<sha>.json` with a sha256 for every file. Every later run recomputes and compares, and **any** missing, extra or changed file fails the Job. Record the manifest right after a known-good download (`kubectl create job --from=cronjob/weights-verify …`).
 
----
+### 3.3 Backups
 
-## 4. The Single-GPU Rolling Update Paradox (`Recreate` vs. `Surge`)
+| Data | Job | Format | Restore | Drill |
+|---|---|---|---|---|
+| Open WebUI `webui.db` | `webui-backup` | SQLite online backup + `integrity_check` | copy file back with the app scaled to 0 | Vol 27 §5.6 |
+| LiteLLM Postgres | `litellm-db-backup` | `pg_dump -Fc` | `pg_restore --clean -d litellm` | §5.4 |
+| Qdrant index | rebuildable | — | re-run `rag-ingest` (alias swap) | Vol 29 |
+| model weights | rebuildable | — | prefetch the pinned revision | §5.3 |
+| Vault | 01 Ansible (Raft snapshot) | — | 01 Ansible runbook | 01 Ansible |
 
-In standard cloud Kubernetes deployments with large GPU pools:
-* Upgrading a model uses **Rolling Updates with Surge**: Pod $B$ (new model) boots up, loads weights, passes readiness probes, and only then is Pod $A$ (old model) terminated.
+### 3.4 Upgrade runbook (checklist)
 
-### Why Rolling Update Fails on a Single DGX Spark:
-On a single **NVIDIA DGX Spark (128 GB Unified Memory)**:
-* Pod $A$ (DeepSeek-R1-32B) consumes **~95 GB** (weights + KV cache).
-* If Kubernetes attempts a rolling update with `maxSurge: 1`, it tries to launch Pod $B$ concurrently.
-* Pod $B$ attempts to allocate another 95 GB of memory:
-  $$\text{Total Required Memory} = 95 + 95 = 190 \text{ GB} > 128 \text{ GB (Capacity!)}$$
-* **Result**: Pod $B$ crashes immediately with `CUDA Out Of Memory`, leaving the deployment in a broken state!
-
-### The Production Solution for Single-Node Hosts:
-1. **Strategy: `Recreate`**: Kubernetes cleanly terminates Pod $A$, frees the 128 GB memory array completely, and then launches Pod $B$.
-2. **Upstream Gateway Buffering**: During the 6-second window where Pod $B$ reloads from local NVMe, **LiteLLM Proxy** holds incoming user queries in its queue buffer, delivering them the millisecond Pod $B$ becomes ready with **zero dropped requests**!
-
----
-
-## 5. Comparative Analysis: Systemd Timers vs. Cron vs. K8s CronJobs
-
-| Dimension | Systemd Timers | Legacy Crontab | Kubernetes CronJob |
-| :--- | :--- | :--- | :--- |
-| **Logging & Auditability** | **Native in `journalctl -u`** | Cryptic `/var/log/syslog` | Pod logs (`kubectl logs`) |
-| **Overlapping Job Control** | **Native (`ConditionPathExists`)**| Requires manual `flock` | `concurrencyPolicy: Forbid` |
-| **Missed Execution Recovery**| **Yes (`Persistent=true`)** | No (Skipped if host was off) | Yes |
-| **Host Hardware Access** | **Direct (`fstrim`, `nvidia-smi`)**| Direct | Requires privileged hostPath |
-| **Recommended Usage** | **Host maintenance & NVMe trim**| Deprecated | Application-level batch jobs |
+1. **Detect**: the `catalog-drift` Job fails with `MOVED <name>`.
+2. **Read upstream**: model card and commit diff. Chat template changes are the most common breaking change.
+3. **Pin in a branch**: `catalog_drift.py pin --only <name>`, then `gen_overlays.py`, then a PR. CI must be green.
+4. **Stage**: serve the new revision on the Spark (`serve-model.sh <name>` from the branch).
+5. **Gate**: `eval_harness.py` on the same suites as the last accepted run. Accept if no suite drops by more than your tolerance (e.g. 2 points).
+6. **Promote**: merge, then run the playbook with `--tags serve`. Record the new manifest (`weights-verify`).
+7. **Keep rollback**: leave the previous snapshot in the cache for at least one release. Rollback = re-pin the old sha and redeploy.
 
 ---
 
-## 6. Hardware Grounding: NVMe Wear Leveling & ECC Monitoring on DGX Spark
+## 4. Integrations
 
-To maintain peak read throughput on the **DGX Spark PCIe Gen5 NVMe SSD**:
-
-### 1. NVMe Block Trimming (`fstrim`)
-When large model checkpoints (30+ GB) are deleted and overwritten, the SSD flash controller marks deleted blocks as stale. Without periodic trimming, subsequent write operations suffer severe write amplification and degraded read performance.
-* Running `fstrim -v /data` once per week resets deleted NAND flash blocks, ensuring read speeds remain pegged at **7.0 GB/s**.
-
-### 2. GPU Hardware ECC Monitoring
-The Blackwell GB10 GPU features Error-Correcting Code (ECC) memory across its unified LPDDR5X array:
-* **Single-Bit Errors**: Automatically detected and corrected by hardware with zero impact on computation.
-* **Double-Bit Errors (Uncorrectable)**: Hardware faults that require immediate pod eviction.
-* The maintenance daemon inspects ECC error counters weekly via:
-  ```bash
-  nvidia-smi -q -d ECC
-  ```
+- **Vol 15**: the catalog and generator gained `revision`. **Vol 31**: the playbook passes it to prefetch.
+- **Vol 32**: `vault-sync` is the 15-minute job in the schedule.
+- **Vol 38**: kube-prometheus-stack's `KubeJobFailed` alert turns a failed day-2 Job into a notification.
+- **Vol 40**: the eval gate used in step 5.
+- **02 Vol 11 / Vol 20**: cache layout and NVMe capacity.
 
 ---
 
-## 7. Hands-On Python Lab: SafeTensors Cryptographic Audit Script
-
-This script audits all SafeTensors shards in a target directory, calculating SHA-256 hashes and verifying that no file corruption or truncation has occurred:
-
-```python
-#!/usr/bin/env python3
-"""
-audit_safetensors_integrity.py
-Cryptographic SHA-256 checksum and header audit for SafeTensors model directories.
-"""
-
-import os
-import json
-import hashlib
-import sys
-
-def calculate_file_sha256(filepath: str, chunk_size: int = 1024 * 1024 * 8) -> str:
-    """Computes SHA-256 hash using 8MB buffered streaming to prevent memory exhaustion."""
-    hasher = hashlib.sha256()
-    with open(filepath, 'rb') as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            hasher.update(chunk)
-    return hasher.hexdigest()
-
-def audit_model_directory(model_dir: str):
-    print("=" * 70)
-    print(f"CRYPTOGRAPHIC SAFETENSORS AUDIT: {model_dir}")
-    print("=" * 70)
-
-    if not os.path.isdir(model_dir):
-        print(f"[!] Error: Model path {model_dir} does not exist!")
-        sys.exit(1)
-
-    # 1. Inspect SafeTensors Index
-    index_path = os.path.join(model_dir, "model.safetensors.index.json")
-    single_file_path = os.path.join(model_dir, "model.safetensors")
-
-    target_shards = []
-    if os.path.exists(index_path):
-        with open(index_path, 'r') as f:
-            index_data = json.load(f)
-        weight_map = index_data.get("weight_map", {})
-        target_shards = sorted(list(set(weight_map.values())))
-        print(f"[*] Multi-shard checkpoint detected: {len(target_shards)} shards registered.")
-    elif os.path.exists(single_file_path):
-        target_shards = ["model.safetensors"]
-        print("[*] Single-file checkpoint detected.")
-    else:
-        print("[!] Error: No valid .safetensors files or index found!")
-        sys.exit(1)
-
-    # 2. Iterate and Verify Shards
-    total_bytes = 0
-    all_passed = True
-
-    for shard in target_shards:
-        shard_path = os.path.join(model_dir, shard)
-        if not os.path.exists(shard_path):
-            print(f"\033[91m[FAILED]\033[0m Missing physical shard file: {shard}")
-            all_passed = False
-            continue
-
-        file_size = os.path.getsize(shard_path)
-        total_bytes += file_size
-        size_gb = file_size / (1024 ** 3)
-
-        print(f"[*] Auditing {shard} ({size_gb:.2f} GB)... ", end="", flush=True)
-        sha256_hash = calculate_file_sha256(shard_path)
-        print(f"\033[92m[PASSED]\033[0m (Hash: {sha256_hash[:16]}...)")
-
-    print("-" * 70)
-    total_gb = total_bytes / (1024 ** 3)
-    if all_passed:
-        print(f"\033[92m[✓] AUDIT SUCCESSFUL:\033[0m All {len(target_shards)} shards verified intact.")
-        print(f"    Total Model Volume: {total_gb:.2f} GB")
-    else:
-        print("\033[91m[!] AUDIT FAILED:\033[0m Corrupted or missing shards detected!")
-        sys.exit(1)
-    print("=" * 70)
-
-if __name__ == "__main__":
-    target_dir = sys.argv[1] if len(sys.argv) > 1 else "/data/models/DeepSeek-R1-Distill-Qwen-32B"
-    audit_model_directory(target_dir)
-```
-
----
-
-## 8. Automated Nightly Sync & Atomic Cutover Pipeline
-
-Save this script to `/usr/local/bin/dgx-model-sync.sh`:
+## 5. Lab
 
 ```bash
-#!/usr/bin/env bash
-# ==============================================================================
-# /usr/local/bin/dgx-model-sync.sh
-# Nightly synchronization of fine-tuned weights with atomic symlink cutover.
-# ==============================================================================
-set -euo pipefail
-
-SYNC_SOURCE="s3://enterprise-ai-checkpoints/production/deepseek-r1-latest"
-STAGING_DIR="/data/models/staging_weights"
-ACTIVE_DIR="/data/models/active_model"
-LOCKFILE="/tmp/dgx_sync.lock"
-
-# Prevent concurrent executions
-exec 200>"$LOCKFILE"
-flock -n 200 || { echo "[!] Another sync job is running. Exiting."; exit 1; }
-
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting model synchronization from $SYNC_SOURCE..."
-
-# 1. Sync weights down to staging directory
-mkdir -p "$STAGING_DIR"
-aws s3 sync "$SYNC_SOURCE" "$STAGING_DIR" --delete --exact-timestamps
-
-# 2. Run cryptographic audit on staged weights
-python3 /usr/local/bin/audit_safetensors_integrity.py "$STAGING_DIR"
-
-# 3. Perform atomic symlink flip
-echo "[*] Performing atomic cutover to new model revision..."
-ln -sfn "$STAGING_DIR" "$ACTIVE_DIR"
-
-# 4. Trigger rolling restart in Kubernetes
-echo "[*] Triggering Kubernetes deployment rollout..."
-kubectl rollout restart deployment/deepseek-r1-serving -n ai-inference
-kubectl rollout status deployment/deepseek-r1-serving -n ai-inference --timeout=300s
-
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Synchronization and rollout complete!"
+cd "03 DeepSeek/lab"
+kubectl apply -k .                                 # tools + catalog ConfigMaps
+kubectl apply -f k8s/ops/                          # all day-2 CronJobs
+kubectl -n llm-serving get cronjobs
 ```
 
-Make executable:
+Expected: `catalog-drift`, `litellm-db-backup`, `vault-sync`, `webui-backup`, `weights-verify` with the schedules from §2.1.
+
+### 5.1 Pin a model
+
+On a workstation with internet access:
+
 ```bash
-sudo chmod +x /usr/local/bin/dgx-model-sync.sh
+python3 tools/catalog_drift.py report
+python3 tools/catalog_drift.py pin --only r1-7b
+python3 scripts/gen_overlays.py && git diff models.yaml k8s/models/r1-7b
 ```
 
----
+Expected: a `revision:` line under r1-7b, and two new args in its overlay (`--revision=…`, `--tokenizer-revision=…`).
 
-## 9. Systemd Production Maintenance Service & Timer Pair
+### 5.2 Serve the pinned revision and record its manifest
 
-### 1. Service Unit (`/etc/systemd/system/dgx-maintenance.service`):
-
-```ini
-[Unit]
-Description=DGX Spark Day-2 Maintenance and Storage Hygiene Daemon
-After=network.target
-
-[Service]
-Type=oneshot
-User=root
-ExecStart=/bin/bash -c '\
-  echo "[*] Starting Weekly DGX Spark Maintenance..."; \
-  echo "[1/3] Trimming NVMe SSD blocks..."; \
-  fstrim -v /data; \
-  echo "[2/3] Pruning stale Docker images and build caches..."; \
-  docker image prune -af --filter "until=168h"; \
-  docker builder prune -af --filter "until=168h"; \
-  echo "[3/3] Deleting orphaned Hugging Face lockfiles..."; \
-  find /data/models/cache -name "*.lock" -delete; \
-  find /data/models/cache -name "*.incomplete" -mtime +2 -delete; \
-  echo "[✓] Maintenance complete. Current storage utilization:"; \
-  df -h /data'
-
-StandardOutput=journal
-StandardError=journal
-```
-
-### 2. Timer Unit (`/etc/systemd/system/dgx-maintenance.timer`):
-
-```ini
-[Unit]
-Description=Weekly Scheduled Maintenance Timer for DGX Spark
-Requires=dgx-maintenance.service
-
-[Timer]
-# Runs every Sunday at 03:00 AM UTC
-OnCalendar=Sun *-*-* 03:00:00
-# Ensures missed runs execute immediately upon system boot
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-```
-
-### Enable and Activate:
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now dgx-maintenance.timer
-
-# Verify active status
-systemctl list-timers --all | grep dgx-maintenance
+scripts/serve-model.sh r1-7b
+kubectl -n llm-serving logs job/model-prefetch | tail -1          # downloaded …@<sha>
+kubectl -n llm-serving create job --from=cronjob/weights-verify wv-pin && kubectl -n llm-serving logs -f job/wv-pin
 ```
 
----
+### 5.3 Tamper drill
 
-## 10. Practice Exercises with Step-by-Step Solutions
+Corrupt a byte in a copy of the snapshot (never the live one), then verify the copy against the real manifest:
 
-### Exercise 1: Preventing Outages During Single-GPU Model Upgrades
-**Scenario**: You manage a single DGX Spark node with 128 GB Unified Memory.
-You deploy `DeepSeek-R1-Distill-32B` in Kubernetes using the standard default `strategy: type: RollingUpdate, maxSurge: 25%`.
-During a model update, the deployment hangs in `CrashLoopBackOff`, and the existing pod is terminated.
-**Question**: Explain why this failure occurred and write the exact YAML configuration snippet to prevent it.
-
-#### Solution:
-* **The Failure**: With `maxSurge: 25%`, Kubernetes creates a new pod before killing the old pod. Since each 32B model pod requires ~95 GB of memory, attempting to schedule two pods simultaneously requires 190 GB, instantly causing an out-of-memory error.
-* **The Fix**: Change the deployment strategy to `Recreate`:
-  ```yaml
-  spec:
-    strategy:
-      type: Recreate
-  ```
-  Kubernetes terminates the old pod first, frees all 128 GB of unified memory, and then launches the updated pod!
-
----
-
-### Exercise 2: Authoring a Systemd Calendar Specification
-**Scenario**: You want your model synchronization script (`/usr/local/bin/dgx-model-sync.sh`) to run twice daily: at **02:00 AM** and **02:00 PM** UTC, every day of the week.
-**Question**: Write the exact `OnCalendar` expression for the systemd timer.
-
-#### Solution:
-```ini
-[Timer]
-OnCalendar=*-*-* 02,14:00:00
-Persistent=true
+```bash
+kubectl -n llm-serving run tamper --rm -it --restart=Never --image=python:3.12-slim \
+  --overrides '{"spec":{"containers":[{"name":"t","image":"python:3.12-slim","stdin":true,"tty":true,
+    "command":["bash"],"volumeMounts":[{"name":"m","mountPath":"/models"},{"name":"t","mountPath":"/tools"}]}],
+    "volumes":[{"name":"m","persistentVolumeClaim":{"claimName":"model-cache"}},{"name":"t","configMap":{"name":"deepseek-tools"}}]}}'
+# inside the pod:
+S=$(ls -d /models/hf/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-7B/snapshots/*/ | head -1)
+M=/models/manifests/$(echo "$S" | sed 's|/models/hf/models--||; s|/snapshots/|@|; s|/$||; s|/|_|g').json
+cp -rL "$S" /tmp/snap && printf '\x00' | dd of=/tmp/snap/config.json bs=1 seek=10 conv=notrunc
+python3 /tools/weights_verify.py verify /tmp/snap "$M"; echo "exit $?"
 ```
-* **Explanation**: `*-*-*` matches any year, month, and day. `02,14:00:00` specifies the 2nd and 14th hours (2:00 AM and 2:00 PM).
+
+Expected: a mismatch on `config.json` and exit 1. In production that's an incident: quarantine the snapshot, re-download the pinned revision, then find out how it changed.
+
+### 5.4 Back up and restore LiteLLM's database
+
+```bash
+kubectl -n llm-serving create job --from=cronjob/litellm-db-backup ldb-now && kubectl -n llm-serving logs -f job/ldb-now
+```
+
+Restore drill: delete a virtual key (`POST /key/delete`), restore, and check that it works again:
+
+```bash
+F=$(kubectl -n llm-serving logs job/ldb-now | awk '/litellm-.*\.dump/{print $NF}' | tail -1)
+kubectl -n llm-serving scale deploy litellm --replicas=0
+kubectl -n llm-serving run ldb-restore --rm -i --restart=Never --image=postgres:16.10-alpine \
+  --overrides '{"spec":{"securityContext":{"runAsUser":70},"containers":[{"name":"r","image":"postgres:16.10-alpine",
+    "command":["sh","-c","pg_restore --clean --if-exists -h litellm-db -U litellm -d litellm '"$F"'"],
+    "env":[{"name":"PGPASSWORD","valueFrom":{"secretKeyRef":{"name":"litellm-db","key":"password"}}}],
+    "volumeMounts":[{"name":"b","mountPath":"/backups"}]}],
+    "volumes":[{"name":"b","persistentVolumeClaim":{"claimName":"litellm-db-backups"}}]}}'
+kubectl -n llm-serving scale deploy litellm --replicas=1
+```
+
+Record the restore time. That's your recovery time for gateway keys.
+
+### 5.5 Cache garbage collection
+
+```bash
+kubectl -n llm-serving run hfgc --rm -it --restart=Never --image=python:3.12-slim \
+  --overrides '{"spec":{"containers":[{"name":"g","image":"python:3.12-slim","stdin":true,"tty":true,"command":["bash"],
+    "env":[{"name":"HOME","value":"/tmp"}],"volumeMounts":[{"name":"m","mountPath":"/models"}]}],
+    "volumes":[{"name":"m","persistentVolumeClaim":{"claimName":"model-cache"}}]}}'
+# inside:
+pip install -q "huggingface_hub[cli]==0.35.3" && export PATH=$HOME/.local/bin:$PATH
+hf cache scan --dir /models/hf
+hf cache delete --dir /models/hf          # interactive: keep every repo/revision in models.yaml plus the previous pin
+```
+
+### 5.6 Drift detection end to end
+
+```bash
+kubectl -n llm-serving create job --from=cronjob/catalog-drift cd-now && kubectl -n llm-serving logs -f job/cd-now
+```
+
+Expected: `ok` for pinned models still at upstream, `UNPINNED` for the rest. If anything shows `MOVED`, the Job fails, so you get the `KubeJobFailed` alert in Vol 38. Follow §3.4.
 
 ---
 
-## 11. Troubleshooting Guide & Diagnostic Runbook
+## 6. Verify
 
-### Issue 1: `fstrim: /data: FITRIM ioctl failed: Operation not supported`
-* **Root Cause**: The storage device is a virtual loopback filesystem or an NFS/network share that does not support the SATA/NVMe `TRIM` discard command.
-* **Remediation**: Run `fstrim` only on physical block devices mounted as `ext4` or `xfs`:
-  ```bash
-  lsblk -D  # Verify DISC-GRAN and DISC-MAX are non-zero
-  ```
-
-### Issue 2: `aws s3 sync: Access Denied` During Nightly Sync
-* **Root Cause**: The AWS credentials or IAM role expired, or the target S3 bucket policy lacks read permissions for the DGX Spark machine.
-* **Remediation**: Re-authenticate the AWS CLI using instance credentials or HashiCorp Vault AppRole:
-  ```bash
-  aws sts get-caller-identity
-  ```
+| Check | Expected |
+|---|---|
+| CronJobs | five present, last schedules successful |
+| pin | overlay has `--revision`. Prefetch log shows `@<sha>` |
+| integrity | real snapshot passes. Tampered copy fails |
+| backups | both Jobs `Complete`. Files in their PVCs. Restores tested and timed |
+| drift | report runs. A moved pin fails the Job |
+| offline tests | `run-local-checks.sh` covers pin/report/drift against a mock Hub |
 
 ---
 
-## 🔗 Related Curriculum Modules
-* **NVMe Storage Architecture**: [20-nvme-local-storage-and-weight-caching.md](20-nvme-local-storage-and-weight-caching.md)
-* **Automated Ansible Deployments**: [31-ansible-one-click-deployment-playbook.md](31-ansible-one-click-deployment-playbook.md)
-* **Vault Secrets Integration**: [32-hashicorp-vault-secrets-integration.md](32-hashicorp-vault-secrets-integration.md)
-* **Prometheus & DCGM Telemetry**: [38-dcgm-prometheus-and-grafana-telemetry.md](38-dcgm-prometheus-and-grafana-telemetry.md)
+## 7. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Revision not found` in prefetch | sha typo, or a gated repo without a token | `catalog_drift.py report`. HF token via Vault |
+| vLLM loads, tokenizer mismatch warnings | revision pinned for weights only | the generator pins both (`--tokenizer-revision`) |
+| `weights-verify` fails after an intentional upgrade | new snapshot without a manifest (fine), or the old manifest reused | each snapshot has its own manifest keyed by sha. Check the file name |
+| `catalog-drift` HTTP 401/403 for meta-llama | gated repo | `hf-token` Secret with a token that accepted the licence |
+| `pg_dump: server version mismatch` | client older than server | same major version image as the server (16) |
+| backup Jobs Pending on a two-node cluster | PVC bound to the other node | schedule on the node that holds the PVC, or use a shared storage class |
+
+---
+
+## 8. Scale-out path
+
+| One Spark | Production |
+|---|---|
+| Hugging Face + local pin | internal model registry/mirror (Artifactory, NGC private registry, S3) with signed artifacts and approval workflow |
+| sha256 manifests | signatures (Sigstore model signing), SBOM for models, admission policy that only allows signed revisions |
+| CronJobs + `KubeJobFailed` | the same jobs with on-call routing, and backup copies off-node or off-site |
+
+---
+
+## 9. Checklist
+
+- [ ] Every production model is pinned to a commit, and I know when upstream moves.
+- [ ] A changed byte in cached weights fails a job I'll hear about.
+- [ ] Chat history and gateway keys are backed up, and I've timed a restore of each.
+- [ ] I can upgrade a model through a gate and roll it back.

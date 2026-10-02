@@ -19,23 +19,33 @@ lab/
 │   ├── ring_attention_demo.py  context parallelism with ring attention, verified vs full attention    (Vol 08)
 │   ├── eplb_sim.py             expert placement: naive vs replicate+pack vs DeepSeek's eplb.py        (Vol 09)
 │   ├── grpo_tiny.py            GRPO with rule-based rewards on verifiable arithmetic (TRL)            (Vol 05, 25)
-│   ├── sft_lora.py · lora_calc.py · fsdp_finetune.py   LoRA SFT, memory sizing, FSDP2 full fine-tune (Vol 23, 24, 26)
-│   ├── eval_harness.py         math / code / JSON suites + reasoning-token and $/Mtok accounting      (Vol 34-37, 40)
-│   ├── rag_demo.py             chunk → bge-m3 → Qdrant → cited answers                                 (Vol 29)
-│   ├── agent_tools.py          OpenAI tool-calling loop with safe calculator / kubectl / search tools   (Vol 30)
+│   ├── sft_lora.py · lora_calc.py · fsdp_finetune.py   LoRA/full SFT (+DeepSpeed), sizing, FSDP2    (Vol 23, 24, 26)
+│   ├── eval_harness.py         math / code / JSON suites, tokens per correct answer, $/Mtok, --gate   (Vol 34-37, 40)
+│   ├── format_check.py         <think>/<answer> format + correctness on fresh problems                (Vol 23-25)
+│   ├── unsloth_sft.py          the Vol 23 SFT with Unsloth, same recipe, comparable stats             (Vol 24)
+│   ├── stream_probe.py         SSE timing per hop: TTFT, time-to-answer, ITL, buffering, truncation  (Vol 21)
+│   ├── catalog_drift.py        pin catalog models to HF commits; report upstream drift               (Vol 33)
+│   ├── rag_demo.py             chunk → bge-m3 → Qdrant (blue/green alias, quality gate) → cited answers (Vol 29)
+│   ├── agent_tools.py          tool-calling loop: allow-list, schema validation, audit log            (Vol 30)
 │   ├── vault_sync.py           Vault KV → Kubernetes Secrets via the Kubernetes auth method           (Vol 32)
 │   └── weights_verify.py       sha256 manifests for model snapshots                                    (Vol 33)
-├── data/                   # original eval sets: 40 math, 12 code (with tests), 8 JSON extraction
+├── data/                   # original eval sets: 40 math, 12 code (with tests), 8 JSON; 16 RAG gold questions
 ├── k8s/
 │   ├── models/<name>/      # GENERATED vLLM overlays of 02's Deployment, one per catalog entry     (Vol 15, 19)
+│   ├── serving/            # GitOps pointer to the served model + PostSync eval gate              (production-mlops)
+│   ├── multi/              # a second model side by side (renamed, relabelled)                    (Vol 41)
+│   ├── lora/ · spec-decode/ · long-context/   adapters, speculative decoding, 128K overlays   (Vol 03, 08, 23)
+│   ├── autoscale/ · kserve/   KEDA office hours, KServe InferenceService                         (Vol 22)
 │   ├── sglang/ · trtllm/ · llamacpp/   other engines (SGLang FP8, TensorRT-LLM, llama.cpp + RPC)  (Vol 16-18)
 │   ├── multinode/          # LeaderWorkerSet + Ray: 70B with tensor parallelism over 2 Sparks       (Vol 14)
 │   ├── apps/               # bge-m3 embeddings, LiteLLM gateway, Open WebUI                       (Vol 27-29)
-│   ├── jobs/               # eval, RAG ingest, GPU probes, SFT, GRPO, FSDP on 2 Sparks              (Vol 23-26, 29, 40)
-│   └── ops/                # Vault sync CronJob, nightly weight verification                       (Vol 32, 33)
-├── observability/          # reasoning-specific alerts + "Spark · LLM serving" dashboard (generated) (Vol 38)
+│   ├── jobs/               # eval, RAG ingest, GPU probes, agent, SFT/Unsloth/LLaMA-Factory, GRPO, FSDP, ZeRO-3 (Vol 23-30, 40)
+│   ├── rl/                 # disaggregated GRPO: rollout server on spark-02, learner on spark-01   (Vol 25)
+│   └── ops/                # vault-sync, weights-verify, catalog-drift, WebUI + LiteLLM DB backups  (Vol 27, 32, 33)
+├── observability/          # 9 alerts (+ promtool unit tests) and the 27-panel dashboard (generated) (Vol 38)
+├── gitops/                 # Argo CD Applications for the DeepSeek layers                         (production-mlops)
 ├── ansible/deploy-deepseek.yml   # the whole stack in one playbook                                 (Vol 31)
-├── scripts/                # serve-model.sh, verify.sh, breakfix.sh (D01-D08), gen_overlays.py, Vault setup
+├── scripts/                # serve-model, compare-models, verify, llm-triage, breakfix (D01-D08), publish-adapter, gen_overlays, Vault setup
 ├── breakfix/               # fault-injection overlays                                             (Vol 39)
 └── tests/                  # run-local-checks.sh + mock OpenAI servers for GPU-free CI
 ```
@@ -49,18 +59,18 @@ flowchart LR
     SDK["OpenAI SDKs · agents<br/>api.lab.local"]
   end
   subgraph SERVE["llm-serving (02 platform)"]
-    LL["LiteLLM<br/>aliases: reasoning · reasoning-fast · embeddings<br/>timeouts 900 s · fallbacks"]
+    LL["LiteLLM + Postgres<br/>aliases: reasoning · reasoning-fast · agent · embeddings<br/>keys · budgets · timeouts 900 s · fallbacks"]
     V["vLLM: one chat model at a time<br/>k8s/models/&lt;name&gt; overlay"]
     SG["SGLang / TensorRT-LLM / llama.cpp<br/>(alternatives, replicas 0)"]
     E["bge-m3 embeddings"]
-    Q[("Qdrant<br/>technical-depth collection")]
+    Q[("Qdrant<br/>alias technical-depth (blue/green)")]
   end
   subgraph BATCH["batch (Kueue)"]
-    T["SFT · GRPO · FSDP jobs"]
+    T["SFT · Unsloth · LLaMA-Factory · GRPO · FSDP · ZeRO-3"]
   end
   subgraph OPS["ops"]
-    VS["vault-sync CronJob"] --> SEC["hf-token<br/>litellm-master-key"]
-    WV["weights-verify CronJob"]
+    VS["vault-sync CronJob"] --> SEC["hf-token · litellm-master-key<br/>open-webui-secret"]
+    WV["weights-verify · catalog-drift<br/>backups"]
   end
   UI --> LL
   SDK --> LL
@@ -109,7 +119,7 @@ cd "01 Ansible/lab" && ansible-playbook "../../03 DeepSeek/lab/ansible/deploy-de
 
 The GB10's 128 GB is shared by the OS, the platform and every model. The catalog's `util` values keep a single
 chat model plus bge-m3 (0.06) under about 0.75 of the pool. `serve-model.sh` scales SGLang and TensorRT-LLM to 0
-before it switches vLLM. Bigger models (70B FP8 with tensor parallelism, DeepSeek-R1 671B at 1.58 bit) need two Sparks:
+before it switches vLLM. Two small models can share the box with `k8s/multi/` (Vol 41) if their `util` values stay within budget. Bigger models (70B FP8 with tensor parallelism, DeepSeek-R1 671B at 1.58 bit) need two Sparks:
 see `k8s/multinode/` and `k8s/llamacpp/rpc-2spark.yaml`.
 
 ## What needs a real Spark

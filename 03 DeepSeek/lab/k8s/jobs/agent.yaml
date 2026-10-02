@@ -1,0 +1,45 @@
+# The Vol 30 agent as an in-cluster Job with least privilege: its ServiceAccount may
+# only list pods (for gpu_slices), its token is the only credential it has, and every
+# tool call lands in the Job log as an audit line.
+#   kubectl apply -f k8s/jobs/agent.yaml && kubectl -n llm-serving logs -f job/agent
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: agent-readonly, namespace: llm-serving}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: agent-pod-reader}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: agent-pod-reader}
+subjects: [{kind: ServiceAccount, name: agent-readonly, namespace: llm-serving}]
+roleRef: {kind: ClusterRole, name: agent-pod-reader, apiGroup: rbac.authorization.k8s.io}
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: agent, namespace: llm-serving}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: agent-readonly
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: agent
+          image: python:3.12-slim
+          command: ["python3", "/app/tools/agent_tools.py"]
+          args: ["How many GPU time-slices are in use per namespace, and what share of 4 slices is that in percent?",
+                 "--url", "http://vllm.llm-serving:8000", "--model", "qwen2.5-7b-tools",
+                 "--max-steps", "6", "--audit", "/dev/stdout"]
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 256Mi}}
+          volumeMounts: [{name: tools, mountPath: /app/tools}]
+      volumes:
+        - {name: tools, configMap: {name: deepseek-tools}}

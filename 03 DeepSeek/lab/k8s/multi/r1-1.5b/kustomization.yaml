@@ -1,0 +1,23 @@
+# Run r1-1.5b NEXT TO the main vLLM Deployment (Volume 41): the same catalog overlay, renamed to
+# vllm-r1-1-5b, relabelled app=vllm-r1-1-5b (so svc/vllm never selects these pods), with its own
+# Service and ServiceMonitor, sharing the hf-token Secret.
+#   kubectl apply -k k8s/multi/r1-1.5b     → svc/vllm-r1-1-5b:8000
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../models/r1-1.5b
+nameSuffix: -r1-1-5b
+labels:
+  - pairs: {app: vllm-r1-1-5b}
+    includeSelectors: true
+patches:
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Secret
+      metadata: {name: hf-token, namespace: llm-serving}
+  - target: {kind: ServiceMonitor}
+    patch: |-
+      - op: replace
+        path: /spec/selector/matchLabels/app
+        value: vllm-r1-1-5b

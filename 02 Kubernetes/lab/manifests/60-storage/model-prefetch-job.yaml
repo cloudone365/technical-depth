@@ -23,11 +23,12 @@ spec:
               pip install --quiet --user "huggingface_hub[hf_transfer]==0.35.3"
               export PATH=$HOME/.local/bin:$PATH
               t0=$(date +%s)
-              hf download "$MODEL" --cache-dir /models/hf --max-workers 8
+              hf download "$MODEL" --revision "$REVISION" --cache-dir /models/hf --max-workers 8
               du -sh /models/hf
-              echo "downloaded $MODEL in $(( $(date +%s) - t0 ))s"
+              echo "downloaded $MODEL@$REVISION in $(( $(date +%s) - t0 ))s"
           env:
             - {name: MODEL, value: Qwen/Qwen2.5-0.5B-Instruct}
+            - {name: REVISION, value: main}          # a commit SHA pins the exact weights (03 DeepSeek Vol 33)
             - {name: HOME, value: /tmp}
             - {name: HF_HUB_ENABLE_HF_TRANSFER, value: "1"}
             - name: HF_TOKEN

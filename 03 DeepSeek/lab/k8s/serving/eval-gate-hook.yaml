@@ -1,0 +1,52 @@
+# Argo CD PostSync hook: runs once the vLLM Deployment is Healthy after every sync.
+# Asks vLLM which model it serves, evaluates it (math + json), and fails the sync if
+# accuracy regressed beyond the tolerance vs the recorded baseline. No baseline yet →
+# the run is printed so you can record it (bootstrap), and the hook passes.
+#   record a baseline:  kubectl -n llm-serving create configmap deepseek-eval-baseline \
+#                         --from-file=baseline.json=results/baseline-r1-7b.json
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: eval-gate
+  namespace: llm-serving
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: gate
+          image: python:3.12-slim
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              M=$(python3 -c "import json,urllib.request;print(json.load(urllib.request.urlopen('http://vllm.llm-serving:8000/v1/models'))['data'][0]['id'])")
+              echo "serving: $M"
+              GATE=""
+              if [ -s /baseline/baseline.json ]; then GATE="--gate /baseline/baseline.json --tolerance ${TOLERANCE}"; else echo "no baseline yet — this run is the bootstrap"; fi
+              python3 /app/tools/eval_harness.py --url http://vllm.llm-serving:8000 --model "$M" --suites math json \
+                --concurrency 8 --max-tokens 8192 --out /tmp/run.json $GATE
+              echo "---- run (save as the next baseline when you accept it) ----"
+              python3 -c "import json; d = json.load(open('/tmp/run.json'));
+              s = {k: {'accuracy': v['accuracy'], 'n': v['n']} for k, v in d['suites'].items()};
+              print(json.dumps({'model': d['model'], 'suites': s}))"
+          env: [{name: TOLERANCE, value: "0.05"}]
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 500m, memory: 256Mi}, limits: {memory: 512Mi}}
+          volumeMounts:
+            - {name: tools, mountPath: /app/tools}
+            - {name: data, mountPath: /app/data}
+            - {name: baseline, mountPath: /baseline}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: tools, configMap: {name: deepseek-tools}}
+        - {name: data, configMap: {name: deepseek-evaldata}}
+        - {name: baseline, configMap: {name: deepseek-eval-baseline, optional: true}}
+        - {name: tmp, emptyDir: {}}

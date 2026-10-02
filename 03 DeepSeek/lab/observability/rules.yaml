@@ -1,4 +1,4 @@
-# Serving alerts specific to reasoning models (Volume 38).
+# Serving, GB10 and day-2 alerts for the DeepSeek stack (Volume 38).
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata: {name: spark-reasoning, namespace: observability, labels: {release: kps}}
@@ -28,3 +28,45 @@ spec:
           for: 30m
           labels: {severity: info}
           annotations: {summary: "prefix cache hit rate <5 % — variable content before the shared prompt? (Vol 16)"}
+        - alert: ReasoningTTFTSlow
+          # prefill only — thinking time is NOT in TTFT; slow TTFT means queueing or huge prompts
+          expr: |
+            histogram_quantile(0.95, sum by (le, model_name) (rate(vllm:time_to_first_token_seconds_bucket[10m]))) > 10
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: "{{ $labels.model_name }}: p95 TTFT {{ $value | humanizeDuration }}"
+            action: "check vllm:num_requests_waiting and prompt sizes; scale out (spark-02) or lower max-num-seqs"
+    - name: spark-gb10
+      rules:
+        - alert: SparkGPUXid
+          expr: max(spark_gpu_xid_events_24h) > 0
+          labels: {severity: critical}
+          annotations:
+            summary: "GPU Xid events in the last 24 h: {{ $value }}"
+            action: "journalctl -k | grep -i xid; 02 Vol 19 decoder table; drain serving if repeating"
+        - alert: SparkGPUThrottling
+          # bit 0 (GPU idle) alone is normal; anything above it is a real clock event (power/thermal/…)
+          expr: max(spark_gpu_throttle_reasons_bitmask) > 1 and max(spark_gpu_utilization_ratio) > 0.5
+          for: 15m
+          labels: {severity: warning}
+          annotations: {summary: "GB10 clocks limited under load (bitmask {{ $value }}) — airflow, power, ambient temperature"}
+    - name: spark-day2
+      rules:
+        - alert: DayTwoJobFailed
+          expr: |
+            max by (job_name) (kube_job_status_failed{namespace="llm-serving",
+              job_name=~"(weights-verify|catalog-drift|vault-sync|webui-backup|litellm-db-backup|rag-ingest).*"}) > 0
+          labels: {severity: warning}
+          annotations:
+            summary: "{{ $labels.job_name }} failed"
+            action: "kubectl -n llm-serving logs job/{{ $labels.job_name }} — Vol 33 runbook (weights mismatch, upstream drift, backup)"
+        - alert: VaultSyncStale
+          expr: (time() - kube_cronjob_status_last_successful_time{namespace="llm-serving", cronjob="vault-sync"}) > 3600
+          for: 10m
+          labels: {severity: warning}
+          annotations: {summary: "vault-sync has not succeeded for over an hour — Vault sealed or auth broken (Vol 32)"}
+        - alert: BackupStale
+          expr: (time() - kube_cronjob_status_last_successful_time{namespace="llm-serving", cronjob=~"webui-backup|litellm-db-backup"}) > 2 * 86400
+          labels: {severity: warning}
+          annotations: {summary: "{{ $labels.cronjob }}: no successful backup for 2 days"}

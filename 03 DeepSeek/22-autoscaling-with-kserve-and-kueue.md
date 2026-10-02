@@ -1,396 +1,261 @@
-# 22. Autoscaling with KServe & Kueue — Queue-Depth HPA & Scale-to-Zero
+# Volume 22 — Autoscaling on One GB10: Serve by Day, Train by Night, with KEDA, Kueue and KServe
 
-> **Target Audience**: Platform Engineers, MLOps Architects, and SREs optimizing GPU utilization across mixed interactive serving and batch training workloads.  
-> **Prerequisites**: Kubernetes Deployments and Services (from [19-kubernetes-manifests-for-deepseek.md](19-kubernetes-manifests-for-deepseek.md)), Prometheus metric scraping, and vLLM telemetry basics.  
-> **Estimated Study Time**: 60 minutes.  
-> **What You Will Master**: Why traditional CPU/RAM HPA fails for LLMs, autoscaling on **vLLM queue depth (`num_requests_waiting`)**, implementing **Scale-to-Zero serverless serving with KServe & Knative**, and fair-share GPU batch admission control with **Kueue** on the **NVIDIA DGX Spark**.
+> **Module 03 · Part V — Platform integration** · Prev: [21 Ingress & streaming](21-ingress-and-realtime-streaming-gateways.md) · Next: [23 LoRA/QLoRA sizing](23-peft-lora-qlora-parameter-sizing.md)
 
----
-
-## 📑 Table of Contents
-1. [Foundational Scaffolding: The VRAM Pre-Allocation Paradox](#1-foundational-scaffolding-the-vram-pre-allocation-paradox)
-2. [Co-Related Concepts & The Evolution of Cloud-Native AI Scaling](#2-co-related-concepts--the-evolution-of-cloud-native-ai-scaling)
-3. [Deep First-Principles: Queue-Depth & KV Cache Saturation Metrics](#3-deep-first-principles-queue-depth--kv-cache-saturation-metrics)
-4. [Scale-to-Zero Serverless Mechanics with KServe & Knative](#4-scale-to-zero-serverless-mechanics-with-kserve--knative)
-5. [Kueue Fair-Share Admission: Merging Serving with Batch Training](#5-kueue-fair-share-admission-merging-serving-with-batch-training)
-6. [Comparative Analysis: KServe vs. KEDA vs. Ray Serve vs. SageMaker](#6-comparative-analysis-kserve-vs-keda-vs-ray-serve-vs-sagemaker)
-7. [Hardware Grounding: The Single-Node Reality on DGX Spark (GB10)](#7-hardware-grounding-the-single-node-reality-on-dgx-spark-gb10)
-8. [Complete Production Manifest Suite (KEDA, KServe, Kueue)](#8-complete-production-manifest-suite-keda-kserve-kueue)
-9. [Hands-On Python Lab: Bursty Load Generator & Autoscaling Verification](#9-hands-on-python-lab-bursty-load-generator--autoscaling-verification)
-10. [Practice Exercises with Step-by-Step Solutions](#10-practice-exercises-with-step-by-step-solutions)
-11. [Troubleshooting Guide & Diagnostic Runbook](#11-troubleshooting-guide--diagnostic-runbook)
+| | |
+|---|---|
+| **You will build** | A one-box capacity plan that shares the GB10 between serving and training on a schedule. KEDA scales vLLM to zero outside office hours and brings it back on demand. Kueue admits fine-tuning Jobs within a quota and preempts low-priority work for urgent runs. KServe serves the same R1 distill through an `InferenceService`, so you can compare the two serving APIs |
+| **Hardware** | spark-01 (spark-02 raises `maxReplicaCount` to 2) |
+| **Time** | 90 min |
+| **Risk** | Medium. Scaling vLLM to 0 makes the API unavailable until it scales back. Do it outside your own working hours or adjust the cron window |
+| **Lab files** | [`k8s/autoscale/vllm-office-hours.yaml`](lab/k8s/autoscale/vllm-office-hours.yaml), [`k8s/kserve/r1-1.5b.yaml`](lab/k8s/kserve/r1-1.5b.yaml), [`k8s/jobs/sft.yaml`](lab/k8s/jobs/sft.yaml), [`k8s/jobs/grpo.yaml`](lab/k8s/jobs/grpo.yaml), [`02 …/20-scheduling/kueue.yaml`](../02%20Kubernetes/lab/manifests/20-scheduling/kueue.yaml), [`02 …/90-serving/`](../02%20Kubernetes/lab/manifests/90-serving/) |
 
 ---
 
-## 1. Foundational Scaffolding: The VRAM Pre-Allocation Paradox
+## 1. Why "autoscaling" means something different on one box
 
-### Why Traditional CPU/Memory HPA Fails for LLMs
-Standard Kubernetes Horizontal Pod Autoscaler (HPA) monitors container CPU percentage and RAM usage:
-```yaml
-# THE NAIVE ANTI-PATTERN: DO NOT USE THIS FOR LLMs!
-metrics:
-- type: Resource
-  resource:
-    name: memory
-    target:
-      type: Utilization
-      averageUtilization: 80
-```
-When this HPA controller observes an inference engine like vLLM or TensorRT-LLM:
-1. **The VRAM Illusion**: During initialization, vLLM immediately pre-allocates **90% of GPU memory** to construct its physical PagedAttention block tables.
-2. Even if the server is processing **0 active user requests**, the GPU memory shows **90% utilized**!
-3. The traditional HPA controller believes the Pod is in a critical bottleneck state and triggers an immediate scale-out, exhausting cluster GPU quotas.
-4. Conversely, during token decoding, host CPU utilization often hovers at **3% to 6%**, so a CPU-based HPA will never scale out, even if 100 users are stalled in an incoming queue!
+In a datacenter, autoscaling adds replicas on more GPUs. A single DGX Spark has one GB10 and 128 GB of unified memory, so you can't add capacity. You can only **move it between jobs over time**:
 
-```
-                  THE TRADITIONAL HPA METRIC ILLUSION
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ vLLM Engine State: IDLE (0 Active Requests)                                            │
-│  - Host CPU Usage : 2.8%   ──► Traditional HPA: "System is idle, do nothing!"          │
-│  - GPU VRAM Usage : 90.0%  ──► Traditional HPA: "Out of memory! Scale to 10 pods!"     │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-```
+| Lever | What it does here | Tool |
+|---|---|---|
+| Scale serving to zero when idle | frees a time-slice and 36–55 GiB of UMA | KEDA (cron + Prometheus triggers) |
+| Queue training until capacity is free | jobs wait instead of OOM-killing the server | Kueue (quota + gang admission) |
+| Priority | urgent runs preempt routine ones, serving outranks batch | PriorityClass (pods) + WorkloadPriorityClass (Kueue) |
+| Standard serving API | one CRD for any model server, with HPA built in | KServe `InferenceService` (RawDeployment) |
 
-### The Airport Runway Analogy
-Air traffic control does not evaluate airport congestion by checking how much fuel is sitting inside the tanks of parked airplanes at passenger gates. It monitors the **taxiway takeoff queue**. If 20 airplanes are queued up waiting on the runway, you open a secondary runway.
-For LLMs, the true congestion metric is the **vLLM request queue depth** (`vllm:num_requests_waiting`).
+The same YAML scales out unchanged when spark-02 joins: raise `maxReplicaCount`, add a second ResourceFlavor, and the policies stay the same.
 
 ---
 
-## 2. Co-Related Concepts & The Evolution of Cloud-Native AI Scaling
+## 2. Architecture — HLD
 
 ```mermaid
-flowchart TD
-    StaticPod["Static Pod Replica (1 Pod Always Active)<br/>100% GPU locked 24/7, high idle cloud bills"] --> CPU_HPA["Vanilla HPA (CPU / RAM)<br/>Catastrophic failure due to VRAM pre-allocation"]
-    CPU_HPA --> KEDA_Metrics["KEDA Custom Metrics Autoscaler<br/>Scrapes vLLM Prometheus metrics (queue depth, KV cache)"]
-    KEDA_Metrics --> KServe_Serverless["KServe Serverless (Scale-to-Zero)<br/>Knative Activator holds traffic, wakes pod in <8s from NVMe"]
-    KServe_Serverless --> Kueue_Batch["Kueue Batch Orchestrator<br/>Reclaims idle inference GPU to run fine-tuning jobs"]
+flowchart TB
+  subgraph DAY["08:00–20:00 Mon–Fri"]
+    direction LR
+    K1["KEDA cron trigger<br/>desiredReplicas 1"] --> V1["vLLM r1-7b<br/>1 slice · util 0.30"]
+    B1["bge-m3<br/>1 slice · util 0.06"]
+    Q1["Kueue spark-cq<br/>2 slices for batch"]
+  end
+  subgraph NIGHT["nights and weekends"]
+    direction LR
+    K2["KEDA: no cron window<br/>no requests for 15 min"] --> V2["vLLM → 0 replicas<br/>UMA freed"]
+    Q2["Kueue admits sft · grpo<br/>(memory now available)"]
+  end
+  P["Prometheus<br/>vllm:num_requests_running<br/>+ num_requests_waiting"] --> K1
+  P --> K2
+  USER["late request via LiteLLM"] -.->|"no backend → 503<br/>(KEDA can't see it: no pod, no metric)"| V2
+  DAY --> NIGHT
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef obs fill:#fb8500,stroke:#9a5000,color:#000
+  classDef sec fill:#cf222e,stroke:#82071e,color:#fff
+  classDef ext fill:#24292f,stroke:#000,color:#fff
+  class K1,K2,Q1,Q2 ctrl
+  class V1,B1,V2 gpu
+  class P obs
+  class USER ext
+  style DAY fill:#f4fbe8,stroke:#76b900
+  style NIGHT fill:#eef2ff,stroke:#1f6feb
 ```
 
-### Key Scaling Components Demystified:
-* **KEDA (Kubernetes Event-driven Autoscaling)**: A lightweight Kubernetes operator that drives pod autoscaling based on arbitrary event triggers (Kafka lag, Prometheus queries, Redis lengths).
-* **KServe**: A cloud-native model serving platform built on top of Knative and Istio, enabling declarative multi-model routing, canary rollouts, and **Scale-to-Zero**.
-* **Knative Activator**: An in-memory reverse proxy that catches incoming HTTP requests when 0 pods are running, buffers the payload, signals KServe to boot a pod, and delivers the request once the pod is ready.
-* **Kueue**: A Kubernetes-native job queueing system that manages resource quotas across batch jobs (PyTorch distributed, Ray, Job) and interactive serving workloads.
+The dotted arrow is the main limitation of scale-to-zero: once vLLM is at 0 there's no pod to queue requests, so the Prometheus trigger never fires. Something in front has to hold the request and signal demand (KEDA's HTTP add-on, or a gateway-side queue). This lab uses a **schedule** instead, because it's predictable and the GPU is shared with training anyway.
 
 ---
 
-## 3. Deep First-Principles: Queue-Depth & KV Cache Saturation Metrics
+## 3. LLD
 
-vLLM exposes rich Prometheus metrics on port `8000/metrics`. Two critical signals govern autoscaling decisions:
+### 3.1 Capacity budget (time-slices and memory)
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│ CRITICAL TELEMETRY SIGNALS IN vLLM EXPORTER                            │
-├────────────────────────────────────────────────────────────────────────┤
-│ 1. vllm:num_requests_waiting                                           │
-│    Number of HTTP requests queued in the scheduler waiting for free   │
-│    KV cache blocks. Normal healthy value = 0.                          │
-│    Threshold for Scale-Up: > 5 requests for > 30 seconds.              │
-├────────────────────────────────────────────────────────────────────────┤
-│ 2. vllm:gpu_cache_usage_factor                                         │
-│    Fraction of PagedAttention blocks actively holding token cache.     │
-│    0.0 = completely free, 1.0 = completely full.                      │
-│    Threshold for Warning: > 0.85 (Imminent preemption danger!).        │
-└────────────────────────────────────────────────────────────────────────┘
-```
+| Consumer | Slices | UMA (approx.) | Who decides |
+|---|---|---|---|
+| vLLM r1-7b | 1 | 0.30 × 119.7 ≈ 36 GiB + host process | KEDA (0 or 1) |
+| bge-m3 | 1 | 0.06 × 119.7 ≈ 7 GiB | always on |
+| Kueue `spark-cq` | **2** (nominal quota) | requests ≤ 64Gi (quota), limits up to 48Gi per Job | Kueue |
+| OS, k3s, Prometheus, Qdrant | — | ≈ 15–20 GiB | — |
 
-### The Kubernetes Autoscaling Math Formulation
-The Horizontal Pod Autoscaler calculates the desired replica count using:
+Time-slicing shares **compute** and does **not** partition memory. The memory quota in Kueue and the `limits.memory` on each pod are the only guards against the box running out of UMA. GPU memory isn't a Kubernetes resource on the GB10, so a Job's *GPU* allocations count against its cgroup only through unified memory.
 
-$$\text{Desired Replicas} = \left\lceil \text{Current Replicas} \times \left( \frac{\text{Current Metric Value}}{\text{Target Metric Value}} \right) \right\rceil$$
+### 3.2 The ScaledObject (`k8s/autoscale/vllm-office-hours.yaml`)
 
-For example, if:
-* Current Replicas = 1
-* Current Metric (`sum(vllm:num_requests_waiting)`) = 18 requests waiting
-* Target Metric Threshold = 6 requests
+| Field | Value | Why |
+|---|---|---|
+| name | `vllm` | replaces 02's ScaledObject on the same Deployment (only one ScaledObject per target) |
+| `minReplicaCount` / `maxReplicaCount` | 0 / 1 | 2 when spark-02 joins |
+| cron trigger | Mon–Fri 08:00–20:00, `desiredReplicas: 1` | predictable availability |
+| prometheus trigger | running + waiting, threshold 16, `activationThreshold: 0` | an in-flight request keeps the pod alive past 20:00 |
+| `cooldownPeriod` | 900 s | a model reload costs minutes. Don't flap |
+| `ignoreNullValues` | true | with 0 pods there's no series. Treat it as 0, not as an error |
 
-$$\text{Desired Replicas} = \left\lceil 1 \times \left( \frac{18}{6} \right) \right\rceil = \mathbf{3 \text{ Replicas}}$$
+KEDA takes the **maximum** across triggers. Inside the window the cron trigger holds 1. Outside it the Prometheus trigger decides.
 
----
+### 3.3 Kueue objects (from 02)
 
-## 4. Scale-to-Zero Serverless Mechanics with KServe & Knative
+| Object | Name | Key settings |
+|---|---|---|
+| ResourceFlavor | `gb10` | nodes labelled `nvidia.com/gpu.product: GB10` |
+| ClusterQueue | `spark-cq` | cpu 8, memory 64Gi, `nvidia.com/gpu` 2. `BestEffortFIFO`. Preempts `LowerPriority` within the queue |
+| LocalQueue | `batch/train` | where `sft`, `grpo`, `fsdp` submit (label `kueue.x-k8s.io/queue-name: train`) |
+| WorkloadPriorityClass | `urgent` (1000), `routine` (100) | set per Job with label `kueue.x-k8s.io/priority-class`. The lab's `sft`, `grpo` and `fsdp` carry `routine` |
 
-On high-end hardware like the **Grace Blackwell GB10**, letting a GPU sit completely idle over a 12-hour night shift wastes valuable compute capacity.
-**Scale-to-Zero** allows the inference pod to shut down completely when traffic ceases for a configurable duration (e.g., 10 minutes):
+Without that label, Kueue uses the pod's PriorityClass (`spark-batch` = 10000) as the workload priority, which would outrank `urgent`. Always set the label when you rely on Kueue preemption.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Client as User / Client
-    participant Act as Knative Activator
-    participant KS as KServe Controller
-    participant Pod as vLLM Pod (DGX Spark GB10)
-    Note over Pod: 0 Replicas Active (GPU 100% Free)
-    Client->>Act: POST /v1/chat/completions
-    Act->>Act: Buffer Request in RAM
-    Act->>KS: Request Pod Scale-Up (0 -> 1)
-    KS->>Pod: Schedule Pod & Attach Local NVMe PVC
-    Pod->>Pod: Fast mmap Weight Load (< 6 seconds)
-    Pod-->>Act: Startup & Readiness Probes Pass (HTTP 200)
-    Act->>Pod: Forward Buffered Request
-    Pod-->>Client: Stream SSE Token Output
-```
+Jobs are created with `suspend: true`. Kueue unsuspends them when the whole Job fits, which is gang admission.
 
-Because weights are pre-warmed on direct-attached NVMe storage (as proven in [20-nvme-local-storage-and-weight-caching.md](20-nvme-local-storage-and-weight-caching.md)), cold-start recovery takes **under 8 seconds**, which is well within acceptable tolerance for serverless enterprise batch triggers!
+### 3.4 KServe vs the lab's Deployment
+
+| | Lab Deployment (Vol 15/19) | KServe `InferenceService` |
+|---|---|---|
+| Object | kustomize overlay of 02's base | one CRD per model, runtime shared |
+| Weights | prefetch Job → PVC | `storageUri` (hf://, s3://, pvc://) → storage-initializer init container |
+| Autoscaling | KEDA ScaledObject | HPA (RawDeployment) or Knative (serverless mode) |
+| Endpoint | `svc/vllm:8000` | `svc/<name>-predictor:80` |
+| Best for | one box, full control over every flag | many models and teams, one standard API |
 
 ---
 
-## 5. Kueue Fair-Share Admission: Merging Serving with Batch Training
+## 4. Integrations
 
-When the inference deployment scales to zero, what should the GPU do? 
-It should train!
-**Kueue** acts as the cluster gatekeeper:
-1. Data scientists submit batch jobs (LoRA fine-tuning, RL rollout evaluations) to a Kueue `LocalQueue`.
-2. When interactive serving is active, the GPU quota (`nominalQuota: 1`) is occupied; Kueue holds the training jobs in an orderly `Pending` state.
-3. The moment KServe scales inference to 0 replicas, Kueue detects the released GPU resource and **immediately admits the training job**!
-4. When a user sends an interactive query during business hours, KServe pre-empts the batch job, restoring immediate inference priority.
+- **02 Vol 05** (Kueue) and **02 Vol 23** (KServe) installed the controllers and the `vllm-spark` ServingRuntime.
+- **Vols 23–26** submit their training Jobs to `batch/train`. This volume is what makes them safe to run on the same box as serving.
+- **Vol 38** graphs `kube_deployment_status_replicas{deployment="vllm"}` next to Kueue's `kueue_admitted_active_workloads`.
 
 ---
 
-## 6. Comparative Analysis: KServe vs. KEDA vs. Ray Serve vs. SageMaker
+## 5. Lab
 
-| Feature / Architecture | KServe (v0.14+) | KEDA + Deployment | Ray Serve (KubeRay) | AWS SageMaker Serverless |
-| :--- | :--- | :--- | :--- | :--- |
-| **Autoscaling Metric** | Concurrency, RPS, KEDA | Any Prometheus metric | Custom replicas & Ray queue | Managed HTTP concurrency |
-| **Scale-to-Zero** | **Native (Knative Activator)**| Supported (KEDA HTTP add-on)| Supported | Native |
-| **Cold-Start Time** | **<8s (with NVMe PVC)** | 30–60 seconds | 20–45 seconds | 45–90 seconds |
-| **Multi-Node MoE Serving** | Via Torch Distributed | Manual configuration | **Native Ray cluster** | Manual |
-| **Batch Job Integration** | Integrates with Kueue | Manual orchestration | Ray Train integration | Separate batch endpoints |
+### 5.1 Install the controllers
 
----
-
-## 7. Hardware Grounding: The Single-Node Reality on DGX Spark (GB10)
-
-The **NVIDIA DGX Spark** contains **one physical Blackwell GB10 GPU (128 GB Unified Memory)**.
-In this single-GPU context:
-* You cannot scale out to `replicas: 4` on the same physical board unless you configure NVIDIA Multi-Process Service (MPS) or GPU time-slicing.
-* **The Recommended Production Sizing**:
-  * Set `minReplicas: 0` (Scale-to-Zero enabled).
-  * Set `maxReplicas: 1` (Dedicated pass-through of the entire GB10 chip).
-  * Use **KEDA / Kueue** to arbitrate between the 1 inference replica and queued batch training jobs.
-
----
-
-## 8. Complete Production Manifest Suite (KEDA, KServe, Kueue)
-
-### 1. KEDA ScaledObject for vLLM Queue Depth (`keda-vllm-scaler.yaml`)
-
-```yaml
-apiVersion: keda.sh/v1alpha1
-kind: ScaledObject
-metadata:
-  name: vllm-queue-depth-scaler
-  namespace: ai-inference
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: deepseek-r1-serving
-  minReplicaCount: 0              # Scale-to-Zero when idle
-  maxReplicaCount: 1              # Bound to 1 physical GB10 GPU
-  cooldownPeriod: 600             # Wait 10 minutes (600s) before scaling down to 0
-  pollingInterval: 10             # Poll Prometheus every 10 seconds
-  triggers:
-  # Trigger A: Waiting Requests in vLLM Scheduler Queue
-  - type: prometheus
-    metadata:
-      serverAddress: http://prometheus-k8s.monitoring.svc:9090
-      metricName: vllm_num_requests_waiting
-      query: sum(vllm:num_requests_waiting{namespace="ai-inference"})
-      threshold: "1"              # Wake up or scale if >= 1 request waiting
-  # Trigger B: KV Cache High Watermark
-  - type: prometheus
-    metadata:
-      serverAddress: http://prometheus-k8s.monitoring.svc:9090
-      metricName: vllm_gpu_cache_usage_factor
-      query: max(vllm:gpu_cache_usage_factor{namespace="ai-inference"})
-      threshold: "0.85"           # Flag high utilization
+```bash
+cd "02 Kubernetes/lab"
+scripts/install-addons.sh keda
+scripts/install-addons.sh kserve          # cert-manager + KServe in RawDeployment mode
+kubectl get clusterqueue spark-cq          # Kueue from 02 Vol 05
+cd "../../03 DeepSeek/lab"
 ```
 
-### 2. Kueue ClusterQueue & ResourceFlavor Configuration (`kueue-dgx-setup.yaml`)
+### 5.2 Office hours for vLLM
 
-```yaml
-apiVersion: kueue.x-k8s.io/v1beta1
-kind: ResourceFlavor
-metadata:
-  name: dgx-spark-gb10-flavor
-spec:
-  nodeLabels:
-    ai.infra/gpu-type: blackwell-gb10
----
-apiVersion: kueue.x-k8s.io/v1beta1
-kind: ClusterQueue
-metadata:
-  name: dgx-spark-cluster-queue
-spec:
-  namespaceSelector: {}
-  resourceGroups:
-  - coveredResources: ["nvidia.com/gpu", "cpu", "memory"]
-    flavors:
-    - name: dgx-spark-gb10-flavor
-      resources:
-      - name: "nvidia.com/gpu"
-        nominalQuota: 1
-      - name: "cpu"
-        nominalQuota: "32"
-      - name: "memory"
-        nominalQuota: "96Gi"
----
-apiVersion: kueue.x-k8s.io/v1beta1
-kind: LocalQueue
-metadata:
-  name: batch-training-queue
-  namespace: ai-inference
-spec:
-  clusterQueue: dgx-spark-cluster-queue
+Edit the timezone and window in `k8s/autoscale/vllm-office-hours.yaml` first. To see the scale-down now, set `start`/`end` to a window that ends a few minutes from now.
+
+```bash
+scripts/serve-model.sh r1-7b
+kubectl apply -f k8s/autoscale/vllm-office-hours.yaml
+kubectl -n llm-serving get scaledobject vllm
+kubectl -n llm-serving get hpa keda-hpa-vllm -w
 ```
 
-### 3. Production KServe `InferenceService` Manifest (`kserve-vllm.yaml`)
+Expected: `READY True`, `ACTIVE True` inside the window. After the window ends and 15 min pass with no requests, the Deployment goes to `0/0`:
 
-```yaml
-apiVersion: serving.kserve.io/v1beta1
-kind: InferenceService
-metadata:
-  name: deepseek-r1-serverless
-  namespace: ai-inference
-  annotations:
-    serving.kserve.io/autoscalerClass: "keda"
-    serving.kserve.io/targetMetric: "vllm:num_requests_waiting"
-spec:
-  predictor:
-    minReplicas: 0
-    maxReplicas: 1
-    scaleTarget: 5
-    scaleMetric: "concurrency"
-    model:
-      modelFormat:
-        name: vLLM
-      storageUri: "pvc://nvme-model-cache-pvc/DeepSeek-R1-Distill-Qwen-32B"
-      args:
-        - "--gpu-memory-utilization=0.90"
-        - "--max-model-len=32768"
-        - "--enable-chunked-prefill"
-        - "--kv-cache-dtype=fp8"
-      resources:
-        limits:
-          nvidia.com/gpu: "1"
-          memory: "96Gi"
-          cpu: "24"
-        requests:
-          nvidia.com/gpu: "1"
-          memory: "32Gi"
-          cpu: "8"
+```bash
+kubectl -n llm-serving get deploy vllm -w
+free -g                                     # used memory drops by roughly the vLLM footprint
 ```
 
----
+### 5.3 Measure the cold start you just paid for
 
-## 9. Hands-On Python Lab: Bursty Load Generator & Autoscaling Verification
-
-This script generates synthetic concurrent load against the serving endpoint to trigger autoscaling alarms:
-
-```python
-#!/usr/bin/env python3
-"""
-load_generator_autoscale.py
-Simulates a burst of concurrent users to observe Prometheus metrics and KEDA scaling.
-"""
-
-import time
-import asyncio
-import aiohttp
-
-TARGET_URL = "http://deepseek.local/v1/chat/completions"
-CONCURRENT_USERS = 25  # High concurrency to saturate single GPU and create queue
-
-async def send_prompt(session, user_id):
-    payload = {
-        "model": "deepseek-r1",
-        "messages": [
-            {"role": "user", "content": f"User {user_id}: Write a detailed 500-word essay on distributed consensus."}
-        ],
-        "temperature": 0.7,
-        "max_tokens": 512,
-        "stream": False
-    }
-    
-    start = time.perf_counter()
-    try:
-        async with session.post(TARGET_URL, json=payload, timeout=300) as resp:
-            status = resp.status
-            elapsed = time.perf_counter() - start
-            print(f"[User {user_id:02d}] Finished with HTTP {status} in {elapsed:.2f}s")
-    except Exception as e:
-        print(f"[User {user_id:02d}] Request Error: {e}")
-
-async def run_burst():
-    print(f"[*] Firing burst of {CONCURRENT_USERS} simultaneous requests to force queue build-up...")
-    async with aiohttp.ClientSession() as session:
-        tasks = [send_prompt(session, i) for i in range(CONCURRENT_USERS)]
-        await asyncio.gather(*tasks)
-
-if __name__ == "__main__":
-    asyncio.run(run_burst())
+```bash
+kubectl -n llm-serving scale deploy vllm --replicas=1   # or wait for the window to open
+time kubectl -n llm-serving rollout status deploy/vllm --timeout=30m
 ```
 
+| Model | Cold start to Ready (**record yours**) |
+|---|---|
+| r1-1.5b | |
+| r1-7b | |
+| r1-32b-fp8 | |
+
+This is the latency the first morning user would see if you scaled to zero on demand instead of on a schedule.
+
+### 5.4 Train while serving is scaled down
+
+```bash
+kubectl apply -k .                                       # deepseek-train ConfigMap in batch
+kubectl apply -f k8s/jobs/train-common.yaml -f k8s/jobs/sft.yaml -f k8s/jobs/grpo.yaml
+kubectl -n batch get workloads -o wide
+kubectl get clusterqueue spark-cq -o jsonpath='{.status.flavorsUsage}' | jq
+```
+
+Expected: both workloads `ADMITTED`. Usage shows `nvidia.com/gpu: 2`, `cpu: 8`, `memory: 48Gi`, which is the queue's GPU and CPU quota used in full.
+
+### 5.5 Urgent run preempts routine work
+
+```bash
+yq '.metadata.name = "grpo-urgent" | .metadata.labels."kueue.x-k8s.io/priority-class" = "urgent"
+    | .spec.template.spec.containers[0].args[0] |= sub("--steps 200"; "--steps 20")' k8s/jobs/grpo.yaml \
+  | kubectl apply -f -
+kubectl -n batch get workloads -w
+kubectl -n batch get events --field-selector reason=Preempted
+```
+
+Expected: one of `sft`/`grpo` is evicted (`Preempted`, back to pending), `grpo-urgent` is admitted, and after it finishes the evicted Job is re-admitted and starts from the beginning. That's why Vol 26's training script checkpoints.
+
+Clean up: `kubectl -n batch delete job sft grpo grpo-urgent`.
+
+### 5.6 The same model through KServe
+
+Free a slice first (Kueue's 2 + vLLM + bge-m3 already use all 4):
+
+```bash
+kubectl -n batch delete job --all
+kubectl apply -f "../../02 Kubernetes/lab/manifests/90-serving/kserve/inferenceservice.yaml"   # runtime vllm-spark (+ demo qwen-small)
+kubectl -n llm-serving delete isvc qwen-small
+kubectl apply -f k8s/kserve/r1-1.5b.yaml
+kubectl -n llm-serving get isvc r1-1-5b -w                 # READY True after download + load
+kubectl -n llm-serving port-forward svc/r1-1-5b-predictor 8080:80 &
+python3 tools/stream_probe.py --url http://localhost:8080 --model r1-1-5b
+```
+
+Expected: the reasoning and answer phases split correctly, because KServe appends `--reasoning-parser=deepseek_r1` to the runtime's args (the later flag wins). Look at what KServe generated:
+
+```bash
+kubectl -n llm-serving get deploy,svc,hpa -l serving.kserve.io/inferenceservice=r1-1-5b
+kubectl -n llm-serving get pod -l serving.kserve.io/inferenceservice=r1-1-5b -o jsonpath='{.items[0].spec.initContainers[0].name}'   # storage-initializer
+```
+
+Clean up: `kubectl -n llm-serving delete isvc r1-1-5b`.
+
 ---
 
-## 10. Practice Exercises with Step-by-Step Solutions
+## 6. Verify
 
-### Exercise 1: Computing Metric Thresholds for KEDA
-**Scenario**: You serve `Qwen2.5-32B`. Benchmarking shows that the Blackwell GB10 GPU can process **6 concurrent active streams** with an average Inter-Token Latency (ITL) under **25 ms/token**.
-When active streams exceed 6, ITL spikes above your SLA threshold of 40 ms/token.
-**Question**: How would you configure the KEDA trigger query and threshold to scale up *before* SLA violation occurs?
-
-#### Solution:
-* When active streams hit 6, vLLM's internal KV cache is near capacity.
-* Requests exceeding 6 will be shifted by the vLLM scheduler into the waiting queue: `vllm:num_requests_waiting`.
-* **KEDA Configuration**:
-  * Set `metricName: vllm_num_requests_waiting`.
-  * Set `threshold: "2"` (trigger immediately when 2 or more requests are stuck waiting).
-  * Set `cooldownPeriod: 300` (prevent scaling down until queue has been 0 for 5 minutes).
+| Check | Command | Expected |
+|---|---|---|
+| ScaledObject | `kubectl -n llm-serving get so vllm` | `READY True` |
+| scale to zero | `kubectl -n llm-serving get deploy vllm` outside the window | `0/0` |
+| Kueue quota | `kubectl get cq spark-cq -o yaml` | usage never above the nominal quota |
+| preemption | events | `Preempted` on a routine Job when `urgent` arrives |
+| KServe | `kubectl get isvc r1-1-5b` | `READY True`, answers with `reasoning_content` |
 
 ---
 
-### Exercise 2: Preventing Autoscaling Flapping (Thrashing)
-**Scenario**: During intermittent bursts, traffic arrives every 4 minutes, lasts for 45 seconds, and then stops.
-With default KEDA settings (`cooldownPeriod: 60`), the system scales up to 1 pod, scales down to 0 after 60 seconds, and then must cold-start again 2 minutes later.
-**Question**: What exact parameter in the `ScaledObject` prevents this flapping behavior, and what is its optimal value?
+## 7. Troubleshooting
 
-#### Solution:
-* The parameter is **`cooldownPeriod`** in seconds.
-* **Calculation**:
-  * If request bursts occur every 4 to 5 minutes, setting `cooldownPeriod: 600` (10 minutes) ensures the pod remains alive in memory during the intermediate valleys.
-  * The pod only scales down to 0 during true sustained idle periods (such as overnight or over weekends).
-
----
-
-## 11. Troubleshooting Guide & Diagnostic Runbook
-
-### Issue 1: KEDA ScaledObject Status Shows `FailedGetMetrics`
-* **Root Cause**: KEDA cannot connect to the Prometheus server or the PromQL query returned an empty result because the vLLM metrics endpoint has no label matching `namespace="ai-inference"`.
-* **Remediation**:
-  1. Test the PromQL query directly in the Prometheus UI:
-     ```promql
-     sum(vllm:num_requests_waiting{namespace="ai-inference"})
-     ```
-  2. If empty, remove the namespace filter to inspect raw metric labels:
-     ```promql
-     sum(vllm:num_requests_waiting)
-     ```
-
-### Issue 2: Knative Activator Returns `HTTP 503 Service Unavailable` on Cold Start
-* **Root Cause**: The vLLM pod took longer to start than Knative's default request hold timeout (default 60 seconds).
-* **Remediation**: Update Knative configuration to extend the activation timeout:
-  ```bash
-  kubectl edit configmap config-network -n knative-serving
-  # Set: activator-read-timeout: "180s"
-  ```
+| Symptom | Cause | Fix |
+|---|---|---|
+| `ScaledObject … already managed by ScaledObject` | 02's `vllm` ScaledObject still exists under another name | only one ScaledObject per Deployment. This lab's file reuses the name `vllm` |
+| vLLM never scales to 0 | an open request, a scraping probe sending traffic, or still inside the cron window | check `vllm:num_requests_running`. Check the timezone |
+| first morning request fails with 503 | scaled to 0 and nothing holds requests | open the cron window ~15 min before people arrive. LiteLLM retries |
+| Job stays `Suspended`, workload `Pending` | quota full, or the Job asks for more than the whole quota | `kubectl describe workload -n batch <name>` names the resource |
+| Job admitted but pod `Pending` with `Insufficient nvidia.com/gpu` | Kueue's quota (2) plus serving pods exceed the 4 slices | keep Kueue quota + serving slices ≤ 4. Scale serving down first |
+| OOM-killed training pod while vLLM is up | memory limits sum past UMA | lower `--gpu-memory-utilization`, or train only outside the window |
+| `isvc` stuck `storage-initializer` | gated repo or no `HF_TOKEN` in the KServe secret | use a public model, or wire the HF token secret into KServe's service account |
 
 ---
 
-## 🔗 Related Curriculum Modules
-* **vLLM Serving Core**: [15-vllm-serving-deepseek-and-qwen.md](15-vllm-serving-deepseek-and-qwen.md)
-* **Kubernetes Deployments**: [19-kubernetes-manifests-for-deepseek.md](19-kubernetes-manifests-for-deepseek.md)
-* **NVMe Model Caching**: [20-nvme-local-storage-and-weight-caching.md](20-nvme-local-storage-and-weight-caching.md)
-* **Distributed RL Rollouts**: [25-distributed-rl-rollout-infrastructure.md](25-distributed-rl-rollout-infrastructure.md)
+## 8. Scale-out path
+
+| One Spark | Two Sparks | Fleet |
+|---|---|---|
+| schedule-based 0↔1 | `maxReplicaCount: 2`, RollingUpdate | request-driven scaling with an inference gateway that queues during cold start |
+| one ResourceFlavor, quota 2 slices | per-node flavors, cohorts sharing unused quota | Kueue cohorts across teams, borrowing and fair sharing, MultiKueue across clusters |
+| KServe RawDeployment | same | KServe serverless (Knative) or llm-d, with scale-to-zero and model caching |
+
+---
+
+## 9. Checklist
+
+- [ ] I can explain why time-slicing doesn't protect memory, and what does.
+- [ ] I scaled vLLM to zero on a schedule and measured the cold start.
+- [ ] I watched Kueue admit, queue and preempt training Jobs.
+- [ ] I served the same model through KServe and know when each API fits.

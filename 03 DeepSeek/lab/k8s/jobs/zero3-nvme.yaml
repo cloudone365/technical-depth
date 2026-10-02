@@ -1,0 +1,78 @@
+# Full fine-tune of a 7B model on ONE Spark with DeepSpeed ZeRO-3 + NVMe optimizer offload
+# (Volume 26). The ~91 GiB of fp32 master weights + Adam moments live on the NVMe
+# (ZeRO-Infinity); the GB10 keeps bf16 params, grads and activations. Slow, but it fits.
+# Offloading to "cpu" instead would NOT help here: on the GB10 CPU and GPU share the same
+# LPDDR5x, so it moves bytes without adding capacity.
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: deepspeed-configs, namespace: batch}
+data:
+  zero3.json: |
+    {"bf16": {"enabled": "auto"},
+     "optimizer": {"type": "AdamW", "params": {"lr": "auto", "betas": "auto", "eps": "auto", "weight_decay": "auto"}},
+     "zero_optimization": {"stage": 3, "overlap_comm": true, "contiguous_gradients": true,
+                           "stage3_gather_16bit_weights_on_model_save": true},
+     "gradient_accumulation_steps": "auto", "gradient_clipping": "auto",
+     "train_micro_batch_size_per_gpu": "auto", "train_batch_size": "auto"}
+  zero3-nvme.json: |
+    {"bf16": {"enabled": "auto"},
+     "optimizer": {"type": "AdamW", "params": {"lr": "auto", "betas": "auto", "eps": "auto", "weight_decay": "auto"}},
+     "zero_optimization": {"stage": 3, "overlap_comm": true, "contiguous_gradients": true,
+                           "offload_optimizer": {"device": "nvme", "nvme_path": "/swap", "pin_memory": true,
+                                                 "buffer_count": 4, "fast_init": false},
+                           "stage3_gather_16bit_weights_on_model_save": true},
+     "aio": {"block_size": 1048576, "queue_depth": 16, "intra_op_parallelism": 4,
+             "single_submit": false, "overlap_events": true},
+     "gradient_accumulation_steps": "auto", "gradient_clipping": "auto",
+     "train_micro_batch_size_per_gpu": "auto", "train_batch_size": "auto"}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: ds-swap, namespace: batch}
+spec:
+  storageClassName: local-nvme            # Delete: scratch, not worth keeping
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 200Gi}}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: zero3-nvme
+  namespace: batch
+  labels: {kueue.x-k8s.io/queue-name: train, kueue.x-k8s.io/priority-class: routine}
+spec:
+  suspend: true
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      priorityClassName: spark-batch
+      containers:
+        - name: train
+          image: nvcr.io/nvidia/pytorch:25.09-py3
+          command: ["bash", "-c"]
+          args:
+            - >-
+              apt-get update -qq && apt-get install -y -qq libaio-dev >/dev/null &&
+              pip install --quiet deepspeed==0.17.6 trl==0.23.0 peft==0.17.1 transformers==4.56.2 accelerate==1.10.1 datasets==4.1.1 &&
+              ds_report | grep -E 'async_io|cpu_adam|torch version|nvcc' ;
+              torchrun --nproc-per-node 1 /train/sft_lora.py --full --model deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+              --steps 30 --deepspeed /ds/zero3-nvme.json --out /ckpt/r1-7b-full-zero3
+          env:
+            - {name: HF_HOME, value: /ckpt/hf}
+            - {name: TOKENIZERS_PARALLELISM, value: "false"}
+          resources:
+            requests: {cpu: "4", memory: 32Gi, nvidia.com/gpu: "1"}
+            limits: {cpu: "8", memory: 100Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: train, mountPath: /train}
+            - {name: ds, mountPath: /ds}
+            - {name: ckpt, mountPath: /ckpt}
+            - {name: swap, mountPath: /swap}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - {name: train, configMap: {name: deepseek-train}}
+        - {name: ds, configMap: {name: deepspeed-configs}}
+        - {name: ckpt, persistentVolumeClaim: {claimName: deepseek-ckpt}}
+        - {name: swap, persistentVolumeClaim: {claimName: ds-swap}}
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 8Gi}}

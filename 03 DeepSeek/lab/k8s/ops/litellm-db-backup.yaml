@@ -1,0 +1,46 @@
+# Nightly logical backup of LiteLLM's PostgreSQL (virtual keys, teams, budgets, spend)
+# (Volume 33). Custom-format dumps restore with pg_restore; 14 are kept.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: litellm-db-backups, namespace: llm-serving}
+spec:
+  storageClassName: local-nvme-retain
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 5Gi}}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: litellm-db-backup, namespace: llm-serving}
+spec:
+  schedule: "51 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext: {runAsUser: 70, runAsGroup: 70, fsGroup: 70, runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+          containers:
+            - name: dump
+              image: postgres:16.10-alpine
+              command: ["sh", "-c"]
+              args:
+                - |
+                  set -e
+                  f=/backups/litellm-$(date -u +%Y%m%dT%H%M%SZ).dump
+                  pg_dump -h litellm-db -U litellm -d litellm -Fc -f "$f"
+                  pg_restore --list "$f" | grep -c 'TABLE DATA' | xargs echo "tables in dump:"
+                  ls -1t /backups/litellm-*.dump | tail -n +15 | xargs -r rm -v
+                  ls -lh "$f"
+              env:
+                - name: PGPASSWORD
+                  valueFrom: {secretKeyRef: {name: litellm-db, key: password}}
+              securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+              resources: {requests: {cpu: 100m, memory: 64Mi}, limits: {memory: 256Mi}}
+              volumeMounts: [{name: backups, mountPath: /backups}]
+          volumes:
+            - {name: backups, persistentVolumeClaim: {claimName: litellm-db-backups}}

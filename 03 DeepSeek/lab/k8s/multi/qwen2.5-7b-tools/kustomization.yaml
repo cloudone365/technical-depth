@@ -1,0 +1,23 @@
+# Run qwen2.5-7b-tools NEXT TO the main vLLM Deployment (Volume 41): the same catalog overlay, renamed to
+# vllm-qwen2-5-7b-tools, relabelled app=vllm-qwen2-5-7b-tools (so svc/vllm never selects these pods), with its own
+# Service and ServiceMonitor, sharing the hf-token Secret.
+#   kubectl apply -k k8s/multi/qwen2.5-7b-tools     → svc/vllm-qwen2-5-7b-tools:8000
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../models/qwen2.5-7b-tools
+nameSuffix: -qwen2-5-7b-tools
+labels:
+  - pairs: {app: vllm-qwen2-5-7b-tools}
+    includeSelectors: true
+patches:
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Secret
+      metadata: {name: hf-token, namespace: llm-serving}
+  - target: {kind: ServiceMonitor}
+    patch: |-
+      - op: replace
+        path: /spec/selector/matchLabels/app
+        value: vllm-qwen2-5-7b-tools

@@ -1,0 +1,56 @@
+# promtool unit tests for rules.yaml (Volume 38). run-local-checks.sh extracts the
+# PrometheusRule groups to rules.extracted.yaml next to this file and runs
+#   promtool test rules rules.test.yaml
+rule_files: [rules.extracted.yaml]
+evaluation_interval: 1m
+tests:
+  - name: truncated reasoning fires above 20 %
+    interval: 1m
+    input_series:
+      - series: 'vllm:request_success_total{model_name="r1-7b", finished_reason="length"}'
+        values: '0+3x40'
+      - series: 'vllm:request_success_total{model_name="r1-7b", finished_reason="stop"}'
+        values: '0+7x40'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ReasoningTruncated
+        exp_alerts:
+          - exp_labels: {severity: warning, model_name: r1-7b}
+            exp_annotations:
+              summary: "r1-7b: 30% of requests hit max_tokens"
+              action: "raise client max_tokens / --max-model-len, or check temperature (R1 loops at 0)"
+  - name: healthy finish reasons stay quiet
+    interval: 1m
+    input_series:
+      - series: 'vllm:request_success_total{model_name="r1-7b", finished_reason="length"}'
+        values: '0+1x40'
+      - series: 'vllm:request_success_total{model_name="r1-7b", finished_reason="stop"}'
+        values: '0+20x40'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ReasoningTruncated
+        exp_alerts: []
+  - name: a failed weights-verify Job pages
+    interval: 1m
+    input_series:
+      - series: 'kube_job_status_failed{namespace="llm-serving", job_name="weights-verify-29312345"}'
+        values: '0 0 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: DayTwoJobFailed
+        exp_alerts:
+          - exp_labels: {severity: warning, job_name: weights-verify-29312345}
+            exp_annotations:
+              summary: "weights-verify-29312345 failed"
+              action: "kubectl -n llm-serving logs job/weights-verify-29312345 — Vol 33 runbook (weights mismatch, upstream drift, backup)"
+  - name: idle-only throttle bit does not alert
+    interval: 1m
+    input_series:
+      - series: 'spark_gpu_throttle_reasons_bitmask'
+        values: '1x30'
+      - series: 'spark_gpu_utilization_ratio'
+        values: '0.9x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: SparkGPUThrottling
+        exp_alerts: []

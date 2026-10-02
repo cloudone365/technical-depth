@@ -1,373 +1,248 @@
-# 23. PEFT, LoRA & QLoRA Parameter Sizing on DGX Spark
+# Volume 23 — LoRA and QLoRA on a GB10: Sizing Before You Train, Training an Adapter, and Serving Base + Adapter from One vLLM
 
-> **Target Audience**: Machine Learning Engineers, Fine-Tuning Specialists, and Applied AI Researchers adapting foundation models to proprietary enterprise datasets.  
-> **Prerequisites**: Transformer linear projections, gradient descent fundamentals, mixed-precision arithmetic (from [04-fp8-mixed-precision-framework.md](04-fp8-mixed-precision-framework.md)), and memory budgeting (from [12-memory-math-for-30b-32b-on-gb10.md](12-memory-math-for-30b-32b-on-gb10.md)).  
-> **Estimated Study Time**: 60 minutes.  
-> **What You Will Master**: The mathematical mechanics of **Low-Rank Adaptation (LoRA)**, NormalFloat4 (NF4) quantization in **QLoRA**, exact VRAM breakdown for 32B models, adapter merging strategies (`merge_and_unload`), and fine-tuning on the **NVIDIA DGX Spark (GB10)**.
+> **Module 03 · Part VI — Fine-tuning and RL** · Prev: [22 Autoscaling](22-autoscaling-with-kserve-and-kueue.md) · Next: [24 Unsloth & LLaMA-Factory](24-unsloth-and-llama-factory-workflows.md)
 
----
-
-## 📑 Table of Contents
-1. [Foundational Scaffolding: The Full Fine-Tuning Memory Explosion](#1-foundational-scaffolding-the-full-fine-tuning-memory-explosion)
-2. [Co-Related Concepts & The Evolution of Parameter Efficiency](#2-co-related-concepts--the-evolution-of-parameter-efficiency)
-3. [Deep First-Principles: LoRA Mathematical Decomposition](#3-deep-first-principles-lora-mathematical-decomposition)
-4. [QLoRA: NormalFloat4 (NF4), Double Quantization & Paged Optimizers](#4-qlora-normalfloat4-nf4-double-quantization--paged-optimizers)
-5. [Target Module Selection in GQA & MoE Architectures](#5-target-module-selection-in-gqa--moe-architectures)
-6. [Master VRAM Breakdown Formulation (Full vs. LoRA vs. QLoRA)](#6-master-vram-breakdown-formulation-full-vs-lora-vs-qlora)
-7. [Comparative Analysis: Full FT vs. LoRA vs. QLoRA vs. DoRA vs. GaLore](#7-comparative-analysis-full-ft-vs-lora-vs-qlora-vs-dora-vs-galore)
-8. [Hardware Grounding: Training Sizing on NVIDIA DGX Spark (GB10)](#8-hardware-grounding-training-sizing-on-nvidia-dgx-spark-gb10)
-9. [Hands-On Python Lab: End-to-End QLoRA Training & Adapter Merge](#9-hands-on-python-lab-end-to-end-qlora-training--adapter-merge)
-10. [Practice Exercises with Step-by-Step Solutions](#10-practice-exercises-with-step-by-step-solutions)
-11. [Troubleshooting Guide & Diagnostic Runbook](#11-troubleshooting-guide--diagnostic-runbook)
+| | |
+|---|---|
+| **You will build** | A sizing habit and a full adapter lifecycle. You'll predict memory for LoRA, QLoRA and full fine-tuning with `lora_calc.py`, train a rank-16 LoRA on R1-Distill-Qwen-1.5B as a Kueue Job, publish the adapter into the model cache, serve base and adapter side by side from one vLLM, and measure what the adapter changed with `format_check.py` |
+| **Hardware** | spark-01 |
+| **Time** | 2 h (≈30 min of it is training) |
+| **Risk** | Low. Training runs in `batch` under Kueue's quota |
+| **Lab files** | [`tools/lora_calc.py`](lab/tools/lora_calc.py), [`tools/sft_lora.py`](lab/tools/sft_lora.py), [`tools/format_check.py`](lab/tools/format_check.py), [`k8s/jobs/sft.yaml`](lab/k8s/jobs/sft.yaml), [`scripts/publish-adapter.sh`](lab/scripts/publish-adapter.sh), [`k8s/lora/r1-1.5b-sft`](lab/k8s/lora/r1-1.5b-sft/kustomization.yaml) |
 
 ---
 
-## 1. Foundational Scaffolding: The Full Fine-Tuning Memory Explosion
+## 1. Why parameter-efficient fine-tuning
 
-### The Training Memory Tax
-Beginners often assume that if a 32-billion parameter model consumes **64 GB of VRAM** for inference in 16-bit precision, fine-tuning it requires 64 GB of VRAM.
-This assumption is catastrophically false. In training, every active parameter incurs a massive memory tax:
-1. **Model Weights ($W$)**: 16-bit float ($2 \text{ bytes}$).
-2. **Gradients ($\nabla_W$)**: 16-bit float ($2 \text{ bytes}$).
-3. **AdamW Optimizer States**:
-   * Master FP32 weights: $4 \text{ bytes}$.
-   * First momentum vector ($m_t$): $4 \text{ bytes}$.
-   * Second variance vector ($v_t$): $4 \text{ bytes}$.
-   * Total Optimizer Memory: **$12 \text{ bytes per parameter}$**!
+Full fine-tuning updates every weight. With mixed-precision AdamW that costs about **16 bytes per parameter** (bf16 weights + bf16 grads + two fp32 Adam moments + fp32 master weights) before activations. For a 7B model that's ~114 GiB, which is the entire GB10.
 
-$$\text{Static Parameter Footprint} = 2 + 2 + 12 = \mathbf{16 \text{ Bytes per parameter!}}$$
+LoRA freezes the base model and learns a low-rank update for selected matrices:
 
-For a 32B model:
-$$\text{Static Training Memory} = 32 \times 10^9 \times 16 \text{ bytes} \approx \mathbf{512 \text{ Gigabytes!}}$$
-
-Add 30 GB to 60 GB of activation memory for backpropagation, and full fine-tuning requires **over 550 GB of VRAM**—demanding an 8-GPU H100 cluster.
-
-```
-                      FULL FINE-TUNING MEMORY BREAKDOWN (550+ GB)
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ Weights: 64 GB │ Gradients: 64 GB │ Master Weights: 128 GB │ AdamW States: 256 GB      │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-                                 ▲
-                    IMPOSSIBLE ON SINGLE 128GB GPU!
+```text
+W' = W + (α / r) · B · A        A: r × d_in,  B: d_out × r,  r ≪ d
+trainable params per matrix = r · (d_in + d_out)
 ```
 
-### The Sticky Note on the Textbook Analogy
-Full fine-tuning is like re-typesetting and re-printing a 1,000-page medical textbook because you want to add five paragraphs about a new clinical trial.
-**LoRA (Low-Rank Adaptation)** is like leaving the original printed textbook completely untouched (frozen) and inserting small yellow sticky notes (low-rank adapter matrices) into the margins of relevant chapters. During reading (forward pass), you look at the printed page and add the note on the sticky note.
+QLoRA goes further and stores the frozen base in 4-bit NF4, so a 32B or 70B model fits for training on one Spark. What you trade:
+
+| Method | Trainable | Frozen base | Quality vs full FT | Typical use |
+|---|---|---|---|---|
+| Full | 100 % | — | reference | new domain, continued pre-training |
+| LoRA | 0.3–2 % | bf16 | close for format, style, tasks | most instruction/format tuning |
+| QLoRA | same as LoRA | 4-bit NF4 | slightly lower. Slower steps (dequantisation) | large models on small memory |
 
 ---
 
-## 2. Co-Related Concepts & The Evolution of Parameter Efficiency
+## 2. Architecture — HLD
 
 ```mermaid
-flowchart TD
-    FFT["Full Fine-Tuning (FFT)<br/>Updates 100% of parameters<br/>550+ GB VRAM for 32B models"] --> PromptTuning["Prompt / Prefix Tuning<br/>Prepends virtual token embeddings<br/>Brittle optimization, shrinks context window"]
-    PromptTuning --> LoRA["LoRA (Hu et al., 2021)<br/>Frozen base weights + Low-rank delta matrices (B x A)<br/>Reduces trainable parameters by 99%"]
-    LoRA --> QLoRA["QLoRA (Dettmers et al., 2023)<br/>4-bit NormalFloat base weights + FP16 LoRA adapters<br/>Enables 32B tuning in under 28 GB VRAM!"]
-    QLoRA --> DoRA["DoRA (Weight-Decomposed LoRA)<br/>Decomposes weights into magnitude and direction<br/>Matches or outperforms Full Fine-Tuning"]
-```
-
-### Why Low-Rank Adaptation Works: The Intrinsic Rank Hypothesis
-Research by Aghajanyan et al. (2020) demonstrated that the weight updates ($\Delta W$) during downstream domain adaptation have a very low **intrinsic dimension**. 
-Even though a weight matrix contains $5,120 \times 5,120 = 26.2 \text{ million}$ parameters, the actual manifold of meaningful domain adaptation can be captured in a subspace of rank $r \in [8, 64]$.
-
----
-
-## 3. Deep First-Principles: LoRA Mathematical Decomposition
-
-During fine-tuning, the pre-trained weight matrix $W_0 \in \mathbb{R}^{d \times k}$ remains permanently frozen:
-
-$$h = W_0 x + \Delta W x = W_0 x + \frac{\alpha}{r} (B \cdot A) x$$
-
-Where:
-* $W_0 \in \mathbb{R}^{d \times k}$ is the frozen pre-trained weight tensor.
-* $B \in \mathbb{R}^{d \times r}$ is a trainable down-projection initialized to **all zeros**.
-* $A \in \mathbb{R}^{r \times k}$ is a trainable up-projection initialized with **Gaussian random noise** ($\mathcal{N}(0, \sigma^2)$).
-* $r \ll \min(d, k)$ is the **Rank** (e.g., $r = 16$).
-* $\alpha$ is a fixed scaling hyperparameter (typically $\alpha = 2 \times r = 32$).
-
-```
-                      LoRA FORWARD PASS ARCHITECTURE
-               Input Vector x ∈ ℝ^k
-                  │             │
-                  │             ▼
-                  │     ┌──────────────┐
-                  │     │  Matrix A    │  Trainable (r × k)
-                  │     └──────────────┘
-                  │             │
-                  │             ▼
-                  │     ┌──────────────┐
-                  │     │  Matrix B    │  Trainable (d × r)
-                  │     └──────────────┘
-                  │             │
-                  │             ▼
-                  │     ┌──────────────┐
-                  │     │ Scale: (α/r) │
-                  │     └──────────────┘
-                  ▼             │
-          ┌──────────────┐      │
-          │ Frozen W_0   │      │
-          │ (d × k)      │      │
-          └──────────────┘      │
-                  │             │
-                  ▼             ▼
-               [+] Summation Node
-                        │
-                        ▼
-               Output Vector h ∈ ℝ^d
-```
-
-### Why Matrix B is Initialized to Zero
-Because $B$ is initialized to zero:
-$$\Delta W = B \cdot A = 0 \cdot A = 0$$
-At step 0 of training, the model's output is **100% identical to the base pre-trained model**. Training begins smoothly from the pre-trained distribution without initial performance degradation!
-
-### Parameter Count Compression Ratio
-Consider a projection matrix in `Qwen2.5-32B` ($d = 5,120, k = 5,120$):
-* Full parameters: $5,120 \times 5,120 = 26,214,400 \text{ parameters}$.
-* LoRA parameters ($r = 16$): $16 \times (5,120 + 5,120) = 163,840 \text{ parameters}$.
-* **Compression Ratio**: $\frac{163,840}{26,214,400} = \mathbf{0.625\% \text{ of original parameters (99.37% reduction!)}}$!
-
----
-
-## 4. QLoRA: NormalFloat4 (NF4), Double Quantization & Paged Optimizers
-
-Invented by Tim Dettmers et al. (2023), **QLoRA** combines three breakthroughs to eliminate VRAM constraints:
-
-```mermaid
-graph TD
-    subgraph QLoRA_Pillars["The 3 Pillars of QLoRA"]
-        NF4["1. NormalFloat4 (NF4)<br/>Quantile-spaced 4-bit bins tailored to Gaussian weights"]
-        DQ["2. Double Quantization (DQ)<br/>Quantizes quantization constants, saving 0.37 bits/param"]
-        PO["3. Paged Optimizers<br/>Pages optimizer spikes to CPU memory via NVLink"]
-    end
-```
-
-1. **NormalFloat4 (NF4)**: Pre-trained neural network weights follow a zero-mean normal distribution $\mathcal{N}(0, \sigma^2)$. Uniform integer quantization (INT4) wastes information density because weight values cluster near 0. NF4 constructs non-linear quantization bins such that each bin has an equal number of expected parameters, minimizing information entropy loss.
-2. **Double Quantization (DQ)**: Quantizing blocks of 64 weights requires storing a 32-bit scale factor (0.5 bits/param). Double Quantization quantizes these scale factors into 8-bit FP8 numbers, reducing overhead to **0.127 bits/param** (saving 3 GB of VRAM on a 32B model).
-3. **Paged Optimizers**: Leverages CUDA Unified Memory to automatically page AdamW memory spikes across NVLink into system memory if a sudden long context sequence causes a temporary activation spike.
-
----
-
-## 5. Target Module Selection in GQA & MoE Architectures
-
-Early LoRA implementations only adapted Attention Query ($W_q$) and Value ($W_v$) matrices. 
-Modern empirical research proves that to achieve maximum reasoning performance, **all linear projection layers must be targeted**:
-
-```python
-# Optimal Target Modules for Qwen2.5-32B and DeepSeek-32B
-TARGET_MODULES = [
-    # Attention Projection Heads
-    "q_proj", "k_proj", "v_proj", "o_proj",
-    # Feed-Forward Network (MLP / SwiGLU) Projections
-    "gate_proj", "up_proj", "down_proj"
-]
-```
-
-Adapting all 7 linear projections across 64 layers with rank $r = 16$ yields **~120 million trainable parameters** (only **~0.37% of the model**), perfectly balancing plasticity and stability.
-
----
-
-## 6. Master VRAM Breakdown Formulation (Full vs. LoRA vs. QLoRA)
-
-### Mathematical Sizing Matrix for a 32B Model (Batch Size = 2, Seq Len = 2,048)
-
-| Component | Full Fine-Tuning (FP16) | Standard LoRA (FP16) | QLoRA (4-bit NF4 + DQ) |
-| :--- | :--- | :--- | :--- |
-| **Base Model Weights** | 65.0 GiB (FP16) | 65.0 GiB (Frozen FP16) | **17.5 GiB (4-bit NF4)** |
-| **Adapter Weights** | 0 GiB | 0.24 GiB ($r=16$) | 0.24 GiB ($r=16$) |
-| **Weight Gradients** | 65.0 GiB (All weights) | 0.24 GiB (Adapters only) | 0.24 GiB (Adapters only) |
-| **AdamW Optimizer States** | 390.0 GiB (12 bytes/param)| 1.44 GiB (Adapters only) | 1.44 GiB (Adapters only) |
-| **Activation Memory** | ~24.0 GiB (Full grads) | ~14.0 GiB (Frozen base) | ~8.5 GiB (Gradient checkpointing)|
-| **CUDA Runtime / Overhead** | ~4.0 GiB | ~3.0 GiB | ~2.5 GiB |
-| **TOTAL VRAM REQUIRED** | **548.0 GiB** | **83.9 GiB** | **30.4 GiB** |
-| **Fits on DGX Spark (128GB)?**| **NO (OOM!)** | **YES (Fits comfortably)** | **YES (Leaves 97GB Free!)** |
-
----
-
-## 7. Comparative Analysis: Full FT vs. LoRA vs. QLoRA vs. DoRA vs. GaLore
-
-| Fine-Tuning Technique | VRAM Footprint (32B) | Throughput Speed | Quality vs. Full FT | Base Weights Modified? | Deployment Complexity |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Full Fine-Tuning (FFT)** | 548 GiB (8x H100) | 1.0x (Baseline) | 100% (Reference) | Yes | High (Full weights deploy) |
-| **Standard LoRA** | 84 GiB (1x GB10) | 1.2x (Faster) | 98.5% | No (Frozen) | **Zero (Mergeable into base)** |
-| **QLoRA (NF4)** | **30 GiB (1x GB10)** | 0.85x (De-quant tax)| 97.8% | No (Frozen) | **Zero (Mergeable into base)** |
-| **DoRA (Weight-Decomposed)**| 86 GiB (1x GB10) | 0.95x | **99.5% (Matches FFT)**| No (Frozen) | Moderate (Mergeable) |
-| **GaLore (Gradient Low-Rank)**| 120 GiB (1x GB10) | 0.70x | 99.0% | Yes (Base updated) | High (Optimizer projection) |
-
----
-
-## 8. Hardware Grounding: Training Sizing on NVIDIA DGX Spark (GB10)
-
-The **NVIDIA DGX Spark** features:
-* **GPU**: NVIDIA Blackwell GB10
-* **Unified Memory**: 128 GB LPDDR5X
-* **Interconnect**: 900 GB/s NVLink-C2C to Grace ARM CPU
-
-### Why the DGX Spark is an Unmatched PEFT Machine:
-1. In standard x86 systems with an RTX 4090 (24 GB) or A100 (80 GB), running a 32B model in 16-bit LoRA triggers an OOM error because 84 GiB exceeds the GPU VRAM.
-2. On the **DGX Spark (128 GB)**, you can run **unquantized 16-bit LoRA natively** with sequence lengths up to **8,192 tokens**!
-3. Alternatively, running **QLoRA (30 GiB)** leaves **~98 GB of unified memory completely free**, allowing massive batch sizes ($B=16$) or 32k context lengths without gradient accumulation bottlenecks!
-
----
-
-## 9. Hands-On Python Lab: End-to-End QLoRA Training & Adapter Merge
-
-This complete script initializes `DeepSeek-R1-Distill-Qwen-32B` in 4-bit NF4, trains a LoRA adapter on sample reasoning data, and demonstrates how to **merge the adapter back into the base weights** for zero-overhead production deployment:
-
-```python
-#!/usr/bin/env python3
-"""
-qlora_training_and_merge.py
-Demonstrates 4-bit QLoRA training on DGX Spark and zero-latency adapter merging.
-"""
-
-import os
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TrainingArguments, Trainer
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-
-MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
-OUTPUT_DIR = "/data/models/qlora_adapter_out"
-MERGED_DIR = "/data/models/deepseek_r1_32b_custom_merged"
-
-def run_peft_pipeline():
-    print("[*] Configuring 4-bit NormalFloat Quantization (QLoRA)...")
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True
-    )
-
-    print(f"[*] Loading base model: {MODEL_ID} onto Blackwell GB10...")
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
-        quantization_config=bnb_config,
-        device_map="auto",
-        torch_dtype=torch.bfloat16
-    )
-    
-    # Enable gradient checkpointing and prepare model
-    model = prepare_model_for_kbit_training(model)
-    model.gradient_checkpointing_enable()
-
-    print("[*] Attaching LoRA Adapters across all 7 linear projections...")
-    peft_config = LoraConfig(
-        r=16,
-        lora_alpha=32,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        lora_dropout=0.05,
-        bias="none",
-        task_type="CAUSAL_LM"
-    )
-
-    peft_model = get_peft_model(model, peft_config)
-    peft_model.print_trainable_parameters()
-    
-    # Save adapter checkpoint
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    peft_model.save_pretrained(OUTPUT_DIR)
-    print(f"[✓] Adapter weights saved to: {OUTPUT_DIR}")
-
-def merge_adapters_to_base():
-    """
-    Crucial Step: Merges the LoRA adapter back into base FP16 weights.
-    This eliminates all LoRA runtime overhead during production vLLM serving!
-    """
-    print("\n" + "=" * 60)
-    print("ADAPTER MERGE PIPELINE (ZERO-LATENCY INFERENCE PREP)")
-    print("=" * 60)
-    
-    from peft import PeftModel
-    
-    print("[*] Loading unquantized base model in FP16...")
-    base_model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
-        torch_dtype=torch.bfloat16,
-        device_map="cpu"  # Load to CPU/Unified RAM for clean merge
-    )
-    
-    print(f"[*] Loading LoRA adapter from {OUTPUT_DIR}...")
-    merged_model = PeftModel.from_pretrained(base_model, OUTPUT_DIR)
-    
-    print("[*] Merging weights: W = W_0 + (alpha/r) * (B x A)...")
-    final_model = merged_model.merge_and_unload()
-    
-    print(f"[*] Saving standalone merged model to {MERGED_DIR}...")
-    final_model.save_pretrained(MERGED_DIR)
-    print("[✓] Standalone merged model ready for instant vLLM deployment!")
-    print("=" * 60)
-
-if __name__ == "__main__":
-    run_peft_pipeline()
-    # In production, run merge_adapters_to_base() after training converges!
+flowchart LR
+  CALC["lora_calc.py<br/>size first"] --> JOB
+  subgraph BATCH["batch namespace · Kueue LocalQueue train"]
+    JOB["Job sft (suspend → admitted)<br/>NGC PyTorch 25.09 + TRL/PEFT<br/>sft_lora.py --rank 16"]
+    CK[("PVC deepseek-ckpt<br/>/ckpt/sft-lora (adapter, 77 MiB)<br/>/ckpt/sft-lora-merged")]
+    JOB --> CK
+  end
+  CK -->|"publish-adapter.sh<br/>tar stream between two pods"| MC
+  subgraph SERVE["llm-serving namespace"]
+    MC[("PVC model-cache<br/>/models/hf (base)<br/>/models/adapters/sft-lora")]
+    V["vLLM r1-1.5b<br/>--enable-lora<br/>--lora-modules r1-sft=…"]
+    MC --> V
+  end
+  V -->|"model: r1-1.5b"| BASE["base answers"]
+  V -->|"model: r1-sft"| ADP["base + adapter answers"]
+  FC["format_check.py<br/>same problems, both names"] -.-> V
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef obs fill:#fb8500,stroke:#9a5000,color:#000
+  class CALC,JOB ctrl
+  class CK,MC store
+  class V,BASE,ADP gpu
+  class FC obs
+  style BATCH fill:#eef2ff,stroke:#1f6feb
+  style SERVE fill:#e6f4f5,stroke:#0e7c86
 ```
 
 ---
 
-## 10. Practice Exercises with Step-by-Step Solutions
+## 3. LLD
 
-### Exercise 1: Calculating LoRA Trainable Parameters
-**Scenario**: You are fine-tuning `Qwen2.5-32B`.
-* Model configuration: 64 transformer layers.
-* Hidden dimension $d_{model} = 5,120$.
-* Intermediate MLP dimension $d_{ffn} = 27,648$.
-* You attach LoRA adapters to `q_proj`, `k_proj`, `v_proj`, `o_proj` (each $5,120 \times 5,120$), and `gate_proj`, `up_proj`, `down_proj` (each $5,120 \times 27,648$).
-* You configure Rank $r = 16$.
+### 3.1 Sizing results (`lora_calc.py`, seq 2048, batch 1, gradient checkpointing on)
 
-**Question**: How many total trainable parameters are added across all 64 layers?
+| Model | LoRA r16 | QLoRA r16 | Full FT | Trainable (r16) |
+|---|---|---|---|---|
+| R1-Distill-Qwen-1.5B | 5.1 GiB | 2.7 GiB | 28.0 GiB ✓ | 18.5 M (1.04 %) |
+| R1-Distill-Qwen-7B | 16.7 GiB | 6.4 GiB | 115.4 GiB ✗ (2 Sparks) | 40.4 M (0.53 %) |
+| R1-Distill-Qwen-32B | 66.7 GiB | 22.4 GiB | 491.9 GiB ✗ | 134.2 M (0.41 %) |
+| Llama-3.3-70B | — | 45.2 GiB | ✗ | — |
 
-#### Solution:
-1. **Parameters for 4 Attention Projections per layer**:
-   $$\text{Attention params/layer} = 4 \times \left( r \times d_{model} + r \times d_{model} \right) = 4 \times (16 \times 5,120 \times 2) = 655,360 \text{ parameters}$$
-2. **Parameters for 3 MLP Projections per layer**:
-   $$\text{MLP params/layer} = 3 \times \left( r \times d_{model} + r \times d_{ffn} \right)$$
-   $$\text{MLP params/layer} = 3 \times 16 \times (5,120 + 27,648) = 48 \times 32,768 = 1,572,864 \text{ parameters}$$
-3. **Total Trainable Parameters per layer**:
-   $$\text{Params per layer} = 655,360 + 1,572,864 = 2,228,224 \text{ parameters}$$
-4. **Total Trainable Parameters across 64 layers**:
-   $$\text{Total Trainable} = 64 \times 2,228,224 = \mathbf{142,606,336 \text{ parameters} \approx 142.6 \text{ Million}}$$
-*Context*: 142.6M parameters is only **0.43%** of the 32B model, yet adapts all attention and reasoning heads!
+These are estimates. Leave 15–20 % headroom for the CUDA context, allocator fragmentation and the host. Then **record yours** from `nvidia-smi` and `free -g` during the run.
 
----
+### 3.2 What drives the numbers (7B, LoRA)
 
-### Exercise 2: Selecting Optimal Rank ($r$) and Alpha ($\alpha$)
-**Scenario**: A junior ML engineer sets $r = 64$ and $\alpha = 16$. During training, the loss does not decrease, and the model fails to learn new domain terminology.
-**Question**: Explain why this hyperparameter combination failed, and propose the correct configuration.
+| Knob | Change | Memory | Notes |
+|---|---|---|---|
+| rank 8 → 256 | 20 M → 646 M trainable | 16.4 → 25.7 GiB | adapter file 38 MiB → 1.2 GiB |
+| seq 2048 → 8192, batch 1 → 4 | 16× tokens per step | 16.7 → 45.6 GiB | logits (vocab 152K) become a major term |
+| gradient checkpointing off | (seq 8192, batch 4) | 45.6 → 131.3 GiB | recomputation trades ~30 % speed for memory |
 
-#### Solution:
-* **The Failure Mechanism**:
-  The effective learning scale multiplier applied to the weight delta is:
-  $$\text{Scaling Factor} = \frac{\alpha}{r} = \frac{16}{64} = \mathbf{0.25}$$
-  A multiplier of $0.25$ severely dampens the gradient updates entering the model. The effective learning rate was reduced by 75%, effectively freezing the adapters!
-* **The Standard Rule of Thumb**:
-  $$\alpha = 2 \times r$$
-  For $r = 64$, set $\alpha = 128$ (yielding $\frac{\alpha}{r} = 2.0$), or for $r = 16$, set $\alpha = 32$. This amplifies the adapter gradient updates to match base weight magnitudes.
+### 3.3 The lab's SFT recipe (`sft_lora.py`)
 
----
+| Setting | Value |
+|---|---|
+| Base | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` |
+| Data | 5,000 synthetic GPU-arithmetic problems with explicit reasoning, in `<think>…</think><answer>N</answer>` form |
+| Target modules | `q,k,v,o,gate,up,down_proj` (all linear layers) |
+| r / α / dropout | 16 / 32 / 0.05 |
+| Optimiser | AdamW, lr 2e-4, cosine, warmup 5 % |
+| Batch | 8 × grad-accum 2 = 16 sequences/step, max length 512, bf16, gradient checkpointing |
+| Steps | 300 |
+| Outputs | `/ckpt/sft-lora` (adapter), `/ckpt/sft-lora-merged` (with `--merge`) |
 
-## 11. Troubleshooting Guide & Diagnostic Runbook
+### 3.4 Serving adapters: merge or attach?
 
-### Issue 1: `ValueError: Target modules ['q_proj', ...] not found in model`
-* **Root Cause**: Architecture projection names vary across model families. For instance, ChatGLM uses `query_key_value`, while Falcon uses `dense_h_to_4h`.
-* **Remediation**: Inspect module names programmatically before applying PEFT:
-  ```python
-  for name, module in model.named_modules():
-      print(name)
-  ```
-
-### Issue 2: `RuntimeError: CUDA error: out of memory during backward pass`
-* **Root Cause**: Activation memory spikes during the backward pass due to disabled gradient checkpointing.
-* **Remediation**: Explicitly enable gradient checkpointing:
-  ```python
-  model.gradient_checkpointing_enable()
-  ```
+| | Merge (`merge_and_unload`) | Attach (`--enable-lora`) |
+|---|---|---|
+| Serving cost | a full model copy per variant | one base + N small adapters in the same KV/compute budget |
+| Speed | base speed | a few % slower (extra low-rank matmuls) |
+| Switching | redeploy | per request: `model: r1-sft` |
+| Use when | one variant, maximum speed | many tenants or tasks on one GPU |
 
 ---
 
-## 🔗 Related Curriculum Modules
-* **Precision Fundamentals**: [04-fp8-mixed-precision-framework.md](04-fp8-mixed-precision-framework.md)
-* **Distilled 32B Models**: [11-deepseek-r1-32b-and-qwen-32b-models.md](11-deepseek-r1-32b-and-qwen-32b-models.md)
-* **Turnkey Fine-Tuning Workflows**: [24-unsloth-and-llama-factory-workflows.md](24-unsloth-and-llama-factory-workflows.md)
-* **Serving the Merged Model**: [15-vllm-serving-deepseek-and-qwen.md](15-vllm-serving-deepseek-and-qwen.md)
+## 4. Integrations
+
+- **Vol 22**: the Job is gang-admitted by Kueue (`batch/train`, priority `routine`).
+- **Vol 24**: Unsloth and LLaMA-Factory produce the same PEFT adapter format, so publishing and serving don't change.
+- **Vol 25**: GRPO starts from this SFT checkpoint in the R1 recipe (SFT for format, then RL for correctness).
+- **Vol 28**: LiteLLM can expose `r1-sft` as a tenant-specific alias.
+
+---
+
+## 5. Lab
+
+### 5.1 Size it before you submit
+
+```bash
+cd "03 DeepSeek/lab"
+python3 tools/lora_calc.py deepseek-r1-distill-qwen-1.5b --method lora --rank 16
+python3 tools/lora_calc.py deepseek-r1-distill-qwen-7b --method full
+python3 tools/lora_calc.py deepseek-r1-distill-qwen-32b --method qlora --seq 4096
+```
+
+Expected (7B full):
+
+```text
+total ≈ 115.4 GiB of 119.7 GiB unified memory → ✗ needs 2 Sparks (FSDP/ZeRO-3) or a lighter method
+```
+
+### 5.2 Look at the training data
+
+```bash
+python3 tools/sft_lora.py --dry-run
+```
+
+```text
+A cluster has 10 nodes with 3 GPUs each. 10 GPUs are drained for maintenance. How many GPUs are available?
+  → <think>Total GPUs = 10 × 3 = 30. Drained = 10. Available = 30 − 10 = 20.</think><answer>20</answer>
+```
+
+### 5.3 Baseline: how well does the base model follow the format?
+
+```bash
+scripts/serve-model.sh r1-1.5b
+kubectl -n llm-serving port-forward svc/vllm 8000 &
+python3 tools/format_check.py --url http://localhost:8000 --model r1-1.5b -n 50
+```
+
+Record format % and correct %. The base model reasons well but rarely wraps its answer in `<answer>` tags.
+
+### 5.4 Train (Kueue admits it)
+
+```bash
+kubectl apply -k .
+kubectl apply -f k8s/jobs/train-common.yaml -f k8s/jobs/sft.yaml
+kubectl -n batch get workload -w                        # Admitted
+kubectl -n batch logs -f job/sft | grep -E "trainable params|'loss'|merged"
+```
+
+Expected: `print_trainable_parameters` reports ≈18.5 M trainable of ≈1.8 B (≈1.03 %, matching §3.1), then loss falling from ~1.5 to < 0.1 over 300 steps (**record yours**: step time, peak `free -g` used).
+
+### 5.5 Publish and serve base + adapter
+
+```bash
+scripts/publish-adapter.sh sft-lora
+kubectl apply -k k8s/lora/r1-1.5b-sft
+kubectl -n llm-serving rollout status deploy/vllm --timeout=20m
+curl -s localhost:8000/v1/models | jq -r '.data[].id'          # r1-1.5b and r1-sft
+```
+
+### 5.6 Measure the change
+
+```bash
+python3 tools/format_check.py --url http://localhost:8000 --model r1-1.5b -n 50
+python3 tools/format_check.py --url http://localhost:8000 --model r1-sft  -n 50
+```
+
+| Model | format % | correct % |
+|---|---|---|
+| r1-1.5b (base) | | |
+| r1-sft (base + adapter) | | |
+
+Expected pattern: format jumps to ~100 % with the adapter, while correctness changes much less. SFT teaches the *shape* of the answer. Vol 25 uses RL to push correctness.
+
+### 5.7 (Optional) Merged weights
+
+The Job wrote `/ckpt/sft-lora-merged`. Publish it and serve it as its own model if you need base-model speed:
+
+```bash
+scripts/publish-adapter.sh sft-lora-merged
+kubectl apply -k k8s/models/r1-1.5b
+kubectl -n llm-serving set env deploy/vllm MODEL=/models/adapters/sft-lora-merged SERVED_NAME=r1-sft-merged
+python3 tools/format_check.py --url http://localhost:8000 --model r1-sft-merged -n 50   # same scores, base-model speed
+```
+
+---
+
+## 6. Verify
+
+| Check | Expected |
+|---|---|
+| sizing | you predicted the Job's memory within ~20 % |
+| Job | `Complete`. `/ckpt/sft-lora/adapter_config.json` exists |
+| serving | `/v1/models` lists both `r1-1.5b` and `r1-sft` |
+| effect | format % clearly higher for `r1-sft` |
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Job `OOMKilled` | limits.memory (48Gi) below the real footprint | re-run `lora_calc.py` with your seq/batch. Lower batch, raise grad-accum |
+| loss is NaN | fp16 overflow or lr too high | bf16 (default). lr 1e-4 |
+| `ValueError: LoRA rank 32 is greater than max_lora_rank 16` | adapter rank > `--max-lora-rank` | raise `--max-lora-rank` to the adapter's `r` |
+| `r1-sft` 404 | adapter path wrong, or vLLM started before publishing | `ls /models/adapters/sft-lora` in the pod. Restart vLLM |
+| adapter loads but answers look like base | wrong `target_modules`, or adapter trained on a different base | check `base_model_name_or_path` in `adapter_config.json` |
+| QLoRA step much slower than LoRA | 4-bit dequantisation every forward pass | expected. Use LoRA when bf16 weights fit |
+| `bitsandbytes` import fails on arm64 | wheel without aarch64/CUDA support | use the NGC image's build, or a recent `bitsandbytes` with aarch64 wheels |
+
+---
+
+## 8. Scale-out path
+
+| One Spark | Two Sparks | Datacenter |
+|---|---|---|
+| LoRA/QLoRA to 70B | full FT of 7B with FSDP (Vol 26) | full FT with FSDP/ZeRO-3 + TP across nodes |
+| adapters on a PVC | NFS-RDMA share | adapter registry (object store + metadata), hot-loaded with vLLM's dynamic LoRA API |
+| `format_check.py` | same | eval gate in CI before an adapter is promoted |
+
+---
+
+## 9. Checklist
+
+- [ ] I size every training run before submitting it.
+- [ ] I can explain the 16 bytes/parameter of full fine-tuning and what LoRA removes.
+- [ ] I trained, published and served an adapter next to its base.
+- [ ] I measured what the adapter changed on held-out problems.

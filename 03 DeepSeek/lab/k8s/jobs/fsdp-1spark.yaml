@@ -1,0 +1,36 @@
+# FSDP2 on one Spark (Volume 26): world size 1, so nothing is actually sharded —
+# the baseline that fsdp-2spark.yaml is compared against. 1.5B full FT ≈ 28 GiB.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fsdp-1spark
+  namespace: batch
+  labels: {kueue.x-k8s.io/queue-name: train, kueue.x-k8s.io/priority-class: routine}
+spec:
+  suspend: true
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      priorityClassName: spark-batch
+      containers:
+        - name: train
+          image: nvcr.io/nvidia/pytorch:25.09-py3
+          command: ["bash", "-c"]
+          args:
+            - >-
+              pip install --quiet transformers==4.56.2 accelerate==1.10.1 &&
+              torchrun --nproc-per-node 1 /train/fsdp_finetune.py --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --steps 50
+          env:
+            - {name: HF_HOME, value: /ckpt/hf}
+          resources:
+            requests: {cpu: "4", memory: 24Gi, nvidia.com/gpu: "1"}
+            limits: {cpu: "4", memory: 64Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: train, mountPath: /train}
+            - {name: ckpt, mountPath: /ckpt}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - {name: train, configMap: {name: deepseek-train}}
+        - {name: ckpt, persistentVolumeClaim: {claimName: deepseek-ckpt}}
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 8Gi}}

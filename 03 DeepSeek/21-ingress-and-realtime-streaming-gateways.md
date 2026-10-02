@@ -161,12 +161,12 @@ python3 tools/stream_probe.py --url http://localhost:8000 --model r1-7b
 
 ```text
 http://localhost:8000  model=r1-7b
-  ttfb      41 ms | first reasoning      41 ms | first answer    9120 ms | total 9.84 s
-  chunks 642 (reasoning 598, answer 44) | ITL p50 14.2 ms p99 21.7 ms | ≈66 chunks/s
+  ttfb      41 ms | first reasoning      41 ms | first answer   36930 ms | total 39.70 s
+  chunks 642 (reasoning 598, answer 44) | ITL p50 61.5 ms p99 70.3 ms | ≈16 chunks/s
   finish_reason=stop  usage={'prompt_tokens': 38, 'completion_tokens': 643, …}
 ```
 
-(Illustrative numbers. **Record yours**.)
+(Illustrative numbers for a BF16 7B: one stream can't beat the ~18 tok/s bandwidth ceiling `model_math.py` prints. **Record yours**.)
 
 ### 5.2 Hop 2 — through LiteLLM
 
