@@ -51,6 +51,26 @@ panel("Finish reasons (length = truncated reasoning)", [(f"sum by (finished_reas
 panel("Prefix-cache hit rate", [(f"sum(rate(vllm:prefix_cache_hits_total{M}[5m])) / sum(rate(vllm:prefix_cache_queries_total{M}[5m]))", "hit rate")], "percentunit", x=12)
 Y[0] += 8
 panel("Speculative decoding acceptance", [(f"sum(rate(vllm:spec_decode_num_accepted_tokens_total{M}[5m])) / sum(rate(vllm:spec_decode_num_draft_tokens_total{M}[5m]))", "acceptance")], "percentunit", x=0)
+# energy efficiency: output tokens per joule = tokens/s ÷ watts (DCGM if enabled, else the 01 Ansible textfile metric)
+POWER = "(sum(DCGM_FI_DEV_POWER_USAGE) or sum(spark_gpu_power_watts))"
+panel("Output tokens per joule (GPU power)", [(f"sum(rate(vllm:generation_tokens_total{M}[5m])) / {POWER}", "tokens/J")], x=12)
+Y[0] += 8
+row("GB10 and unified memory")
+panel("GPU utilisation", [("max(DCGM_FI_DEV_GPU_UTIL) / 100 or max(spark_gpu_utilization_ratio)", "busy")], "percentunit", x=0, w=8)
+panel("GPU power (W) and temperature (°C)", [(POWER, "W"),
+                                             ("max(DCGM_FI_DEV_GPU_TEMP) or max(spark_gpu_temperature_celsius)", "°C")], x=8, w=8)
+panel("Throttle reasons bitmask / Xid events (24h)", [("max(spark_gpu_throttle_reasons_bitmask)", "throttle bitmask"),
+                                                      ("max(spark_gpu_xid_events_24h)", "Xid 24h")], x=16, w=8)
+Y[0] += 8
+panel("UMA available vs droppable page cache", [("max(spark_uma_available_bytes) or max(node_memory_MemAvailable_bytes)", "available"),
+                                               ("max(spark_uma_page_cache_bytes) or max(node_memory_Cached_bytes)", "page cache")], "bytes", x=0)
+panel("Pod memory working set (llm-serving, batch)", [('sum by (namespace) (container_memory_working_set_bytes{namespace=~"llm-serving|batch", container!=""})', "{{namespace}}")], "bytes", x=12)
+Y[0] += 8
+row("Gateway and day-2 jobs")
+panel("Requests/s through Traefik by route", [('sum by (service) (rate(traefik_service_requests_total{service=~"llm-serving-.*"}[5m]))', "{{service}}")], x=0)
+panel("Failed day-2 Jobs (llm-serving)", [('sum by (job_name) (kube_job_status_failed{namespace="llm-serving"} > 0)', "{{job_name}}")], x=12)
+Y[0] += 8
+panel("Hours since last successful CronJob run", [('(time() - kube_cronjob_status_last_successful_time{namespace="llm-serving"}) / 3600', "{{cronjob}}")], "h", x=0, w=24)
 Y[0] += 8
 
 print(json.dumps({

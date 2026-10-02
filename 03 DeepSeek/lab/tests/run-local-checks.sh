@@ -25,6 +25,12 @@ for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8
 echo "== promtool";            promtool check rules <(python3 -c "
 import yaml
 for d in yaml.safe_load_all(open('observability/rules.yaml')): print(yaml.safe_dump({'groups': d['spec']['groups']}))")
+echo "== alert unit tests (promtool test rules)"
+python3 -c "
+import yaml
+g = [x for d in yaml.safe_load_all(open('observability/rules.yaml')) for x in d['spec']['groups']]
+open('observability/rules.extracted.yaml', 'w').write(yaml.safe_dump({'groups': g}))"
+(cd observability && promtool test rules rules.test.yaml); rm -f observability/rules.extracted.yaml
 echo "== dashboard up to date"; diff -q <(python3 observability/gen_dashboard.py) observability/deepseek-serving-dashboard.json
 echo "== python compile";      python3 -m py_compile tools/*.py tests/*.py scripts/*.py observability/*.py
 echo "== shellcheck";          shellcheck -S warning -x scripts/*.sh tests/*.sh

@@ -490,6 +490,333 @@
     "overrides": []
    },
    "id": 16
+  },
+  {
+   "type": "timeseries",
+   "title": "Output tokens per joule (GPU power)",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 44
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(vllm:generation_tokens_total{model_name=~\"$model\"}[5m])) / (sum(DCGM_FI_DEV_POWER_USAGE) or sum(spark_gpu_power_watts))",
+     "legendFormat": "tokens/J",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 17
+  },
+  {
+   "type": "row",
+   "title": "GB10 and unified memory",
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 52
+   },
+   "collapsed": false,
+   "id": 18
+  },
+  {
+   "type": "timeseries",
+   "title": "GPU utilisation",
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 53
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "max(DCGM_FI_DEV_GPU_UTIL) / 100 or max(spark_gpu_utilization_ratio)",
+     "legendFormat": "busy",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 19
+  },
+  {
+   "type": "timeseries",
+   "title": "GPU power (W) and temperature (\u00b0C)",
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 53
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "(sum(DCGM_FI_DEV_POWER_USAGE) or sum(spark_gpu_power_watts))",
+     "legendFormat": "W",
+     "refId": "A"
+    },
+    {
+     "expr": "max(DCGM_FI_DEV_GPU_TEMP) or max(spark_gpu_temperature_celsius)",
+     "legendFormat": "\u00b0C",
+     "refId": "B"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 20
+  },
+  {
+   "type": "timeseries",
+   "title": "Throttle reasons bitmask / Xid events (24h)",
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 53
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "max(spark_gpu_throttle_reasons_bitmask)",
+     "legendFormat": "throttle bitmask",
+     "refId": "A"
+    },
+    {
+     "expr": "max(spark_gpu_xid_events_24h)",
+     "legendFormat": "Xid 24h",
+     "refId": "B"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 21
+  },
+  {
+   "type": "timeseries",
+   "title": "UMA available vs droppable page cache",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 61
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "max(spark_uma_available_bytes) or max(node_memory_MemAvailable_bytes)",
+     "legendFormat": "available",
+     "refId": "A"
+    },
+    {
+     "expr": "max(spark_uma_page_cache_bytes) or max(node_memory_Cached_bytes)",
+     "legendFormat": "page cache",
+     "refId": "B"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 22
+  },
+  {
+   "type": "timeseries",
+   "title": "Pod memory working set (llm-serving, batch)",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 61
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "sum by (namespace) (container_memory_working_set_bytes{namespace=~\"llm-serving|batch\", container!=\"\"})",
+     "legendFormat": "{{namespace}}",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 23
+  },
+  {
+   "type": "row",
+   "title": "Gateway and day-2 jobs",
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 69
+   },
+   "collapsed": false,
+   "id": 24
+  },
+  {
+   "type": "timeseries",
+   "title": "Requests/s through Traefik by route",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 70
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "sum by (service) (rate(traefik_service_requests_total{service=~\"llm-serving-.*\"}[5m]))",
+     "legendFormat": "{{service}}",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 25
+  },
+  {
+   "type": "timeseries",
+   "title": "Failed day-2 Jobs (llm-serving)",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 70
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "sum by (job_name) (kube_job_status_failed{namespace=\"llm-serving\"} > 0)",
+     "legendFormat": "{{job_name}}",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 26
+  },
+  {
+   "type": "timeseries",
+   "title": "Hours since last successful CronJob run",
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 78
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "(time() - kube_cronjob_status_last_successful_time{namespace=\"llm-serving\"}) / 3600",
+     "legendFormat": "{{cronjob}}",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "h",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10
+     }
+    },
+    "overrides": []
+   },
+   "id": 27
   }
  ]
 }
