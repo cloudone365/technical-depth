@@ -6,12 +6,27 @@ Twenty-seven practical volumes that turn one DGX Spark into a small but complete
 
 ---
 
+## The lab in one picture: three clusters nested on one Spark
+
+![DGX Spark nested Kubernetes lab: your MacBook as the terminal, a kubeadm root cluster on the Spark, and the dev-lab and llms vClusters inside it](diagrams/nested-lab-architecture.svg)
+
+Read it from the outside in:
+
+1. **Your MacBook is the terminal, nothing more.** It holds the tools (`kubectl`, `helm`, `ansible-playbook`, a browser) and one kubeconfig with three contexts. No Kubernetes component runs on it; it reaches the Spark over the home LAN — Ansible over SSH, `kubectl` to three API endpoints, a browser to Grafana and the LLM gateway.
+2. **The DGX Spark is the whole datacenter.** Every cluster, pod and GPU slice lives on this one box. DGX OS provides the driver, CUDA, containerd and Docker; swap is off.
+3. **The root cluster (`spark-root`) is the platform.** kubeadm installs a real control plane — API server, etcd, scheduler, controller-manager — and the Spark is also its only worker. It owns everything physical: the node and its kubelet/containerd, the network (Cilium, MetalLB), storage, the GPU (GPU Operator → 15 time-slices) and observability. Reach it at `192.168.0.100:6443` with `--context spark-root`.
+4. **Inside it, two virtual clusters.** `dev-lab` (`192.168.0.111`) and `llms` (`192.168.0.112`) each have their own API server, controller-manager, CoreDNS and datastore — so their users get their own namespaces, RBAC, CRDs and policies — but those run as ordinary pods in the root namespaces `vc-dev-lab` and `vc-llms`. They have no nodes of their own.
+5. **The syncer is the bridge.** When you create a pod in `llms`, the llms API server stores it and the llms syncer copies it to the root (`vllm-…-x-llm-serving-x-llms` in `vc-llms`). From there the **root** scheduler places it, the root kubelet starts it in containerd, Cilium wires its network and the GPU Operator's device plugin hands it a slice.
+6. **Budgets are enforced at the root.** A ResourceQuota on `vc-dev-lab` (2 CPU · 8 Gi · 2 slices) and `vc-llms` (4 CPU · 48 Gi · 8 slices) caps each vCluster as a whole; quotas inside a vCluster only divide its share among its own teams. The root keeps the rest (14 CPU · ~64 GiB · 5 slices) for the platform.
+
+So a tenant's request crosses **two** API servers — the vCluster's (who are you, what may you do, does it fit your team's quota) and then, through the syncer, the root's (does it fit the vCluster's budget, which node, which GPU). [Volume 27](27-nested-clusters-with-vcluster.md) walks one pod through every hop; [Volume 15](15-dgx-spark-datacenter-simulation-lab.md) builds the whole thing in order with a check after each stage.
+
 ## Platform at a glance
 
 ```mermaid
 flowchart TB
   U(["users · SDKs · Open WebUI"]) --> GW
-  subgraph SPARK["spark-01 · DGX OS 7 · GB10 (15 time-slices) · 128 GB unified memory"]
+  subgraph SPARK["spark-01 · DGX OS 7 · GB10 (15 time-slices) · ~119.7 GiB unified memory"]
     direction TB
     subgraph ROOT["root cluster · kubeadm v1.36 · master + worker"]
       direction TB

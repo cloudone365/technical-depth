@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | The whole "AI datacenter in a box" on one Spark: a kubeadm **root cluster** that owns the hardware, two **vClusters** with hard budgets (`dev-lab` for tenants, `llms` for serving and training), a serving tier behind an API gateway, a gang-scheduled batch tier, observability across all three clusters, backups and a scripted verification gate after every layer. Everything is designed to add spark-02 without rework |
-| **Hardware** | 1 DGX Spark (2 optional) · control node (laptop or spark-01) |
+| **Hardware** | 1 DGX Spark (2 optional) · your MacBook as the terminal (control node) |
 | **Time** | 4–6 h the first time, ~45 min once practised |
 | **Risk** | Medium. Everything is rebuildable: `01 Ansible playbooks/99-reset-kubernetes.yml` wipes Kubernetes, playbooks 05 → 06 → 06b rebuild it |
 | **Lab files** | the whole [`lab/`](lab/README.md) directory |
@@ -38,8 +38,8 @@ The goal isn't scale. It's the **same shape and the same failure modes** as a pr
 ```mermaid
 flowchart TB
   USER(["Users · SDKs · Open WebUI"]) --> EDGE
-  ADMIN(["Platform admin · kubectl<br/>contexts spark-root · dev-lab · llms"])
-  subgraph SPARK["spark-01 · DGX OS 7 · GB10 · 128 GB UMA"]
+  ADMIN(["Your MacBook · kubectl<br/>contexts spark-root · dev-lab · llms"])
+  subgraph SPARK["spark-01 · DGX OS 7 · GB10 · 128 GB UMA (~119.7 GiB usable)"]
     direction TB
     subgraph ROOT["Root cluster · kubeadm v1.36 · master + worker"]
       direction TB
@@ -112,7 +112,7 @@ flowchart TB
 | Root API server (`spark-root`) | `https://192.168.0.100:6443` | kubeconfig from 01 Ansible `.cache/kubeconfig-spark-lab.yaml` |
 | dev-lab API (`dev-lab`) | `https://192.168.0.111:443` | MetalLB IP of the vCluster's Service; same kubeconfig |
 | llms API (`llms`) | `https://192.168.0.112:443` | same |
-| llms gateway (Traefik) | `192.168.0.115:80`, `:443` | hosts `llm.lab.local`, `gw.lab.local` in your laptop's `/etc/hosts` |
+| llms gateway (Traefik) | `192.168.0.115:80`, `:443` | hosts `llm.lab.local`, `gw.lab.local` in your MacBook's `/etc/hosts` |
 | Grafana (kps) | `http://192.168.0.100:32000` | admin / from Vault |
 | Hubble UI | `http://192.168.0.100:31235` | Cilium flow visibility |
 | Host Grafana (01 Ansible) | `http://192.168.0.100:3000` | node/GPU view that survives a Kubernetes outage |
@@ -170,7 +170,7 @@ flowchart LR
   class G6,G7,G8 gpu
 ```
 
-### Step 0 · Toolchain (control node)
+### Step 0 · Toolchain (your MacBook)
 
 ```bash
 git clone https://github.com/cloudone365/technical-depth.git && cd "technical-depth/02 Kubernetes/lab"
@@ -304,7 +304,7 @@ scripts/verify.sh
 
 | Task | Frequency | How |
 |---|---|---|
-| etcd snapshot off-box | daily | copy `/var/lib/etcd-snapshots/` to the control node (Vol 03 §5.7) |
+| etcd snapshot off-box | daily | copy `/var/lib/etcd-snapshots/` to your MacBook (Vol 03 §5.7) |
 | vCluster backup | weekly | scale the control plane to 0, tar its PVC directory (Vol 27 §6.7) |
 | Restore rehearsal | monthly | `scripts/etcd-drill.sh restore …` on a quiet day; one vCluster PVC restore |
 | Version review | monthly | `versions.env` vs upstream releases. Test in CI (kind + 2 vClusters) first |

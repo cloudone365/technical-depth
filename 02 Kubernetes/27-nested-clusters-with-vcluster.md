@@ -38,13 +38,15 @@ One Spark can only be one *node*. But a datacenter has *several clusters*: a pla
 
 ## 2. HLD — the whole picture
 
+The full picture, with your MacBook as the terminal, is at the top of the [module README](README.md#the-lab-in-one-picture-three-clusters-nested-on-one-spark) ([SVG](diagrams/nested-lab-architecture.svg)). The diagram below adds the communication paths between the components.
+
 ```mermaid
 flowchart TB
-  ADMIN(["you · kubectl<br/>one kubeconfig, 3 contexts"])
+  ADMIN(["your MacBook · kubectl<br/>one kubeconfig, 3 contexts"])
   ADMIN -- "spark-root" --> RAPI
   ADMIN -- "dev-lab · 192.168.0.111" --> DAPI
   ADMIN -- "llms · 192.168.0.112" --> LAPI
-  subgraph SPARK["DGX Spark · DGX OS 7 · GB10 (15 time-slices) · 128 GB unified memory"]
+  subgraph SPARK["DGX Spark · DGX OS 7 · GB10 (15 time-slices) · ~119.7 GiB unified memory"]
     direction TB
     subgraph ROOT["Root cluster · kubeadm v1.36 · spark-01 = master + worker"]
       direction TB

@@ -62,7 +62,7 @@ lab/
 
 ```mermaid
 flowchart LR
-  subgraph CTL["Control node (laptop or spark-01)"]
+  subgraph CTL["Your MacBook · terminal (control node)"]
     K["kubectl · helm<br/>KUBECONFIG = 01 Ansible .cache/kubeconfig-spark-lab.yaml<br/>contexts: spark-root · dev-lab · llms"]
   end
   subgraph S1["spark-01 · 192.168.0.100 · root cluster (kubeadm)"]

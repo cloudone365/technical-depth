@@ -4,6 +4,12 @@
 >
 > **Three clusters, one kubeconfig.** Every command names its context: `spark-root` (the kubeadm root — platform team), `dev-lab` (vCluster #1 — tenants and labs) or `llms` (vCluster #2 — serving and training). [Volume 27](27-nested-clusters-with-vcluster.md) explains the shape; the [lab README](lab/README.md#which-cluster-am-i-talking-to) has the rule of thumb.
 
+**What you are building** — your MacBook is only the terminal; the root cluster and both vClusters all run on the Spark ([how to read this picture](README.md#the-lab-in-one-picture-three-clusters-nested-on-one-spark)):
+
+![DGX Spark nested Kubernetes lab: your MacBook as the terminal, a kubeadm root cluster on the Spark, and the dev-lab and llms vClusters inside it](diagrams/nested-lab-architecture.svg)
+
+**The path through it:**
+
 ```mermaid
 flowchart LR
   subgraph W1["Week 1 · Control plane & clusters"]
@@ -36,7 +42,7 @@ flowchart LR
 
 ---
 
-## Step 0 · Toolchain on the control node (20 min) → [20 §CI](20-hands-on-practice-exercises-workbook.md)
+## Step 0 · Toolchain on your MacBook — the control node (20 min) → [20 §CI](20-hands-on-practice-exercises-workbook.md)
 
 ```bash
 cd "technical-depth/02 Kubernetes/lab"
@@ -141,7 +147,7 @@ kubectl --context spark-root apply -f manifests/root/30-networking/coredns-coref
 ```bash
 scripts/install-addons.sh traefik                     # inside llms → 192.168.0.115
 kubectl --context llms apply -k manifests/llms/40-ingress
-echo "192.168.0.115 llm.lab.local gw.lab.local" | sudo tee -a /etc/hosts      # on the laptop
+echo "192.168.0.115 llm.lab.local gw.lab.local" | sudo tee -a /etc/hosts      # on your MacBook
 scripts/verify.sh ingress
 ```
 
