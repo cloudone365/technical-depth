@@ -1,8 +1,8 @@
 # Module 02 — Kubernetes for AI Infrastructure on NVIDIA DGX Spark
 
-Twenty-six practical volumes that turn the k3s cluster built by [01 Ansible](../01%20Ansible/README.md) into a small but complete **AI datacenter platform**: a hardened control plane, budgeted tenants, GPU sharing, gang-scheduled training, an LLM API gateway, vLLM/Triton/SGLang serving, observability, drills and GitOps. Every volume follows the same shape: **HLD → LLD → integrations → step-by-step lab → verification with expected output → troubleshooting → scale-out path**. Every command runs against the files in [`lab/`](lab/README.md).
+Twenty-seven practical volumes that turn one DGX Spark into a small but complete **AI datacenter platform**. The [01 Ansible](../01%20Ansible/README.md) lab builds a **root Kubernetes cluster with kubeadm** — the Spark is its control plane *and* its worker — and two **virtual clusters** inside it: `dev-lab` for tenants and experiments, `llms` for model serving and training. On top of that you build a hardened control plane, budgeted tenants, GPU sharing, gang-scheduled training, an LLM API gateway, vLLM/Triton/SGLang serving, observability, drills and GitOps. Every volume follows the same shape: **HLD → LLD → integrations → step-by-step lab → verification with expected output → troubleshooting → scale-out path**. Every command runs against the files in [`lab/`](lab/README.md), and every volume says which of the three clusters it uses.
 
-**Start here:** [00 · Step-by-step guide](00-kubernetes-step-by-step-guide.md) (shortest correct path) · [15 · Datacenter simulation](15-dgx-spark-datacenter-simulation-lab.md) (the whole picture) · [`lab/README.md`](lab/README.md)
+**Start here:** [00 · Step-by-step guide](00-kubernetes-step-by-step-guide.md) (shortest correct path) · [27 · Nested clusters](27-nested-clusters-with-vcluster.md) (the lab's shape) · [15 · Datacenter simulation](15-dgx-spark-datacenter-simulation-lab.md) (the whole picture) · [`lab/README.md`](lab/README.md)
 
 ---
 
@@ -11,26 +11,37 @@ Twenty-six practical volumes that turn the k3s cluster built by [01 Ansible](../
 ```mermaid
 flowchart TB
   U(["users · SDKs · Open WebUI"]) --> GW
-  subgraph SPARK["spark-01 · DGX OS 7 · k3s · GB10 (4 time-slices) · 128 GB unified memory"]
+  subgraph SPARK["spark-01 · DGX OS 7 · GB10 (15 time-slices) · 128 GB unified memory"]
     direction TB
-    GW["Traefik: Ingress + Gateway API<br/>streaming-safe · limits · auth · canary"]
-    subgraph CP["control plane"]
-      API["API server<br/>RBAC · CEL policies · APF · audit"] <--> ETCD[("etcd · snapshots")]
+    subgraph ROOT["root cluster · kubeadm v1.36 · master + worker"]
+      direction TB
+      subgraph CP["control plane"]
+        API["API server<br/>RBAC · APF · audit"] <--> ETCD[("etcd · snapshots")]
+      end
+      subgraph PLAT["platform · keeps 14 CPU · ~64 GiB · 5 slices"]
+        direction LR
+        NET["Cilium · MetalLB"]
+        GPU["GPU Operator<br/>15 slices"]
+        OBS["kube-prometheus-stack<br/>dashboards · alerts"]
+        PT["platform-tools<br/>probes · benchmarks"]
+      end
+      subgraph DEV["vCluster dev-lab · 2 CPU · 8 Gi · 2 slices"]
+        TEN["tenant-alpha / tenant-beta<br/>lab-tools"]
+      end
+      subgraph LLM["vCluster llms · 4 CPU · 48 Gi · 8 slices"]
+        direction LR
+        GW["Traefik gateway<br/>Ingress + Gateway API"]
+        SRV["llm-serving<br/>vLLM · Triton · SGLang · KServe · Qdrant"]
+        BAT["batch<br/>Kueue gangs · torchrun"]
+      end
     end
-    subgraph TIERS["workload tiers"]
-      direction LR
-      SRV["llm-serving<br/>vLLM · Triton · SGLang · KServe · Qdrant"]
-      BAT["batch<br/>Kueue gangs · torchrun · checkpoints"]
-      TEN["tenant-alpha / beta<br/>5 % budgets"]
-    end
-    OBS["kube-prometheus-stack + host exporters<br/>dashboard 'Spark · Kubernetes' · alerts"]
-    GPU["GPU Operator · device plugin · GFD"]
     NV[("NVMe · model cache · PVCs")]
   end
-  S2["spark-02 (optional)<br/>CX-7 200 GbE · NCCL/RoCE"]
+  S2["spark-02 (optional)<br/>root worker · CX-7 200 GbE"]
   GW --> SRV
-  SRV & BAT & TEN --> GPU
+  SRV & BAT & TEN & PT --> GPU
   SRV --> NV
+  DEV & LLM -. "pods synced, budgets enforced" .-> API
   SPARK <-.-> S2
   classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
   classDef net fill:#8250df,stroke:#4c2889,color:#fff
@@ -40,15 +51,18 @@ flowchart TB
   classDef tenant fill:#eaeef2,stroke:#57606a,color:#000
   classDef ext fill:#24292f,stroke:#000,color:#fff
   class API ctrl
-  class GW net
+  class GW,NET net
   class GPU,S2 gpu
   class ETCD,NV store
   class OBS obs
-  class SRV,BAT,TEN tenant
+  class SRV,BAT,TEN,PT tenant
   class U ext
   style SPARK fill:#e6f4f5,stroke:#0e7c86,stroke-width:2px
+  style ROOT fill:#ffffff,stroke:#1f6feb
   style CP fill:#ffffff,stroke:#1f6feb
-  style TIERS fill:#ffffff,stroke:#8c959f
+  style PLAT fill:#ffffff,stroke:#8c959f
+  style DEV fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
+  style LLM fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
 ```
 
 **Diagram colour key** (all volumes): blue = control plane · teal = host/node · green = GPU · purple = network · amber = storage · orange = observability · red = security/policy · black = external · grey = tenant workload.
@@ -61,9 +75,9 @@ flowchart TB
 
 | # | Volume | You build |
 |---|---|---|
-| 01 | [Core architecture & pod lifecycle](01-kubernetes-core-architecture.md) | trace one `kubectl apply` through API → scheduler → kubelet → containerd → nvidia runtime |
-| 02 | [API server: AuthN, RBAC, CEL admission, APF, audit](02-kube-apiserver-internals.md) | x509 users, 4 CEL policies with dry-run fixtures, a fair-queuing lane, audit queries |
-| 03 | [etcd: Raft, MVCC, quotas, backup & restore](03-etcd-database-deep-dive.md) | SQLite → etcd migration, 3-member sandbox (elections, quorum loss, NOSPACE), restore drill |
+| 01 | [Core architecture & pod lifecycle](01-kubernetes-core-architecture.md) | read the kubeadm control plane, trace one `kubectl apply` through API → scheduler → kubelet → containerd → nvidia runtime — and through a vCluster |
+| 02 | [API server: AuthN, RBAC, CEL admission, APF, audit](02-kube-apiserver-internals.md) | x509 users per cluster, 4 CEL policies with dry-run fixtures, fair-queuing lanes for tenants and syncers, audit queries |
+| 03 | [etcd: Raft, MVCC, quotas, backup & restore](03-etcd-database-deep-dive.md) | kubeadm's stacked etcd, SQLite in the vClusters, 3-member sandbox (elections, quorum loss, NOSPACE), restore drill |
 | 04 | [Controllers & writing your own](04-kube-controller-manager-and-controllers.md) | reconciliation cascades, GC, a dependency-free GPU-slice ledger controller |
 | 05 | [Scheduler, priorities, Kueue gangs, DRA](05-kube-scheduler-and-ai-batch-scheduling.md) | preemption ladder, a reproduced partial-gang deadlock, Kueue fix |
 
@@ -71,7 +85,7 @@ flowchart TB
 
 | # | Volume | You build |
 |---|---|---|
-| 06 | [CNI, flannel VXLAN, NetworkPolicy, RDMA networks](06-kubernetes-networking-deep-dive.md) | packet path map, MTU proof, tenant isolation |
+| 06 | [CNI with Cilium, VXLAN, NetworkPolicy, RDMA networks](06-kubernetes-networking-deep-dive.md) | packet path map, MTU proof, tenant isolation, the vCluster boundary, Hubble |
 | 07 | [kube-proxy, ClusterIP, conntrack, headless](07-kube-proxy-and-cluster-ip-mechanics.md) | iptables reading, keep-alive pinning, graceful stream draining |
 | 08 | [CoreDNS & the ndots tax](08-coredns-and-service-discovery.md) | measured query amplification, custom zones, outage drill |
 | 09 | [Ingress & Gateway API for LLM APIs](09-ingress-controllers-and-gateway-api.md) | unbuffered streaming, limits, auth, canary, TLS, gRPC |
@@ -82,7 +96,8 @@ flowchart TB
 |---|---|---|
 | 10 | [StatefulSets, DaemonSets, Indexed Jobs, PDBs](10-advanced-workload-controllers.md) | Qdrant with durable data, GPU probe DaemonSet, sharded tokenizer, safe drains |
 | 11 | [Storage on NVMe, model caches, fio, page cache vs UMA](11-storage-csi-and-high-performance-volumes.md) | Retain/Delete classes, prefetch Job, AI-shaped fio baseline |
-| 12 | [Quotas, QoS, cgroups v2 & the UMA question](12-multi-tenancy-resource-quotas-and-cgroups.md) | 5 % budgets, throttling/OOM reproduced, *is CUDA memory charged to the pod?* |
+| 12 | [Quotas, QoS, cgroups v2 & the UMA question](12-multi-tenancy-resource-quotas-and-cgroups.md) | two-layer budgets (root + tenant), throttling/OOM reproduced, *is CUDA memory charged to the pod?* |
+| 27 | [**Nested clusters: kubeadm root + two vClusters**](27-nested-clusters-with-vcluster.md) | the lab's shape: budgets, sync, names, the pod's path through three API servers, resize/add/back up a vCluster |
 
 ### Part IV — NVIDIA platform
 
@@ -90,7 +105,7 @@ flowchart TB
 |---|---|---|
 | 13 | [GB10 hardware & driver stack](13-nvidia-hardware-and-driver-stack.md) | host/pod inventory, GEMM baseline, arch/CUDA triage |
 | 14 | [Container Toolkit, CDI, time-slicing, the GPU leak](14-nvidia-container-toolkit-and-gpu-virtualization.md) | contention table, leak closed |
-| 15 | [**DGX Spark datacenter simulation (end-to-end)**](15-dgx-spark-datacenter-simulation-lab.md) | the whole platform with gates, capacity plan, day-2 ops, spark-02 plan |
+| 15 | [**DGX Spark datacenter simulation (end-to-end)**](15-dgx-spark-datacenter-simulation-lab.md) | the whole platform — root, both vClusters, gates, capacity plan, day-2 ops, spark-02 plan |
 | 16 | [GPU Operator, Network Operator & observability](16-nvidia-gpu-operator-and-network-operator.md) | per-node profiles, kps + host exporters, alerts, RDMA pod networking |
 
 ### Part V — Distributed AI & diagnostics
@@ -125,7 +140,7 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-  P1["Part I<br/>01→05"] --> P2["Part II<br/>06→09"] --> P3["Part III<br/>10→12"] --> P4["Part IV<br/>13→16"]
+  P1["Part I<br/>01→05"] --> P2["Part II<br/>06→09"] --> P3["Part III<br/>10→12 · 27"] --> P4["Part IV<br/>13→16"]
   P4 --> P5["Part V<br/>17→20"]
   P4 --> P6["Part VI<br/>21→24"]
   P5 & P6 --> P7["Part VII<br/>25→26 · MLOps"]
@@ -143,13 +158,16 @@ flowchart LR
 
 | Item | Value |
 |---|---|
-| Nodes | spark-01 `192.168.0.100` (k3s server). Optional spark-02 `192.168.0.101` (agent) |
+| Nodes | spark-01 `192.168.0.100` (kubeadm control plane + worker). Optional spark-02 `192.168.0.101` (worker) |
+| Clusters (contexts) | `spark-root` (kubeadm) · `dev-lab` (vCluster, `https://192.168.0.111`) · `llms` (vCluster, `https://192.168.0.112`) — one kubeconfig: `01 Ansible/lab/.cache/kubeconfig-spark-lab.yaml` |
+| Budgets | dev-lab 2 CPU · 8 Gi · 2 slices · 300 Gi — llms 4 CPU · 48 Gi · 8 slices · 500 Gi — root keeps 14 CPU · ~64 GiB · 5 slices ([Vol 27](27-nested-clusters-with-vcluster.md)) |
 | CX-7 | `192.168.100.0/24` + `192.168.101.0/24`, MTU 9000 |
-| Pods / Services / DNS | `10.42.0.0/16` / `10.43.0.0/16` / `10.43.0.10` |
-| Entry points | API `:6443` · Traefik `:80/:443` · Grafana `:32000` (kps), `:3000` (host) |
-| GPU | GB10, compute capability 12.1, 4 time-slices, no MIG |
-| Versions | [`lab/versions.env`](lab/versions.env) (k3s v1.32.5+k3s1, GPU Operator v25.3.0, Kueue v0.13.4, Traefik chart 34.4.1, kps 70.4.2, NGC 25.09 images) |
+| Pods / Services / DNS | `10.42.0.0/16` / `10.43.0.0/16` / `10.43.0.10` (Cilium VXLAN, kube-proxy iptables) |
+| LoadBalancer IPs | MetalLB `192.168.0.110–119`: dev-lab API `.111`, llms API `.112`, llms gateway (Traefik) `.115` |
+| Entry points | root API `:6443` · Grafana `:32000` · Hubble UI `:31235` · llms gateway `192.168.0.115:80` |
+| GPU | GB10, compute capability 12.1, 15 time-slices, no MIG |
+| Versions | [`lab/versions.env`](lab/versions.env) (Kubernetes v1.36.5, Cilium 1.20.2, vCluster 0.37.1, GPU Operator v26.7.1, Kueue v0.13.4, Traefik chart 34.4.1, kps 70.4.2, NGC 25.09 images) |
 
 ## How this module was verified
 
-Without a Spark attached, every manifest was applied with **server-side dry-run against a real Kubernetes 1.32 API server** carrying the Kueue, Gateway API, Traefik, Prometheus Operator, KEDA, KServe, Network Operator and Argo CD CRDs. The admission policies were exercised by 11 allow/deny fixtures. The Python tools (mock OpenAI server, P/D proxy, slice-ledger controller against a live API with RBAC, checkpoint/resume trainer, calculators) were run for real, and all Mermaid diagrams were rendered. CI ([`k8s-lab-ci.yml`](../.github/workflows/k8s-lab-ci.yml)) repeats the static checks, then builds a kind cluster with a fake GB10 node, applies the lab, runs the fixtures and the Kueue gang test on every PR. GPU-dependent results (TFLOPS, TTFT, NCCL bandwidth, the UMA cgroup experiment) are marked in the volumes as **"record yours"**. Those are the numbers to measure on your Spark.
+Without a Spark attached, the lab was applied with **server-side dry-run against real Kubernetes 1.36 API servers** standing in for the root and the two vClusters, carrying the Cilium, Kueue, Gateway API, Traefik, Prometheus Operator and KEDA CRDs: every layer applies, the tenancy checks and the 11 allow/deny admission fixtures pass, and all 39 pod templates are admitted in their target cluster. Both vCluster values files validate against the vCluster 0.37.1 chart schema and the Traefik values against its chart schema; [`tests/budget_check.py`](lab/tests/budget_check.py) proves the budgets fit the Spark. The Python tools (mock OpenAI server, P/D proxy, slice-ledger controller, checkpoint/resume trainer, calculators) were run for real, and all Mermaid diagrams were rendered. CI ([`k8s-lab-ci.yml`](../.github/workflows/k8s-lab-ci.yml)) repeats the static checks, then builds the same shape on kind — kind as the root with a fake GB10, plus vCluster `dev-lab` and `llms` from the lab's own values — applies the lab to all three, runs the fixtures and the Kueue gang test on every PR. GPU-dependent results (TFLOPS, TTFT, NCCL bandwidth, the UMA cgroup experiment) are marked in the volumes as **"record yours"**. Those are the numbers to measure on your Spark.
