@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Snapshot the root Kubernetes etcd every 6 hours
+
+[Timer]
+OnCalendar={{ kubeadm_cluster_etcd_snapshot_calendar }}
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

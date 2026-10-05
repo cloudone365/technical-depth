@@ -1,0 +1,110 @@
+---
+# Wipe Kubernetes from the Sparks so you can rebuild from scratch (Volume 16 §8).
+# The DGX itself is your playground: break the cluster, learn, reset, rebuild.
+# Docker, the NVIDIA driver/toolkit, Slurm and everything outside Kubernetes
+# are left alone.
+#
+#   ansible-playbook playbooks/99-reset-kubernetes.yml                       # kubeadm cluster only
+#   ansible-playbook playbooks/99-reset-kubernetes.yml -e reset_remove_k3s=true   # also uninstall an old k3s
+#   ansible-playbook playbooks/99-reset-kubernetes.yml -e reset_wipe_data=true    # also delete PV data in /data/k8s
+#
+# Then rebuild: playbooks/05-kubernetes.yml → 06-gpu-operator.yml → 06b-vclusters.yml
+- name: Reset Kubernetes
+  hosts: spark
+  become: true
+  gather_facts: false
+  vars:
+    reset_remove_k3s: false
+    reset_wipe_data: false
+  vars_prompt:
+    - name: reset_confirm
+      prompt: "This deletes the Kubernetes cluster, every vCluster and all workloads on {{ ansible_play_hosts_all | join(', ') }}. Type RESET to continue"
+      private: false
+  pre_tasks:
+    - name: Confirmation
+      ansible.builtin.assert:
+        that: reset_confirm == 'RESET'
+        fail_msg: Aborted — nothing was changed.
+      run_once: true
+  tasks:
+    # ------------------------------------------------------------ old k3s lab
+    - name: Uninstall k3s (server or agent) if asked
+      ansible.builtin.command: "{{ item }}"
+      args:
+        removes: "{{ item }}"
+      loop:
+        - /usr/local/bin/k3s-uninstall.sh
+        - /usr/local/bin/k3s-agent-uninstall.sh
+      when: reset_remove_k3s | bool
+
+    # ------------------------------------------------------------ kubeadm
+    - name: Is kubeadm installed?
+      ansible.builtin.stat:
+        path: /usr/bin/kubeadm
+      register: reset_kubeadm
+
+    - name: Kubeadm reset (stops static pods, removes /etc/kubernetes and /var/lib/etcd)
+      ansible.builtin.command: kubeadm reset --force
+      changed_when: true
+      when: reset_kubeadm.stat.exists
+
+    - name: Stop kubelet
+      ansible.builtin.service:
+        name: kubelet
+        state: stopped
+      failed_when: false
+
+    # kubeadm reset leaves the CNI config, Cilium's interfaces/BPF state and the
+    # kube-proxy/Cilium iptables chains behind. A half-cleaned host is the most
+    # common cause of "the new cluster's networking is weird".
+    - name: Remove CNI config, Cilium state and kubelet leftovers
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/cni/net.d
+        - /var/lib/cni
+        - /var/run/cilium
+        - /sys/fs/bpf/cilium
+        - /etc/kubernetes/kubeadm-config.yaml
+        - /root/.kube
+        - "/home/{{ spark_admin_user | default('nvidia') }}/.kube"
+
+    - name: Delete Cilium network interfaces
+      ansible.builtin.command: ip link delete {{ item }}
+      loop: [cilium_host, cilium_net, cilium_vxlan]
+      register: reset_links
+      changed_when: reset_links.rc == 0
+      failed_when: false
+
+    - name: Remove only the Kubernetes/Cilium iptables rules (Docker's stay)
+      ansible.builtin.shell: |
+        set -o pipefail
+        for t in filter nat mangle raw; do
+          iptables-save -t "$t" | grep -vE 'KUBE-|CILIUM|cilium' | iptables-restore -T "$t"
+          ip6tables-save -t "$t" 2>/dev/null | grep -vE 'KUBE-|CILIUM|cilium' | ip6tables-restore -T "$t" 2>/dev/null || true
+        done
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Optionally delete persistent-volume data
+      ansible.builtin.file:
+        path: /data/k8s
+        state: absent
+      when: reset_wipe_data | bool
+
+    - name: Restart containerd (drops stale pod sandboxes) and Docker
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: restarted
+      loop: [containerd, docker]
+
+    - name: Forget the lab kubeconfigs on the control node
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ query('ansible.builtin.fileglob', playbook_dir ~ '/../.cache/kubeconfig-*.yaml') }}"
+      delegate_to: localhost
+      become: false
+      run_once: true

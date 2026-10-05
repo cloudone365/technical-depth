@@ -10,10 +10,12 @@
   ansible.builtin.import_playbook: 04-telemetry.yml
 - name: Vault
   ansible.builtin.import_playbook: 08-vault.yml
-- name: Kubernetes
-  ansible.builtin.import_playbook: 05-k3s.yml
+- name: Kubernetes (kubeadm root cluster + Cilium + MetalLB)
+  ansible.builtin.import_playbook: 05-kubernetes.yml
 - name: GPU Operator
   ansible.builtin.import_playbook: 06-gpu-operator.yml
+- name: Virtual clusters (dev-lab, llms)
+  ansible.builtin.import_playbook: 06b-vclusters.yml
 - name: Slurm
   ansible.builtin.import_playbook: 07-slurm.yml
 - name: Shared storage

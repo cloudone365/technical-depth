@@ -1,5 +1,5 @@
 ---
-- name: NVIDIA GPU Operator on k3s
+- name: NVIDIA GPU Operator on the root cluster
   hosts: localhost
   connection: local
   gather_facts: false
@@ -9,6 +9,7 @@
     - name: Launch a GPU test pod
       kubernetes.core.k8s:
         kubeconfig: "{{ gpu_operator_kubeconfig }}"
+        context: "{{ gpu_operator_context }}"
         state: present
         wait: true
         wait_condition:

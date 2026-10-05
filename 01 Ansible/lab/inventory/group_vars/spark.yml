@@ -42,7 +42,7 @@ spark_sysctls:
   vm.swappiness: 10
   vm.max_map_count: 1048576          # large mmap'ed model weights
   fs.inotify.max_user_watches: 1048576
-  fs.inotify.max_user_instances: 8192 # k3s + many containers
+  fs.inotify.max_user_instances: 8192 # kubelet + vClusters + many containers
   net.core.rmem_max: 268435456
   net.core.wmem_max: 268435456
   net.ipv4.tcp_rmem: "4096 87380 268435456"

@@ -1,0 +1,22 @@
+# Root-cluster namespaces that belong to the platform team (Volume 15, 27).
+# Tenant namespaces do NOT live here any more: they live inside the vClusters
+# (manifests/dev-lab, manifests/llms). The vCluster host namespaces are in
+# root/05-vclusters; gpu-operator, metallb-system and argocd are created by
+# their installers.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    spark.lab/tier: platform               # kube-prometheus-stack (addons/kube-prometheus-stack-values.yaml)
+    pod-security.kubernetes.io/enforce: privileged   # node-level exporters if you enable them
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: platform-tools
+  labels:
+    # What the platform team runs on the bare node: host-network netshoot,
+    # GPU/storage benchmarks, the node probe, the GPU slice ledger, drills.
+    spark.lab/tier: platform
+    pod-security.kubernetes.io/enforce: privileged

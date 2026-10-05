@@ -1,0 +1,58 @@
+---
+# Runs on the control node (localhost) against the root API server.
+- name: Namespace (privileged PSA — the speaker uses hostNetwork and NET_RAW for ARP)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ metallb_kubeconfig }}"
+    context: "{{ metallb_context }}"
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ metallb_namespace }}"
+        labels:
+          pod-security.kubernetes.io/enforce: privileged
+          pod-security.kubernetes.io/audit: privileged
+          pod-security.kubernetes.io/warn: privileged
+
+- name: Add MetalLB Helm repo
+  kubernetes.core.helm_repository:
+    name: metallb
+    repo_url: https://metallb.github.io/metallb
+
+- name: Install / upgrade MetalLB
+  kubernetes.core.helm:
+    kubeconfig: "{{ metallb_kubeconfig }}"
+    context: "{{ metallb_context }}"
+    name: metallb
+    chart_ref: metallb/metallb
+    chart_version: "{{ metallb_chart_version }}"
+    release_namespace: "{{ metallb_namespace }}"
+    wait: true
+    wait_timeout: 5m
+
+# The CRs are validated by MetalLB's webhook, which needs a few seconds after
+# the pods are Ready — retry instead of sleeping.
+- name: Address pool and L2 advertisement
+  kubernetes.core.k8s:
+    kubeconfig: "{{ metallb_kubeconfig }}"
+    context: "{{ metallb_context }}"
+    definition:
+      - apiVersion: metallb.io/v1beta1
+        kind: IPAddressPool
+        metadata:
+          name: "{{ metallb_pool_name }}"
+          namespace: "{{ metallb_namespace }}"
+        spec:
+          addresses: "{{ metallb_pool_addresses }}"
+      - apiVersion: metallb.io/v1beta1
+        kind: L2Advertisement
+        metadata:
+          name: "{{ metallb_pool_name }}-l2"
+          namespace: "{{ metallb_namespace }}"
+        spec:
+          ipAddressPools: ["{{ metallb_pool_name }}"]
+          interfaces: "{{ metallb_l2_interfaces }}"
+  register: metallb_crs
+  until: metallb_crs is succeeded
+  retries: 12
+  delay: 10

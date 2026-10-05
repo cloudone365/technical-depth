@@ -1,0 +1,21 @@
+# Who can do what INSIDE vCluster #2 · llms (Volume 02, 27, production-mlops).
+# CI deploys into llm-serving with a ServiceAccount token, nothing else.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ci-deployer
+  namespace: llm-serving
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ci-deployer
+  namespace: llm-serving
+subjects:
+  - kind: ServiceAccount
+    name: ci-deployer
+    namespace: llm-serving
+roleRef:
+  kind: ClusterRole
+  name: edit
+  apiGroup: rbac.authorization.k8s.io

@@ -167,7 +167,7 @@
   loop_control:
     label: "{{ item.rdma_dev }}"
 
-- name: Publish fabric facts for later roles (NCCL, Slurm, k3s, vLLM)
+- name: Publish fabric facts for later roles (NCCL, Slurm, Kubernetes, vLLM)
   ansible.builtin.set_fact:
     cx7_fabric_primary_if: "{{ cx7_fabric_interfaces[0].name }}"
     cx7_fabric_primary_ip: "{{ cx7_fabric_interfaces[0].address.split('/')[0] }}"

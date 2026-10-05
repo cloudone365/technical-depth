@@ -1,0 +1,9 @@
+# RuntimeClass "nvidia" inside each vCluster (Volume 14, 27).
+# On the root the GPU Operator creates it. A vCluster has its own API server,
+# which rejects a pod whose runtimeClassName doesn't exist there — so the same
+# object is created inside; the synced pod then runs with the root's handler.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: nvidia
+handler: nvidia

@@ -1,12 +1,15 @@
 # CI for "02 Kubernetes/lab" — see 02 Kubernetes/20-hands-on-practice-exercises-workbook.md §0
+# The lab is a root cluster with two vClusters inside (Volume 27). CI builds the
+# same shape on kind: kind = root (fake GB10 with 15 slices), then vCluster
+# dev-lab and llms from the lab's own Helm values, reached by port-forward.
 name: k8s-lab
 
 on:
   pull_request:
-    paths: ["02 Kubernetes/lab/**", ".github/workflows/k8s-lab-ci.yml"]
+    paths: ["02 Kubernetes/lab/**", "01 Ansible/lab/roles/**", ".github/workflows/k8s-lab-ci.yml"]
   push:
     branches: [main]
-    paths: ["02 Kubernetes/lab/**"]
+    paths: ["02 Kubernetes/lab/**", "01 Ansible/lab/roles/**"]
   workflow_dispatch:
 
 defaults:
@@ -16,17 +19,20 @@ defaults:
 env:
   KUBECONFORM: v0.6.7
   PROMETHEUS: "3.4.1"
+  HELM: v3.19.0
 
 jobs:
   static:
-    name: lint · kubeconform · promtool · python · shellcheck
+    name: lint · kubeconform · budgets · promtool · python · shellcheck · helm template
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with: {python-version: "3.12"}
       - uses: azure/setup-kubectl@v4
-        with: {version: v1.32.5}
+        with: {version: v1.34.1}
+      - uses: azure/setup-helm@v4
+        with: {version: "${{ env.HELM }}"}
       - name: Tools
         run: |
           pip install yamllint shellcheck-py pyyaml
@@ -37,47 +43,80 @@ jobs:
         run: tests/ci-run.sh tests/run-local-checks.sh
 
   kind:
-    name: apply + admission + Kueue gang on kind (fake GPUs)
+    name: root + 2 vClusters on kind (fake GPUs) · apply · admission · Kueue gang
     needs: static
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with: {python-version: "3.12"}
+      - uses: azure/setup-helm@v4
+        with: {version: "${{ env.HELM }}"}
       - uses: helm/kind-action@v1
         with:
           cluster_name: spark-sim
-          node_image: kindest/node:v1.32.2
+          node_image: kindest/node:v1.34.0
       - name: Tools
         run: |
           pip install yamllint shellcheck-py pyyaml
           curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM}/kubeconform-linux-amd64.tar.gz" | sudo tar xz -C /usr/local/bin kubeconform
           curl -sSL "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS}/prometheus-${PROMETHEUS}.linux-amd64.tar.gz" \
             | sudo tar xz -C /usr/local/bin --strip-components=1 "prometheus-${PROMETHEUS}.linux-amd64/promtool"
-      - name: Pretend the kind node is a DGX Spark
-        run: tests/fake-gpu-node.sh
-      - name: CRDs the lab expects (no controllers except Kueue)
+      - name: The kind cluster plays the root (context spark-root) and the Spark (fake GB10)
+        run: |
+          kubectl config rename-context kind-spark-sim spark-root
+          kubectl config use-context spark-root
+          tests/fake-gpu-node.sh
+      - name: Root CRDs the lab expects (Cilium policy, Prometheus Operator) — no controllers
         run: |
           source versions.env
-          kubectl apply --server-side -f "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml"
+          kubectl apply --server-side -f "https://raw.githubusercontent.com/cilium/cilium/v${CILIUM_VERSION}/pkg/k8s/apis/cilium.io/client/crds/v2/ciliumnetworkpolicies.yaml"
           kubectl apply --server-side -f "https://github.com/prometheus-operator/prometheus-operator/releases/download/v0.81.0/stripped-down-crds.yaml"
-          kubectl apply --server-side -f "https://github.com/kedacore/keda/releases/download/${KEDA_VERSION}/keda-${KEDA_VERSION#v}-crds.yaml"
-          for c in traefik.io_middlewares traefik.io_ingressroutes; do
-            kubectl apply --server-side -f "https://raw.githubusercontent.com/traefik/traefik-helm-chart/v${TRAEFIK_CHART_VERSION}/traefik/crds/${c}.yaml"
+      - name: VCluster dev-lab and llms from vclusters/*.yaml
+        run: |
+          source versions.env
+          kubectl apply -k manifests/root/00-platform
+          kubectl apply -k manifests/root/05-vclusters
+          helm repo add loft https://charts.loft.sh
+          port=8443
+          for v in dev-lab llms; do
+            # kind has no MetalLB/local-nvme: ClusterIP + port-forward, kind's 'standard' class
+            helm upgrade --install "$v" loft/vcluster --version "$VCLUSTER_VERSION" -n "vc-$v" -f "vclusters/$v.yaml" \
+              --set controlPlane.service.spec.type=ClusterIP \
+              --set controlPlane.statefulSet.persistence.volumeClaim.storageClass=standard \
+              --set exportKubeConfig.server="https://127.0.0.1:$port" \
+              --wait --timeout 10m
+            nohup kubectl -n "vc-$v" port-forward "svc/$v" "$port:443" > "/tmp/pf-$v.log" 2>&1 &
+            # same merge the Spark uses: cluster/user/context all renamed to $v
+            scripts/merge-vcluster-kubeconfig.sh "$v" "vc-$v"
+            port=$((port+1))
           done
-          kubectl apply --server-side -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
-          kubectl -n kueue-system rollout status deploy/kueue-controller-manager --timeout=5m
-      - name: Apply lab + tenancy/admission checks
-        run: API=1 tests/ci-run.sh tests/run-local-checks.sh
+          kubectl config get-contexts
+      - name: CRDs/controllers inside llms (Kueue for real; Gateway API, Traefik, KEDA as CRDs only)
+        run: |
+          source versions.env
+          K="kubectl --context llms"
+          $K apply --server-side -f "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml"
+          $K apply --server-side -f "https://github.com/kedacore/keda/releases/download/${KEDA_VERSION}/keda-${KEDA_VERSION#v}-crds.yaml"
+          for c in traefik.io_middlewares traefik.io_ingressroutes; do
+            $K apply --server-side -f "https://raw.githubusercontent.com/traefik/traefik-helm-chart/v${TRAEFIK_CHART_VERSION}/traefik/crds/${c}.yaml"
+          done
+          $K apply --server-side -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
+          $K -n kueue-system rollout status deploy/kueue-controller-manager --timeout=5m
+      - name: Apply lab on all three clusters + budgets/tenancy/admission checks
+        run: HELM_TEMPLATE=0 API=1 tests/ci-run.sh tests/run-local-checks.sh
       - name: Workloads actually run (CPU-only parts)
         run: |
-          kubectl -n llm-serving rollout status deploy/mock-llm --timeout=3m
-          kubectl -n lab-tools rollout status deploy/echo --timeout=3m
+          kubectl --context llms -n llm-serving rollout status deploy/mock-llm --timeout=5m
+          kubectl --context dev-lab -n lab-tools rollout status deploy/echo --timeout=5m
           # from inside llm-serving (the namespace's NetworkPolicy admits same-namespace pods)
-          kubectl -n llm-serving exec deploy/mock-llm-canary -- python3 -c \
+          kubectl --context llms -n llm-serving exec deploy/mock-llm-canary -- python3 -c \
             "import urllib.request; print(urllib.request.urlopen('http://mock-llm:8000/v1/models').read().decode())"
-          kubectl -n lab-tools exec deploy/netshoot -- dig +short echo-headless.lab-tools.svc.cluster.local | wc -l | grep -q 3
-      - name: Kueue gang admission
+          kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- dig +short echo-headless.lab-tools.svc.cluster.local | wc -l | grep -q 3
+          # the same pods, seen from the root: renamed and counted against the vCluster budgets
+          kubectl --context spark-root -n vc-llms get pods
+          kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget
+      - name: Kueue gang admission (inside llms)
         run: tests/ci-run.sh tests/kueue-gang-test.sh
       - name: Diagnostics on failure
         if: failure()

@@ -8,8 +8,15 @@ manifests/kustomizations, wraps it in a Pod in the right namespace, and creates
 it with a server-side dry run, so PSA / ValidatingAdmissionPolicy / quota
 violations show up in CI instead of as a stuck ReplicaSet.
 
-  python3 tests/pod_template_check.py manifests/90-serving/vllm manifests/50-workloads/qdrant-statefulset.yaml …
+  python3 tests/pod_template_check.py manifests/llms/90-serving/vllm manifests/llms/50-workloads/qdrant-statefulset.yaml …
 Exit 1 if any template would be rejected.
+
+The lab is three API servers (Volume 27). The cluster is taken from the path:
+manifests/root/… → spark-root, manifests/dev-lab/… → dev-lab, manifests/llms/… → llms
+(override the context names with ROOT_CTX / DEV_CTX / LLM_CTX). Admission inside
+a vCluster checks that vCluster's PSA/CEL/tenant quotas; the ROOT quota on its
+vc-* namespace is applied only when the syncer creates the real pod, so it
+is not part of a dry run.
 """
 import json
 import os
@@ -19,6 +26,17 @@ import sys
 import yaml
 
 KUBECTL = os.environ.get("KUBECTL", "kubectl")
+CONTEXTS = {"root": os.environ.get("ROOT_CTX", "spark-root"),
+            "dev-lab": os.environ.get("DEV_CTX", "dev-lab"),
+            "llms": os.environ.get("LLM_CTX", "llms")}
+
+
+def context_for(path):
+    parts = os.path.normpath(path).split(os.sep)
+    for key, ctx in CONTEXTS.items():
+        if key in parts:
+            return ctx
+    return CONTEXTS["root"]
 
 
 def render(path):
@@ -62,13 +80,13 @@ def main(paths):
                        "metadata": {"name": f"tplcheck-{name}"[:63], "namespace": ns,
                                     "labels": tpl.get("metadata", {}).get("labels", {})},
                        "spec": tpl["spec"]}
-                r = subprocess.run([KUBECTL, "create", "--dry-run=server", "-f", "-"], input=json.dumps(pod),
-                                   capture_output=True, text=True)
+                r = subprocess.run([KUBECTL, "--context", context_for(p), "create", "--dry-run=server", "-f", "-"],
+                                   input=json.dumps(pod), capture_output=True, text=True)
                 if r.returncode != 0 and "serviceaccount" in r.stderr and "not found" in r.stderr:
                     print(f"note     {doc['kind']}/{name}: ServiceAccount is created by the same apply (dry-run can't see it)")
                 elif r.returncode != 0:
                     bad += 1
-                    print(f"REJECTED {p} :: {doc['kind']}/{name} in {ns}\n   {r.stderr.strip().splitlines()[-1][:400]}")
+                    print(f"REJECTED {p} :: {doc['kind']}/{name} in {context_for(p)}/{ns}\n   {r.stderr.strip().splitlines()[-1][:400]}")
     print(f"{n} pod templates checked, {bad} rejected")
     return 1 if bad else 0
 

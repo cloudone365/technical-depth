@@ -1,5 +1,5 @@
 ---
-# Runs on the control node (localhost) against the k3s API.
+# Runs on the control node (localhost) against the root cluster's API server.
 - name: Add NVIDIA Helm repo
   kubernetes.core.helm_repository:
     name: nvidia
@@ -8,6 +8,7 @@
 - name: Create namespace (privileged PSA — operator pods need host access)
   kubernetes.core.k8s:
     kubeconfig: "{{ gpu_operator_kubeconfig }}"
+    context: "{{ gpu_operator_context }}"
     definition:
       apiVersion: v1
       kind: Namespace
@@ -19,6 +20,7 @@
 - name: Time-slicing ConfigMap
   kubernetes.core.k8s:
     kubeconfig: "{{ gpu_operator_kubeconfig }}"
+    context: "{{ gpu_operator_context }}"
     definition:
       apiVersion: v1
       kind: ConfigMap
@@ -41,6 +43,7 @@
 - name: Install / upgrade GPU Operator
   kubernetes.core.helm:
     kubeconfig: "{{ gpu_operator_kubeconfig }}"
+    context: "{{ gpu_operator_context }}"
     name: gpu-operator
     chart_ref: nvidia/gpu-operator
     chart_version: "{{ gpu_operator_chart_version }}"
@@ -53,6 +56,7 @@
 - name: Wait for validator to succeed
   kubernetes.core.k8s_info:
     kubeconfig: "{{ gpu_operator_kubeconfig }}"
+    context: "{{ gpu_operator_context }}"
     kind: Pod
     namespace: "{{ gpu_operator_namespace }}"
     label_selectors: [app=nvidia-operator-validator]
@@ -66,6 +70,7 @@
 - name: Read allocatable GPUs per node
   kubernetes.core.k8s_info:
     kubeconfig: "{{ gpu_operator_kubeconfig }}"
+    context: "{{ gpu_operator_context }}"
     kind: Node
   register: gpu_operator_nodes
 

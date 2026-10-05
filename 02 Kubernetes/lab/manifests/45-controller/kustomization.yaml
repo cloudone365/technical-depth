@@ -1,9 +1,0 @@
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources: [slice-ledger.yaml]
-configMapGenerator:
-  - name: slice-ledger
-    namespace: lab-tools
-    files: [slice_ledger.py]
-generatorOptions:
-  disableNameSuffixHash: true

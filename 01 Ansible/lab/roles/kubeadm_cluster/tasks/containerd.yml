@@ -1,0 +1,96 @@
+---
+# DGX OS ships containerd.io with Docker. Its stock config disables the CRI
+# plugin (Docker doesn't need it), so kubelet can't talk to it. We replace it
+# with containerd's full default config once, then converge three settings.
+# Docker keeps working: it uses containerd's own 'moby' namespace.
+- name: Read current containerd config
+  ansible.builtin.slurp:
+    src: "{{ kubeadm_cluster_containerd_config }}"
+  register: kubeadm_cluster_ctd_raw
+  failed_when: false
+
+- name: Decide whether the config needs regenerating
+  ansible.builtin.set_fact:
+    kubeadm_cluster_ctd_regen: >-
+      {{ kubeadm_cluster_ctd_raw.content is not defined
+         or ('SystemdCgroup' not in (kubeadm_cluster_ctd_raw.content | b64decode))
+         or ((kubeadm_cluster_ctd_raw.content | b64decode) is search('disabled_plugins\s*=\s*\[[^\]]*"cri"')) }}
+
+- name: Back up the stock config
+  ansible.builtin.copy:
+    src: "{{ kubeadm_cluster_containerd_config }}"
+    dest: "{{ kubeadm_cluster_containerd_config }}.dgxos-orig"
+    remote_src: true
+    force: false
+    mode: "0644"
+  when:
+    - kubeadm_cluster_ctd_regen | bool
+    - kubeadm_cluster_ctd_raw.content is defined
+
+- name: Write containerd's full default config (CRI enabled)
+  ansible.builtin.shell: |
+    set -o pipefail
+    containerd config default > {{ kubeadm_cluster_containerd_config }}
+  args:
+    executable: /bin/bash
+  changed_when: true
+  when: kubeadm_cluster_ctd_regen | bool
+  notify: Restart containerd
+
+- name: Use the systemd cgroup driver (must match kubelet's cgroupDriver)
+  ansible.builtin.replace:
+    path: "{{ kubeadm_cluster_containerd_config }}"
+    regexp: 'SystemdCgroup\s*=\s*false'
+    replace: "SystemdCgroup = true"
+  notify: Restart containerd
+
+- name: Is an 'nvidia' runtime registered in containerd?
+  ansible.builtin.command: grep -Eq "runtimes\.['\"]?nvidia['\"]?\]" {{ kubeadm_cluster_containerd_config }}
+  register: kubeadm_cluster_ctd_has_nvidia
+  changed_when: false
+  failed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+
+- name: Is it the default runtime?
+  ansible.builtin.command: grep -Eq 'default_runtime_name\s*=\s*"nvidia"' {{ kubeadm_cluster_containerd_config }}
+  register: kubeadm_cluster_ctd_nvidia
+  changed_when: false
+  failed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+
+- name: Register the NVIDIA runtime (nvidia-ctk edits config.toml in place)
+  ansible.builtin.command: >-
+    nvidia-ctk runtime configure --runtime=containerd
+    --config={{ kubeadm_cluster_containerd_config }}
+    {{ '--set-as-default' if kubeadm_cluster_default_runtime_nvidia | bool else '' }}
+  changed_when: true
+  when: >-
+    kubeadm_cluster_ctd_has_nvidia.rc != 0 or
+    (kubeadm_cluster_default_runtime_nvidia | bool and kubeadm_cluster_ctd_nvidia.rc != 0)
+  notify: Restart containerd
+
+- name: Apply containerd changes before kubelet starts
+  ansible.builtin.meta: flush_handlers
+
+- name: Point crictl at containerd (used by the 02 lab scripts and by you)
+  ansible.builtin.copy:
+    dest: /etc/crictl.yaml
+    content: |
+      # {{ ansible_managed }}
+      runtime-endpoint: unix:///run/containerd/containerd.sock
+      image-endpoint: unix:///run/containerd/containerd.sock
+      timeout: 10
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: CRI answers on the containerd socket
+  ansible.builtin.command: crictl --runtime-endpoint unix:///run/containerd/containerd.sock info
+  register: kubeadm_cluster_crictl
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  failed_when: false
+
+- name: Report CRI status (crictl arrives with the kube packages on a first run)
+  ansible.builtin.debug:
+    msg: "CRI {{ 'reachable' if kubeadm_cluster_crictl.rc == 0 else 'not checked yet (crictl missing on first run)' }}"

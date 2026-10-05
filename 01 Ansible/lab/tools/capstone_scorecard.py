@@ -107,7 +107,7 @@ def _():
     return len(b) > 0, f"{len(b)} bundles"
 
 
-@check("16", "kubeconfig fetched from k3s")
+@check("16", "kubeconfig fetched from the kubeadm root cluster")
 def _():
     k = glob.glob(p("kubeconfig-*.yaml"))
     ok = any("https://127.0.0.1" not in read(x) and "server: https://" in read(x) for x in k)

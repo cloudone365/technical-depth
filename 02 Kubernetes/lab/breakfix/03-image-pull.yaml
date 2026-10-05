@@ -1,4 +1,4 @@
-# BF-03: a tag that does not exist.
+# BF-03 (cluster: dev-lab): a tag that does not exist.
 apiVersion: v1
 kind: Pod
 metadata: {name: bf03-pull, namespace: lab-tools, labels: {breakfix: "03"}}

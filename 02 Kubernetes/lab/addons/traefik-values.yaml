@@ -1,0 +1,66 @@
+# Helm values for Traefik v3 INSIDE vCluster #2 · llms (Volume 09, 27): the
+# API gateway of the serving tier — Ingress + Gateway API + Traefik CRDs.
+# Installed by scripts/install-addons.sh traefik:
+#   helm --kube-context llms upgrade --install traefik-lab traefik/traefik \
+#     --version "$TRAEFIK_CHART_VERSION" -n ingress -f addons/traefik-values.yaml
+#
+# Why inside the vCluster and not on the root? Traefik reads Middlewares,
+# IngressRoutes and HTTPRoutes from the API server it talks to. Inside llms it
+# sees the tenant's objects with their real names; on the root it would see
+# vCluster-translated names (llm-x-llm-serving-x-llms) and every middleware
+# reference in an annotation would break.
+#
+# Its LoadBalancer Service is synced to the root, where MetalLB gives it
+# 192.168.0.115 — counted against the llms vCluster's root quota.
+deployment:
+  replicas: 1
+providers:
+  kubernetesCRD:
+    enabled: true
+    allowCrossNamespace: false
+  kubernetesIngress:
+    enabled: true
+    publishedService:
+      enabled: true
+  kubernetesGateway:
+    enabled: true
+gateway:
+  enabled: true
+  name: lab-gateway
+  listeners:
+    web:
+      port: 8000
+      protocol: HTTP
+      namespacePolicy: All
+ports:
+  web:
+    # LLM streams can run for minutes; the defaults (readTimeout 60s)
+    # cut long generations. 0s = no limit on the entrypoint; limit
+    # per-route with a Middleware instead.
+    transport:
+      respondingTimeouts:
+        readTimeout: 0s
+        writeTimeout: 0s
+        idleTimeout: 600s
+  websecure:
+    transport:
+      respondingTimeouts:
+        readTimeout: 0s
+        writeTimeout: 0s
+        idleTimeout: 600s
+service:
+  type: LoadBalancer
+  annotations:
+    metallb.io/loadBalancerIPs: 192.168.0.115
+metrics:
+  prometheus:
+    # No Prometheus Operator inside the vCluster: expose a plain metrics
+    # Service (traefik-lab-metrics); the root's ServiceMonitor
+    # vcluster-workloads scrapes it.
+    service:
+      enabled: true
+    serviceMonitor:
+      enabled: false
+resources:
+  requests: {cpu: 100m, memory: 128Mi}
+  limits: {memory: 512Mi}

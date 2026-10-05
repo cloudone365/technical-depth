@@ -1,0 +1,8 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Snapshot the root Kubernetes etcd
+After=kubelet.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/etcd-snapshot

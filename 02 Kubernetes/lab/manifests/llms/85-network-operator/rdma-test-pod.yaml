@@ -1,0 +1,22 @@
+# Verify the secondary RDMA interface from inside a pod (Volume 16 §5.6), INSIDE
+# vCluster #2 · llms. The pod is synced to the root namespace vc-llms with this
+# annotation unchanged, so Multus looks up NetworkAttachmentDefinition cx7-rdma
+# in vc-llms — that is where root/85-network-operator puts it.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rdma-test
+  namespace: batch
+  annotations:
+    k8s.v1.cni.cncf.io/networks: cx7-rdma
+spec:
+  restartPolicy: Never
+  containers:
+    - name: t
+      image: nvcr.io/nvidia/pytorch:25.09-py3
+      command: ["bash", "-c", "ip -br addr; ibv_devices; ibv_devinfo -l; sleep 3600"]
+      securityContext:
+        capabilities: {add: [IPC_LOCK]}            # RDMA needs pinned memory
+      resources:
+        limits: {rdma/rdma_shared_cx7: "1", memory: 4Gi}
+        requests: {cpu: 500m}

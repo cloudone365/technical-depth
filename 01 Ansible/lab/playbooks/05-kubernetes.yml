@@ -1,0 +1,25 @@
+---
+# Root Kubernetes cluster (Volume 16): kubeadm on every node (control plane
+# first, then workers), then the pod network and LoadBalancer IPs.
+#
+#   ansible-playbook playbooks/05-kubernetes.yml
+#   ansible-playbook playbooks/06-gpu-operator.yml
+#   ansible-playbook playbooks/06b-vclusters.yml
+#
+# Start over at any time with playbooks/99-reset-kubernetes.yml — on a lab box
+# a clean rebuild is a normal part of learning, not a failure.
+- name: Kubeadm (control plane first, then workers)
+  hosts: k8s_control_plane:k8s_workers
+  become: true
+  order: sorted
+  serial: "{{ groups['k8s_control_plane'] | length }}"   # control plane must finish before workers join
+  roles:
+    - role: kubeadm_cluster
+
+- name: Pod network (Cilium) and LoadBalancer IPs (MetalLB)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - role: cilium
+    - role: metallb

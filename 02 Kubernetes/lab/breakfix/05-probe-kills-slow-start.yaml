@@ -1,4 +1,4 @@
-# BF-05: the "model" takes 60 s to load, the liveness probe gives up after ~15 s.
+# BF-05 (cluster: llms): the "model" takes 60 s to load, the liveness probe gives up after ~15 s.
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: bf05-slow, namespace: llm-serving, labels: {breakfix: "05"}}

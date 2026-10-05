@@ -1,6 +1,6 @@
 ---
 # What the drain does, in order. Toggle stages per incident.
-node_drain_k8s: "{{ inventory_hostname in groups['k3s_server'] | default([]) + groups['k3s_agent'] | default([]) }}"
+node_drain_k8s: "{{ inventory_hostname in groups['k8s_control_plane'] | default([]) + groups['k8s_workers'] | default([]) }}"
 node_drain_slurm: "{{ inventory_hostname in groups['slurm_compute'] | default([]) }}"
 node_drain_stop_containers: true        # docker containers using the GPU
 node_drain_collect: true                # forensic bundle before anything is restarted

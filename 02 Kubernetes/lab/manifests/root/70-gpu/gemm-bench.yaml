@@ -1,0 +1,23 @@
+# Up to 4 replicas fighting for the same GB10 through time-slicing (Volume 14
+# lab, Workbook ex. 19), on the ROOT in platform-tools: GPU benchmarking is a
+# platform job, and the root has no quota to stop you at 2 slices.
+# Starts at 0 replicas; scale it during the lab.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: gemm-contention, namespace: platform-tools}
+spec:
+  replicas: 0                          # scale to 4 during the lab
+  selector: {matchLabels: {app: gemm-contention}}
+  template:
+    metadata: {labels: {app: gemm-contention}}
+    spec:
+      containers:
+        - name: bench
+          image: nvcr.io/nvidia/pytorch:25.09-py3
+          command: ["python3", "/bench/gemm_bench.py"]
+          env: [{name: LOOP, value: "1"}]
+          resources: {limits: {nvidia.com/gpu: "1", memory: 8Gi}, requests: {cpu: "1", memory: 4Gi}}
+          volumeMounts: [{name: bench, mountPath: /bench}]
+      volumes:
+        - name: bench
+          configMap: {name: gemm-bench}

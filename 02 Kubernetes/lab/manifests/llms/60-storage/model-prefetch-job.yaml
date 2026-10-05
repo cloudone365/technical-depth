@@ -1,0 +1,43 @@
+# Download model weights into the shared model-cache PVC BEFORE any server
+# starts (Volume 11 §5.4, Volume 21). Serving pods then start in seconds and
+# never race each other on the same download.
+#   MODEL=Qwen/Qwen2.5-7B-Instruct envsubst < model-prefetch-job.yaml | kubectl apply -f -
+# or edit the env below.
+apiVersion: batch/v1
+kind: Job
+metadata: {name: model-prefetch, namespace: llm-serving}
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: OnFailure
+      securityContext: {runAsNonRoot: true, runAsUser: 1000, fsGroup: 1000, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: hf
+          image: python:3.12-slim
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              pip install --quiet --user "huggingface_hub[hf_transfer]==0.35.3"
+              export PATH=$HOME/.local/bin:$PATH
+              t0=$(date +%s)
+              hf download "$MODEL" --revision "$REVISION" --cache-dir /models/hf --max-workers 8
+              du -sh /models/hf
+              echo "downloaded $MODEL@$REVISION in $(( $(date +%s) - t0 ))s"
+          env:
+            - {name: MODEL, value: Qwen/Qwen2.5-0.5B-Instruct}
+            - {name: REVISION, value: main}          # a commit SHA pins the exact weights (03 DeepSeek Vol 33)
+            - {name: HOME, value: /tmp}
+            - {name: HF_HUB_ENABLE_HF_TRANSFER, value: "1"}
+            - name: HF_TOKEN
+              valueFrom: {secretKeyRef: {name: hf-token, key: token, optional: true}}
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 500m, memory: 1Gi}, limits: {memory: 4Gi}}
+          volumeMounts:
+            - {name: models, mountPath: /models}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: models, persistentVolumeClaim: {claimName: model-cache}}
+        - {name: tmp, emptyDir: {}}

@@ -1,0 +1,31 @@
+# Three pods, three QoS classes (Volume 12 §5.2), on the ROOT in platform-tools.
+# Compare their cgroups with
+#   scripts/cgroup-inspect.sh platform-tools qos-guaranteed   (… -burstable, -besteffort)
+# Why not in a vCluster? A memory quota (the root quota on every vc-* namespace)
+# rejects any pod without a memory limit, and LimitRange defaults add one — so
+# a BestEffort pod cannot exist inside dev-lab or llms. That is deliberate.
+apiVersion: v1
+kind: Pod
+metadata: {name: qos-guaranteed, namespace: platform-tools}
+spec:
+  containers:
+    - name: c
+      image: registry.k8s.io/pause:3.10
+      resources: {requests: {cpu: 500m, memory: 256Mi}, limits: {cpu: 500m, memory: 256Mi}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: qos-burstable, namespace: platform-tools}
+spec:
+  containers:
+    - name: c
+      image: registry.k8s.io/pause:3.10
+      resources: {requests: {cpu: 100m, memory: 64Mi}, limits: {memory: 512Mi}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: qos-besteffort, namespace: platform-tools}
+spec:
+  containers:
+    - name: c
+      image: registry.k8s.io/pause:3.10

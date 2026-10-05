@@ -1,0 +1,13 @@
+---
+galaxy_info:
+  role_name: kubeadm_cluster
+  author: cloudone365
+  description: >-
+    Root Kubernetes cluster with kubeadm on DGX Spark — containerd + NVIDIA runtime,
+    schedulable control plane, audit log, Secret encryption, etcd snapshots
+  license: MIT
+  min_ansible_version: "2.17"
+  platforms:
+    - name: Ubuntu
+      versions: [noble]
+dependencies: []

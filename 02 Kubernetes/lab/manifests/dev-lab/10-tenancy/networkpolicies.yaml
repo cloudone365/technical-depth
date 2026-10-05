@@ -1,0 +1,32 @@
+# Tenant isolation on the pod network INSIDE dev-lab (Volume 06, 27).
+# vCluster syncs these to the root (selectors translated to the host pods in
+# vc-dev-lab) and Cilium enforces them on the node.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny-ingress, namespace: tenant-alpha}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-same-namespace, namespace: tenant-alpha}
+spec:
+  podSelector: {}
+  ingress:
+    - from: [{podSelector: {}}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny-ingress, namespace: tenant-beta}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-same-namespace, namespace: tenant-beta}
+spec:
+  podSelector: {}
+  ingress:
+    - from: [{podSelector: {}}]

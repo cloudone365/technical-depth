@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# Snapshot the root cluster's etcd (stacked static pod) and keep the newest {{ kubeadm_cluster_etcd_snapshot_keep }}.
+#   sudo etcd-snapshot            # also run every 6 h by etcd-snapshot.timer
+#   sudo etcd-snapshot drill-1    # optional name suffix
+set -euo pipefail
+dir={{ kubeadm_cluster_etcd_snapshot_dir }}
+name="etcd-$(hostname -s)-$(date +%Y%m%d-%H%M%S)${1:+-$1}.db"
+ETCDCTL_API=3 etcdctl \
+  --endpoints=https://127.0.0.1:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/etcd/healthcheck-client.crt \
+  --key=/etc/kubernetes/pki/etcd/healthcheck-client.key \
+  snapshot save "$dir/$name"
+etcdutl snapshot status "$dir/$name" -w table
+# retention
+ls -1t "$dir"/etcd-*.db 2>/dev/null | tail -n +$(({{ kubeadm_cluster_etcd_snapshot_keep }} + 1)) | xargs -r rm -f
+echo "saved $dir/$name"

@@ -1,0 +1,44 @@
+# Sharded preprocessing with an Indexed Job (Volume 10): 8 shards, 2 at a time,
+# each pod processes shard $JOB_COMPLETION_INDEX. Runs INSIDE dev-lab (--context
+# dev-lab) and fits tenant-alpha's 500m budget (2 × 200m), with per-index retry (backoffLimitPerIndex) so one bad shard doesn't
+# restart the other seven.
+apiVersion: batch/v1
+kind: Job
+metadata: {name: tokenize-shards, namespace: tenant-alpha}
+spec:
+  completions: 8
+  parallelism: 2
+  completionMode: Indexed
+  backoffLimitPerIndex: 2
+  maxFailedIndexes: 1
+  ttlSecondsAfterFinished: 3600
+  podFailurePolicy:
+    rules:
+      - action: FailIndex               # exit 42 = bad input shard: don't retry it
+        onExitCodes: {containerName: tok, operator: In, values: [42]}
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: tok
+          image: python:3.12-slim
+          command: ["python3", "-c"]
+          args:
+            - |
+              import hashlib, os, sys, time
+              i = int(os.environ["JOB_COMPLETION_INDEX"])
+              if os.environ.get("BAD_SHARD") == str(i):
+                  print(f"shard={i} is corrupt", flush=True)
+                  sys.exit(42)                       # → podFailurePolicy FailIndex (no retries)
+              docs = [f"document {i}-{n} about unified memory" for n in range(20000)]
+              toks = sum(len(d.split()) for d in docs)
+              digest = hashlib.sha256("".join(docs).encode()).hexdigest()[:12]
+              time.sleep(5)
+              print(f"shard={i} docs={len(docs)} tokens={toks} sha={digest}", flush=True)
+          env:
+            - {name: BAD_SHARD, value: ""}           # set to e.g. "3" to rehearse a corrupt shard
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources:
+            requests: {cpu: 200m, memory: 256Mi}
+            limits: {cpu: 200m, memory: 512Mi}

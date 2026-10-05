@@ -1,4 +1,5 @@
 # expect: deny
+# cluster: dev-lab
 # Pod Security Admission 'restricted' on tenant namespaces
 apiVersion: v1
 kind: Pod

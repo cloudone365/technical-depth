@@ -1,6 +1,6 @@
 // {{ ansible_managed }}
 // Grafana Alloy on {{ inventory_hostname }}: ship the systemd journal (kernel NVRM/Xid,
-// sshd, sudo, k3s, slurmd, docker, vault, auditd via journald) to Loki.
+// sshd, sudo, kubelet, containerd, slurmd, docker, vault, auditd via journald) to Loki.
 loki.relabel "journal" {
   forward_to = []
   rule {

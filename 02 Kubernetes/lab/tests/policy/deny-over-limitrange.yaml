@@ -1,5 +1,6 @@
 # expect: deny
-# LimitRange max cpu 1
+# cluster: dev-lab
+# LimitRange max cpu 500m (dev-lab/10-tenancy/limitranges.yaml)
 apiVersion: v1
 kind: Pod
 metadata: {name: pt-deny-over-limitrange, namespace: tenant-alpha}

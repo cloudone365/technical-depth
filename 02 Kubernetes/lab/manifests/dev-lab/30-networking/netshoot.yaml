@@ -1,0 +1,18 @@
+# Network toolbox (Volume 06-08), INSIDE vCluster #1 · dev-lab (--context dev-lab):
+#   netshoot      — inside the pod network (what a tenant workload sees)
+# Its node-level twin, netshoot-host (hostNetwork + NET_ADMIN: veth, iptables,
+# conntrack, Cilium), runs on the root: manifests/root/30-networking/netshoot-host.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: netshoot, namespace: lab-tools}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: netshoot}}
+  template:
+    metadata: {labels: {app: netshoot}}
+    spec:
+      containers:
+        - name: netshoot
+          image: nicolaka/netshoot:v0.13
+          command: ["sleep", "infinity"]
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 256Mi}}

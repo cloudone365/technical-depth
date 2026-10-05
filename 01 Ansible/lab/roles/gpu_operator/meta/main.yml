@@ -2,7 +2,7 @@
 galaxy_info:
   role_name: gpu_operator
   author: cloudone365
-  description: NVIDIA GPU Operator (driver/toolkit disabled) + time-slicing on k3s
+  description: NVIDIA GPU Operator (driver/toolkit disabled) + 15-way time-slicing on the kubeadm root cluster
   license: MIT
   min_ansible_version: "2.17"
   platforms:

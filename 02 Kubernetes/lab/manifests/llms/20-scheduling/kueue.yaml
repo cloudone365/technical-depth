@@ -1,0 +1,59 @@
+# Kueue INSIDE vCluster #2 · llms: quota-aware job queueing + all-or-nothing
+# admission (Volume 05, 27). Kueue works on Jobs, which only exist in the
+# vCluster, so it runs in the vCluster (scripts/install-addons.sh kueue).
+#
+#   ResourceFlavor  gb10          "what kind of capacity" (node labels, synced from the root)
+#   ClusterQueue    spark-cq      "how much" — the batch tier's share of the llms budget
+#   LocalQueue      batch/train   "where tenants submit" (namespace-scoped)
+#
+# Kueue admits a Job; then the root quota on vc-llms admits its pods. Size
+# spark-cq so batch fits beside serving inside 4 CPU · 48 Gi · 8 slices.
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: gb10
+spec:
+  nodeLabels:
+    nvidia.com/gpu.product: GB10
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: spark-cq
+spec:
+  namespaceSelector: {}                    # any namespace with a LocalQueue
+  queueingStrategy: BestEffortFIFO         # small jobs may pass a blocked big one
+  preemption:
+    withinClusterQueue: LowerPriority
+  resourceGroups:
+    - coveredResources: [cpu, memory, nvidia.com/gpu]
+      flavors:
+        - name: gb10
+          resources:
+            - name: cpu
+              nominalQuota: "2"
+            - name: memory
+              nominalQuota: 24Gi
+            - name: nvidia.com/gpu
+              nominalQuota: "4"            # 4 of the llms vCluster's 8 time-slices; serving keeps the rest
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: train
+  namespace: batch
+spec:
+  clusterQueue: spark-cq
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: WorkloadPriorityClass
+metadata:
+  name: urgent
+value: 1000
+description: "Deadline runs — may preempt lower-priority queued work in spark-cq"
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: WorkloadPriorityClass
+metadata:
+  name: routine
+value: 100

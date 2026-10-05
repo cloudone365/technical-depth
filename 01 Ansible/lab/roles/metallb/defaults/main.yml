@@ -1,0 +1,14 @@
+---
+# MetalLB gives LoadBalancer Services a real IP on the mgmt LAN (Volume 16).
+# kubeadm has no built-in load balancer (k3s had servicelb). Layer 2 mode:
+# the node answers ARP for the Service IP — no router configuration needed.
+metallb_chart_version: "0.16.0"              # pin; check `helm search repo metallb/metallb -l`
+metallb_namespace: metallb-system
+metallb_kubeconfig: "{{ playbook_dir }}/../.cache/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
+metallb_context: spark-root
+
+# Reserve this range in your router's DHCP settings so nothing else takes it.
+#   .111 dev-lab vCluster API · .112 llms vCluster API · .115 llms gateway (Traefik)
+metallb_pool_name: lab-pool
+metallb_pool_addresses: [192.168.0.110-192.168.0.119]
+metallb_l2_interfaces: ["{{ mgmt_interface | default('enP7s7') }}"]

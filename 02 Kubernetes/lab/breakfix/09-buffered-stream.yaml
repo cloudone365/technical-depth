@@ -1,4 +1,4 @@
-# BF-09: a response-buffering middleware turns token streaming into one big blob.
+# BF-09 (cluster: llms): a response-buffering middleware turns token streaming into one big blob.
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata: {name: bf09-buffer, namespace: llm-serving, labels: {breakfix: "09"}}

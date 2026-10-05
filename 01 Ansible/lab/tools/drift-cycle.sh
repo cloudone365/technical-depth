@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 export ANSIBLE_CONFIG=$PWD/ansible.cfg
 OUT=.cache/drift; mkdir -p "$OUT"
 TS=$(date -u +%Y%m%dT%H%M%SZ)
-SAFE_TAGS=${SAFE_TAGS:-baseline,telemetry_node}      # never auto-heal fabric/driver/k3s
+SAFE_TAGS=${SAFE_TAGS:-baseline,telemetry_node}      # never auto-heal fabric/driver/kubernetes
 BECOME_ARGS=${BECOME_ARGS:-}                          # e.g. "--become-password-file /path" for unattended runs
 
 run_check() {

@@ -1,0 +1,27 @@
+# Defaults for any pod that reaches the root without resources. A memory
+# quota rejects pods that don't declare memory, so every synced pod needs a
+# request and a limit; the tenant's own LimitRange (inside the vCluster)
+# usually fills them first, this is the safety net.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: vcluster-defaults
+  namespace: vc-dev-lab
+spec:
+  limits:
+    - type: Container
+      default: {memory: 256Mi}
+      defaultRequest: {cpu: 50m, memory: 128Mi}
+      max: {memory: 8Gi}
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: vcluster-defaults
+  namespace: vc-llms
+spec:
+  limits:
+    - type: Container
+      default: {memory: 512Mi}
+      defaultRequest: {cpu: 50m, memory: 128Mi}
+      max: {memory: 40Gi}

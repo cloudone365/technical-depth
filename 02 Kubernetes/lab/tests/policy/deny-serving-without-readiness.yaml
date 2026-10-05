@@ -1,4 +1,5 @@
 # expect: deny
+# cluster: llms
 # VAP spark-serving-needs-readiness
 apiVersion: apps/v1
 kind: Deployment

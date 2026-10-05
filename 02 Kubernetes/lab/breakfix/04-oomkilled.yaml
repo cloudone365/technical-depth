@@ -1,4 +1,4 @@
-# BF-04: allocates 512 MiB inside a 256 MiB limit.
+# BF-04 (cluster: dev-lab): allocates 512 MiB inside a 256 MiB limit.
 apiVersion: v1
 kind: Pod
 metadata: {name: bf04-oom, namespace: lab-tools, labels: {breakfix: "04"}}

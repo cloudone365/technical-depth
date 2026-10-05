@@ -1,0 +1,58 @@
+---
+- name: Look for a previous k3s install
+  ansible.builtin.stat:
+    path: /usr/local/bin/k3s
+  register: kubeadm_cluster_k3s
+
+- name: Refuse to install next to k3s (ports 6443/10250 and iptables would clash)
+  ansible.builtin.assert:
+    that: not kubeadm_cluster_k3s.stat.exists
+    fail_msg: >-
+      k3s is still installed on {{ inventory_hostname }}. Back up anything you need, then run
+      ansible-playbook playbooks/99-reset-kubernetes.yml -e reset_remove_k3s=true
+    quiet: true
+
+- name: Sanity — nvidia-container-runtime must exist for GPU pods
+  ansible.builtin.stat:
+    path: /usr/bin/nvidia-container-runtime
+  register: kubeadm_cluster_ncr
+  failed_when: not kubeadm_cluster_ncr.stat.exists
+
+# kubelet refuses to start with swap on unless NodeSwap is configured.
+- name: Turn swap off now
+  ansible.builtin.command: swapoff -a
+  when: ansible_swaptotal_mb | default(0) | int > 0
+  changed_when: true
+
+- name: Keep swap off after reboot (comment out swap lines in fstab)
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#\s]\S*\s+\S+\s+swap\s+.*)$'
+    replace: '# \1   # disabled for kubelet (Ansible)'
+
+- name: Kernel modules for the pod network
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/kubernetes.conf
+    content: |
+      # {{ ansible_managed }}
+      overlay
+      br_netfilter
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Load kernel modules now
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: [overlay, br_netfilter]
+
+- name: Sysctls kubeadm preflight requires
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/90-kubernetes.conf
+    reload: true
+  loop: "{{ {'net.bridge.bridge-nf-call-iptables': 1, 'net.bridge.bridge-nf-call-ip6tables': 1, 'net.ipv4.ip_forward': 1} | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}={{ item.value }}"

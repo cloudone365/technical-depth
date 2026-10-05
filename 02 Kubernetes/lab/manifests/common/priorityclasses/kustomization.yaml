@@ -1,0 +1,5 @@
+# The same five PriorityClasses exist in the root and inside both vClusters
+# (root/00-platform, dev-lab/00-platform, llms/00-platform include this).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: [priorityclasses.yaml]

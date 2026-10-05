@@ -43,11 +43,11 @@
 - name: Kubernetes node Ready + GPU allocatable
   ansible.builtin.shell: |
     set -o pipefail
-    k3s kubectl get node {{ inventory_hostname }} -o json \
+    kubectl --kubeconfig /etc/kubernetes/admin.conf get node {{ inventory_hostname }} -o json \
       | jq -r '[(.status.conditions[] | select(.type=="Ready") | .status), (.status.allocatable["nvidia.com/gpu"] // "0")] | @tsv'
   args:
     executable: /bin/bash
-  delegate_to: "{{ groups['k3s_server'][0] }}"
+  delegate_to: "{{ groups['k8s_control_plane'][0] }}"
   register: spark_validate_k8s_out
   changed_when: false
   check_mode: false        # read-only probe: must also run under --check (drift detection)

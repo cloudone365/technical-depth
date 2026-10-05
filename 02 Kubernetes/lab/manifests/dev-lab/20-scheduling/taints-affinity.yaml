@@ -1,0 +1,47 @@
+# Dedicated-GPU-node pattern (Volume 05), applied INSIDE dev-lab (--context dev-lab).
+# Nodes belong to the root: only the platform admin can taint them, and the
+# vCluster shows the taint through node sync. On a 1-node lab you cannot taint
+# the only node NoSchedule without moving every add-on, so the demo uses
+# PreferNoSchedule:
+#   kubectl --context spark-root taint node spark-01 spark.lab/gpu=dedicated:PreferNoSchedule
+# The pod below tolerates it and *requires* a GB10 via node affinity (the root
+# scheduler evaluates both); the anti-affinity spreads replicas across Sparks
+# when spark-02 joins.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: affinity-demo
+  namespace: tenant-beta
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: affinity-demo}}
+  template:
+    metadata:
+      labels: {app: affinity-demo}
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}}
+      tolerations:
+        - {key: spark.lab/gpu, operator: Equal, value: dedicated, effect: PreferNoSchedule}
+        - {key: spark.lab/gpu, operator: Equal, value: dedicated, effect: NoSchedule}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - {key: nvidia.com/gpu.product, operator: In, values: [GB10]}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector: {matchLabels: {app: affinity-demo}}
+      containers:
+        - name: app
+          image: registry.k8s.io/pause:3.10
+          readinessProbe:
+            exec: {command: ["/pause", "--help"]}
+            initialDelaySeconds: 1
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {cpu: 50m, memory: 32Mi}

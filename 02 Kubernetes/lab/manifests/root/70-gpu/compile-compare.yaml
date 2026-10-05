@@ -1,0 +1,19 @@
+# Eager vs torch.compile on one GB10 slice (Volume 25 §5.1).
+apiVersion: batch/v1
+kind: Job
+metadata: {name: compile-compare, namespace: platform-tools}
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: bench
+          image: nvcr.io/nvidia/pytorch:25.09-py3
+          command: ["python3", "/bench/compile_compare.py"]
+          env: [{name: TORCH_LOGS, value: ""}]      # set to "output_code" to print generated Triton kernels
+          resources: {limits: {nvidia.com/gpu: "1", memory: 16Gi}, requests: {cpu: "4", memory: 8Gi}}
+          volumeMounts: [{name: bench, mountPath: /bench}]
+      volumes:
+        - name: bench
+          configMap: {name: gemm-bench}

@@ -1,0 +1,46 @@
+# API Priority & Fairness on the ROOT API server (Volume 02, 27).
+#
+# Every object a tenant creates in a vCluster reaches the root as a request
+# from that vCluster's syncer (ServiceAccount in vc-dev-lab / vc-llms). A
+# tenant loop that creates and deletes pods as fast as it can therefore
+# becomes root API load. This lane gives the syncers a fair, bounded share —
+# by namespace, so one vCluster can't crowd out the other — and the
+# kubelet, controllers and the GPU Operator keep their own levels.
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: PriorityLevelConfiguration
+metadata:
+  name: spark-vcluster-syncers
+spec:
+  type: Limited
+  limited:
+    nominalConcurrencyShares: 30          # vs workload-low 100, global-default 20
+    lendablePercent: 50                   # idle share can be borrowed by others
+    limitResponse:
+      type: Queue
+      queuing:
+        queues: 8
+        handSize: 2
+        queueLengthLimit: 100
+---
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: FlowSchema
+metadata:
+  name: spark-vcluster-syncers
+spec:
+  priorityLevelConfiguration:
+    name: spark-vcluster-syncers
+  matchingPrecedence: 800                 # before workload-low/global-default
+  distinguisherMethod:
+    type: ByNamespace                     # fairness between vClusters
+  rules:
+    - subjects:
+        - kind: ServiceAccount
+          serviceAccount: {namespace: vc-dev-lab, name: "*"}
+        - kind: ServiceAccount
+          serviceAccount: {namespace: vc-llms, name: "*"}
+      resourceRules:
+        - verbs: ["*"]
+          apiGroups: ["*"]
+          resources: ["*"]
+          namespaces: ["*"]
+          clusterScope: true

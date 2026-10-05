@@ -1,0 +1,7 @@
+# The four CEL admission policies run inside BOTH vClusters (each vCluster has
+# its own API server, so each enforces them for its own tenants). Bindings
+# select namespaces by name/label, so they simply match nothing where a
+# namespace doesn't exist.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: [policies.yaml]

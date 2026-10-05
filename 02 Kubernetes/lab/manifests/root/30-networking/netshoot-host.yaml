@@ -1,0 +1,23 @@
+# Node-level network toolbox (Volume 06-08) on the ROOT (--context spark-root):
+# hostNetwork + NET_ADMIN — what the node sees: lxc*/cilium_* interfaces,
+# kube-proxy iptables chains, conntrack. Privileged, so it lives in the root's
+# platform-tools namespace; tenants in a vCluster can't run this, by design.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: netshoot-host, namespace: platform-tools}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: netshoot-host}}
+  template:
+    metadata: {labels: {app: netshoot-host}}
+    spec:
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: netshoot
+          image: nicolaka/netshoot:v0.13
+          command: ["sleep", "infinity"]
+          securityContext:
+            capabilities: {add: [NET_ADMIN, NET_RAW, SYS_ADMIN, SYS_PTRACE]}
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 256Mi}}

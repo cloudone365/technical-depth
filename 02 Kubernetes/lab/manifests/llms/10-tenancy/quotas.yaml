@@ -1,0 +1,19 @@
+# Serving budget INSIDE vCluster #2 · llms (Volume 12, 21, 27).
+#
+#   root   vc-llms      4 CPU · 48 Gi · 8 GPU slices · 500 Gi   ← the real cap
+#   here   llm-serving  2.5 CPU · 36 Gi · 6 slices · 400 Gi     ← ceiling for model servers
+#   Kueue  spark-cq     2 CPU · 24 Gi · 4 slices                ← ceiling for batch (20-scheduling/kueue.yaml)
+#
+# Serving + batch can add up to more than the root allows on purpose:
+# the root quota, Kueue and PriorityClasses decide who waits.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: serving-budget
+  namespace: llm-serving
+spec:
+  hard:
+    requests.cpu: 2500m
+    limits.memory: 36Gi
+    requests.nvidia.com/gpu: "6"
+    requests.storage: 400Gi

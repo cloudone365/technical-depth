@@ -1,4 +1,4 @@
-# BF-06: someone "hardened" llm-serving: a default-deny, and the old allow
+# BF-06 (cluster: llms): someone "hardened" llm-serving: a default-deny, and the old allow
 # policy was deleted in the same change (breakfix.sh does the delete).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

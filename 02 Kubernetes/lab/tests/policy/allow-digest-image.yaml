@@ -1,4 +1,5 @@
 # expect: allow
+# cluster: dev-lab
 # digest-pinned image passes
 apiVersion: v1
 kind: Pod

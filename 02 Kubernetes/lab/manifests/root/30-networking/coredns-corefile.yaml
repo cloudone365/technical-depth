@@ -1,0 +1,45 @@
+# The root cluster's CoreDNS config (Volume 08). kubeadm owns this ConfigMap:
+# unlike k3s there is no "coredns-custom" import, you edit the Corefile itself.
+# This is kubeadm's default Corefile plus two lab additions:
+#   log            — log every query (turn OFF after the lab; it is chatty)
+#   lab.local:53   — resolve *.lab.local via the site DNS (192.168.0.1)
+# Apply:  kubectl --context spark-root apply -f root/30-networking/coredns-corefile.yaml
+# CoreDNS's 'reload' plugin picks the change up within ~30 s, no restart.
+# 'kubeadm upgrade' rewrites this ConfigMap — re-apply after an upgrade.
+#
+# Scope: this is the ROOT's resolver (platform pods, nodes). Each vCluster runs
+# its own CoreDNS for its tenants; to change that one, set
+# controlPlane.coredns.overwriteConfig in vclusters/<name>.yaml (Volume 27).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns
+  namespace: kube-system
+data:
+  Corefile: |
+    .:53 {
+        log
+        errors
+        health {
+           lameduck 5s
+        }
+        ready
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+           pods insecure
+           fallthrough in-addr.arpa ip6.arpa
+           ttl 30
+        }
+        prometheus :9153
+        forward . /etc/resolv.conf {
+           max_concurrent 1000
+        }
+        cache 30
+        loop
+        reload
+        loadbalance
+    }
+    lab.local:53 {
+        errors
+        cache 30
+        forward . 192.168.0.1
+    }

@@ -1,0 +1,57 @@
+# The root's Prometheus scrapes model servers that live INSIDE the vClusters
+# (Volume 16, 27). Tenants can't create ServiceMonitors (no Prometheus Operator
+# in a vCluster, and it couldn't see the root's anyway), so the platform team
+# runs one ServiceMonitor here that watches the vCluster host namespaces.
+#
+# Synced Services carry vCluster's annotations with their original identity:
+#   vcluster.loft.sh/object-name       vllm
+#   vcluster.loft.sh/object-namespace  llm-serving
+# The relabelings keep only the services we want and copy that identity into
+# labels, so queries read like the tenant thinks:
+#   vllm:num_requests_waiting{vcluster="llms", vnamespace="llm-serving"}
+# ('namespace' and 'pod' keep the root names: vc-llms, vllm-…-x-llm-serving-x-llms.)
+# Allowed through tenant NetworkPolicies by root/05-vclusters/cilium-policies.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vcluster-workloads
+  namespace: observability
+  labels: {release: kps}
+spec:
+  namespaceSelector:
+    matchNames: [vc-llms, vc-dev-lab]
+  selector: {}
+  endpoints:
+    # OpenAI-compatible engines expose /metrics on their API port
+    - port: http
+      path: /metrics
+      interval: 15s
+      relabelings:
+        - action: keep
+          sourceLabels: [__meta_kubernetes_service_annotation_vcluster_loft_sh_object_name]
+          regex: vllm|vllm-prefill|vllm-decode|sglang|qwen-small-predictor
+        - sourceLabels: [__meta_kubernetes_namespace]
+          regex: vc-(.*)
+          targetLabel: vcluster
+        - sourceLabels: [__meta_kubernetes_service_annotation_vcluster_loft_sh_object_namespace]
+          targetLabel: vnamespace
+        - sourceLabels: [__meta_kubernetes_service_annotation_vcluster_loft_sh_object_name]
+          targetLabel: vservice
+        - sourceLabels: [__meta_kubernetes_pod_annotation_vcluster_loft_sh_object_name]
+          targetLabel: vpod
+    # Triton and Traefik expose metrics on a dedicated 'metrics' port
+    - port: metrics
+      interval: 15s
+      relabelings:
+        - action: keep
+          sourceLabels: [__meta_kubernetes_service_annotation_vcluster_loft_sh_object_name]
+          regex: triton|traefik-lab-metrics
+        - sourceLabels: [__meta_kubernetes_namespace]
+          regex: vc-(.*)
+          targetLabel: vcluster
+        - sourceLabels: [__meta_kubernetes_service_annotation_vcluster_loft_sh_object_namespace]
+          targetLabel: vnamespace
+        - sourceLabels: [__meta_kubernetes_service_annotation_vcluster_loft_sh_object_name]
+          targetLabel: vservice
+        - sourceLabels: [__meta_kubernetes_pod_annotation_vcluster_loft_sh_object_name]
+          targetLabel: vpod

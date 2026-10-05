@@ -1,0 +1,47 @@
+# The hard budgets of the two vClusters (Volume 27). These are the real caps:
+# quotas inside a vCluster are ceilings for its tenants, but only this root
+# quota stops the vCluster as a whole. Root keeps the rest of the Spark:
+#
+#               CPU (req)   memory      GPU slices   storage
+#   Spark total    20       128 GB         15          ~3.7 TiB
+#   dev-lab         2        8 Gi           2           300 Gi
+#   llms            4       48 Gi           8           500 Gi
+#   root keeps     14       ~72 GB          5           the rest
+#
+# CPU is capped on requests only: a vCluster is guaranteed its share and may
+# burst into idle CPU. Memory is capped on requests AND limits — on a unified-
+# memory box, memory is GPU memory too, so overcommit here is how you lose
+# model servers to the OOM killer.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: vcluster-budget
+  namespace: vc-dev-lab
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: 8Gi
+    limits.memory: 8Gi
+    requests.nvidia.com/gpu: "2"
+    requests.storage: 300Gi
+    persistentvolumeclaims: "20"
+    pods: "60"
+    services.loadbalancers: "1"        # the vCluster API (192.168.0.111)
+    services.nodeports: "0"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: vcluster-budget
+  namespace: vc-llms
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 48Gi
+    limits.memory: 48Gi
+    requests.nvidia.com/gpu: "8"
+    requests.storage: 500Gi
+    persistentvolumeclaims: "20"
+    pods: "80"
+    services.loadbalancers: "2"        # the vCluster API (.112) + the llms gateway (.115)
+    services.nodeports: "0"

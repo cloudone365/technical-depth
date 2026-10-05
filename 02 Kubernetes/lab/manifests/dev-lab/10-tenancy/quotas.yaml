@@ -1,0 +1,49 @@
+# Tenant budgets INSIDE vCluster #1 · dev-lab (Volume 12, 27).
+#
+# Two layers of quota:
+#   root   vc-dev-lab  2 CPU · 8 Gi · 2 GPU slices · 300 Gi   ← the real cap (manifests/root/05-vclusters)
+#   here   per tenant  500m · 2 Gi · 1 slice · 100 Gi          ← ceilings enforced by dev-lab's own API server
+#
+# Inner quotas are ceilings, not reservations: alpha + beta + lab-tools may add
+# up to more than the root allows. Whoever asks first gets it; the next pod is
+# refused by the root quota and stays Pending in dev-lab with a sync error
+# (break/fix 02 shows exactly that).
+#
+# Remember: on UMA, "memory" is CPU RAM *and* GPU memory. Whether a CUDA
+# allocation is charged to the pod's memory cgroup is something you measure
+# (root/12-cgroups/uma-cgroup-experiment.yaml, Volume 12 §5.5).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tenant-budget
+  namespace: tenant-alpha
+spec:
+  hard:
+    requests.cpu: 500m
+    limits.cpu: 500m
+    requests.memory: 2Gi
+    limits.memory: 2Gi
+    requests.nvidia.com/gpu: "1"
+    requests.storage: 100Gi
+    persistentvolumeclaims: "5"
+    pods: "10"
+    services.loadbalancers: "0"
+    services.nodeports: "0"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tenant-budget
+  namespace: tenant-beta
+spec:
+  hard:
+    requests.cpu: 500m
+    limits.cpu: 500m
+    requests.memory: 2Gi
+    limits.memory: 2Gi
+    requests.nvidia.com/gpu: "1"
+    requests.storage: 100Gi
+    persistentvolumeclaims: "5"
+    pods: "10"
+    services.loadbalancers: "0"
+    services.nodeports: "0"

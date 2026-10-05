@@ -1,0 +1,33 @@
+# The root quota on vc-llms caps memory, so every container must declare memory.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: defaults
+  namespace: llm-serving
+spec:
+  limits:
+    - type: Container
+      default: {memory: 512Mi}
+      defaultRequest: {cpu: 50m, memory: 128Mi}
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: defaults
+  namespace: batch
+spec:
+  limits:
+    - type: Container
+      default: {memory: 1Gi}
+      defaultRequest: {cpu: 100m, memory: 256Mi}
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: defaults
+  namespace: ingress
+spec:
+  limits:
+    - type: Container
+      default: {memory: 512Mi}
+      defaultRequest: {cpu: 50m, memory: 128Mi}

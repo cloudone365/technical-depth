@@ -1,0 +1,45 @@
+---
+- name: Already joined?
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: kubeadm_cluster_joined
+
+- name: Join credentials from the control plane
+  when: not kubeadm_cluster_joined.stat.exists
+  delegate_to: "{{ groups[kubeadm_cluster_control_plane_group][0] }}"
+  block:
+    - name: Create a short-lived bootstrap token
+      ansible.builtin.command: kubeadm token create --ttl 30m
+      register: kubeadm_cluster_token
+      changed_when: true
+      no_log: true
+
+    - name: CA public-key hash (pins the API server the worker trusts)
+      ansible.builtin.shell: |
+        set -o pipefail
+        openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt \
+          | openssl pkey -pubin -outform der | openssl dgst -sha256 -hex | sed 's/^.* //'
+      args:
+        executable: /bin/bash
+      register: kubeadm_cluster_ca_hash
+      changed_when: false
+
+- name: Write join config
+  ansible.builtin.template:
+    src: kubeadm-join.yaml.j2
+    dest: /etc/kubernetes/kubeadm-join.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  when: not kubeadm_cluster_joined.stat.exists
+
+- name: Kubeadm join
+  ansible.builtin.command: kubeadm join --config /etc/kubernetes/kubeadm-join.yaml
+  changed_when: true
+  when: not kubeadm_cluster_joined.stat.exists
+
+- name: Remove the join config (the token expires anyway)
+  ansible.builtin.file:
+    path: /etc/kubernetes/kubeadm-join.yaml
+    state: absent

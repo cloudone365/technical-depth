@@ -1,5 +1,6 @@
 # expect: deny
-# LimitRange max 6Gi / quota 6Gi
+# cluster: dev-lab
+# LimitRange max 2Gi / tenant quota 2Gi
 apiVersion: v1
 kind: Pod
 metadata: {name: pt-deny-over-quota-memory, namespace: tenant-alpha}

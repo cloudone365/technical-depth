@@ -1,6 +1,6 @@
 ---
 # Audit & logging stack:
-#   * auditd rules on every Spark (who changed sudoers, sshd, netplan, docker, k3s, slurm, vault…)
+#   * auditd rules on every Spark (who changed sudoers, sshd, netplan, docker, kubernetes, slurm, vault…)
 #   * Loki on the monitoring host + Grafana Alloy on every Spark shipping the journal
 #   * Loki datasource in the Volume 09 Grafana
 #   * ARA API server recording every ansible-playbook run

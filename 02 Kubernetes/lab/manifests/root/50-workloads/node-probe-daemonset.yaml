@@ -1,0 +1,48 @@
+# One pod per Spark that publishes GPU + UMA facts as node-exporter textfile
+# metrics (Volume 10). Runs on the ROOT in platform-tools (privileged PSA) because it reads the
+# host's /proc and the GPU without taking a device-plugin slice.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: spark-node-probe, namespace: platform-tools}
+spec:
+  selector: {matchLabels: {app: spark-node-probe}}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 1}
+  template:
+    metadata: {labels: {app: spark-node-probe}}
+    spec:
+      priorityClassName: spark-platform
+      tolerations: [{operator: Exists}]          # run on tainted/cordoned GPU nodes too
+      nodeSelector: {nvidia.com/gpu.product: GB10}
+      containers:
+        - name: probe
+          image: nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04
+          env:
+            - {name: NVIDIA_VISIBLE_DEVICES, value: all}    # observe, don't allocate
+            - {name: NODE_NAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              while true; do
+                out=/host-textfile/k8s_node_probe.prom.$$
+                {
+                  echo "# HELP spark_probe_gpu_temp_celsius GB10 temperature seen from Kubernetes"
+                  echo "# TYPE spark_probe_gpu_temp_celsius gauge"
+                  t=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null || echo NaN)
+                  echo "spark_probe_gpu_temp_celsius{node=\"$NODE_NAME\"} ${t:-NaN}"
+                  echo "# HELP spark_probe_mem_available_bytes MemAvailable of the shared CPU+GPU pool"
+                  echo "# TYPE spark_probe_mem_available_bytes gauge"
+                  awk -v n="$NODE_NAME" '/MemAvailable/ {printf "spark_probe_mem_available_bytes{node=\"%s\"} %d\n", n, $2*1024}' /host/proc/meminfo
+                } > "$out" && mv "$out" /host-textfile/k8s_node_probe.prom
+                sleep 15
+              done
+          resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {memory: 64Mi}}
+          volumeMounts:
+            - {name: proc, mountPath: /host/proc, readOnly: true}
+            - {name: textfile, mountPath: /host-textfile}
+      volumes:
+        - name: proc
+          hostPath: {path: /proc}
+        - name: textfile
+          hostPath: {path: /var/lib/prometheus/node-exporter, type: DirectoryOrCreate}   # 01 Ansible gpu_telemetry dir

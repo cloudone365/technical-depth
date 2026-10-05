@@ -1,0 +1,36 @@
+# Queue-depth autoscaling with KEDA INSIDE vCluster #2 · llms (Volume 21 §8, 27).
+# Scale on what users feel (requests waiting), not on GPU utilisation (a
+# time-sliced GB10 reads ~100 % whenever anything runs).
+# Install KEDA in llms: scripts/install-addons.sh keda
+# Prometheus runs on the ROOT; vclusters/llms.yaml replicates its Service into
+# this vCluster as default/prometheus. Metrics carry vcluster/vnamespace labels
+# (root/95-observability/vcluster-workloads.yaml).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: {name: mock-llm, namespace: llm-serving}
+spec:
+  scaleTargetRef: {name: mock-llm}
+  minReplicaCount: 1
+  maxReplicaCount: 6
+  cooldownPeriod: 120
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.default.svc:9090
+        # in-flight requests on the Traefik service that fronts mock-llm
+        query: sum(traefik_service_open_connections{vcluster="llms", exported_service=~"llm-serving-mock-llm-8000@kubernetes"})
+        threshold: "8"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: {name: vllm, namespace: llm-serving}
+spec:
+  scaleTargetRef: {name: vllm}
+  minReplicaCount: 1
+  maxReplicaCount: 1                   # raise to 2 when spark-02 joins
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.default.svc:9090
+        query: sum(vllm:num_requests_waiting{vcluster="llms", vnamespace="llm-serving"})
+        threshold: "16"

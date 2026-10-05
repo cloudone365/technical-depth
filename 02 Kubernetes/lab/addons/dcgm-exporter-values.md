@@ -11,6 +11,6 @@ If it does, turn it on (01 Ansible lab):
 
     ansible-playbook playbooks/06-gpu-operator.yml -e gpu_operator_dcgm_exporter=true
 
-then apply manifests/95-observability/ (ServiceMonitor + rules + dashboard).
+then apply manifests/root/95-observability/ (ServiceMonitors + rules + dashboard) with --context spark-root.
 If it does not, the 01 Ansible textfile collector (nvidia-smi → node-exporter)
 feeds the same dashboard panels via the `spark_gpu_*` metrics.

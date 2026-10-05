@@ -9,7 +9,9 @@
 -w /etc/docker/daemon.json -p wa -k container-runtime
 -w /etc/cdi/ -p wa -k container-runtime
 -w /etc/nvidia-container-runtime/ -p wa -k container-runtime
--w /etc/rancher/k3s/ -p wa -k k3s
+-w /etc/kubernetes/ -p wa -k kubernetes
+-w /var/lib/kubelet/config.yaml -p wa -k kubernetes
+-w /etc/containerd/ -p wa -k container-runtime
 -w /etc/slurm/ -p wa -k slurm
 -w /etc/munge/munge.key -p rwa -k slurm-secret
 -w /etc/vault.d/ -p wa -k vault

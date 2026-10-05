@@ -1,0 +1,33 @@
+---
+- name: Determine this node's Kubernetes role
+  ansible.builtin.set_fact:
+    kubeadm_cluster_role: >-
+      {{ 'control_plane' if inventory_hostname in groups[kubeadm_cluster_control_plane_group] else 'worker' }}
+
+- name: Host prerequisites (no k3s, swap off, kernel modules, sysctls)
+  ansible.builtin.import_tasks: prereqs.yml
+
+- name: Containerd with CRI, systemd cgroups and the NVIDIA runtime
+  ansible.builtin.import_tasks: containerd.yml
+
+- name: Kubernetes packages from pkgs.k8s.io (held)
+  ansible.builtin.import_tasks: packages.yml
+
+- name: Control plane (kubeadm init, audit, encryption, etcd snapshots)
+  ansible.builtin.include_tasks: control_plane.yml
+  when: kubeadm_cluster_role == 'control_plane'
+
+- name: Workers (kubeadm join)
+  ansible.builtin.include_tasks: workers.yml
+  when: kubeadm_cluster_role == 'worker'
+
+- name: Every node is registered with the API server (Ready comes after the CNI)
+  ansible.builtin.command: >-
+    kubectl --kubeconfig /etc/kubernetes/admin.conf get node {{ inventory_hostname }} -o name
+  register: kubeadm_cluster_node_registered
+  until: kubeadm_cluster_node_registered.rc == 0
+  retries: 30
+  delay: 5
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  delegate_to: "{{ groups[kubeadm_cluster_control_plane_group][0] }}"

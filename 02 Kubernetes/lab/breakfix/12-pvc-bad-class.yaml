@@ -1,4 +1,4 @@
-# BF-12: PVC names a StorageClass that doesn't exist.
+# BF-12 (cluster: dev-lab): PVC names a StorageClass that doesn't exist.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata: {name: bf12-data, namespace: lab-tools, labels: {breakfix: "12"}}

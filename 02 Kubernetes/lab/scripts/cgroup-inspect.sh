@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Show how Kubernetes requests/limits became cgroup v2 files (Volume 12).
-#   scripts/cgroup-inspect.sh <namespace> <pod>     (run ON the Spark)
+#   scripts/cgroup-inspect.sh <namespace> <pod> [context]     (run ON the Spark)
+# context: spark-root (default), dev-lab or llms. A vCluster pod's cgroup
+# belongs to its synced copy on the root, so that is what we look up.
 source "$(dirname "$0")/lib.sh"
-ns=${1:?namespace}; pod=${2:?pod}
-uid=$(k -n "$ns" get pod "$pod" -o jsonpath='{.metadata.uid}')
-qos=$(k -n "$ns" get pod "$pod" -o jsonpath='{.status.qosClass}')
+ns=${1:?namespace}; pod=${2:?pod}; ctx=${3:-$ROOT_CTX}
+read -r hns hpod < <(host_pod "$ctx" "$ns" "$pod")
+uid=$(kr -n "$hns" get pod "$hpod" -o jsonpath='{.metadata.uid}')
+qos=$(kr -n "$hns" get pod "$hpod" -o jsonpath='{.status.qosClass}')
 dir=$(find /sys/fs/cgroup/kubepods* -maxdepth 3 -type d \( -name "*pod${uid//-/_}*" -o -name "pod${uid}" \) 2>/dev/null | head -1)
 [[ -n "$dir" ]] || { bad "cgroup for pod uid $uid not found (run on the node hosting the pod)"; exit 1; }
-echo "pod $ns/$pod  uid=$uid  qos=$qos"
+echo "pod $ctx $ns/$pod → root $hns/$hpod  uid=$uid  qos=$qos"
 echo "cgroup $dir"
 printf '  %-22s %s\n' cpu.max "$(cat "$dir/cpu.max")" cpu.weight "$(cat "$dir/cpu.weight")" \
   memory.max "$(cat "$dir/memory.max")" memory.current "$(cat "$dir/memory.current")" \

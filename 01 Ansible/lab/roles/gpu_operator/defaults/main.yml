@@ -1,10 +1,12 @@
 ---
-gpu_operator_chart_version: v25.3.0        # pin; check `helm search repo nvidia/gpu-operator -l`
+gpu_operator_chart_version: v26.7.1        # pin; check `helm search repo nvidia/gpu-operator -l`
 gpu_operator_namespace: gpu-operator
-gpu_operator_kubeconfig: "{{ k3s_cluster_kubeconfig_local | default(playbook_dir ~ '/../.cache/kubeconfig-spark-lab.yaml') }}"
+gpu_operator_kubeconfig: "{{ playbook_dir }}/../.cache/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
+gpu_operator_context: spark-root
 
 # DGX OS already provides the driver and container toolkit — the operator must
-# NOT try to install them (it would fight DGX OS updates).
+# NOT try to install them (it would fight DGX OS updates). The kubeadm_cluster
+# role registered the NVIDIA runtime in containerd with nvidia-ctk.
 gpu_operator_values:
   driver:
     enabled: false
@@ -12,7 +14,8 @@ gpu_operator_values:
     enabled: false
   operator:
     defaultRuntime: containerd
-  # k3s keeps containerd config/socket in non-standard paths
+  # CDI is on by default since operator v25.10; this lab injects GPUs through
+  # the nvidia runtime that DGX OS's toolkit configured, so keep it off.
   cdi:
     enabled: false
   devicePlugin:
@@ -26,5 +29,7 @@ gpu_operator_values:
   nfd:
     enabled: true
 
-# Time-slicing: advertise N logical GPUs per physical GB10 (no memory isolation!)
-gpu_operator_timeslice_replicas: 4
+# Time-slicing: advertise N logical GPUs per physical GB10 (no memory isolation!).
+# 15 slices: the root keeps 5, vCluster dev-lab gets 2, vCluster llms gets 8
+# (quotas in "02 Kubernetes/lab/manifests/root/05-vclusters").
+gpu_operator_timeslice_replicas: 15

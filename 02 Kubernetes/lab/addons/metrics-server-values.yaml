@@ -1,0 +1,13 @@
+# Helm values for metrics-server on the ROOT (Volume 12, 16, 21).
+# k3s bundled it; kubeadm doesn't. 'kubectl top', HPAs, and — through
+# integrations.metricsServer in vclusters/*.yaml — 'kubectl top' inside both
+# vClusters depend on it.
+args:
+  # kubeadm's kubelet serving certificates are self-signed (no serverTLSBootstrap
+  # in this lab), so metrics-server can't verify them. Production: enable
+  # serverTLSBootstrap and approve the kubelet CSRs instead.
+  - --kubelet-insecure-tls
+priorityClassName: spark-platform
+resources:
+  requests: {cpu: 50m, memory: 64Mi}
+  limits: {memory: 256Mi}

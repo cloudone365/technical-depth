@@ -1,0 +1,45 @@
+---
+# Runs on the control node (localhost) against the root API server.
+- name: Add Cilium Helm repo
+  kubernetes.core.helm_repository:
+    name: cilium
+    repo_url: https://helm.cilium.io
+
+- name: Install / upgrade Cilium
+  kubernetes.core.helm:
+    kubeconfig: "{{ cilium_kubeconfig }}"
+    context: "{{ cilium_context }}"
+    name: cilium
+    chart_ref: cilium/cilium
+    chart_version: "{{ cilium_chart_version }}"
+    release_namespace: "{{ cilium_namespace }}"
+    values: "{{ cilium_values }}"
+    wait: true
+    wait_timeout: 10m
+
+- name: Wait until every node is Ready (pod network up)
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ cilium_kubeconfig }}"
+    context: "{{ cilium_context }}"
+    kind: Node
+  register: cilium_nodes
+  until: >-
+    cilium_nodes.resources | length > 0 and
+    (cilium_nodes.resources | map(attribute='status.conditions') | map('selectattr', 'type', 'eq', 'Ready')
+     | map('first') | map(attribute='status') | unique) == ['True']
+  retries: 40
+  delay: 10
+
+- name: CoreDNS rolled out on the new pod network
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ cilium_kubeconfig }}"
+    context: "{{ cilium_context }}"
+    kind: Deployment
+    namespace: kube-system
+    name: coredns
+  register: cilium_coredns
+  until: >-
+    cilium_coredns.resources | length > 0 and
+    cilium_coredns.resources[0].status.readyReplicas | default(0) == cilium_coredns.resources[0].spec.replicas
+  retries: 30
+  delay: 10

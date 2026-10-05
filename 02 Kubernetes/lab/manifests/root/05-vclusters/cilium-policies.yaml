@@ -1,0 +1,49 @@
+# Root-side network rules for the vCluster namespaces (Volume 06, 27).
+#
+# Tenant NetworkPolicies written INSIDE a vCluster are synced here (translated)
+# and enforced by Cilium. These two root policies add what tenants can't
+# express because they can't see root namespaces:
+#   1. Prometheus in the root 'observability' namespace may scrape every pod.
+#   2. The two vClusters can't open connections to each other.
+#
+# enableDefaultDeny=false is the important part: an ordinary allow policy that
+# selects a pod isolates it (everything not allowed is dropped), which would
+# break every tenant that relies on "no policy = open". These policies only
+# ADD an allow and a deny; they never switch a pod into default-deny.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: vcluster-boundary
+  namespace: vc-dev-lab
+spec:
+  endpointSelector: {}
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: observability
+  ingressDeny:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: vc-llms
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: vcluster-boundary
+  namespace: vc-llms
+spec:
+  endpointSelector: {}
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: observability
+  ingressDeny:
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: vc-dev-lab

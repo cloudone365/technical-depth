@@ -39,7 +39,7 @@
         journalctl -k --since "-2h" --no-pager  > kernel.log 2>&1
         journalctl -k -b -1 --no-pager          > kernel-prev-boot.log 2>&1 || true   # after a hard power-cycle
         journalctl -k --no-pager | grep -E 'NVRM|Xid|mlx5' > nvrm-xid.log 2>&1 || true
-        journalctl -u docker -u k3s -u k3s-agent -u slurmd --since "-2h" --no-pager > services.log 2>&1
+        journalctl -u docker -u containerd -u kubelet -u slurmd --since "-2h" --no-pager > services.log 2>&1
         cat /proc/meminfo > meminfo.txt
         ibdev2netdev > ibdev2netdev.txt 2>&1
         for d in $(ls /sys/class/infiniband 2>/dev/null); do ibv_devinfo -d $d; done > ibv_devinfo.txt 2>&1

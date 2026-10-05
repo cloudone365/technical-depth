@@ -1,0 +1,74 @@
+# Who can do what INSIDE vCluster #1 · dev-lab (Volume 02, 27). Groups come
+# from client-cert O= fields (scripts/make-user.sh --context dev-lab) or your
+# OIDC provider in production. These users exist only in dev-lab: they have no
+# rights at all on the root or in llms.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spark-tenant-developer
+rules:
+  - apiGroups: ["", "apps", "batch"]
+    resources: [pods, pods/log, pods/exec, pods/portforward, services, configmaps,
+                persistentvolumeclaims, deployments, statefulsets, jobs, cronjobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, create, update, delete]      # no watch: limits bulk exfiltration
+  - apiGroups: [""]
+    resources: [resourcequotas, limitranges, events]
+    verbs: [get, list, watch]                        # read, never change their budget
+  - apiGroups: [kueue.x-k8s.io]
+    resources: [workloads, localqueues]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spark-gpu-viewer
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+  - apiGroups: [metrics.k8s.io]
+    resources: [nodes, pods]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alpha-developers
+  namespace: tenant-alpha
+subjects:
+  - kind: Group
+    name: team-alpha
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: spark-tenant-developer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: beta-developers
+  namespace: tenant-beta
+subjects:
+  - kind: Group
+    name: team-beta
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: spark-tenant-developer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: all-teams-gpu-viewer
+subjects:
+  - {kind: Group, name: team-alpha, apiGroup: rbac.authorization.k8s.io}
+  - {kind: Group, name: team-beta, apiGroup: rbac.authorization.k8s.io}
+roleRef:
+  kind: ClusterRole
+  name: spark-gpu-viewer
+  apiGroup: rbac.authorization.k8s.io

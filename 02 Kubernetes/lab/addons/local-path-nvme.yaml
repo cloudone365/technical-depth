@@ -1,8 +1,11 @@
-# StorageClasses on top of k3s's bundled local-path provisioner (Volume 11).
+# StorageClasses on top of rancher/local-path-provisioner (Volume 11), which
+# scripts/install-addons.sh storage installs on the ROOT (k3s bundled it,
+# kubeadm doesn't). Both vClusters see these classes (sync.fromHost.storageClasses)
+# and their PVCs become real PVs here.
 #
-# The DGX Spark has ONE NVMe (the 4 TB M.2 that also holds /). k3s is told
-# (k3s/20-k8s-lab.yaml) to root local-path volumes at /data/k8s; these classes
-# add readable directory names and two reclaim policies:
+# The DGX Spark has ONE NVMe (the 4 TB M.2 that also holds /). The provisioner
+# is told (local-path-config-patch.yaml) to root volumes at /data/k8s; these
+# classes add readable directory names and two reclaim policies:
 #   local-nvme          scratch, caches, Prometheus      → Delete
 #   local-nvme-retain   model weights, vector DB data    → Retain (survives PVC delete)
 apiVersion: storage.k8s.io/v1

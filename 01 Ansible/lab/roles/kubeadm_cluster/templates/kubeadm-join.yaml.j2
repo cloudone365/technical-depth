@@ -1,0 +1,17 @@
+# {{ ansible_managed }}
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: JoinConfiguration
+discovery:
+  bootstrapToken:
+    apiServerEndpoint: "{{ kubeadm_cluster_api_endpoint }}"
+    token: "{{ kubeadm_cluster_token.stdout }}"
+    caCertHashes:
+      - "sha256:{{ kubeadm_cluster_ca_hash.stdout }}"
+nodeRegistration:
+  name: {{ inventory_hostname }}
+  criSocket: unix:///run/containerd/containerd.sock
+  kubeletExtraArgs:
+    - name: node-ip
+      value: "{{ kubeadm_cluster_node_ip }}"
+    - name: node-labels
+      value: "{{ kubeadm_cluster_node_labels | join(',') }}"

@@ -1,4 +1,4 @@
-# BF-01: a Deployment that asks for more than tenant-alpha's 5 % budget.
+# BF-01 (cluster: dev-lab): a Deployment that asks for more than tenant-alpha's 500m budget.
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: bf01-big, namespace: tenant-alpha, labels: {breakfix: "01"}}
@@ -13,4 +13,4 @@ spec:
         - name: app
           image: registry.k8s.io/pause:3.10
           securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
-          resources: {requests: {cpu: 500m, memory: 1Gi}, limits: {cpu: 500m, memory: 1Gi}}
+          resources: {requests: {cpu: 250m, memory: 512Mi}, limits: {cpu: 250m, memory: 512Mi}}

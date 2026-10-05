@@ -1,4 +1,4 @@
-# BF-10: requests NO GPU, still sees the GB10 (default runtime = nvidia and the
+# BF-10 (cluster: dev-lab): requests NO GPU, still sees the GB10 (default runtime = nvidia and the
 # CUDA base image sets NVIDIA_VISIBLE_DEVICES=all).
 apiVersion: v1
 kind: Pod

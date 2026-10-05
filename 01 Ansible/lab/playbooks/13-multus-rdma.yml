@@ -1,56 +1,52 @@
 ---
-# Secondary CX-7 networks for pods on k3s: Multus + macvlan (static IPAM) + RDMA shared device plugin.
-# Result: a pod gets eth0 (flannel) AND net1 on the 200G fabric with RDMA verbs access.
+# Secondary CX-7 networks for pods: Multus + macvlan (static IPAM) + RDMA shared device plugin.
+# Result: a pod gets eth0 (Cilium) AND net1 on the 200G fabric with RDMA verbs access.
+# Cilium was installed with cni.exclusive=false (roles/cilium) so it leaves Multus's
+# config alone in /etc/cni/net.d.
 #
 #   ansible-playbook playbooks/13-multus-rdma.yml
-- name: Multus + RDMA on k3s
+- name: Multus + RDMA on the root cluster
   hosts: localhost
   connection: local
   gather_facts: false
   vars:
     kubeconfig: "{{ playbook_dir }}/../.cache/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
-    multus_chart_version: ""                 # pin after `helm search repo rke2-charts/rke2-multus -l`
+    kube_context: spark-root
+    multus_version: v4.3.0                   # check https://github.com/k8snetworkplumbingwg/multus-cni/releases
     multus_rdma_resource: rdma_shared_cx7
     multus_rdma_ifnames: [enp1s0f1np1, enP2p1s0f1np1]
     multus_rdma_dp_image: ghcr.io/mellanox/k8s-rdma-shared-dev-plugin:latest   # pin a release tag
     multus_test_image: ubuntu:24.04          # perftest + verbs utils installed at start (readiness waits for it)
+    # NADs are namespaced: platform-tools for the platform test pods below, vc-llms
+    # because that is where the llms vCluster's batch pods really run on the root.
+    multus_nad_namespaces: [platform-tools, vc-llms]
+    multus_test_namespace: platform-tools
     multus_nads:
       - { name: cx7-a, master: enp1s0f1np1, subnet: 192.168.100.0/24 }
       - { name: cx7-b, master: enP2p1s0f1np1, subnet: 192.168.101.0/24 }
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ kubeconfig }}"
+      context: "{{ kube_context }}"
   tasks:
-    # ---------------------------------------------------------------- Multus via k3s HelmChart CRD
-    - name: Multus (rke2-multus chart, paths adjusted for k3s)
+    # ---------------------------------------------------------------- Multus (thick plugin) from upstream
+    - name: Download the Multus thick-plugin manifest
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/{{ multus_version }}/deployments/multus-daemonset-thick.yml"
+        dest: "{{ playbook_dir }}/../.cache/multus-{{ multus_version }}.yml"
+        mode: "0644"
+
+    - name: Multus DaemonSet (standard kubeadm paths /etc/cni/net.d and /opt/cni/bin)
       kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig }}"
-        definition:
-          apiVersion: helm.cattle.io/v1
-          kind: HelmChart
-          metadata:
-            name: multus
-            namespace: kube-system
-          spec:
-            repo: https://rke2-charts.rancher.io
-            chart: rke2-multus
-            version: "{{ multus_chart_version | default(omit, true) }}"
-            targetNamespace: kube-system
-            valuesContent: |-
-              config:
-                fullnameOverride: multus
-                cni_conf:
-                  confDir: /var/lib/rancher/k3s/agent/etc/cni/net.d
-                  binDir: /var/lib/rancher/k3s/data/cni/
-                  kubeconfig: /var/lib/rancher/k3s/agent/etc/cni/net.d/multus.d/multus.kubeconfig
-                  # per k3s docs: remove this line for rke2-multus < v4.2.202
-                  multusAutoconfigDir: /var/lib/rancher/k3s/agent/etc/cni/net.d
-              manifests:
-                dhcpDaemonSet: false
+        src: "{{ playbook_dir }}/../.cache/multus-{{ multus_version }}.yml"
+        state: present
 
     - name: Wait for Multus DaemonSet
       kubernetes.core.k8s_info:
         kubeconfig: "{{ kubeconfig }}"
         kind: DaemonSet
         namespace: kube-system
-        name: multus
+        name: kube-multus-ds
       register: multus_ds
       until: >-
         multus_ds.resources | length > 0 and
@@ -65,6 +61,27 @@
         state: present
         template: rdma-shared-dp.yaml.j2
 
+    # ---------------------------------------------------------------- namespaces
+    - name: Platform-tools namespace (also created by the 02 lab's manifests/root/00-platform)
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: platform-tools
+            labels:
+              spark.lab/tier: platform
+              pod-security.kubernetes.io/enforce: privileged
+
+    - name: Which NAD namespaces exist (vc-llms appears once playbook 06b has run)?
+      kubernetes.core.k8s_info:
+        kind: Namespace
+      register: multus_ns
+
+    - name: Keep only existing namespaces
+      ansible.builtin.set_fact:
+        multus_nad_namespaces: "{{ multus_nad_namespaces | intersect(multus_ns.resources | map(attribute='metadata.name') | list) }}"
+
     # ---------------------------------------------------------------- NetworkAttachmentDefinitions
     - name: Macvlan NADs on the CX-7 netdevs (static IPAM — IP chosen per pod)
       kubernetes.core.k8s:
@@ -73,14 +90,14 @@
           apiVersion: k8s.cni.cncf.io/v1
           kind: NetworkAttachmentDefinition
           metadata:
-            name: "{{ item.name }}"
-            namespace: default
+            name: "{{ item.0.name }}"
+            namespace: "{{ item.1 }}"
           spec:
             config: >-
-              {{ {'cniVersion': '0.3.1', 'type': 'macvlan', 'master': item.master, 'mode': 'bridge',
+              {{ {'cniVersion': '0.3.1', 'type': 'macvlan', 'master': item.0.master, 'mode': 'bridge',
                   'mtu': 9000, 'capabilities': {'ips': true}, 'ipam': {'type': 'static'}} | to_json }}
-      loop: "{{ multus_nads }}"
-      loop_control: { label: "{{ item.name }} -> {{ item.master }}" }
+      loop: "{{ multus_nads | product(multus_nad_namespaces) | list }}"
+      loop_control: { label: "{{ item.1 }}/{{ item.0.name }} -> {{ item.0.master }}" }
 
     - name: Wait until every node advertises the RDMA resource
       kubernetes.core.k8s_info:
@@ -106,7 +123,7 @@
           kind: Pod
           metadata:
             name: "rdma-test-{{ item.node }}"
-            namespace: default
+            namespace: "{{ multus_test_namespace }}"
             annotations:
               k8s.v1.cni.cncf.io/networks: >-
                 [{"name": "cx7-a", "ips": ["{{ item.ip }}/24"]}]
@@ -136,7 +153,7 @@
     - name: Show net1 inside each pod
       kubernetes.core.k8s_exec:
         kubeconfig: "{{ kubeconfig }}"
-        namespace: default
+        namespace: "{{ multus_test_namespace }}"
         pod: "rdma-test-{{ item }}"
         command: sh -c "ip -br addr show net1; ls /dev/infiniband"
       loop: "{{ groups['spark'] }}"

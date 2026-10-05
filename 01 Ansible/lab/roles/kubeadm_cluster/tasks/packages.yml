@@ -1,0 +1,53 @@
+---
+- name: Keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Kubernetes apt signing key (per minor version)
+  ansible.builtin.get_url:
+    url: "{{ kubeadm_cluster_apt_repo }}Release.key"
+    dest: "/etc/apt/keyrings/kubernetes-v{{ kubeadm_cluster_minor }}.asc"
+    mode: "0644"
+
+- name: Kubernetes apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/kubernetes-v{{ kubeadm_cluster_minor }}.asc]
+      {{ kubeadm_cluster_apt_repo }} /
+    filename: kubernetes
+    state: present
+
+- name: Release the hold so a version change can apply
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: install
+  loop: [kubelet, kubeadm, kubectl]
+  changed_when: false
+
+- name: Install kubelet, kubeadm, kubectl (exact version)
+  ansible.builtin.apt:
+    name:
+      - "kubelet={{ kubeadm_cluster_version }}{{ kubeadm_cluster_package_suffix }}"
+      - "kubeadm={{ kubeadm_cluster_version }}{{ kubeadm_cluster_package_suffix }}"
+      - "kubectl={{ kubeadm_cluster_version }}{{ kubeadm_cluster_package_suffix }}"
+    state: present
+    update_cache: true
+  register: kubeadm_cluster_apt
+  retries: 3
+  delay: 10
+  until: kubeadm_cluster_apt is succeeded
+
+# A routine 'apt upgrade' must never move the cluster version (same idea as the
+# NVIDIA package holds in spark_baseline). Upgrades go through 'kubeadm upgrade'.
+- name: Hold Kubernetes packages
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop: [kubelet, kubeadm, kubectl]
+
+- name: Kubelet enabled (it crash-loops until kubeadm writes its config; that is normal)
+  ansible.builtin.service:
+    name: kubelet
+    enabled: true
