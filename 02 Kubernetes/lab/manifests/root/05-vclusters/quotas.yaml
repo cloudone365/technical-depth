@@ -3,10 +3,10 @@
 # quota stops the vCluster as a whole. Root keeps the rest of the Spark:
 #
 #               CPU (req)   memory      GPU slices   storage
-#   Spark total    20       128 GB         15          ~3.7 TiB
+#   Spark total    20     ~119.7 GiB       15          ~3.7 TiB
 #   dev-lab         2        8 Gi           2           300 Gi
 #   llms            4       48 Gi           8           500 Gi
-#   root keeps     14       ~72 GB          5           the rest
+#   root keeps     14       ~64 GiB         5           the rest
 #
 # CPU is capped on requests only: a vCluster is guaranteed its share and may
 # burst into idle CPU. Memory is capped on requests AND limits — on a unified-
@@ -27,7 +27,11 @@ spec:
     persistentvolumeclaims: "20"
     pods: "60"
     services.loadbalancers: "1"        # the vCluster API (192.168.0.111)
-    services.nodeports: "0"
+    # A LoadBalancer Service also allocates a NodePort per port (unless it sets
+    # allocateLoadBalancerNodePorts: false), and quota counts those. Leave room
+    # for the API service's ports; plain NodePort Services are still kept out by
+    # the small number.
+    services.nodeports: "2"            # the API Service exposes https (443) and kubelet (10250)
 ---
 apiVersion: v1
 kind: ResourceQuota
@@ -44,4 +48,4 @@ spec:
     persistentvolumeclaims: "20"
     pods: "80"
     services.loadbalancers: "2"        # the vCluster API (.112) + the llms gateway (.115)
-    services.nodeports: "0"
+    services.nodeports: "4"            # API https+kubelet, Traefik web+websecure

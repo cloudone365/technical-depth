@@ -1,5 +1,5 @@
 # KServe in RawDeployment mode INSIDE vCluster #2 · llms (Volume 23, 27).
-# Scale deploy/vllm to 0 first (llms memory budget). No Knative, no Istio — KServe
+# Park vLLM first (llms memory budget; pause its KEDA ScaledObject, Vol 21 §9). No Knative, no Istio — KServe
 # creates a plain Deployment + Service + HPA. Requires cert-manager and the
 # KServe controller (scripts/install-addons.sh kserve).
 apiVersion: serving.kserve.io/v1alpha1
@@ -15,6 +15,10 @@ spec:
       args: ["--served-model-name={{.Name}}", "--port=8080",
              "--gpu-memory-utilization=0.20", "--max-model-len=8192"]
       ports: [{containerPort: 8080, protocol: TCP}]
+      # Required in llm-serving by the CEL policy spark-serving-needs-readiness
+      # (the predictor Deployment KServe creates is checked like any other).
+      startupProbe: {httpGet: {path: /health, port: 8080}, periodSeconds: 10, failureThreshold: 60}
+      readinessProbe: {httpGet: {path: /health, port: 8080}, periodSeconds: 5}
       resources:
         requests: {cpu: 1500m, memory: 12Gi, nvidia.com/gpu: "1"}
         limits: {memory: 32Gi, nvidia.com/gpu: "1"}

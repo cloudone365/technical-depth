@@ -22,8 +22,12 @@ lab/
 │   ├── cx7_fabric              # netplan, MTU, 200G/RDMA verify, runtime reconcile, GID, argspec (Vol 11, 05)
 │   ├── container_runtime       # docker + nvidia-ctk + CDI (freshness-checked) + NGC              (Vol 08)
 │   ├── gpu_telemetry           # textfile collector, Prometheus/Grafana/Alertmanager, dashboard  (Vol 09)
-│   ├── k3s_cluster             # k3s w/ nvidia default runtime, flannel over CX-7                (Vol 16)
-│   ├── gpu_operator            # Helm, driver/toolkit disabled, time-slicing                    (Vol 17)
+│   ├── kubeadm_cluster         # kubeadm root cluster spark-root: containerd + nvidia runtime,   (Vol 16)
+│   │                           #   audit log, Secret encryption, etcd snapshot timer, workers join
+│   ├── cilium                  # Cilium CNI (VXLAN, kube-proxy kept), Hubble UI :31235          (Vol 16)
+│   ├── metallb                 # MetalLB L2 pool 192.168.0.110-119                               (Vol 16)
+│   ├── gpu_operator            # Helm, driver/toolkit disabled, 15 time-slices                  (Vol 17)
+│   ├── vclusters               # vClusters dev-lab + llms from ../../02 Kubernetes/lab           (Vol 16)
 │   ├── slurm_cluster           # munge, slurm.conf, gres.conf, cgroup v2, health check          (Vol 18)
 │   ├── vault_server            # Vault raft + TLS + init/unseal                                  (Vol 03B)
 │   ├── vault_config            # KV, AppRole, policies, SSH CA, audit via HTTP API              (Vol 19)
@@ -31,6 +35,8 @@ lab/
 │   ├── node_drain              # cordon → capture → stop → reboot → validate → return            (Vol 24)
 │   └── spark_validate          # end-to-end invariants + JSON report                             (Vol 25)
 ├── playbooks/                  # 00-bootstrap … 30-validate, site.yml (see ../00-ansible-step-by-step-guide.md)
+│   │                           #   Kubernetes: 05-kubernetes → 06-gpu-operator → 06b-vclusters;
+│   │                           #   99-reset-kubernetes wipes it for a clean rebuild
 │   ├── files/uma_probe.cu      # sm_121 unified-memory probe                                     (Vol 08)
 │   └── templates/              # RDMA device plugin, Loki, Alloy, auditd rules                   (Vol 13, 23)
 ├── tools/
@@ -55,10 +61,10 @@ flowchart LR
   subgraph MGMT["Mgmt LAN 192.168.0.0/24 (10GbE enP7s7)"]
   end
   subgraph S1["spark-01 · 192.168.0.100"]
-    S1a["k3s server · slurmctld+slurmd<br/>Vault · Prometheus/Grafana<br/>NFS server /srv/models"]
+    S1a["kubeadm control plane + worker (spark-root)<br/>vClusters dev-lab · llms<br/>slurmctld+slurmd · Vault · Prometheus/Grafana<br/>NFS server /srv/models"]
   end
   subgraph S2["spark-02 · 192.168.0.101"]
-    S2a["k3s agent · slurmd<br/>NFS client /mnt/models"]
+    S2a["root worker (k8s_workers) · slurmd<br/>NFS client /mnt/models"]
   end
   A -- SSH 22 --> MGMT
   MGMT --- S1
@@ -67,8 +73,30 @@ flowchart LR
 ```
 
 **Single Spark?** Remove `spark-02` from `inventory/hosts.yml` and from the
-`k3s_agent`/`nfs_client` groups. Fabric, NCCL and NFS-over-RDMA steps skip
-themselves; everything else runs.
+`k8s_workers`/`nfs_client` groups. Fabric, NCCL and NFS-over-RDMA steps skip
+themselves; everything else runs. `spark-01` keeps no control-plane taint, so on
+its own it is a complete cluster.
+
+## Kubernetes: one root cluster, two vClusters
+
+```bash
+ansible-playbook playbooks/05-kubernetes.yml -K   # kubeadm root cluster + Cilium + MetalLB
+ansible-playbook playbooks/06-gpu-operator.yml    # GPU Operator, node advertises nvidia.com/gpu: 15
+ansible-playbook playbooks/06b-vclusters.yml      # vClusters dev-lab (192.168.0.111) and llms (192.168.0.112)
+
+export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml   # contexts: spark-root, dev-lab, llms
+kubectl --context spark-root get nodes -o wide
+kubectl --context dev-lab get namespaces
+kubectl --context llms get namespaces
+
+# Start over (type RESET at the prompt); -e reset_remove_k3s=true also removes an old k3s install
+ansible-playbook playbooks/99-reset-kubernetes.yml -K
+```
+
+`06b-vclusters.yml` applies the vCluster values and root budgets from
+[`../../02 Kubernetes/lab`](../../02%20Kubernetes/lab/README.md), so that lab must
+be checked out next to this one. It also writes `.cache/kubeconfig-dev-lab.yaml`
+and `.cache/kubeconfig-llms.yaml` for anyone who should only see one vCluster.
 
 ## Quick start
 
@@ -87,6 +115,9 @@ ansible-playbook playbooks/00-ping.yml
 ansible-playbook playbooks/01-baseline.yml --ask-become-pass
 ansible-playbook playbooks/02-fabric.yml   -K
 ansible-playbook playbooks/03-containers.yml -K
+ansible-playbook playbooks/05-kubernetes.yml -K
+ansible-playbook playbooks/06-gpu-operator.yml
+ansible-playbook playbooks/06b-vclusters.yml
 ansible-playbook playbooks/30-validate.yml -K
 # …or everything:
 ansible-playbook playbooks/site.yml -K
@@ -110,11 +141,15 @@ cd roles/spark_baseline && molecule test   # on the Spark: native arm64 containe
 | Component | Pin | Where |
 |---|---|---|
 | ansible-core | 2.18.x | `requirements.txt` |
-| k3s | v1.32.5+k3s1 | `roles/k3s_cluster/defaults` |
-| GPU Operator chart | v25.3.0 | `roles/gpu_operator/defaults` |
+| Kubernetes (kubeadm, pkgs.k8s.io) | 1.36.5 | `roles/kubeadm_cluster/defaults` |
+| Cilium chart | 1.20.2 | `roles/cilium/defaults` |
+| MetalLB chart | 0.16.0 | `roles/metallb/defaults` |
+| GPU Operator chart | v26.7.1 | `roles/gpu_operator/defaults` |
+| vCluster chart | 0.37.1 | `roles/vclusters/defaults` |
+| Multus (thick) | v4.3.0 | `playbooks/13-multus-rdma.yml` |
 | Vault | 1.20.* | `roles/vault_server/defaults` |
 | NCCL | v2.30.7-1 (NVIDIA Spark playbook) | `playbooks/10-nccl-test.yml` |
 | CUDA smoke image | `nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04` | `container_runtime`, `spark_validate` |
 
-`.cache/` (git-ignored) holds the fact cache, run log, kubeconfig, munge key,
+`.cache/` (git-ignored) holds the fact cache, run log, kubeconfigs (`kubeconfig-spark-lab.yaml` with all three contexts), munge key,
 Vault CA and — **lab only** — Vault init keys. Treat it as secret.

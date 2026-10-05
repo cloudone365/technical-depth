@@ -37,7 +37,7 @@ kubeadm_cluster_eviction_hard:
   imagefs.available: 15%
 kubeadm_cluster_max_pods: 200                # two vClusters + platform add-ons on one node
 kubeadm_cluster_node_labels:
-  - "nvidia.com/gpu.product=GB10"
+  - "spark.lab/gpu=gb10"                     # lab-owned: GFD rewrites nvidia.com/gpu.product (e.g. -SHARED suffix under time-slicing)
   - "spark.lab/node-index={{ spark_node_index | default(0) }}"
 
 # containerd comes from DGX OS's containerd.io package (the one Docker uses).

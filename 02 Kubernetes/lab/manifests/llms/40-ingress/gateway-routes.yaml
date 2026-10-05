@@ -1,5 +1,5 @@
 # The same API through Gateway API (Volume 09). The Traefik chart creates
-# Gateway 'lab-gateway' in namespace 'ingress' (addons/traefik.yaml).
+# Gateway 'lab-gateway' in namespace 'ingress' (addons/traefik-values.yaml).
 # Weighted backends = canary: 90 % to stable, 10 % to canary.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute

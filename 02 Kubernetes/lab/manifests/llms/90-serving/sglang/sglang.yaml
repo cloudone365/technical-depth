@@ -4,7 +4,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata: {name: sglang, namespace: llm-serving, labels: {app: sglang}}
 spec:
-  replicas: 0                          # scale to 1 when vLLM is scaled to 0 (llms memory budget: 48 Gi)
+  replicas: 0                          # scale to 1 once vLLM is parked (Vol 21 §9: one 32 Gi engine at a time)
   strategy: {type: Recreate}
   selector: {matchLabels: {app: sglang}}
   template:

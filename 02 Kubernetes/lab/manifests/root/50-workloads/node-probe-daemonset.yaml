@@ -14,7 +14,7 @@ spec:
     spec:
       priorityClassName: spark-platform
       tolerations: [{operator: Exists}]          # run on tainted/cordoned GPU nodes too
-      nodeSelector: {nvidia.com/gpu.product: GB10}
+      nodeSelector: {spark.lab/gpu: gb10}
       containers:
         - name: probe
           image: nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04

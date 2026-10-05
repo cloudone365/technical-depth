@@ -9,4 +9,5 @@ node_drain_reboot: false
 node_drain_undrain_after: false         # only after reboot + validation passes
 node_drain_reason: "maint: ansible drain {{ now(utc=true, fmt='%Y-%m-%dT%H:%MZ') }}"
 node_drain_kubeconfig: "{{ playbook_dir }}/../.cache/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
+node_drain_context: spark-root          # the root owns the nodes; vCluster pods are drained as root pods
 node_drain_bundle_dir: "{{ playbook_dir }}/../.cache/incidents"

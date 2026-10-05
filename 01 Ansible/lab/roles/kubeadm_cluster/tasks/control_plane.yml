@@ -99,11 +99,19 @@
     group: "{{ spark_admin_user | default('nvidia') }}"
     mode: "0700"
 
-- name: Admin kubeconfig for the admin user
-  ansible.builtin.copy:
+- name: Read admin.conf
+  ansible.builtin.slurp:
     src: /etc/kubernetes/admin.conf
+  register: kubeadm_cluster_admin_slurp
+
+# Same context name as on the control node, so lab scripts that pass
+# '--context spark-root' (etcd-drill.sh, verify.sh …) also work on the Spark.
+- name: Admin kubeconfig for the admin user (context renamed to {{ kubeadm_cluster_context }})
+  ansible.builtin.copy:
+    content: >-
+      {{ kubeadm_cluster_admin_slurp.content | b64decode
+         | regex_replace('kubernetes-admin@' ~ kubeadm_cluster_name, kubeadm_cluster_context) }}
     dest: "/home/{{ spark_admin_user | default('nvidia') }}/.kube/config"
-    remote_src: true
     owner: "{{ spark_admin_user | default('nvidia') }}"
     group: "{{ spark_admin_user | default('nvidia') }}"
     mode: "0600"

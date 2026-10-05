@@ -8,7 +8,7 @@ source "$(dirname "$0")/lib.sh"
 set +e
 want() { [[ " ${SECTIONS[*]} " == *" $1 "* ]]; }
 SECTIONS=("$@"); [[ ${#SECTIONS[@]} -eq 0 ]] && SECTIONS=(platform vclusters tenancy admission gpu ingress storage serving observability)
-gpu_node() { kr get nodes -l nvidia.com/gpu.product=GB10 -o jsonpath='{.items[0].metadata.name}'; }
+gpu_node() { kr get nodes -l spark.lab/gpu=gb10 -o jsonpath='{.items[0].metadata.name}'; }
 
 if want platform; then
   echo "── platform (root, context $ROOT_CTX)"
@@ -71,7 +71,7 @@ fi
 if want gpu; then
   echo "── gpu"
   node=$(gpu_node)
-  [[ -n "$node" ]] && ok "GB10 node: $node" || bad "no node labelled nvidia.com/gpu.product=GB10"
+  [[ -n "$node" ]] && ok "GB10 node: $node" || bad "no node labelled spark.lab/gpu=gb10"
   alloc=$(kr get node "$node" -o jsonpath='{.status.allocatable.nvidia\.com/gpu}')
   [[ ${alloc:-0} -eq 15 ]] && ok "allocatable nvidia.com/gpu=$alloc (root 5 · dev-lab 2 · llms 8)" \
     || { [[ ${alloc:-0} -ge 1 ]] && warn "allocatable nvidia.com/gpu=$alloc (budgets assume 15)" || bad "no GPU allocatable"; }

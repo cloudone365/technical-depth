@@ -3,6 +3,7 @@
 - name: "1/6 Cordon + drain Kubernetes node"
   kubernetes.core.k8s_drain:
     kubeconfig: "{{ node_drain_kubeconfig }}"
+    context: "{{ node_drain_context }}"
     name: "{{ inventory_hostname }}"
     state: drain
     delete_options:
@@ -91,6 +92,7 @@
     - name: Uncordon Kubernetes node
       kubernetes.core.k8s_drain:
         kubeconfig: "{{ node_drain_kubeconfig }}"
+        context: "{{ node_drain_context }}"
         name: "{{ inventory_hostname }}"
         state: uncordon
       delegate_to: localhost

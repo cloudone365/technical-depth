@@ -1,5 +1,5 @@
 # Disaggregated prefill/decode (Volume 24) — ADVANCED / EXPERIMENTAL.
-# INSIDE vCluster #2 · llms. Scale vLLM/Triton to 0 first: prefill + decode
+# INSIDE vCluster #2 · llms. Park vLLM first (pause its KEDA ScaledObject, Vol 21 §9): prefill + decode
 # take 2 slices and 40 Gi of the llms vCluster's 48 Gi memory budget.
 # One Spark: both roles share the GB10 via time-slicing (2 slices), so this
 # demonstrates the *mechanics* (KV handoff over NIXL/UCX, routing, metrics),

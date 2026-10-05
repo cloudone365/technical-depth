@@ -9,7 +9,7 @@ set -euo pipefail
 ctx=(--context "${ROOT_CTX:-spark-root}")
 node=${1:-$(kubectl "${ctx[@]}" get nodes -o jsonpath='{.items[0].metadata.name}')}
 n=${2:-15}
-kubectl "${ctx[@]}" label node "$node" nvidia.com/gpu.product=GB10 nvidia.com/gpu.count=1 \
+kubectl "${ctx[@]}" label node "$node" spark.lab/gpu=gb10 nvidia.com/gpu.product=NVIDIA-GB10-SHARED nvidia.com/gpu.count=1 \
   nvidia.com/gpu.compute.major=12 nvidia.com/gpu.compute.minor=1 --overwrite
 kubectl "${ctx[@]}" patch node "$node" --subresource=status --type=merge \
   -p "{\"status\":{\"capacity\":{\"nvidia.com/gpu\":\"$n\"},\"allocatable\":{\"nvidia.com/gpu\":\"$n\"}}}"

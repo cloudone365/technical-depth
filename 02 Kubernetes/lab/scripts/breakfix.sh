@@ -39,7 +39,7 @@ ANSWER[06]="kubectl --context llms -n llm-serving get netpol → only bf06-defau
 TITLE[07]="Root cluster DNS down";                     CTX[07]=spark-root
 SYMPTOM[07]="platform pods can't resolve names: Grafana alert notifications fail, 'could not resolve host' from platform-tools/netshoot-host"
 HINT[07]="Test by IP and by name from netshoot-host on the root. Then try the same from netshoot in dev-lab — what is different?"
-ANSWER[07]="kubectl --context spark-root -n kube-system get deploy coredns → 0/0. Fix: kubectl --context spark-root -n kube-system scale deploy coredns --replicas=2. Note what kept working: cluster names INSIDE a vCluster are answered by that vCluster's own CoreDNS, so tenants may not notice at first — a shared failure with a delayed, uneven blast radius. Prevention: PDB + PriorityClass system-cluster-critical (already set on CoreDNS)."
+ANSWER[07]="kubectl --context spark-root -n kube-system get deploy coredns → 0/0. Fix: kubectl --context spark-root -n kube-system scale deploy coredns --replicas=2. Note what kept working: cluster names INSIDE a vCluster are answered by that vCluster's own CoreDNS, so tenants may not notice at first — a shared failure with a delayed, uneven blast radius. Prevention: a PodDisruptionBudget for CoreDNS (kubeadm does not create one — write it) and PriorityClass system-cluster-critical (kubeadm already sets that)."
 TITLE[08]="Service with no endpoints";                 CTX[08]=llms
 SYMPTOM[08]="curl -H 'Host: bf08.lab.local' http://192.168.0.115/ → 503 'no available server'"
 HINT[08]="kubectl --context llms -n llm-serving get endpointslices -l kubernetes.io/service-name=bf08-api"
