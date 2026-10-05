@@ -3,10 +3,10 @@
 # vCluster shows the taint through node sync. On a 1-node lab you cannot taint
 # the only node NoSchedule without moving every add-on, so the demo uses
 # PreferNoSchedule:
-#   kubectl --context spark-root taint node spark-01 spark.lab/dedicated=gpu:PreferNoSchedule
+#   kubectl --context spark-root taint node dgx-spark-01 spark.lab/dedicated=gpu:PreferNoSchedule
 # The pod below tolerates it and *requires* a GB10 via node affinity (the root
 # scheduler evaluates both); the anti-affinity spreads replicas across Sparks
-# when spark-02 joins.
+# when dgx-spark-02 joins.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

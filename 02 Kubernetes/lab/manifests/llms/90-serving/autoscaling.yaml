@@ -27,7 +27,7 @@ metadata: {name: vllm, namespace: llm-serving}
 spec:
   scaleTargetRef: {name: vllm}
   minReplicaCount: 1
-  maxReplicaCount: 1                   # raise to 2 when spark-02 joins
+  maxReplicaCount: 1                   # raise to 2 when dgx-spark-02 joins
   triggers:
     - type: prometheus
       metadata:

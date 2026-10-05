@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | A mental model you can check against the real processes, sockets and files. You'll read the kubeadm control plane on the Spark, then trace one `kubectl apply` from your laptop to a running container on the GB10 — through a vCluster's API server and the root's — and read each hop's evidence. |
-| **Hardware** | spark-01 running the kubeadm root cluster from the 01 Ansible lab (`playbooks/05-kubernetes.yml`, `06-gpu-operator.yml`, `06b-vclusters.yml`) |
+| **Hardware** | dgx-spark-01 running the kubeadm root cluster from the 01 Ansible lab (`playbooks/05-kubernetes.yml`, `06-gpu-operator.yml`, `06b-vclusters.yml`) |
 | **Time** | 75 min |
 | **Risk** | None. Read-only apart from one test pod |
 | **Clusters** | `spark-root` (the control plane itself) and `dev-lab` (the test pod) |
@@ -36,7 +36,7 @@ flowchart TB
   subgraph LAPTOP["Control node"]
     KC["kubectl<br/>contexts spark-root · dev-lab · llms"]
   end
-  subgraph SPARK["spark-01 · 192.168.0.100 · DGX OS 7 (Ubuntu 24.04 arm64)"]
+  subgraph SPARK["dgx-spark-01 · 192.168.0.100 · DGX OS 7 (Ubuntu 24.04 arm64)"]
     direction TB
     subgraph SP["static pods · /etc/kubernetes/manifests"]
       direction LR
@@ -65,7 +65,7 @@ flowchart TB
   API <--> ETCD
   SCH -->|"watch Pods w/o nodeName<br/>POST binding"| API
   CM -->|"watch/patch Deployments, RS, Jobs…"| API
-  KL -->|"watch Pods on spark-01<br/>PATCH status"| API
+  KL -->|"watch Pods on dgx-spark-01<br/>PATCH status"| API
   KP -->|"watch Services/EndpointSlices"| API
   KL -->|"starts static pods from disk"| SP
   KL -->|CRI gRPC| CTRD --> NVR --> RUNC
@@ -99,8 +99,8 @@ Rule of thumb: **only the API server talks to etcd.** Every other component is a
 
 | Component | How it runs | Listens | Key paths / evidence |
 |---|---|---|---|
-| kube-apiserver | static pod `kube-apiserver-spark-01` | `:6443` (TLS) | manifest `/etc/kubernetes/manifests/kube-apiserver.yaml`, certs `/etc/kubernetes/pki/`, audit log `/var/log/kubernetes/audit/audit.log` (Vol 02) |
-| etcd | static pod `etcd-spark-01` (stacked) | `127.0.0.1:2379`, `:2380`, metrics `:2381` | data `/var/lib/etcd`, certs `/etc/kubernetes/pki/etcd/`, snapshots `/var/lib/etcd-snapshots` (Vol 03) |
+| kube-apiserver | static pod `kube-apiserver-dgx-spark-01` | `:6443` (TLS) | manifest `/etc/kubernetes/manifests/kube-apiserver.yaml`, certs `/etc/kubernetes/pki/`, audit log `/var/log/kubernetes/audit/audit.log` (Vol 02) |
+| etcd | static pod `etcd-dgx-spark-01` (stacked) | `127.0.0.1:2379`, `:2380`, metrics `:2381` | data `/var/lib/etcd`, certs `/etc/kubernetes/pki/etcd/`, snapshots `/var/lib/etcd-snapshots` (Vol 03) |
 | kube-scheduler | static pod | `:10259` metrics | leader Lease `kube-system/kube-scheduler` |
 | kube-controller-manager | static pod | `:10257` metrics | leader Lease `kube-system/kube-controller-manager`; allocates each node's pod CIDR from `10.42.0.0/16` |
 | kubelet | systemd `kubelet.service` | `:10250` (API), `:10248` healthz | `/var/lib/kubelet/config.yaml` (from the kubeadm config), `/var/lib/kubelet/pods/<uid>/`, `journalctl -u kubelet` |
@@ -114,7 +114,7 @@ Rule of thumb: **only the API server talks to etcd.** Every other component is a
 
 | Object | Purpose | Comes from |
 |---|---|---|
-| `pod/kube-apiserver-spark-01`, `etcd-…`, `kube-scheduler-…`, `kube-controller-manager-…` | mirror pods of the static pods | kubeadm |
+| `pod/kube-apiserver-dgx-spark-01`, `etcd-…`, `kube-scheduler-…`, `kube-controller-manager-…` | mirror pods of the static pods | kubeadm |
 | `deploy/coredns` | Cluster DNS `10.43.0.10` (the root's; each vCluster has its own) | kubeadm add-on |
 | `ds/kube-proxy` | Service VIPs via iptables | kubeadm add-on |
 | `ds/cilium`, `deploy/cilium-operator`, Hubble | pod network, NetworkPolicy, flow logs | 01 Ansible `roles/cilium` |
@@ -135,7 +135,7 @@ The 01 Ansible kubeadm config sets `systemReserved: {cpu: 2, memory: 8Gi}`, `kub
 | − eviction threshold | — | 4 Gi | kubelet starts evicting below this |
 | **Allocatable** | **17** | **≈105.7 GiB** | What the scheduler hands out, **CPU and GPU combined** |
 
-Unlike k3s, the control plane is *not* inside kube-reserved: the static pods request ~0.65 CPU and a few hundred MiB themselves (apiserver 250m, controller-manager 200m, scheduler 100m, etcd 100m + 100Mi) out of allocatable. `kubectl --context spark-root describe node spark-01 | grep -A12 'Allocated resources'` shows them alongside the vCluster pods.
+Unlike k3s, the control plane is *not* inside kube-reserved: the static pods request ~0.65 CPU and a few hundred MiB themselves (apiserver 250m, controller-manager 200m, scheduler 100m, etcd 100m + 100Mi) out of allocatable. `kubectl --context spark-root describe node dgx-spark-01 | grep -A12 'Allocated resources'` shows them alongside the vCluster pods.
 
 ### 3.4 Three API servers, one node
 
@@ -165,7 +165,7 @@ sequenceDiagram
     participant E as etcd
     participant S as scheduler
   end
-  box rgb(230,244,245) Node · spark-01
+  box rgb(230,244,245) Node · dgx-spark-01
     participant K as kubelet
     participant C as containerd
     participant N as nvidia runtime + runc
@@ -178,7 +178,7 @@ sequenceDiagram
   A->>E: write /registry/pods/vc-dev-lab/gpu-smoke-x-tenant-beta-x-dev-lab
   S->>A: watch event: unscheduled pod
   S->>S: filter (resources, taints, affinity) → score
-  S->>A: POST …/binding (nodeName=spark-01)
+  S->>A: POST …/binding (nodeName=dgx-spark-01)
   K->>A: watch event: pod bound to me
   K->>K: admit (device plugin allocates one nvidia.com/gpu slice)
   K->>C: RunPodSandbox (pause container, netns via Cilium CNI)
@@ -216,9 +216,9 @@ Expected (abridged):
 [PASS] kubelet active
 [PASS] kubeadm v1.36.5
 [PASS] root API server /readyz (context spark-root, KUBECONFIG=…/kubeconfig-spark-lab.yaml)
-[PASS] spark-01 schedulable (no control-plane taint)
+[PASS] dgx-spark-01 schedulable (no control-plane taint)
 [PASS] Cilium agent ready
-[PASS] spark-01 allocatable nvidia.com/gpu=15 (time-slices)
+[PASS] dgx-spark-01 allocatable nvidia.com/gpu=15 (time-slices)
 [PASS] vCluster dev-lab answers
 [PASS] vCluster llms answers
 ```
@@ -233,7 +233,7 @@ sudo ss -ltnp | grep -E ':(6443|10250|10257|10259|2379|2381) '
 kubectl --context spark-root -n kube-system get pods -o wide | grep -E 'apiserver|etcd|scheduler|controller'
 ```
 
-Expected: four YAML files; four running containers; each port owned by its own process (`kube-apiserver`, `etcd`, …) and `kubelet` on 10250; and four `…-spark-01` mirror pods. Delete one of them with `kubectl delete pod` and watch it come straight back — the kubelet owns static pods, not the API server.
+Expected: four YAML files; four running containers; each port owned by its own process (`kube-apiserver`, `etcd`, …) and `kubelet` on 10250; and four `…-dgx-spark-01` mirror pods. Delete one of them with `kubectl delete pod` and watch it come straight back — the kubelet owns static pods, not the API server.
 
 ```bash
 sudo grep -A3 'audit-policy-file\|encryption-provider' /etc/kubernetes/manifests/kube-apiserver.yaml | head -8
@@ -251,7 +251,7 @@ kubectl --context spark-root get lease -n kube-system        # scheduler + contr
 kubectl --context dev-lab get --raw='/readyz'                 # the vCluster's own API server
 ```
 
-Expected: `readyz check passed`, Leases `kube-scheduler` and `kube-controller-manager` with a `HOLDER` of the form `spark-01_<uuid>`, and `ok` from dev-lab.
+Expected: `readyz check passed`, Leases `kube-scheduler` and `kube-controller-manager` with a `HOLDER` of the form `dgx-spark-01_<uuid>`, and `ok` from dev-lab.
 
 ### Step 4 · Watch a pod walk through its lifecycle — in both clusters
 
@@ -278,7 +278,7 @@ kubectl --context dev-lab -n tenant-beta get pod gpu-smoke -w -o wide
 Expected event order on the root, which matches the sequence diagram:
 
 ```text
-Normal  Scheduled  pod/gpu-smoke-x-tenant-beta-x-dev-lab  Successfully assigned vc-dev-lab/gpu-smoke-x-tenant-beta-x-dev-lab to spark-01
+Normal  Scheduled  pod/gpu-smoke-x-tenant-beta-x-dev-lab  Successfully assigned vc-dev-lab/gpu-smoke-x-tenant-beta-x-dev-lab to dgx-spark-01
 Normal  Pulling    pod/gpu-smoke-x-tenant-beta-x-dev-lab  Pulling image "nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04"
 Normal  Pulled     pod/gpu-smoke-x-tenant-beta-x-dev-lab  Successfully pulled image … in 14.2s
 Normal  Created    pod/gpu-smoke-x-tenant-beta-x-dev-lab  Created container: smi
@@ -338,7 +338,7 @@ In dev-lab the managers are `kubectl-client-side-apply` and the syncer (writing 
 |---|---|---|
 | Control plane healthy | `kubectl --context spark-root get --raw /readyz` | `ok` |
 | Static pods | `ls /etc/kubernetes/manifests` | 4 files |
-| Node Ready + GPU advertised | `kubectl --context spark-root get node spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}'` | `15` |
+| Node Ready + GPU advertised | `kubectl --context spark-root get node dgx-spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}'` | `15` |
 | Pod completed on GPU (via dev-lab) | `kubectl --context dev-lab -n tenant-beta get pod gpu-smoke` | `Completed` |
 | Scripted | `scripts/verify.sh platform vclusters gpu` | all `[PASS]` |
 
@@ -348,7 +348,7 @@ In dev-lab the managers are `kubectl-client-side-apply` and the syncer (writing 
 
 | Symptom | Likely cause | Diagnose | Fix |
 |---|---|---|---|
-| Pod `Pending`, event `0/1 nodes are available: 1 Insufficient nvidia.com/gpu` | All 15 time-slices taken | `kubectl --context spark-root describe node spark-01 \| grep -A10 'Allocated resources'` | Free a slice, queue with Kueue (Vol 05) |
+| Pod `Pending`, event `0/1 nodes are available: 1 Insufficient nvidia.com/gpu` | All 15 time-slices taken | `kubectl --context spark-root describe node dgx-spark-01 \| grep -A10 'Allocated resources'` | Free a slice, queue with Kueue (Vol 05) |
 | Pod `Pending` in a vCluster, **no** scheduler events | the root quota of that vCluster is spent | `kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget` | Vol 27 §8; break/fix 02 |
 | Pod `Pending` on the root, **no events at all** | scheduler not running / not leader | `kubectl --context spark-root get lease -n kube-system kube-scheduler -o yaml` (renewTime stale?), `sudo crictl logs $(sudo crictl ps -q --name kube-scheduler)` | fix the manifest in `/etc/kubernetes/manifests/kube-scheduler.yaml`; the kubelet restarts it |
 | `kubectl` hangs / `connection refused :6443` | API server static pod crash-looping (bad flag, cert, etcd down) | `sudo crictl ps -a --name kube-apiserver`, `sudo crictl logs <id>`, `journalctl -u kubelet -n 50` | revert the last edit of `kube-apiserver.yaml`; check etcd first |
@@ -376,10 +376,10 @@ sudo apt-mark unhold kubeadm && sudo apt-get install -y kubeadm=1.37.x-1.1 && su
 sudo kubeadm upgrade plan
 sudo kubeadm upgrade apply v1.37.x          # rewrites the static pods one by one, renews certificates
 # 2. kubelet + kubectl
-kubectl --context spark-root drain spark-01 --ignore-daemonsets --delete-emptydir-data   # single node: evicts everything
+kubectl --context spark-root drain dgx-spark-01 --ignore-daemonsets --delete-emptydir-data   # single node: evicts everything
 sudo apt-mark unhold kubelet kubectl && sudo apt-get install -y kubelet=1.37.x-1.1 kubectl=1.37.x-1.1 && sudo apt-mark hold kubelet kubectl
 sudo systemctl daemon-reload && sudo systemctl restart kubelet
-kubectl --context spark-root uncordon spark-01
+kubectl --context spark-root uncordon dgx-spark-01
 scripts/verify.sh
 ```
 
@@ -389,7 +389,7 @@ Before you start: check that the vCluster release supports the new host version 
 
 ```mermaid
 flowchart LR
-  A["Today<br/>1 × Spark<br/>control plane + worker<br/>+ 2 vClusters"] --> B["+ spark-02<br/>kubeadm join (worker)<br/>(01 Ansible k8s_workers)"]
+  A["Today<br/>1 × Spark<br/>control plane + worker<br/>+ 2 vClusters"] --> B["+ dgx-spark-02<br/>kubeadm join (worker)<br/>(01 Ansible k8s_workers)"]
   B --> C["3 control planes<br/>stacked etcd HA<br/>(quorum 2 of 3)"]
   C --> D["Datacenter<br/>dedicated CP nodes<br/>GPU workers in pools<br/>one vCluster per team"]
   classDef gpu fill:#76b900,stroke:#3d6000,color:#000
@@ -400,7 +400,7 @@ flowchart LR
 
 | Step | What changes | What stays the same |
 |---|---|---|
-| Add spark-02 | Uncomment `spark-02` under `k8s_workers` in `inventory/hosts.yml` and re-run `playbooks/05-kubernetes.yml`. Both vClusters see the node at once | All manifests. The scheduler now has 30 GPU slices; budgets stay until you raise them |
+| Add dgx-spark-02 | Uncomment `dgx-spark-02` under `k8s_workers` in `inventory/hosts.yml` and re-run `playbooks/05-kubernetes.yml`. Both vClusters see the node at once | All manifests. The scheduler now has 30 GPU slices; budgets stay until you raise them |
 | 3 control planes | `controlPlaneEndpoint` is already in the kubeadm config, so more control planes can `kubeadm join --control-plane` (with `kubeadm init phase upload-certs`). You need three machines for etcd quorum (2 Sparks can't form a safe quorum) | Workloads, vClusters |
 | Datacenter | Control plane on small CPU nodes, GPU nodes tainted `nvidia.com/gpu=present:NoSchedule`, OIDC auth, external etcd, a vCluster per team | The loops, the objects, the debugging method in this volume |
 

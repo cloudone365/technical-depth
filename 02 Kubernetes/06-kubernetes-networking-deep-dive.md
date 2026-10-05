@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| **You will build** | A packet-level map of the pod network on your Spark: pod netns → `eth0` → `lxc*` veth → Cilium's eBPF datapath → `cilium_host` / `cilium_vxlan` (VXLAN over the management LAN when spark-02 joins). You'll follow a pod that a tenant created *inside a vCluster* to the real root pod that carries its traffic, prove tenant NetworkPolicies and the root's `vcluster-boundary` policy with Hubble, and see where RDMA traffic *must not* go (the overlay) |
-| **Hardware** | spark-01. §5.6 and §8 need spark-02 and the QSFP cable |
+| **You will build** | A packet-level map of the pod network on your Spark: pod netns → `eth0` → `lxc*` veth → Cilium's eBPF datapath → `cilium_host` / `cilium_vxlan` (VXLAN over the management LAN when dgx-spark-02 joins). You'll follow a pod that a tenant created *inside a vCluster* to the real root pod that carries its traffic, prove tenant NetworkPolicies and the root's `vcluster-boundary` policy with Hubble, and see where RDMA traffic *must not* go (the overlay) |
+| **Hardware** | dgx-spark-01. §5.6 and §8 need dgx-spark-02 and the QSFP cable |
 | **Time** | 90 min |
 | **Risk** | Low. Breaking policies is scripted and reversible (`breakfix 06`) |
 | **Clusters** | `spark-root` (Cilium, Hubble, the real pods, `netshoot-host`), `dev-lab` (netshoot, echo, the tenant probes), `llms` (serving policy, Traefik, `breakfix 06`) |
@@ -33,7 +33,7 @@ There is one more thing to understand before any of it makes sense: **a vCluster
 
 ```mermaid
 flowchart LR
-  subgraph S1["spark-01 · node IP 192.168.0.100 · podCIDR 10.42.0.0/24"]
+  subgraph S1["dgx-spark-01 · node IP 192.168.0.100 · podCIDR 10.42.0.0/24"]
     direction TB
     subgraph VCD["root ns vc-dev-lab (vCluster dev-lab's pods)"]
       subgraph P1["netshoot-…-x-lab-tools-x-dev-lab"]
@@ -59,7 +59,7 @@ flowchart LR
     KP["kube-proxy (iptables)<br/>Services — Vol 07"]
     CX["CX-7 enp1s0f1np1<br/>Multus net1 · RDMA"]
   end
-  subgraph S2["spark-02 · 192.168.0.101 · podCIDR 10.42.1.0/24"]
+  subgraph S2["dgx-spark-02 · 192.168.0.101 · podCIDR 10.42.1.0/24"]
     VX2["cilium_vxlan"] --> P3["pod C 10.42.1.7"]
   end
   NIC == "outer: 192.168.0.100 → .101 UDP 8472<br/>inner: 10.42.0.15 → 10.42.1.7" ==> VX2
@@ -93,10 +93,10 @@ With one Spark, pod ↔ pod traffic never leaves the node: Cilium's eBPF program
 
 | Range | Purpose | Set by |
 |---|---|---|
-| 192.168.0.0/24 | management / node IPs (`spark-01` .100, `spark-02` .101) | 01 Ansible inventory |
+| 192.168.0.0/24 | management / node IPs (`dgx-spark-01` .100, `dgx-spark-02` .101) | 01 Ansible inventory |
 | 192.168.0.110–119 | MetalLB L2 pool: .111 dev-lab API, .112 llms API, .115 Traefik in llms | 01 Ansible `roles/metallb` |
 | 192.168.100.0/24, 192.168.101.0/24 | CX-7 point-to-point (one subnet per logical port), Multus NADs `cx7-a` / `cx7-b` | 01 Ansible `host_vars`, `playbooks/13-multus-rdma.yml` |
-| **10.42.0.0/16** | pods, one /24 per node (`10.42.0.0/24` spark-01, `10.42.1.0/24` spark-02). Root pods and synced vCluster pods share it | kubeadm `podSubnet`; kube-controller-manager allocates `node.spec.podCIDR`; Cilium `ipam.mode=kubernetes` uses it |
+| **10.42.0.0/16** | pods, one /24 per node (`10.42.0.0/24` dgx-spark-01, `10.42.1.0/24` dgx-spark-02). Root pods and synced vCluster pods share it | kubeadm `podSubnet`; kube-controller-manager allocates `node.spec.podCIDR`; Cilium `ipam.mode=kubernetes` uses it |
 | **10.43.0.0/16** | Service ClusterIPs — including every Service a vCluster syncs. Root DNS at **10.43.0.10** | kubeadm `serviceSubnet` |
 
 A /24 holds 254 pod IPs; the kubelet's `maxPods: 200` (01 Ansible) stops the node first.
@@ -267,7 +267,7 @@ kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- ping -c2 -M do -s
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- ping -c2 -M do -s 1423 "$ECHO_IP"   # → "message too long, mtu=1450"
 ```
 
-With a 1500-byte management LAN, the route MTU is 1450 even for a neighbour on the same node: Cilium budgets for the VXLAN header on every pod route so a pod doesn't behave differently when spark-02 joins and the destination moves.
+With a 1500-byte management LAN, the route MTU is 1450 even for a neighbour on the same node: Cilium budgets for the VXLAN header on every pod route so a pod doesn't behave differently when dgx-spark-02 joins and the destination moves.
 
 ### 5.5 NetworkPolicies: prove isolation, then break it
 
@@ -345,10 +345,10 @@ Clean up the probes: `kubectl --context dev-lab -n tenant-alpha delete pod probe
 ### 5.6 (2 Sparks) See VXLAN on the wire and compare with RDMA
 
 ```bash
-# pods on both nodes: the root scheduler spreads dev-lab's pods across spark-01 and spark-02
+# pods on both nodes: the root scheduler spreads dev-lab's pods across dgx-spark-01 and dgx-spark-02
 kubectl --context dev-lab -n lab-tools scale deploy echo --replicas=4
-kubectl --context dev-lab -n lab-tools get pods -l app=echo -o wide        # some on spark-02 (10.42.1.x)
-# capture the *outer* packets on the management NIC (run on spark-01)
+kubectl --context dev-lab -n lab-tools get pods -l app=echo -o wide        # some on dgx-spark-02 (10.42.1.x)
+# capture the *outer* packets on the management NIC (run on dgx-spark-01)
 sudo tcpdump -ni enP7s7 udp port 8472 -c 4 -vv
 kubectl --context spark-root -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg bpf tunnel list   # podCIDR → node IP
 # overlay vs RDMA throughput: iperf3 between two netshoot pods vs ib_write_bw on the hosts (01 Ansible playbooks/11-rdma-perftest.yml)
@@ -379,7 +379,7 @@ The gap is large. Pod-to-pod iperf3 over the overlay is capped by the 10 GbE man
 | Symptom | Cause | Diagnose | Fix |
 |---|---|---|---|
 | `curl` of a small page works, big responses/`kubectl logs -f` hang | MTU mismatch (one node's mgmt NIC at 9000, the other at 1500, or a switch in between that drops jumbo frames) | `ping -M do -s <size>` sweep between pods; `ip link` on both nodes; `ip route` in a pod | same MTU on every node's mgmt NIC, then `kubectl --context spark-root -n kube-system rollout restart ds/cilium` and recreate pods |
-| Pods on spark-02 can't reach spark-01 pods | UDP 8472 blocked between node IPs, or a node registered with the wrong `node-ip` | `cilium-dbg bpf tunnel list`, `kubectl --context spark-root get nodes -o wide` (INTERNAL-IP), `tcpdump -ni enP7s7 udp port 8472` on both | open UDP 8472 in ufw between nodes; fix `node-ip` in the kubeadm join config |
+| Pods on dgx-spark-02 can't reach dgx-spark-01 pods | UDP 8472 blocked between node IPs, or a node registered with the wrong `node-ip` | `cilium-dbg bpf tunnel list`, `kubectl --context spark-root get nodes -o wide` (INTERNAL-IP), `tcpdump -ni enP7s7 udp port 8472` on both | open UDP 8472 in ufw between nodes; fix `node-ip` in the kubeadm join config |
 | New pods stuck `ContainerCreating`: `unable to allocate IP` / Cilium CNI errors | podCIDR exhausted, Cilium agent not ready, or the CNI config missing | `kubectl --context spark-root -n kube-system logs ds/cilium -c cilium-agent \| grep -i ipam`; `ls /etc/cni/net.d` | wait for / restart the agent; check `node.spec.podCIDR` is set |
 | Pods get `net1` but no `eth0` traffic after installing Multus | Multus config ordering or Cilium installed with `cni.exclusive=true` (renames other configs) | `ls /etc/cni/net.d`; `kubectl --context spark-root -n kube-system logs ds/kube-multus-ds` | keep `cni.exclusive=false` (01 Ansible `roles/cilium`) |
 | NetworkPolicy written in a vCluster has no effect | policy sync off, or the policy only exists inside the vCluster | `kubectl --context spark-root -n vc-<vc> get netpol` — is the `…-x-<ns>-x-<vc>` copy there? | `sync.toHost.networkPolicies.enabled: true` in `vclusters/<vc>.yaml`, `helm upgrade` |
@@ -407,6 +407,6 @@ The gap is large. Pod-to-pod iperf3 over the overlay is capped by the 10 GbE man
 
 - [ ] I traced a vCluster pod's `eth0` to its root pod, its `lxc*` veth, `cilium_host` and the route back.
 - [ ] I read a flow in Hubble and know why it shows root names and numeric identities.
-- [ ] I measured the pod route MTU and know where the 50 bytes go when spark-02 joins.
+- [ ] I measured the pod route MTU and know where the 50 bytes go when dgx-spark-02 joins.
 - [ ] I proved tenant isolation inside a vCluster *and* the root's boundary between vClusters, and diagnosed a policy that broke ingress.
 - [ ] I can explain why NCCL must not use the pod overlay.

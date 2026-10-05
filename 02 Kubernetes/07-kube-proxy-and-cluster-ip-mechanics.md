@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | The ability to read a Service's load-balancing rules straight out of the root's iptables — including Services a tenant created inside a vCluster, which reach the kernel as synced root Services. You'll watch endpoints appear and disappear with readiness, see why rolling a model server can drop requests, follow a MetalLB LoadBalancer IP to a pod, and size conntrack for an inference gateway |
-| **Hardware** | spark-01 |
+| **Hardware** | dgx-spark-01 |
 | **Time** | 75 min |
 | **Risk** | None |
 | **Clusters** | `spark-root` (kube-proxy, iptables, conntrack, MetalLB, the synced Services), `dev-lab` (echo Services), `llms` (mock-llm streams, Traefik LoadBalancer) |

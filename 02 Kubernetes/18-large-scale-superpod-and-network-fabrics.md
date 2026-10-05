@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | A working model of datacenter AI fabrics anchored in hardware you can touch: the two-Spark CX-7 link as a "one-rail, zero-switch" fabric. You'll read and interpret NIC counters, simulate a degraded link and watch NCCL react, and size a rail-optimised fat tree with a calculator |
-| **Clusters** | mostly the hosts and the cable. `spark-root` (nodes, conditions, taints, spark-02 as a worker) · `llms` (the NCCL job in `batch`, §5.3–5.4) |
+| **Clusters** | mostly the hosts and the cable. `spark-root` (nodes, conditions, taints, dgx-spark-02 as a worker) · `llms` (the NCCL job in `batch`, §5.3–5.4) |
 | **Hardware** | 1 Spark for §5.1–5.2 and §5.5. 2 Sparks + QSFP cable for §5.3–5.4 |
 | **Time** | 75 min |
 | **Risk** | Low. §5.4 takes one logical CX-7 port down for a minute |
@@ -70,11 +70,11 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-  subgraph S1["spark-01"]
+  subgraph S1["dgx-spark-01"]
     G1["GB10"] --- C1["CX-7<br/>enp1s0f1np1 · enP2p1s0f1np1"]
     M1["enP7s7 10 GbE"]
   end
-  subgraph S2["spark-02"]
+  subgraph S2["dgx-spark-02"]
     G2["GB10"] --- C2["CX-7"]
     M2["enP7s7"]
   end
@@ -183,7 +183,7 @@ Then run the NCCL job (Vol 17 §5.5) and diff the counters before and after. PFC
 ### 5.4 (2 Sparks) Degrade the fabric and watch NCCL
 
 ```bash
-# take ONE logical half down on spark-02 for the duration of a run
+# take ONE logical half down on dgx-spark-02 for the duration of a run
 ssh nvidia@192.168.0.101 'sudo ip link set enP2p1s0f1np1 down'
 kubectl --context llms delete -k manifests/llms/80-distributed/two-spark --ignore-not-found
 kubectl --context llms apply -k manifests/llms/80-distributed/two-spark
@@ -217,12 +217,12 @@ chmod +x /tmp/fabric-health.sh && /tmp/fabric-health.sh && echo HEALTHY
 In Kubernetes, this becomes a node-problem-detector custom plugin on the **root**. A failing check sets a node condition, and a taint keeps distributed jobs away. Simulate the outcome by hand:
 
 ```bash
-kubectl --context spark-root taint node spark-02 spark.lab/fabric=degraded:NoSchedule
-kubectl --context llms describe node spark-02 | grep -i taint          # synced into the vCluster
+kubectl --context spark-root taint node dgx-spark-02 spark.lab/fabric=degraded:NoSchedule
+kubectl --context llms describe node dgx-spark-02 | grep -i taint          # synced into the vCluster
 kubectl --context llms apply -k manifests/llms/80-distributed/two-spark
 kubectl --context llms -n batch get pods -l job-name=ddp -o wide       # rank 1 Pending: untolerated taint
 kubectl --context llms delete -k manifests/llms/80-distributed/two-spark
-kubectl --context spark-root taint node spark-02 spark.lab/fabric-
+kubectl --context spark-root taint node dgx-spark-02 spark.lab/fabric-
 ```
 
 The tenant sees the reason in its own events (`1 node(s) had untolerated taint {spark.lab/fabric: degraded}`) without any access to the fabric. Note the scope: a taint stops *every* new pod on that node, in every cluster — break/fix 13 shows that blast radius on one node. A production check would use a dedicated taint that only distributed jobs care about, or a node label that the training ResourceFlavor selects on. The 01 Ansible `spark_validate` role runs the same checks at the host level.

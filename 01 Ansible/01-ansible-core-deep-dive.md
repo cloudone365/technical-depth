@@ -66,7 +66,7 @@ Ansible is **agentless**. Nothing runs on the Spark between plays. Each task is 
 flowchart TB
   all --> spark
   all --> k8s_control_plane & k8s_workers & slurm_controller & slurm_compute & vault & monitoring & nfs_server & nfs_client
-  spark --> s1[spark-01] & s2[spark-02]
+  spark --> s1[dgx-spark-01] & s2[dgx-spark-02]
   k8s_control_plane --> s1
   k8s_workers --> s2
   slurm_compute --> spark
@@ -87,7 +87,7 @@ Rule of thumb: **hardware facts in `group_vars/spark.yml`, per-box addressing in
 ### Step 1 — Build the control node
 
 ```bash
-# Any Linux/macOS/WSL box with Python ≥ 3.11 (or spark-01 itself)
+# Any Linux/macOS/WSL box with Python ≥ 3.11 (or dgx-spark-01 itself)
 git clone https://github.com/cloudone365/technical-depth.git
 cd "technical-depth/01 Ansible/lab"
 python3 -m venv ~/.venvs/spark-ansible
@@ -97,7 +97,7 @@ ansible-galaxy collection install -r requirements.yml -p ./collections
 ansible --version        # expect: core 2.18.x, config file = .../lab/ansible.cfg
 ```
 
-> **Using the Spark as its own control node?** That works. In `hosts.yml` set `ansible_connection: local` for `spark-01`. You lose nothing except the "rebuild from outside" property, so keep a copy of the repo elsewhere.
+> **Using the Spark as its own control node?** That works. In `hosts.yml` set `ansible_connection: local` for `dgx-spark-01`. You lose nothing except the "rebuild from outside" property, so keep a copy of the repo elsewhere.
 
 ```ini
 # lab/ansible.cfg
@@ -177,7 +177,7 @@ Each physical QSFP cage shows up as **two** netdevs (`enp1s0f1np1` and `enP2p1s0
 ---
 # Static inventory for the DGX Spark lab.
 #
-#   Single-Spark mode: delete spark-02 (or leave it commented) — every playbook
+#   Single-Spark mode: delete dgx-spark-02 (or leave it commented) — every playbook
 #   works on one node; 2-node sections are skipped automatically.
 #
 #   Management network (10GbE RJ-45, enP7s7) : 192.168.0.0/24
@@ -193,38 +193,38 @@ all:
           ansible_python_interpreter: "{{ ansible_playbook_python }}"
     spark:
       hosts:
-        spark-01:
+        dgx-spark-01:
           ansible_host: 192.168.0.100
-        spark-02:
+        dgx-spark-02:
           ansible_host: 192.168.0.101
 
     # ---- functional groups (a host can be in several) -------------------
-    # Kubernetes (Volume 16): kubeadm control plane on spark-01. It also runs
+    # Kubernetes (Volume 16): kubeadm control plane on dgx-spark-01. It also runs
     # workloads (no control-plane taint), so a single Spark is a complete cluster.
     k8s_control_plane:
       hosts:
-        spark-01:
+        dgx-spark-01:
     k8s_workers:
       hosts:
-        spark-02:
+        dgx-spark-02:
     slurm_controller:
       hosts:
-        spark-01:
+        dgx-spark-01:
     slurm_compute:
       children:
         spark:
     vault:
       hosts:
-        spark-01:
+        dgx-spark-01:
     monitoring:
       hosts:
-        spark-01:
+        dgx-spark-01:
     nfs_server:
       hosts:
-        spark-01:
+        dgx-spark-01:
     nfs_client:
       hosts:
-        spark-02:
+        dgx-spark-02:
 ```
 
 ```yaml
@@ -283,7 +283,7 @@ spark_sysctls:
 ```
 
 ```yaml
-# lab/inventory/host_vars/spark-01.yml
+# lab/inventory/host_vars/dgx-spark-01.yml
 ---
 spark_node_index: 1
 
@@ -305,7 +305,7 @@ Check that Ansible sees what you meant:
 
 ```bash
 ansible-inventory --graph
-ansible-inventory --host spark-01 --yaml | head -40     # merged vars for one host
+ansible-inventory --host dgx-spark-01 --yaml | head -40     # merged vars for one host
 ansible -m debug -a "var=cx7_interfaces" spark           # per-host value
 ```
 
@@ -340,7 +340,7 @@ ansible-playbook playbooks/00-ping.yml -K     # -K prompts for the sudo password
 Expected output (trimmed; your exact numbers and kernel will differ):
 
 ```
-ok: [spark-01] => msg: spark-01 aarch64 20 cores 119.6 GiB Ubuntu 24.04 kernel 6.x-…-nvidia
+ok: [dgx-spark-01] => msg: dgx-spark-01 aarch64 20 cores 119.6 GiB Ubuntu 24.04 kernel 6.x-…-nvidia
 ```
 
 > The reported memory is slightly under 128 GB: firmware and carve-outs take some. The `spark_expected.mem_total_gib_min: 110` guard allows for that.
@@ -699,7 +699,7 @@ A diagnostic sequence worth memorising:
 ```bash
 ansible spark -m ping -vvv 2>&1 | grep -E 'ESTABLISH|EXEC|SSH:'   # is it SSH, sudo or Python?
 ansible-config dump --only-changed                                # which config is actually in effect
-ansible-inventory --host spark-02 --yaml                          # which vars will be used
+ansible-inventory --host dgx-spark-02 --yaml                          # which vars will be used
 ansible-playbook playbooks/01-baseline.yml --list-tasks --list-tags
 ansible-playbook playbooks/01-baseline.yml --start-at-task "Harden sshd (drop-in, validated before reload)" -K
 ```

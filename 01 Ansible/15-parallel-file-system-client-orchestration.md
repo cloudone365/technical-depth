@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **You will build** | spark-01 exports `/srv/models` (its NVMe) over **NFSv4.2 on RDMA** across the CX-7 link; spark-02 mounts it at `/mnt/models` with an automatic TCP fallback. One download of a 70B checkpoint serves both nodes, and tensor-parallel runs see identical paths |
+| **You will build** | dgx-spark-01 exports `/srv/models` (its NVMe) over **NFSv4.2 on RDMA** across the CX-7 link; dgx-spark-02 mounts it at `/mnt/models` with an automatic TCP fallback. One download of a 70B checkpoint serves both nodes, and tensor-parallel runs see identical paths |
 | **Hardware** | 2× DGX Spark with the CX-7 fabric from Volume 11 |
 | **Time** | 45 min |
 | **Risk** | Low. `hard` mounts mean clients hang (rather than corrupt) if the server disappears; `x-systemd.automount` keeps boot from blocking |
@@ -28,11 +28,11 @@ Model weights are **read-mostly**, which is the easy case for NFS: no locking st
 
 ```mermaid
 flowchart LR
-  subgraph S1["spark-01 (nfs_server)"]
+  subgraph S1["dgx-spark-01 (nfs_server)"]
     NV1[("NVMe<br/>/srv/models")] --> NFSD["nfsd (16 threads)<br/>TCP :2049 + RDMA :20049"]
     HF1["huggingface-cli download<br/>(writes here)"] --> NV1
   end
-  subgraph S2["spark-02 (nfs_client)"]
+  subgraph S2["dgx-spark-02 (nfs_client)"]
     AM["systemd automount<br/>/mnt/models"] --> RPC["rpcrdma → NFSv4.2 client<br/>nconnect=4, rsize/wsize 1M"]
     APP2["vLLM / PyTorch<br/>--model /mnt/models/…"] --> AM
   end
@@ -58,8 +58,8 @@ flowchart LR
 ```yaml
 # lab/roles/nfs_rdma/defaults/main.yml
 ---
-# Shared model/dataset cache: spark-01 exports its NVMe over NFSv4.2 on RDMA
-# (port 20049) across the CX-7 link; spark-02 mounts it. One copy of a 70 GB
+# Shared model/dataset cache: dgx-spark-01 exports its NVMe over NFSv4.2 on RDMA
+# (port 20049) across the CX-7 link; dgx-spark-02 mounts it. One copy of a 70 GB
 # checkpoint instead of two downloads.
 nfs_rdma_export_path: /srv/models
 nfs_rdma_mount_path: /mnt/models
@@ -204,19 +204,19 @@ ssh nvidia@192.168.0.101 'nfsstat -m | grep -A1 /mnt/models; cat /proc/fs/nfsd/p
 ### 3.1 Put a model in it once, and use it on both nodes
 
 ```bash
-# on spark-01 (server side, local disk speed)
+# on dgx-spark-01 (server side, local disk speed)
 docker run --rm -v /srv/models:/models -e HF_TOKEN nvcr.io/nvidia/pytorch:25.11-py3 \
   huggingface-cli download Qwen/Qwen2.5-7B-Instruct --local-dir /models/qwen2.5-7b-instruct
-# on spark-02 (over RDMA)
+# on dgx-spark-02 (over RDMA)
 ls -lh /mnt/models/qwen2.5-7b-instruct/*.safetensors
 ```
 
-For multi-node vLLM (NVIDIA's Ray-based Spark recipe), mount the **same path** in both containers: `-v /srv/models:/models` on spark-01 and `-v /mnt/models:/models` on spark-02, then pass `--model /models/...`. Identical paths inside the containers are what matters.
+For multi-node vLLM (NVIDIA's Ray-based Spark recipe), mount the **same path** in both containers: `-v /srv/models:/models` on dgx-spark-01 and `-v /mnt/models:/models` on dgx-spark-02, then pass `--model /models/...`. Identical paths inside the containers are what matters.
 
 ### 3.2 Measure it
 
 ```bash
-# spark-02: sequential read over RDMA (direct I/O, bypass client page cache)
+# dgx-spark-02: sequential read over RDMA (direct I/O, bypass client page cache)
 fio --name=seqread --filename=/mnt/models/fio.bin --size=16G --rw=read --bs=1M \
     --ioengine=libaio --iodepth=32 --numjobs=4 --direct=1 --group_reporting
 # compare with TCP: remount with proto=tcp (or run the fallback task) and repeat
@@ -263,6 +263,6 @@ The lesson carries over: **every storage client with a kernel module must be par
 
 ## 7. Validation
 
-- [ ] `/proc/mounts` on spark-02 shows `proto=rdma,port=20049` for `/mnt/models`.
+- [ ] `/proc/mounts` on dgx-spark-02 shows `proto=rdma,port=20049` for `/mnt/models`.
 - [ ] One model downloaded once, loaded on both nodes.
 - [ ] `fio` numbers recorded for RDMA vs TCP, with client CPU usage for each.

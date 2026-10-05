@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **You will build** | A Slurm cluster across your Sparks (controller on spark-01, `slurmd` on both), GPUs as GRES (`gpu:gb10:1`), device and memory confinement via cgroup v2, a health check that **drains** a node on GPU faults or unified-memory exhaustion, and batch jobs, including a 2-node NCCL run |
+| **You will build** | A Slurm cluster across your Sparks (controller on dgx-spark-01, `slurmd` on both), GPUs as GRES (`gpu:gb10:1`), device and memory confinement via cgroup v2, a health check that **drains** a node on GPU faults or unified-memory exhaustion, and batch jobs, including a 2-node NCCL run |
 | **Hardware** | 1–2× DGX Spark |
 | **Time** | 60 min |
 | **Risk** | Low. Distro packages; configs are templated and identical on every node |
@@ -20,12 +20,12 @@ Slurm and Kubernetes can coexist on the same Sparks for learning purposes, but *
 ```mermaid
 flowchart LR
   U["user: sbatch / srun"] --> CTLD
-  subgraph S1["spark-01"]
+  subgraph S1["dgx-spark-01"]
     CTLD["slurmctld :6817<br/>StateSave /var/spool/slurmctld"]
     D1["slurmd :6818<br/>gres gpu:gb10:1"]
     M1["munged"]
   end
-  subgraph S2["spark-02"]
+  subgraph S2["dgx-spark-02"]
     D2["slurmd :6818<br/>gres gpu:gb10:1"]
     M2["munged"]
   end
@@ -275,7 +275,7 @@ Design choices:
 
 - **The munge key is generated with `creates:`** on the control node and never regenerated. A new key on a live cluster would lock out every node.
 - **"Resume" is selective.** Nodes drained by `healthcheck:` or `maint:` reasons stay drained. Only nodes down because of the reconfiguration itself get resumed. An automation that blindly resumes everything would undo your own safety net.
-- **Same template, every node.** The role renders `slurm.conf` from inventory, so adding spark-03 is an inventory edit plus a run.
+- **Same template, every node.** The role renders `slurm.conf` from inventory, so adding dgx-spark-03 is an inventory edit plus a run.
 
 ---
 
@@ -285,8 +285,8 @@ Design choices:
 cd "01 Ansible/lab"
 ansible-playbook playbooks/07-slurm.yml -K
 ssh nvidia@192.168.0.100
-sinfo -N -o "%N %T %G %m %c"          # spark-01 idle gpu:gb10:1 106496 20
-scontrol show node spark-01 | grep -E 'Gres|RealMemory|State'
+sinfo -N -o "%N %T %G %m %c"          # dgx-spark-01 idle gpu:gb10:1 106496 20
+scontrol show node dgx-spark-01 | grep -E 'Gres|RealMemory|State'
 ```
 
 ### 3.1 Prove device confinement
@@ -345,7 +345,7 @@ sbatch ~/nccl-2node.sbatch
 ### 3.4 Watch the health check drain a node
 
 ```bash
-# on spark-02 — TEMPORARILY make the UMA threshold impossible to meet
+# on dgx-spark-02 — TEMPORARILY make the UMA threshold impossible to meet
 sudo sed -i 's/-lt 4 ]/-lt 999 ]/' /usr/local/sbin/spark-slurm-healthcheck.sh
 sleep 130; sinfo -R          # REASON: healthcheck: UMA MemAvailable < 4 GiB
 
@@ -355,7 +355,7 @@ ansible-playbook playbooks/07-slurm.yml -K
 sinfo -R                     # still drained: that's the point
 
 # a human (or an AWX job with approval) resumes it after checking
-sudo scontrol update NodeName=spark-02 State=RESUME
+sudo scontrol update NodeName=dgx-spark-02 State=RESUME
 ```
 
 ### 3.5 Experiment: does GPU memory count against the job's cgroup on UMA?

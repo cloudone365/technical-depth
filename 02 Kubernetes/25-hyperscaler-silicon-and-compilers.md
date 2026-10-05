@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | A measured answer, on your GB10, to "what does a compiler buy me?" (eager vs `torch.compile` vs max-autotune, with the generated kernels), plus a practical map of how Kubernetes schedules GPUs, TPU slices and Trainium devices, so you can read or port manifests between clouds |
-| **Hardware** | spark-01 |
+| **Hardware** | dgx-spark-01 |
 | **Time** | 60 min |
 | **Risk** | None. The benchmark takes one of the root's 5 GPU slices for a few minutes |
 | **Clusters** | `spark-root` (namespace `platform-tools`: benchmarking the hardware is a platform job) · `llms` (only to compare what a tenant sees) |
@@ -161,7 +161,7 @@ device=NVIDIA GB10 cc=(12, 1) torch=2.9.0a0+…
 compile time: default 35s, max-autotune 180s
 ```
 
-While it runs, compare the two views of the GPU: `kubectl --context spark-root describe node spark-01 | grep -A8 'Allocated resources'` counts the slice you just took, and `kubectl --context llms describe node spark-01 | grep -A8 'Allocated resources'` shows the same node as a tenant sees it — real allocatable and real labels, synced from the root.
+While it runs, compare the two views of the GPU: `kubectl --context spark-root describe node dgx-spark-01 | grep -A8 'Allocated resources'` counts the slice you just took, and `kubectl --context llms describe node dgx-spark-01 | grep -A8 'Allocated resources'` shows the same node as a tenant sees it — real allocatable and real labels, synced from the root.
 
 ### 5.2 See the generated kernels
 

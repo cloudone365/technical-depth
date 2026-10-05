@@ -162,7 +162,7 @@ node_drain_bundle_dir: "{{ playbook_dir }}/../.cache/incidents"
 ```yaml
 # lab/playbooks/21-emergency-drain.yml
 ---
-# ansible-playbook playbooks/21-emergency-drain.yml -l spark-02 \
+# ansible-playbook playbooks/21-emergency-drain.yml -l dgx-spark-02 \
 #   -e node_drain_reboot=true -e node_drain_undrain_after=true -e node_drain_bug_report=true
 - name: Emergency drain / remediation
   hosts: spark
@@ -185,26 +185,26 @@ node_drain_bundle_dir: "{{ playbook_dir }}/../.cache/incidents"
 
 ```bash
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
-kubectl --context spark-root drain spark-02 --ignore-daemonsets --delete-emptydir-data --grace-period=60 --timeout=300s
+kubectl --context spark-root drain dgx-spark-02 --ignore-daemonsets --delete-emptydir-data --grace-period=60 --timeout=300s
 ```
 
 A vCluster has no kubelet and no nodes of its own, so there's nothing to drain "inside" it. Every vCluster pod is a real pod on the root, renamed `<pod>-x-<namespace>-x-<vcluster>` in `vc-dev-lab` or `vc-llms`, and the root drain evicts it like any other pod:
 
 | What runs on the node | What the drain does | What you see |
 |---|---|---|
-| Static control-plane pods (kube-apiserver, etcd, …) on spark-01 | Skipped: they are mirror pods, owned by the kubelet, not the API | The root API stays up |
+| Static control-plane pods (kube-apiserver, etcd, …) on dgx-spark-01 | Skipped: they are mirror pods, owned by the kubelet, not the API | The root API stays up |
 | DaemonSets (cilium, kube-proxy, GPU Operator device plugin, MetalLB speaker) | Skipped (`ignore_daemonsets`) | Networking and the GPU stay advertised |
 | vCluster control planes (`dev-lab`, `llms` StatefulSets in `vc-*`) | Evicted | That vCluster's API (`https://192.168.0.111` / `.112`) is down until it reschedules. On a single Spark that means until you uncordon |
 | Tenant pods synced from a vCluster | Evicted | The tenant's controller recreates its pod; the syncer creates a new root pod, which stays `Pending` while the node is cordoned |
 | Tenant PodDisruptionBudgets | Respected: vCluster syncs PDBs to the root | A tight tenant PDB can block the drain until `wait_timeout` (§5) |
 
 ```bash
-kubectl --context spark-root get pods -A -o wide --field-selector spec.nodeName=spark-02   # what is still there
+kubectl --context spark-root get pods -A -o wide --field-selector spec.nodeName=dgx-spark-02   # what is still there
 kubectl --context spark-root -n vc-llms get pods                                           # tenant pods, root names
 kubectl --context spark-root get pdb -A                                                    # synced PDBs show up in vc-*
 ```
 
-**Single Spark:** `spark-01` is the only node, so draining it stops *every* workload in all three clusters (the root API itself keeps running). That's correct for a GPU hang, but it isn't a rolling drain. Use `node_drain_k8s=false` if you only need the evidence bundle.
+**Single Spark:** `dgx-spark-01` is the only node, so draining it stops *every* workload in all three clusters (the root API itself keeps running). That's correct for a GPU hang, but it isn't a rolling drain. Use `node_drain_k8s=false` if you only need the evidence bundle.
 
 ---
 
@@ -215,18 +215,18 @@ kubectl --context spark-root get pdb -A                                         
 **Signals:** `SparkGPUUnresponsive` alert; Slurm health check drains the node (`healthcheck: nvidia-smi unresponsive`); workloads stuck in CUDA calls.
 
 ```bash
-ansible-playbook playbooks/21-emergency-drain.yml -l spark-02 -K \
+ansible-playbook playbooks/21-emergency-drain.yml -l dgx-spark-02 -K \
   -e node_drain_bug_report=true -e node_drain_reboot=true -e node_drain_undrain_after=true
 ```
 
-If it happens again after the reboot, keep the node drained and open a case with the bundle (`.cache/incidents/spark-02-*.tgz` includes `nvidia-bug-report.log.gz`), and check for a driver/firmware update (Volumes 07, 10).
+If it happens again after the reboot, keep the node drained and open a case with the bundle (`.cache/incidents/dgx-spark-02-*.tgz` includes `nvidia-bug-report.log.gz`), and check for a driver/firmware update (Volumes 07, 10).
 
 ### Runbook B — Xid triage
 
 **Signals:** `SparkGPUXid` alert; Loki `|= "NVRM: Xid"`.
 
 ```bash
-ansible spark-02 -b -m shell -a "journalctl -k --since '-24h' --no-pager | grep 'NVRM: Xid'"
+ansible dgx-spark-02 -b -m shell -a "journalctl -k --since '-24h' --no-pager | grep 'NVRM: Xid'"
 ```
 
 | Xid (common meaning, per NVIDIA's Xid catalogue) | Usually | Action |
@@ -253,9 +253,9 @@ Kubernetes side first: `kubectl --context spark-root get pods -A --field-selecto
 ---
 # Runbook C — unified-memory pressure on a DGX Spark.
 # Diagnose first (always), relieve second (opt-in flags).
-#   ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K                       # diagnose only
-#   ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K -e uma_drop_caches=true
-#   ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K -e uma_stop_label=spark.lab/idle=true
+#   ansible-playbook playbooks/24-uma-relief.yml -l dgx-spark-01 -K                       # diagnose only
+#   ansible-playbook playbooks/24-uma-relief.yml -l dgx-spark-01 -K -e uma_drop_caches=true
+#   ansible-playbook playbooks/24-uma-relief.yml -l dgx-spark-01 -K -e uma_stop_label=spark.lab/idle=true
 - name: UMA pressure diagnosis and relief
   hosts: spark
   become: true
@@ -318,8 +318,8 @@ Kubernetes side first: `kubectl --context spark-root get pods -A --field-selecto
 ```
 
 ```bash
-ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K                          # diagnose
-ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K -e uma_drop_caches=true   # relieve
+ansible-playbook playbooks/24-uma-relief.yml -l dgx-spark-01 -K                          # diagnose
+ansible-playbook playbooks/24-uma-relief.yml -l dgx-spark-01 -K -e uma_drop_caches=true   # relieve
 ```
 
 Prevent it from recurring: set memory limits on model-server containers, keep the kubelet reserve (Volume 16), give idle services the `spark.lab/idle=true` label so this runbook can stop them, and don't run Kubernetes and Slurm GPU jobs on the same node at the same time.
@@ -356,10 +356,10 @@ sequenceDiagram
   participant AWX as AWX (webhook-enabled workflow)
   participant OPS as On-call human
   participant S as Spark
-  P->>AM: SparkGPUXid (host=spark-02)
-  AM->>AWX: webhook → launch "spark · drain" workflow, limit=spark-02
+  P->>AM: SparkGPUXid (host=dgx-spark-02)
+  AM->>AWX: webhook → launch "spark · drain" workflow, limit=dgx-spark-02
   AWX->>S: drain + evidence (no reboot)
-  AWX->>OPS: approval: "Reboot spark-02?" (bundle link attached)
+  AWX->>OPS: approval: "Reboot dgx-spark-02?" (bundle link attached)
   OPS-->>AWX: approve
   AWX->>S: reboot → validate → return to service
 ```
@@ -372,16 +372,16 @@ Automate **steps 1–3** (safe and reversible). Gate **step 4** (reboot or reloa
 
 | Symptom | Diagnose | Fix |
 |---|---|---|
-| k8s drain times out | `kubectl --context spark-root get pods -A -o wide --field-selector spec.nodeName=spark-02`; `kubectl --context spark-root get pdb -A` | PodDisruptionBudgets (including tenant PDBs synced from a vCluster into `vc-*`) or unmanaged pods; `terminate_grace_period`; delete stuck pods with the owner's consent. For a tenant pod, ask the tenant to delete it through their own context (`--context llms`), or the syncer may fight you |
+| k8s drain times out | `kubectl --context spark-root get pods -A -o wide --field-selector spec.nodeName=dgx-spark-02`; `kubectl --context spark-root get pdb -A` | PodDisruptionBudgets (including tenant PDBs synced from a vCluster into `vc-*`) or unmanaged pods; `terminate_grace_period`; delete stuck pods with the owner's consent. For a tenant pod, ask the tenant to delete it through their own context (`--context llms`), or the syncer may fight you |
 | Drain fails with "node not found" / context error | `kubectl --kubeconfig .cache/kubeconfig-spark-lab.yaml config get-contexts` | `node_drain_context` must name the root (`spark-root`); a vCluster context has synced nodes you can't cordon from there. Fix the variable or re-run `05-kubernetes.yml` to restore the context |
-| Slurm DRAIN never reaches DRAINED | `squeue -w spark-02` | Running jobs finish first (by design); `scancel` only if agreed |
+| Slurm DRAIN never reaches DRAINED | `squeue -w dgx-spark-02` | Running jobs finish first (by design); `scancel` only if agreed |
 | Evidence capture hangs | Which command? Everything is wrapped in `timeout` | A new command without `timeout` → add it |
 | Reboot task times out | Console | Capsule/firmware work on boot takes long (Volume 10), or the node didn't come back: Runbook E |
 | Returned to service but alerts fire again | Loki/Prometheus since the reboot | Root cause not fixed; re-drain with `node_drain_undrain_after=false` |
 
 ## 6. Validation (drills)
 
-- [ ] Drill A: drain spark-02 with evidence and a reboot; the bundle exists; the node returns only after validation passes.
+- [ ] Drill A: drain dgx-spark-02 with evidence and a reboot; the bundle exists; the node returns only after validation passes.
 - [ ] Drill C: load a model until `SparkUnifiedMemoryLow` fires; relieve with the runbook; record before/after GiB.
 - [ ] Drill D: pull the QSFP cable during a perftest; alert, then diagnosis, then recovery.
 - [ ] The playbook refuses to run without `-l`.

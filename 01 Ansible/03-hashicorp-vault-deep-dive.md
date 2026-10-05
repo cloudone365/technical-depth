@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **You will build** | A single-node Vault on spark-01 (integrated Raft storage, TLS from a lab CA, audit log, snapshots), deployed and configured entirely by Ansible |
+| **You will build** | A single-node Vault on dgx-spark-01 (integrated Raft storage, TLS from a lab CA, audit log, snapshots), deployed and configured entirely by Ansible |
 | **Hardware** | 1× DGX Spark |
 | **Time** | 90 min |
 | **Risk** | Medium. **Losing the unseal keys means losing every secret.** Read §5 before running |
@@ -24,7 +24,7 @@ flowchart LR
     INIT[".cache/vault-init.json<br/>(LAB ONLY)"]
     CA[".cache/spark-lab-ca.crt"]
   end
-  subgraph S1["spark-01"]
+  subgraph S1["dgx-spark-01"]
     V["vault server :8200 (API) :8201 (cluster)"]
     R[("Raft storage<br/>/opt/vault/data")]
     A["audit log<br/>/var/log/vault/audit.log"]
@@ -335,12 +335,12 @@ export VAULT_CACERT=$PWD/.cache/spark-lab-ca.crt
 export VAULT_TOKEN=$(jq -r .root_token .cache/vault-init.json)     # lab only!
 
 vault status                         # Sealed false, Storage Type raft, HA Enabled true
-vault operator raft list-peers       # spark-01 leader
+vault operator raft list-peers       # dgx-spark-01 leader
 vault secrets list                   # kv/, ssh-client-signer/ (from vault_config)
 vault audit list                     # file/
 vault kv put kv/spark-lab/ngc api_key=nvapi-xxxxxxxx
 vault kv get -field=api_key kv/spark-lab/ngc
-sudo tail -1 /var/log/vault/audit.log | jq '.request.path, .auth.display_name'   # on spark-01
+sudo tail -1 /var/log/vault/audit.log | jq '.request.path, .auth.display_name'   # on dgx-spark-01
 ```
 
 ### 3.1 Prove the seal behaviour
@@ -399,7 +399,7 @@ Add a Prometheus job in Volume 09 (use a token with a `sys/metrics` read policy)
 - [ ] **Unseal keys:** never on the control node in plain text. Use `vault operator init -pgp-keys=...` to encrypt each share to a different person's key, or use **auto-unseal**.
 - [ ] **Auto-unseal options:** a *transit* seal against a second small Vault (a good home-lab pattern: a Raspberry Pi or a VM), a cloud KMS, or an HSM via PKCS#11 (Enterprise).
 - [ ] **Revoke the root token** after bootstrap (`vault token revoke <root>`). Regenerate it with `vault operator generate-root` when needed.
-- [ ] **HA:** three Raft nodes (spark-01, spark-02 and a small third box) with `retry_join`. Two nodes can't reach quorum after one failure.
+- [ ] **HA:** three Raft nodes (dgx-spark-01, dgx-spark-02 and a small third box) with `retry_join`. Two nodes can't reach quorum after one failure.
 - [ ] **Audit device redundancy:** if every audit device fails, Vault **stops serving requests**. Add a second (`socket` to Loki or syslog) and rotate the file with `logrotate` using `copytruncate` or a HUP.
 - [ ] **TLS:** replace the lab CA with your org CA; monitor certificate expiry (825 days here).
 
@@ -408,7 +408,7 @@ Add a Prometheus job in Volume 09 (use a token with a `sys/metrics` read policy)
 | Symptom | Diagnose | Fix |
 |---|---|---|
 | `x509: certificate signed by unknown authority` | `openssl s_client -connect 192.168.0.100:8200 -showcerts` | Set `VAULT_CACERT` to `.cache/spark-lab-ca.crt`, or install the CA on the client |
-| `x509: certificate is valid for spark-01, not 192.168.0.100` | Inspect the SANs: `openssl x509 -in /opt/vault/tls/vault.crt -noout -ext subjectAltName` | Add the name or IP to `subject_alt_name` and re-run (the cert is reissued) |
+| `x509: certificate is valid for dgx-spark-01, not 192.168.0.100` | Inspect the SANs: `openssl x509 -in /opt/vault/tls/vault.crt -noout -ext subjectAltName` | Add the name or IP to `subject_alt_name` and re-run (the cert is reissued) |
 | `503 Vault is sealed` after a reboot | `vault status` | Re-run `08-vault.yml` (it unseals) or `vault operator unseal` ×3 |
 | `Error initializing: Vault is already initialized` | — | Expected on re-runs. The role checks first; if you ran init by hand, recover the keys you got then |
 | Vault won't start: `failed to open raft storage: permission denied` | `journalctl -u vault -n 50`; `ls -ld /opt/vault/data` | `chown -R vault:vault /opt/vault` |

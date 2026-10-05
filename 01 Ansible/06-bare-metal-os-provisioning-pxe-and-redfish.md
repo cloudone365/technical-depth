@@ -99,7 +99,7 @@ The same pattern protects **any** change that can cut your own access: sshd conf
 # Day-1 bootstrap for a Spark that just finished the first-boot wizard.
 # Password auth is still on, you have no key trust yet, and it's on DHCP.
 #
-#   ansible-playbook playbooks/00-bootstrap.yml -l spark-02 -k -K \
+#   ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-02 -k -K \
 #     -e bootstrap_current_ip=<current DHCP IP> [-e bootstrap_static_ip=true]
 #
 # NOTE: don't pass -e ansible_host=… — extra vars outrank set_fact, so Ansible
@@ -224,15 +224,15 @@ The same pattern protects **any** change that can cut your own access: sshd conf
 ```bash
 cd "01 Ansible/lab"
 # First run: password SSH (-k) and sudo (-K), on the DHCP address, no IP change yet
-ansible-playbook playbooks/00-bootstrap.yml -l spark-02 -k -K -e bootstrap_current_ip=192.168.0.137
+ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-02 -k -K -e bootstrap_current_ip=192.168.0.137
 
 # Second run: move it to its inventory IP (192.168.0.101) with the dead-man switch
-ansible-playbook playbooks/00-bootstrap.yml -l spark-02 -K \
+ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-02 -K \
   -e bootstrap_current_ip=192.168.0.137 -e bootstrap_static_ip=true
 
 # From now on, plain inventory addressing works
-ansible-playbook playbooks/00-ping.yml -l spark-02
-ansible-playbook playbooks/01-baseline.yml -l spark-02 -K
+ansible-playbook playbooks/00-ping.yml -l dgx-spark-02
+ansible-playbook playbooks/01-baseline.yml -l dgx-spark-02 -K
 ```
 
 **Test the rollback on purpose, once.** Point the node at an address your control node can't reach, e.g. `-e bootstrap_target_ip=10.99.99.99`. (`-e` beats the playbook's own `set_fact`, so this is a handy way to force a bad target.) The reconnect times out, and 180 s later the Spark is back on its old address. `journalctl -t bootstrap` on the Spark shows the rollback.
@@ -279,10 +279,10 @@ DGX OS ships tuned kernel parameters, so don't change them casually. When you mu
 
 The real test of provisioning automation is to wipe a node and rebuild it:
 
-1. Record the state: `ansible-playbook playbooks/30-validate.yml -l spark-02 -K` (keep `.cache/validation/spark-02.json`).
-2. Re-image spark-02 from the USB recovery media (the OEM/NVIDIA guide covers creating it with `dd`; verify the checksum first).
+1. Record the state: `ansible-playbook playbooks/30-validate.yml -l dgx-spark-02 -K` (keep `.cache/validation/dgx-spark-02.json`).
+2. Re-image dgx-spark-02 from the USB recovery media (the OEM/NVIDIA guide covers creating it with `dd`; verify the checksum first).
 3. Complete the wizard (§3.1).
-4. `00-bootstrap.yml` (both runs), then `site.yml -l spark-02`.
+4. `00-bootstrap.yml` (both runs), then `site.yml -l dgx-spark-02`.
 5. Validate again and `diff` the two JSON reports. **Anything that differs is something you did by hand and never automated.**
 
 Time the whole thing. Under an hour from USB boot to validated is a good target.

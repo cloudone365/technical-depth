@@ -24,7 +24,7 @@ RoCEv2 carries RDMA inside UDP/IP. RDMA transports react badly to packet loss, b
 
 ```mermaid
 flowchart LR
-  subgraph TX["spark-01 CX-7"]
+  subgraph TX["dgx-spark-01 CX-7"]
     APP["NCCL / NFS-RDMA<br/>(RDMA-CM ToS 106)"] --> Q3["Priority 3 queue<br/>(DSCP 26 trusted)"]
     CNP_RX["DCQCN RP:<br/>slows QP on CNP"]
   end
@@ -32,7 +32,7 @@ flowchart LR
     ECN["WRED/ECN marking<br/>on prio-3 queue"]
     PFC["PFC pause prio 3<br/>(last resort)"]
   end
-  subgraph RX["spark-02 CX-7"]
+  subgraph RX["dgx-spark-02 CX-7"]
     NP["DCQCN NP:<br/>sees CE → sends CNP (DSCP 48)"]
   end
   Q3 --> ECN --> NP

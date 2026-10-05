@@ -6,7 +6,7 @@
 |---|---|
 | **You will build** | A triage method you can follow under pressure across three API servers, a support bundle, runbooks for the failures that actually happen on a Spark (static-pod control plane, etcd, kubeadm certificates, Cilium, DNS, GPU/Xid, unified memory, stragglers) and for the ones the nesting adds (syncer down, root quota refusing a synced pod, MetalLB pool exhausted), and fifteen injectable drills to practise them |
 | **Clusters** | all three: `spark-root` (control plane, node, GPU, budgets), `dev-lab` and `llms` (tenant symptoms). Every drill names the cluster it breaks |
-| **Hardware** | spark-01 |
+| **Hardware** | dgx-spark-01 |
 | **Time** | 2 h (plus drills over time) |
 | **Risk** | Drills are reversible. BF-15 (UMA pressure) and the etcd restore are the only risky ones, and both ask first |
 | **Lab files** | [`scripts/breakfix.sh`](lab/scripts/breakfix.sh), [`breakfix/`](lab/breakfix/), [`scripts/collect-diag.sh`](lab/scripts/collect-diag.sh), [`scripts/verify.sh`](lab/scripts/verify.sh), [`scripts/etcd-drill.sh`](lab/scripts/etcd-drill.sh), [`scripts/lib.sh`](lab/scripts/lib.sh) (`host_pod`), [`manifests/root/95-observability/rules.yaml`](lab/manifests/root/95-observability/rules.yaml) |
@@ -182,7 +182,7 @@ Then try by IP, then by name (Vol 08 §5.5). Common faults: replicas at 0 (break
 ### 3.6 Node NotReady
 
 ```bash
-kubectl --context spark-root describe node spark-01 | sed -n '/Conditions/,/Addresses/p'
+kubectl --context spark-root describe node dgx-spark-01 | sed -n '/Conditions/,/Addresses/p'
 sudo journalctl -u kubelet | grep -iE 'PLEG|not ready|runtime|eviction' | tail
 sudo crictl info | jq '.status.conditions'
 sudo systemctl status containerd --no-pager | head -5
@@ -190,7 +190,7 @@ sudo systemctl status containerd --no-pager | head -5
 
 `PLEG is not healthy` means containerd is slow or stuck. Often it's disk I/O saturation, or thousands of dead containers (`sudo crictl rm $(sudo crictl ps -a -q --state exited)`). The root's containerd is DGX OS's `containerd.io`, shared with Docker: Kubernetes containers live in containerd namespace `k8s.io`, Docker's in `moby` (`sudo ctr -n k8s.io containers ls | wc -l`). A Docker workload that fills `/var/lib/containerd` takes the node down too.
 
-One node, three clusters: when spark-01 is NotReady, both vClusters show it NotReady as well (node sync), and the root's node controller starts tainting it (`node.kubernetes.io/not-ready`). Fix the root; the vClusters follow.
+One node, three clusters: when dgx-spark-01 is NotReady, both vClusters show it NotReady as well (node sync), and the root's node controller starts tainting it (`node.kubernetes.io/not-ready`). Fix the root; the vClusters follow.
 
 ### 3.7 Unified-memory pressure (the Spark-specific one)
 
@@ -210,7 +210,7 @@ Order of actions: (1) stop or scale down `spark-preemptible` and `spark-batch` w
 ```bash
 sudo dmesg -T | grep -iE 'NVRM: Xid' | tail
 nvidia-smi -q | sed -n '/Clocks Event Reasons/,/Sync Boost/p'
-kubectl --context spark-root -n gpu-operator get pods; kubectl --context spark-root get node spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'
+kubectl --context spark-root -n gpu-operator get pods; kubectl --context spark-root get node dgx-spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'
 ```
 
 | Xid | Meaning | Usually | Action |

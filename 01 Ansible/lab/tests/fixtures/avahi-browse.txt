@@ -1,6 +1,6 @@
-+;enp0s31f6;IPv4;spark-01;_ssh._tcp;local
-=;enp0s31f6;IPv4;spark-01;_ssh._tcp;local;spark-01.local;192.168.0.100;22;
-=;enp0s31f6;IPv6;spark-01;_ssh._tcp;local;spark-01.local;fe80::1;22;
-=;enp0s31f6;IPv4;spark-02;_ssh._tcp;local;spark-02.local;192.168.0.101;22;
++;enp0s31f6;IPv4;dgx-spark-01;_ssh._tcp;local
+=;enp0s31f6;IPv4;dgx-spark-01;_ssh._tcp;local;dgx-spark-01.local;192.168.0.100;22;
+=;enp0s31f6;IPv6;dgx-spark-01;_ssh._tcp;local;dgx-spark-01.local;fe80::1;22;
+=;enp0s31f6;IPv4;dgx-spark-02;_ssh._tcp;local;dgx-spark-02.local;192.168.0.101;22;
 =;enp0s31f6;IPv4;nas;_ssh._tcp;local;nas.local;192.168.0.200;22;
-=;wlp2s0;IPv4;spark-01;_ssh._tcp;local;spark-01.local;192.168.1.77;22;
+=;wlp2s0;IPv4;dgx-spark-01;_ssh._tcp;local;dgx-spark-01.local;192.168.1.77;22;

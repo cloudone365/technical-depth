@@ -13,7 +13,7 @@ flowchart LR
   subgraph CTL["Control node"]
     ANS["ansible-core 2.18 · collections<br/>lab/ (git) · .cache/ (secrets, kubeconfig, reports)"]
   end
-  subgraph S1["spark-01 · 192.168.0.100"]
+  subgraph S1["dgx-spark-01 · 192.168.0.100"]
     direction TB
     S1A["kubeadm root cluster spark-root (control plane + worker)<br/>Cilium · MetalLB · GPU Operator · AWX"]
     S1V["vClusters dev-lab (192.168.0.111) · llms (192.168.0.112)"]
@@ -21,7 +21,7 @@ flowchart LR
     S1C["Vault · Prometheus · Grafana · Loki · ARA"]
     S1D["NFS/RDMA server /srv/models"]
   end
-  subgraph S2["spark-02 · 192.168.0.101"]
+  subgraph S2["dgx-spark-02 · 192.168.0.101"]
     direction TB
     S2A["(optional) root worker · slurmd"]
     S2B["NFS/RDMA client /mnt/models"]
@@ -32,7 +32,7 @@ flowchart LR
   S1 <== "QSFP · CX-7 200GbE RoCEv2<br/>192.168.100.0/24 · 192.168.101.0/24" ==> S2
 ```
 
-Single Spark? Remove `spark-02` from the inventory. The fabric, NCCL and NFS/RDMA steps skip themselves, and `spark-01` alone is a complete Kubernetes cluster (no control-plane taint).
+Single Spark? Remove `dgx-spark-02` from the inventory. The fabric, NCCL and NFS/RDMA steps skip themselves, and `dgx-spark-01` alone is a complete Kubernetes cluster (no control-plane taint).
 
 The Kubernetes end-state is one **kubeadm** root cluster (`spark-root`) with two **vClusters** inside it, `dev-lab` and `llms`. Ansible builds it in three stages: `05-kubernetes.yml` (kubeadm, Cilium, MetalLB) → `06-gpu-operator.yml` (15 GPU time-slices) → `06b-vclusters.yml` (the two vClusters, applied from the [02 Kubernetes lab](../02%20Kubernetes/lab/README.md)). All three contexts land in one file, `lab/.cache/kubeconfig-spark-lab.yaml`.
 

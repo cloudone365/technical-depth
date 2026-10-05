@@ -30,7 +30,7 @@ sequenceDiagram
   autonumber
   participant ADM as Admin / AWX (privileged)
   participant CN as Control node (ansible-playbook)
-  participant V as Vault (spark-01:8200)
+  participant V as Vault (dgx-spark-01:8200)
   participant SP as Sparks (sshd trusts Vault SSH CA)
   ADM->>V: read role-id, write secret-id (TTL 24h)
   V-->>ADM: role_id, secret_id → .cache/approle.env (0600)

@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | A production-shaped vLLM Deployment inside the `llms` vCluster: shared model cache, startup/readiness/liveness probes, graceful drain, UMA-aware memory flags, metrics scraped by the root's Prometheus, queue-depth autoscaling with KEDA, a repeatable benchmark that gives you TTFT/TPOT/throughput for your GB10 — and a sizing table that shows which engines fit the `llms` budget together |
-| **Hardware** | spark-01 |
+| **Hardware** | dgx-spark-01 |
 | **Time** | 90 min |
 | **Risk** | Low. The engine takes ~24 GiB of UMA at `--gpu-memory-utilization 0.20`; the pod may use up to 32 Gi of the `llm-serving` budget |
 | **Clusters** | `llms` (the Deployment, the `serving-budget` quota, KEDA, Traefik) · `spark-root` (the real pod and its cgroup, the `vcluster-budget` quota, Prometheus, alerts) |
@@ -136,7 +136,7 @@ The root ServiceMonitor [`vcluster-workloads`](lab/manifests/root/95-observabili
 
 - **Storage (Vol 11)**: the prefetch Job fills `model-cache` (`local-nvme-retain`, a root StorageClass synced into llms), and vLLM starts from local NVMe. On the Spark the weights are under `/data/k8s/retain/vc-llms/model-cache-x-llm-serving-x-llms` — root namespace, root PVC name.
 - **Ingress (Vol 09)**: Traefik runs *inside* llms (`ingress` namespace, `192.168.0.115`). Point an HTTPRoute at `vllm:8000` instead of `mock-llm` once you've proven the path with the mock.
-- **Autoscaling**: KEDA reads the root's Prometheus. On one GB10, extra replicas mostly add *queueing* capacity, not compute — and a second 32 Gi replica doesn't fit the llms budget anyway (§9). `maxReplicaCount: 1` until spark-02 joins.
+- **Autoscaling**: KEDA reads the root's Prometheus. On one GB10, extra replicas mostly add *queueing* capacity, not compute — and a second 32 Gi replica doesn't fit the llms budget anyway (§9). `maxReplicaCount: 1` until dgx-spark-02 joins.
 - **Scheduling (Vol 05)**: `spark-serving` is synced to the root as a PriorityClass, so the root scheduler can preempt a `spark-preemptible` pod — in either vCluster — to start vLLM.
 - **Modules 03–06**: each model family is a kustomize-style variation of this Deployment (model, quantisation, engine flags, chat template), sized against §9.
 
@@ -318,7 +318,7 @@ scripts/verify.sh storage serving observability
 
 | Lab | 2 Sparks | Datacenter |
 |---|---|---|
-| 1 replica, 1 slice | 2 replicas (one per Spark) behind Traefik, weights on NFS, KEDA `maxReplicaCount: 2` — after raising `serving-budget` and the root's `vcluster-budget` by one engine (§9). Both vClusters see spark-02 as soon as it joins the root | many replicas, prefix/KV-aware routing (Gateway API Inference Extension, llm-d) |
+| 1 replica, 1 slice | 2 replicas (one per Spark) behind Traefik, weights on NFS, KEDA `maxReplicaCount: 2` — after raising `serving-budget` and the root's `vcluster-budget` by one engine (§9). Both vClusters see dgx-spark-02 as soon as it joins the root | many replicas, prefix/KV-aware routing (Gateway API Inference Extension, llm-d) |
 | single-GPU model | tensor/pipeline parallel across the CX-7 (`--tensor-parallel-size 2` with Ray, or `--pipeline-parallel-size 2`) for models that don't fit one Spark | TP within NVLink domains, PP/EP across nodes, disaggregated prefill/decode (Vol 24) |
 | KEDA on queue depth | same | + SLO-based scaling and admission control |
 | one serving vCluster | same | a serving cluster per environment or business unit; budgets per cluster, promoted by GitOps (production-mlops) |

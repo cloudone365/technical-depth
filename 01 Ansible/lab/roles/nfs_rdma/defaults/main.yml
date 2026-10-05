@@ -1,6 +1,6 @@
 ---
-# Shared model/dataset cache: spark-01 exports its NVMe over NFSv4.2 on RDMA
-# (port 20049) across the CX-7 link; spark-02 mounts it. One copy of a 70 GB
+# Shared model/dataset cache: dgx-spark-01 exports its NVMe over NFSv4.2 on RDMA
+# (port 20049) across the CX-7 link; dgx-spark-02 mounts it. One copy of a 70 GB
 # checkpoint instead of two downloads.
 nfs_rdma_export_path: /srv/models
 nfs_rdma_mount_path: /mnt/models

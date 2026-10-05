@@ -2,7 +2,7 @@
 
 Everything the 27 volumes (plus the [step-by-step guide](../00-kubernetes-step-by-step-guide.md)) teach, as manifests, scripts and drills. The [01 Ansible lab](../../01%20Ansible/lab/README.md) builds the base on one DGX Spark (a second Spark is optional):
 
-- a **root cluster** with kubeadm — spark-01 is control plane *and* worker — with Cilium, MetalLB and the GPU Operator (15 time-slices), and
+- a **root cluster** with kubeadm — dgx-spark-01 is control plane *and* worker — with Cilium, MetalLB and the GPU Operator (15 time-slices), and
 - two **vClusters** inside it ([Volume 27](../27-nested-clusters-with-vcluster.md)): `dev-lab` (2 CPU · 8 Gi · 2 slices) and `llms` (4 CPU · 48 Gi · 8 slices).
 
 This directory holds their definitions and everything that runs on them. Every code block in the volumes is taken from here.
@@ -65,7 +65,7 @@ flowchart LR
   subgraph CTL["Your MacBook · terminal (control node)"]
     K["kubectl · helm<br/>KUBECONFIG = 01 Ansible .cache/kubeconfig-spark-lab.yaml<br/>contexts: spark-root · dev-lab · llms"]
   end
-  subgraph S1["spark-01 · 192.168.0.100 · root cluster (kubeadm)"]
+  subgraph S1["dgx-spark-01 · 192.168.0.100 · root cluster (kubeadm)"]
     direction TB
     CP["API server · etcd · scheduler<br/>controller-manager (static pods)"]
     PL["Cilium · MetalLB · GPU Operator<br/>kps (Grafana :32000) · platform-tools"]
@@ -77,7 +77,7 @@ flowchart LR
     end
     GPU["GB10 → 15 time-slices<br/>root 5 · dev-lab 2 · llms 8"]
   end
-  subgraph S2["spark-02 · 192.168.0.101 · optional root worker"]
+  subgraph S2["dgx-spark-02 · 192.168.0.101 · optional root worker"]
     G2["GB10 → 15 slices"]
   end
   K -->|6443| CP

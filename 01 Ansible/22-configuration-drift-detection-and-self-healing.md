@@ -21,7 +21,7 @@
 | Fabric | netplan edited, MTU changed | `cx7_fabric` template diff | ❌ Notify only: a wrong heal cuts the link |
 | Driver / kernel | DGX Dashboard update moved versions | Volume 07 audit (loaded ≠ on-disk = reboot pending) | ❌ Route to the upgrade playbook |
 | Runtime | `daemon.json` edited, CDI stale | `container_runtime` diff + CDI freshness probe | ⚠️ Only when no containers are running (manual) |
-| Kubernetes host config | `/etc/containerd/config.toml` lost the CRI plugin or `SystemdCgroup = true`; `/etc/kubernetes/kubeadm-config.yaml` edited | **Not** in `20-drift-check.yml`. Run `ansible-playbook playbooks/05-kubernetes.yml --check --diff -l spark-01 -K` by hand; auditd key `kubernetes` / `container-runtime` shows who did it (Volume 23) | ❌ Never: restarting containerd restarts every pod on the node (root *and* both vClusters), and kubeadm doesn't reconcile a running control plane (the role prints the `kubeadm init phase` command instead) |
+| Kubernetes host config | `/etc/containerd/config.toml` lost the CRI plugin or `SystemdCgroup = true`; `/etc/kubernetes/kubeadm-config.yaml` edited | **Not** in `20-drift-check.yml`. Run `ansible-playbook playbooks/05-kubernetes.yml --check --diff -l dgx-spark-01 -K` by hand; auditd key `kubernetes` / `container-runtime` shows who did it (Volume 23) | ❌ Never: restarting containerd restarts every pod on the node (root *and* both vClusters), and kubeadm doesn't reconcile a running control plane (the role prints the `kubeadm init phase` command instead) |
 | Kubernetes objects | someone `kubectl edit`s the `vc-llms` ResourceQuota | Not Ansible's job: `kubectl --context spark-root diff -k "../02 Kubernetes/lab/manifests/root/05-vclusters"`, or Argo CD in the 02 Kubernetes production-mlops track | Via GitOps, not this loop |
 
 ```mermaid
@@ -280,26 +280,26 @@ cat .cache/drift/check-*.md | tail -20
 ```bash
 ssh nvidia@192.168.0.101 'sudo sysctl -w vm.swappiness=60 && sudo sed -i "s/^vm.swappiness.*/vm.swappiness = 60/" /etc/sysctl.d/90-spark.conf'
 ssh nvidia@192.168.0.101 'sudo apt-mark unhold $(apt-mark showhold | grep -m1 nvidia)'
-tools/drift-cycle.sh; echo "exit=$?"          # → 2, spark-02 listed with both tasks
+tools/drift-cycle.sh; echo "exit=$?"          # → 2, dgx-spark-02 listed with both tasks
 ```
 
 Expected report (abridged):
 
 ```markdown
 | Host | Drifted tasks | Failures |
-| spark-01 | 0 | 0 |
-| spark-02 | 2 | 0 |
-## spark-02
+| dgx-spark-01 | 0 | 0 |
+| dgx-spark-02 | 2 | 0 |
+## dgx-spark-02
 - DRIFT `Apply sysctl tuning (persisted to /etc/sysctl.d/90-spark.conf)` (…) keys: …
 - DRIFT `Report missing holds as drift in check mode` (…)
 ```
 
-The Grafana "Config drift (tasks)" stat on the overview dashboard (Volume 09) turns orange for spark-02.
+The Grafana "Config drift (tasks)" stat on the overview dashboard (Volume 09) turns orange for dgx-spark-02.
 
 ### 4.3 Heal (safe tags only) and confirm
 
 ```bash
-AUTO_HEAL=1 tools/drift-cycle.sh; echo "exit=$?"     # → heal on spark-02 only → recheck → 0
+AUTO_HEAL=1 tools/drift-cycle.sh; echo "exit=$?"     # → heal on dgx-spark-02 only → recheck → 0
 ```
 
 ### 4.4 Schedule it
@@ -354,5 +354,5 @@ Or use AWX: the Volume 20 workflow (drift → **approval** → remediate) is the
 
 - [ ] Clean lab → `exit=0`, report shows zero drift.
 - [ ] Introduced sysctl + hold drift → `exit=2`, both detected, dashboard reflects it.
-- [ ] `AUTO_HEAL=1` fixes only spark-02 and only safe tags; recheck exits 0.
+- [ ] `AUTO_HEAL=1` fixes only dgx-spark-02 and only safe tags; recheck exits 0.
 - [ ] A fabric drift (edit `40-cx7.yaml` MTU) is **reported but not healed**.

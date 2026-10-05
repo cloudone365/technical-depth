@@ -1,7 +1,7 @@
 ---
 # Root Kubernetes cluster built with kubeadm (Volume 16).
-# spark-01 is the control plane AND a worker (no control-plane taint), so one
-# Spark is a complete cluster; spark-02 (optional) joins as a worker.
+# dgx-spark-01 is the control plane AND a worker (no control-plane taint), so one
+# Spark is a complete cluster; dgx-spark-02 (optional) joins as a worker.
 kubeadm_cluster_version: "1.36.5"            # pin! check https://kubernetes.io/releases/
 kubeadm_cluster_minor: "{{ kubeadm_cluster_version.split('.')[:2] | join('.') }}"
 kubeadm_cluster_apt_repo: "https://pkgs.k8s.io/core:/stable:/v{{ kubeadm_cluster_minor }}/deb/"

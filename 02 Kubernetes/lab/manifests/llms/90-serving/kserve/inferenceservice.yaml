@@ -34,7 +34,7 @@ metadata:
 spec:
   predictor:
     minReplicas: 1
-    maxReplicas: 1                     # one GB10: scale-out comes with spark-02
+    maxReplicas: 1                     # one GB10: scale-out comes with dgx-spark-02
     model:
       modelFormat: {name: huggingface}
       runtime: vllm-spark

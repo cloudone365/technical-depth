@@ -28,7 +28,7 @@
 
 ```mermaid
 flowchart LR
-  subgraph HOST["DGX OS on spark-01 (Volumes 07, 08, 16)"]
+  subgraph HOST["DGX OS on dgx-spark-01 (Volumes 07, 08, 16)"]
     DRV["driver 580.x"] --- TK["nvidia-container-toolkit"] --- RT["containerd<br/>default runtime 'nvidia'"]
   end
   subgraph OP["spark-root · namespace gpu-operator (this volume)"]
@@ -219,7 +219,7 @@ Key automation moves:
 - **Every call names the cluster.** `kubeconfig` *and* `context: spark-root`. The lab kubeconfig also holds `dev-lab` and `llms`, and the operator must never land inside a vCluster.
 - **`atomic: true` + `wait: true`.** A broken values change rolls back instead of leaving half a DaemonSet set.
 - **Validator gate.** The play doesn't finish until `nvidia-operator-validator` pods are Running, so "Helm said deployed" isn't mistaken for "GPUs work".
-- **Allocatable assertion.** Every node must advertise exactly `gpu_operator_timeslice_replicas` (15) GPUs, which catches the time-slicing ConfigMap not being picked up. With spark-02 joined, each node advertises 15, the scheduler has 30, and the vCluster budgets stay as they are until you raise them.
+- **Allocatable assertion.** Every node must advertise exactly `gpu_operator_timeslice_replicas` (15) GPUs, which catches the time-slicing ConfigMap not being picked up. With dgx-spark-02 joined, each node advertises 15, the scheduler has 30, and the vCluster budgets stay as they are until you raise them.
 
 ---
 
@@ -232,7 +232,7 @@ cd "01 Ansible/lab"
 ansible-playbook playbooks/06-gpu-operator.yml
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
 kubectl --context spark-root -n gpu-operator get pods
-kubectl --context spark-root get node spark-01 -o json \
+kubectl --context spark-root get node dgx-spark-01 -o json \
   | jq '.status.allocatable["nvidia.com/gpu"], (.metadata.labels | with_entries(select(.key|startswith("nvidia.com/gpu"))))'
 kubectl --context spark-root logs cuda-smoke     # → GPU 0: NVIDIA GB10 (UUID: GPU-…)
 helm --kube-context spark-root -n gpu-operator get values gpu-operator | grep -A1 -E '^(driver|toolkit|cdi):'
@@ -245,7 +245,7 @@ Expected: allocatable `"15"`, `nvidia.com/gpu.replicas: "15"` and a `nvidia.com/
 Build the vClusters if you haven't (`ansible-playbook playbooks/06b-vclusters.yml`). First, what a tenant sees:
 
 ```bash
-kubectl --context llms get node spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'   # 15
+kubectl --context llms get node dgx-spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'   # 15
 kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget | grep -E 'nvidia|memory'
 ```
 
@@ -275,7 +275,7 @@ spec:
 
 ```bash
 kubectl --context llms apply -f ts-demo.yaml
-kubectl --context llms get pods -l app=ts-demo -o wide                # 8 Running on spark-01
+kubectl --context llms get pods -l app=ts-demo -o wide                # 8 Running on dgx-spark-01
 kubectl --context llms scale deploy ts-demo --replicas=9
 kubectl --context llms get pods -l app=ts-demo | grep Pending         # the 9th
 kubectl --context llms describe pod "$(kubectl --context llms get pods -l app=ts-demo --field-selector=status.phase=Pending -o name | head -1)" | sed -n '/Events/,$p'
@@ -344,7 +344,7 @@ With option B the Secret exists twice. The original is in the vCluster's SQLite 
 | Validator stuck `Init` | `kubectl --context spark-root -n gpu-operator logs <validator> -c driver-validation` | Host driver not found: make sure `driver.enabled=false` (operator expects the host driver) and `nvidia-smi` works on the host |
 | `toolkit-validation` fails | Container logs; `grep default_runtime_name /etc/containerd/config.toml` on the node | containerd has no `nvidia` runtime (DGX OS update replaced `config.toml`?). Re-run `playbooks/05-kubernetes.yml`; its `nvidia-ctk runtime configure` task restores it |
 | Allocatable `nvidia.com/gpu` = 1, not 15 | `kubectl --context spark-root -n gpu-operator get cm time-slicing-config -o yaml`; device-plugin logs | ConfigMap name/key must match `devicePlugin.config.name/default`; restart the device-plugin DS |
-| Root pod `Pending: Insufficient nvidia.com/gpu` | `kubectl --context spark-root describe node spark-01 \| grep -A8 'Allocated resources'` | All 15 slices in use (count the `vc-*` pods too), or `failRequestsGreaterThanOne` rejected a request for > 1 |
+| Root pod `Pending: Insufficient nvidia.com/gpu` | `kubectl --context spark-root describe node dgx-spark-01 \| grep -A8 'Allocated resources'` | All 15 slices in use (count the `vc-*` pods too), or `failRequestsGreaterThanOne` rejected a request for > 1 |
 | vCluster pod `Pending`, no scheduler events | `kubectl --context <vc> describe pod …` events; `kubectl --context spark-root -n vc-<vc> describe quota vcluster-budget` | Root budget spent (§4.2). Free slices in that vCluster or raise its quota (02 Kubernetes Vol 27 §6.5) |
 | Tenant pod rejected: "at most 1 nvidia.com/gpu" | Message from the vCluster's API server | The 02 lab's CEL policy `spark-gpu-slice-limits`: a slice is not more GPU, request 1 |
 | `ImagePullBackOff` on operator pods | `kubectl --context spark-root -n gpu-operator describe pod <p>` | Check the chart version supports arm64 for every component; pin a release that does |

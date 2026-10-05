@@ -25,9 +25,9 @@ ports:
   - {name: node, port: 9100, protocol: TCP}
 endpoints:
   - addresses: ["192.168.0.100"]
-    nodeName: spark-01
-  # - addresses: ["192.168.0.101"]      # uncomment when spark-02 joins
-  #   nodeName: spark-02
+    nodeName: dgx-spark-01
+  # - addresses: ["192.168.0.101"]      # uncomment when dgx-spark-02 joins
+  #   nodeName: dgx-spark-02
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor

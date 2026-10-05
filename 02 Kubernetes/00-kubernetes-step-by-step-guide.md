@@ -36,7 +36,7 @@ flowchart LR
   class D1,D2,D3,D4,D5,D6 gpu
 ```
 
-**One Spark or two?** Everything works on one. Steps marked **(2×)** have an optional second part that needs spark-02 and the QSFP cable.
+**One Spark or two?** Everything works on one. Steps marked **(2×)** have an optional second part that needs dgx-spark-02 and the QSFP cable.
 
 **The Spark is your playground.** Every step can be undone: `scripts/breakfix.sh reset all` for drills, and `01 Ansible playbooks/99-reset-kubernetes.yml` to wipe Kubernetes and rebuild from playbook 05. Breaking things on purpose is part of the course.
 

@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | A working knowledge of the root cluster's stacked etcd: its static pod, certificates, keyspace and the snapshot timer 01 Ansible installed. You'll prove Secret encryption by reading a raw key, break Raft on purpose in a throw-away 3-member etcd (kill the leader, lose quorum, hit NOSPACE), run a tested restore of the real root cluster, copy everything a rebuild needs off the box, and back up the state etcd does **not** hold: the two vClusters' SQLite databases |
-| **Hardware** | spark-01 (Docker is already installed by 01 Ansible `container_runtime`; the sandbox uses it) |
+| **Hardware** | dgx-spark-01 (Docker is already installed by 01 Ansible `container_runtime`; the sandbox uses it) |
 | **Time** | 2 h |
 | **Risk** | **Medium.** The restore step rolls the root cluster's state back and stops its control plane for a minute or two. Snapshot first, and do it when nothing important is running |
 | **Clusters** | `spark-root` (etcd, snapshots, restore) · `dev-lab` (where a tenant's Secret really lives, PVC backup of its SQLite) · `llms` (survives a root restore untouched) |
@@ -32,9 +32,9 @@ The nesting adds a second lesson: **this lab has three databases, not one.** The
 
 ```mermaid
 flowchart LR
-  subgraph NODE["spark-01 · kubeadm root control plane (static pods)"]
+  subgraph NODE["dgx-spark-01 · kubeadm root control plane (static pods)"]
     API["kube-apiserver<br/>apiserver-etcd-client.crt"] -->|"gRPC :2379<br/>mTLS"| ET
-    subgraph ET["etcd-spark-01 (stacked)"]
+    subgraph ET["etcd-dgx-spark-01 (stacked)"]
       direction TB
       RAFT["Raft log<br/>1 member = leader"] --> WAL[("WAL<br/>fdatasync per commit")]
       RAFT --> MVCC["MVCC keyspace<br/>/registry/…  revision N"]
@@ -98,13 +98,13 @@ Quorum is ⌊n/2⌋+1. **1 member tolerates 0 failures, 2 members tolerate 0, an
 
 | Item | Value |
 |---|---|
-| Static pod | `/etc/kubernetes/manifests/etcd.yaml` → mirror pod `kube-system/etcd-spark-01`; requests 100m CPU + 100Mi |
+| Static pod | `/etc/kubernetes/manifests/etcd.yaml` → mirror pod `kube-system/etcd-dgx-spark-01`; requests 100m CPU + 100Mi |
 | Data dir | `/var/lib/etcd/` (`member/wal/`, `member/snap/db`) — a hostPath, set by `etcd.local.dataDir` in the kubeadm config |
 | Client / peer / metrics | `https://127.0.0.1:2379` + `https://192.168.0.100:2379` · `https://192.168.0.100:2380` · `http://0.0.0.0:2381` (`listen-metrics-urls`, from the 01 Ansible kubeadm config so Prometheus can scrape it) |
 | CA and certs (kubeadm's etcd CA) | `/etc/kubernetes/pki/etcd/{ca,server,peer,healthcheck-client}.{crt,key}`. The API server uses `/etc/kubernetes/pki/apiserver-etcd-client.{crt,key}` |
 | etcdctl flags | `--endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/healthcheck-client.crt --key=/etc/kubernetes/pki/etcd/healthcheck-client.key` |
 | Tools | `etcdctl` (online, talks to the member) and `etcdutl` (offline, works on files: `snapshot status`, `snapshot restore`, offline `defrag`), downloaded by the `kubeadm_cluster` role at the exact version of the etcd image |
-| Snapshots | `etcd-snapshot.timer` → `etcd-snapshot.service` → `/usr/local/sbin/etcd-snapshot` → `/var/lib/etcd-snapshots/etcd-spark-01-<YYYYmmdd-HHMMSS>[-suffix].db`, every 6 h, newest 20 kept |
+| Snapshots | `etcd-snapshot.timer` → `etcd-snapshot.service` → `/usr/local/sbin/etcd-snapshot` → `/var/lib/etcd-snapshots/etcd-dgx-spark-01-<YYYYmmdd-HHMMSS>[-suffix].db`, every 6 h, newest 20 kept |
 | Backend quota | 2 GiB default (kubeadm doesn't change it). Raise with `etcd.local.extraArgs: [{name: quota-backend-bytes, value: "8589934592"}]` if needed |
 | Compaction | the API server compacts every 5 min (`--etcd-compaction-interval`). **Defrag is manual** |
 | Encryption config (needed to read Secrets from any backup) | `/etc/kubernetes/encryption/config.yaml` (aescbc, key `key1`) |
@@ -116,7 +116,7 @@ Quorum is ⌊n/2⌋+1. **1 member tolerates 0 failures, 2 members tolerate 0, an
 | `/registry/pods/<ns>/<name>` | Pods (protobuf, prefix `k8s\x00`). Includes the synced tenant pods: `/registry/pods/vc-dev-lab/echo-…-x-lab-tools-x-dev-lab` |
 | `/registry/secrets/<ns>/<name>` | Secrets, encrypted: value starts `k8s:enc:aescbc:v1:key1:` |
 | `/registry/leases/kube-system/*` | leader-election leases (renewed every ~2 s) |
-| `/registry/leases/kube-node-lease/spark-01` | node heartbeat (every 10 s) |
+| `/registry/leases/kube-node-lease/dgx-spark-01` | node heartbeat (every 10 s) |
 | `/registry/events/…` | Events, with a 1 h TTL. Often the biggest churn |
 | `/registry/resourcequotas/vc-*/vcluster-budget` | the vClusters' budgets — the objects that size dev-lab and llms (Vol 27 §3.2) |
 | `/registry/apiextensions.k8s.io/customresourcedefinitions/…` | the **root's** CRDs: Cilium, MetalLB, GPU Operator, Prometheus Operator, Argo CD. Kueue, KEDA, KServe and Traefik CRDs are *not* here — they were installed into llms |
@@ -177,7 +177,7 @@ cd "02 Kubernetes/lab"
 sudo grep -E -- '--(data-dir|listen-client-urls|listen-peer-urls|listen-metrics-urls|initial-cluster|cert-file|trusted-ca-file|snapshot-count)=' \
   /etc/kubernetes/manifests/etcd.yaml
 sudo ls /etc/kubernetes/pki/etcd/
-kubectl --context spark-root -n kube-system get pod etcd-spark-01 -o wide
+kubectl --context spark-root -n kube-system get pod etcd-dgx-spark-01 -o wide
 etcdctl version && etcdutl version
 scripts/etcd-drill.sh status
 ```
@@ -187,12 +187,12 @@ Expected (abridged):
 ```text
 +------------------+---------+----------+----------------------------+----------------------------------------------------+
 |        ID        | STATUS  |   NAME   |         PEER ADDRS         |                    CLIENT ADDRS                    |
-| 3a1f…            | started | spark-01 | https://192.168.0.100:2380 | https://127.0.0.1:2379,https://192.168.0.100:2379 |
+| 3a1f…            | started | dgx-spark-01 | https://192.168.0.100:2380 | https://127.0.0.1:2379,https://192.168.0.100:2379 |
 +------------------------+---------+----------------+-----------+-----------+
 |        ENDPOINT        | DB SIZE | DB SIZE IN USE | IS LEADER | RAFT TERM |
 | https://127.0.0.1:2379 |  31 MB  |     18 MB      |   true    |     2     |
 (empty alarm list)
--rw------- 1 root root  31M … etcd-spark-01-20261005-120000.db
+-rw------- 1 root root  31M … etcd-dgx-spark-01-20261005-120000.db
 NEXT                         LEFT    LAST  PASSED  UNIT                 ACTIVATES
 Mon 2026-10-05 18:00:00 UTC  5h …    …     …       etcd-snapshot.timer  etcd-snapshot.service
 ```
@@ -326,12 +326,12 @@ With one member, `defrag` blocks **the only** member: the root API server stalls
 Make a marker on each side of the snapshot, so you can see exactly what rolls back:
 
 ```bash
-scripts/etcd-drill.sh snapshot                                  # → /var/lib/etcd-snapshots/etcd-spark-01-<ts>-drill.db
+scripts/etcd-drill.sh snapshot                                  # → /var/lib/etcd-snapshots/etcd-dgx-spark-01-<ts>-drill.db
 kubectl --context spark-root create namespace doomed-by-restore    # root, after the snapshot
 kubectl --context spark-root -n platform-tools create configmap doomed --from-literal=x=1
 kubectl --context dev-lab create namespace survives-restore        # dev-lab, after the snapshot
 sudo ls -1t /var/lib/etcd-snapshots | head -1                   # note the file name
-scripts/etcd-drill.sh restore etcd-spark-01-20261005-120000-drill.db
+scripts/etcd-drill.sh restore etcd-dgx-spark-01-20261005-120000-drill.db
 ```
 
 What `restore` does (read [`etcd-drill.sh`](lab/scripts/etcd-drill.sh)):
@@ -408,7 +408,7 @@ Either way, a *consistent* lab backup is a pair: a root etcd snapshot and both v
 
 | Check | Expected |
 |---|---|
-| `scripts/etcd-drill.sh status` | 1 member `spark-01`, `IS LEADER true`, empty alarm list, ≥ 1 snapshot, `etcd-snapshot.timer` scheduled |
+| `scripts/etcd-drill.sh status` | 1 member `dgx-spark-01`, `IS LEADER true`, empty alarm list, ≥ 1 snapshot, `etcd-snapshot.timer` scheduled |
 | `scripts/verify.sh platform` | includes `[PASS] etcd snapshots present (N)` |
 | raw root Secret starts with `k8s:enc:aescbc:v1:key1:` | yes |
 | Prometheus `histogram_quantile(0.99, rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m]))` | < 0.01 when idle |
@@ -424,7 +424,7 @@ Either way, a *consistent* lab backup is a pair: a root etcd snapshot and both v
 | All writes fail: `mvcc: database space exceeded` | Quota hit, NOSPACE alarm | `scripts/etcd-drill.sh status` (alarm list, DB size) | compact → defrag → `alarm disarm` (§5.5). Find the churn (`--keys-only` counts): often Events, a CRD in a hot loop (Vol 04), or a vCluster syncer looping on one object (look under `/registry/*/vc-*`) |
 | API latency spikes, `apply request took too long` in the etcd log | fsync slow | `EtcdSlowFsync`, §5.2 fio, `iostat -x 1`, `sudo crictl logs $(sudo crictl ps -q --name '^etcd$') 2>&1 \| grep 'took too long'` | Move bulk writers (checkpoints, fio, image pulls) off peak. `ionice -c3` on batch jobs. Both vClusters' SQLite files suffer the same contention |
 | Leader changes on a single member | not normally possible. Clock jumps or process stalls | `sudo crictl logs <etcd id> 2>&1 \| grep -iE 'leader\|elect'` | check chrony (01 Ansible baseline), CPU starvation (`systemReserved`, a runaway pod without limits on the root) |
-| `kubectl` hangs after a restore, API server crash-loops | etcd didn't come back: wrong `--name`/`--initial-cluster`, or data dir permissions | `sudo crictl ps -a --name etcd`, `sudo crictl logs <id>`; `sudo ls -la /var/lib/etcd/member` | the drill reads name and IP from `etcd.yaml`; if you restored by hand, re-run `etcdutl snapshot restore` with `--name spark-01 --initial-cluster spark-01=https://192.168.0.100:2380 --initial-advertise-peer-urls https://192.168.0.100:2380`. Undo: move `/var/lib/etcd.before-restore-<ts>` back |
+| `kubectl` hangs after a restore, API server crash-loops | etcd didn't come back: wrong `--name`/`--initial-cluster`, or data dir permissions | `sudo crictl ps -a --name etcd`, `sudo crictl logs <id>`; `sudo ls -la /var/lib/etcd/member` | the drill reads name and IP from `etcd.yaml`; if you restored by hand, re-run `etcdutl snapshot restore` with `--name dgx-spark-01 --initial-cluster dgx-spark-01=https://192.168.0.100:2380 --initial-advertise-peer-urls https://192.168.0.100:2380`. Undo: move `/var/lib/etcd.before-restore-<ts>` back |
 | `etcdutl: snapshot file has wrong format` / version errors | `etcdutl` doesn't match the etcd that wrote it | `etcdutl version` vs the image tag in `etcd.yaml` | re-run 01 Ansible `playbooks/05-kubernetes.yml` (downloads the matching tools) |
 | Secrets unreadable after restoring on new hardware | encryption config not restored | `kubectl --context spark-root get secret -A` → `Internal error … failed to decrypt` | restore `/etc/kubernetes/encryption/config.yaml` from §5.7 and restart the API server |
 | `etcdctl: context deadline exceeded` | wrong endpoint/certs | run with `--debug` | use the flags from §3.1 (`healthcheck-client`, not the API server's or admin's cert) |
@@ -438,15 +438,15 @@ Either way, a *consistent* lab backup is a pair: a root etcd snapshot and both v
 
 ```mermaid
 flowchart LR
-  A["1 Spark<br/>stacked etcd<br/>quorum 1 · tolerates 0"] --> B["2 Sparks<br/>still 1 etcd voter<br/>(spark-02 = k8s_workers)"]
+  A["1 Spark<br/>stacked etcd<br/>quorum 1 · tolerates 0"] --> B["2 Sparks<br/>still 1 etcd voter<br/>(dgx-spark-02 = k8s_workers)"]
   B --> C["2 Sparks + small x86 box<br/>3 stacked control planes<br/>quorum 2 · tolerates 1"]
   C --> D["Datacenter<br/>3–5 control planes or external etcd<br/>dedicated NVMe for WAL<br/>snapshots to object storage"]
   classDef store fill:#bf8700,stroke:#7a5600,color:#fff
   class A,B,C,D store
 ```
 
-- **Don't make spark-02 a second control plane** with only two machines. A 2-member etcd *halves* your availability: quorum is 2 of 2, so either member failing stops all writes (§5.4 `kill-two` is exactly that state). spark-02 joins as a worker (`k8s_workers`) and etcd stays a single voter.
-- **Three stacked members** is kubeadm's built-in HA. The kubeadm config already sets `controlPlaneEndpoint: 192.168.0.100:6443`; in production that becomes a VIP or load balancer (kube-vip, HAProxy) in front of all three API servers. Then `kubeadm init phase upload-certs --upload-certs` on spark-01 and `kubeadm join 192.168.0.100:6443 --control-plane --certificate-key …` on each new node: kubeadm adds an etcd member per control plane. The third voter can be any small Linux box (a NUC, or a VM on the control node) — tainted `node-role.kubernetes.io/control-plane:NoSchedule` so it carries no workloads.
+- **Don't make dgx-spark-02 a second control plane** with only two machines. A 2-member etcd *halves* your availability: quorum is 2 of 2, so either member failing stops all writes (§5.4 `kill-two` is exactly that state). dgx-spark-02 joins as a worker (`k8s_workers`) and etcd stays a single voter.
+- **Three stacked members** is kubeadm's built-in HA. The kubeadm config already sets `controlPlaneEndpoint: 192.168.0.100:6443`; in production that becomes a VIP or load balancer (kube-vip, HAProxy) in front of all three API servers. Then `kubeadm init phase upload-certs --upload-certs` on dgx-spark-01 and `kubeadm join 192.168.0.100:6443 --control-plane --certificate-key …` on each new node: kubeadm adds an etcd member per control plane. The third voter can be any small Linux box (a NUC, or a VM on the control node) — tainted `node-role.kubernetes.io/control-plane:NoSchedule` so it carries no workloads.
 - **External etcd** (`etcd.external.endpoints` in the kubeadm `ClusterConfiguration`) puts 3 or 5 etcd members on their own hosts: the API servers' failure domains and etcd's are separated, and etcd gets disks nothing else writes to. More machines and more PKI to manage; it's the choice for large clusters.
 - **Restores with several members** are a cluster-wide operation: stop every API server, restore the same snapshot on every member with the full `--initial-cluster` list (or restore one member and re-add the others), then start everything. Practise it on a scratch cluster before you need it.
 - **The vClusters** each run one control-plane replica on SQLite. For HA, vCluster supports several replicas with embedded etcd (Raft *inside* the vCluster's pods) or an external etcd — and those replicas only survive a node failure if the root has more than one node to put them on.

@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| **You will build** | The lab's **root** Kubernetes cluster, `spark-root`: kubeadm v1.36.5 on spark-01, which is control plane *and* worker. It gets containerd with the NVIDIA runtime as default, an audit log, encrypted Secrets and etcd snapshots on a timer, Cilium as the CNI and MetalLB for LoadBalancer IPs. Then the two vClusters `dev-lab` and `llms` go inside it, and one kubeconfig on your control node holds three contexts |
-| **Hardware** | 1 DGX Spark (spark-02 optional: it joins as a worker) |
+| **You will build** | The lab's **root** Kubernetes cluster, `spark-root`: kubeadm v1.36.5 on dgx-spark-01, which is control plane *and* worker. It gets containerd with the NVIDIA runtime as default, an audit log, encrypted Secrets and etcd snapshots on a timer, Cilium as the CNI and MetalLB for LoadBalancer IPs. Then the two vClusters `dev-lab` and `llms` go inside it, and one kubeconfig on your control node holds three contexts |
+| **Hardware** | 1 DGX Spark (dgx-spark-02 optional: it joins as a worker) |
 | **Time** | 60 min (about 20 of it image pulls) |
 | **Risk** | Medium. Rewrites `/etc/containerd/config.toml` (the DGX OS original is kept as `.dgxos-orig`) and turns swap off. `playbooks/99-reset-kubernetes.yml` removes all of it again (§8) |
 | **Clusters** | `spark-root` (everything in §3–§4.4), `dev-lab` and `llms` (§4.5) |
@@ -37,7 +37,7 @@ The inventory model carries over. Kubespray's groups are `kube_control_plane`, `
 ```mermaid
 flowchart TB
   CTL["Control node<br/>ansible-core · helm · kubectl<br/>.cache/kubeconfig-spark-lab.yaml<br/>contexts spark-root · dev-lab · llms"]
-  subgraph S1["spark-01 · 192.168.0.100 · k8s_control_plane (also a worker: taints [])"]
+  subgraph S1["dgx-spark-01 · 192.168.0.100 · k8s_control_plane (also a worker: taints [])"]
     direction TB
     CP["static pods in /etc/kubernetes/manifests<br/>kube-apiserver :6443 · etcd (/var/lib/etcd)<br/>controller-manager · scheduler"]
     SEC["audit log /var/log/kubernetes/audit<br/>Secrets aescbc · etcd-snapshot.timer"]
@@ -47,7 +47,7 @@ flowchart TB
     MLB["MetalLB 0.16.0 · L2 on enP7s7<br/>pool 192.168.0.110–119"]
     VC["vc-dev-lab: vCluster dev-lab → .111<br/>vc-llms: vCluster llms → .112"]
   end
-  subgraph S2["spark-02 · 192.168.0.101 · k8s_workers (optional)"]
+  subgraph S2["dgx-spark-02 · 192.168.0.101 · k8s_workers (optional)"]
     KL2["kubelet · containerd · Cilium"]
   end
   CTL -->|"SSH: playbook 05 play 1"| S1
@@ -95,12 +95,12 @@ Two networks, two jobs. The **pod network** (Cilium VXLAN) and the API run on th
 
 | Stage | Runs on | Talks to | Result |
 |---|---|---|---|
-| `05` play 1 · `kubeadm_cluster` | each Spark over SSH, `become` | the host | containerd ready, packages held, `kubeadm init` (spark-01) / `kubeadm join` (spark-02), context `spark-root` written on the control node |
+| `05` play 1 · `kubeadm_cluster` | each Spark over SSH, `become` | the host | containerd ready, packages held, `kubeadm init` (dgx-spark-01) / `kubeadm join` (dgx-spark-02), context `spark-root` written on the control node |
 | `05` play 2 · `cilium`, `metallb` | control node | root API with context `spark-root` | nodes `Ready`, CoreDNS running, LoadBalancer IPs available |
 | `06` · `gpu_operator` | control node | root API | 15 GPU time-slices per node (Volume 17) |
 | `06b` · `vclusters` | control node | root API, then each vCluster API | storage, budgets, `dev-lab` and `llms`, contexts merged |
 
-`serial` equal to the number of control planes (1) plus `order: sorted` makes spark-01 a batch of its own. spark-02 starts only after `kubeadm init` has finished. The ordering comes from the names: if you add a worker whose name sorts before the control plane's, list the groups explicitly or give the control plane its own play.
+`serial` equal to the number of control planes (1) plus `order: sorted` makes dgx-spark-01 a batch of its own. dgx-spark-02 starts only after `kubeadm init` has finished. The ordering comes from the names: if you add a worker whose name sorts before the control plane's, list the groups explicitly or give the control plane its own play.
 
 ### 2.3 Inventory
 
@@ -108,13 +108,13 @@ Two networks, two jobs. The **pod network** (Cilium VXLAN) and the API run on th
 # lab/inventory/hosts.yml (excerpt)
     k8s_control_plane:
       hosts:
-        spark-01:
+        dgx-spark-01:
     k8s_workers:
       hosts:
-        spark-02:
+        dgx-spark-02:
 ```
 
-Single Spark: remove spark-02 from `spark` and `k8s_workers`. The cluster is complete with one node, because the control plane carries no taint.
+Single Spark: remove dgx-spark-02 from `spark` and `k8s_workers`. The cluster is complete with one node, because the control plane carries no taint.
 
 ### 2.4 LLD: the kubeadm config
 
@@ -168,8 +168,8 @@ mode: iptables
 
 | Setting | Value | Reason |
 |---|---|---|
-| `taints: []` | no taint | spark-01 is the only node. Without this, nothing but DaemonSets could run on it |
-| `controlPlaneEndpoint` | `192.168.0.100:6443` | A stable endpoint, so spark-02 (or more control planes later) can join. Change it to a VIP *before* `init` if you plan HA; it is baked into every certificate and kubeconfig |
+| `taints: []` | no taint | dgx-spark-01 is the only node. Without this, nothing but DaemonSets could run on it |
+| `controlPlaneEndpoint` | `192.168.0.100:6443` | A stable endpoint, so dgx-spark-02 (or more control planes later) can join. Change it to a VIP *before* `init` if you plan HA; it is baked into every certificate and kubeconfig |
 | Pod / Service CIDR | `10.42.0.0/16` / `10.43.0.0/16` | Kept from the earlier lab, so every address in the course stays valid |
 | `systemReserved` + `kubeReserved` + `evictionHard` | 3 CPU, 10 GiB, evict below 4 GiB | Unified memory: pods, their GPU allocations and DGX OS share ~119.7 GiB. Without a reserve, a big model can starve sshd and the DGX Dashboard. Allocatable ends up 17 CPU / ≈105.7 GiB |
 | `evictionHard` lists all four signals | — | Setting the map **replaces** kubelet's defaults; a signal you omit is no longer enforced |
@@ -406,10 +406,10 @@ ansible-playbook playbooks/05-kubernetes.yml -K
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
 kubectl --context spark-root get nodes -o wide -L kubernetes.io/arch
 kubectl --context spark-root -n kube-system get pods -o wide
-kubectl --context spark-root describe node spark-01 | grep -E '^Taints|^Allocatable' -A6
+kubectl --context spark-root describe node dgx-spark-01 | grep -E '^Taints|^Allocatable' -A6
 ```
 
-Expected: `spark-01` `Ready` with role `control-plane`, `ARCH` column `arm64`, `Taints: <none>`. In kube-system: the four static-pod mirrors (`kube-apiserver-spark-01`, `etcd-spark-01`, …), `coredns` ×2, `kube-proxy`, `cilium`, `cilium-operator`, `hubble-relay`, `hubble-ui`. Allocatable reads `cpu: 17` and memory about 105–106 GiB (printed in Ki).
+Expected: `dgx-spark-01` `Ready` with role `control-plane`, `ARCH` column `arm64`, `Taints: <none>`. In kube-system: the four static-pod mirrors (`kube-apiserver-dgx-spark-01`, `etcd-dgx-spark-01`, …), `coredns` ×2, `kube-proxy`, `cilium`, `cilium-operator`, `hubble-relay`, `hubble-ui`. Allocatable reads `cpu: 17` and memory about 105–106 GiB (printed in Ki).
 
 On the Spark itself:
 
@@ -452,15 +452,15 @@ kubectl --context spark-root create deploy lb-demo --image=nginx:1.27-alpine
 kubectl --context spark-root expose deploy lb-demo --port 80 --type LoadBalancer
 kubectl --context spark-root get svc lb-demo -w                # EXTERNAL-IP from 192.168.0.110–119
 curl -sI http://$(kubectl --context spark-root get svc lb-demo -o jsonpath='{.status.loadBalancer.ingress[0].ip}') | head -1
-ip neigh | grep 192.168.0.11                                   # the IP resolves to spark-01's enP7s7 MAC
+ip neigh | grep 192.168.0.11                                   # the IP resolves to dgx-spark-01's enP7s7 MAC
 kubectl --context spark-root delete svc,deploy lb-demo
 ```
 
 With two Sparks, measure the pod network between nodes (`nodeName` pins each pod):
 
 ```bash
-kubectl --context spark-root run a --image=nicolaka/netshoot:v0.13 --overrides='{"spec":{"nodeName":"spark-01"}}' -- sleep 1d
-kubectl --context spark-root run b --image=nicolaka/netshoot:v0.13 --overrides='{"spec":{"nodeName":"spark-02"}}' -- sleep 1d
+kubectl --context spark-root run a --image=nicolaka/netshoot:v0.13 --overrides='{"spec":{"nodeName":"dgx-spark-01"}}' -- sleep 1d
+kubectl --context spark-root run b --image=nicolaka/netshoot:v0.13 --overrides='{"spec":{"nodeName":"dgx-spark-02"}}' -- sleep 1d
 B=$(kubectl --context spark-root get pod b -o jsonpath='{.status.podIP}')
 kubectl --context spark-root exec b -- iperf3 -s -D; kubectl --context spark-root exec a -- iperf3 -c "$B" -P 4 -t 10
 ```
@@ -490,14 +490,14 @@ ansible-playbook playbooks/06b-vclusters.yml
 kubectl config get-contexts                          # KUBECONFIG is set above: spark-root (current), dev-lab, llms
 kubectl --context spark-root get ns | grep -E '^vc-'
 kubectl --context spark-root -n vc-llms get svc llms  # TYPE LoadBalancer, EXTERNAL-IP 192.168.0.112
-kubectl --context dev-lab get nodes                   # the real spark-01, synced from the root
+kubectl --context dev-lab get nodes                   # the real dgx-spark-01, synced from the root
 ```
 
 Follow one pod down into the root:
 
 ```bash
 kubectl --context dev-lab run web --image=nginx:1.27-alpine
-kubectl --context dev-lab get pod web -o wide                           # Running on spark-01
+kubectl --context dev-lab get pod web -o wide                           # Running on dgx-spark-01
 kubectl --context spark-root -n vc-dev-lab get pods | grep web          # web-x-default-x-dev-lab
 kubectl --context spark-root -n vc-dev-lab get pod web-x-default-x-dev-lab \
   -o jsonpath='{.metadata.annotations.vcluster\.loft\.sh/object-name}{"  "}{.spec.containers[0].resources}{"\n"}'
@@ -517,11 +517,11 @@ sudo apt-mark unhold kubeadm && sudo apt-get install -y kubeadm=1.36.X-1.1 && su
 sudo kubeadm upgrade plan
 sudo kubeadm upgrade apply v1.36.X            # static pods one by one; extraArgs come from ConfigMap kube-system/kubeadm-config
 exit
-kubectl --context spark-root drain spark-01 --ignore-daemonsets --delete-emptydir-data   # one node: evicts everything, vClusters included
+kubectl --context spark-root drain dgx-spark-01 --ignore-daemonsets --delete-emptydir-data   # one node: evicts everything, vClusters included
 ansible-playbook playbooks/05-kubernetes.yml -K -e kubeadm_cluster_version=1.36.X --check --diff   # shows kubelet/kubectl moving
 ansible-playbook playbooks/05-kubernetes.yml -K -e kubeadm_cluster_version=1.36.X                  # converges + re-holds
 ssh nvidia@192.168.0.100 'sudo systemctl daemon-reload && sudo systemctl restart kubelet'
-kubectl --context spark-root uncordon spark-01
+kubectl --context spark-root uncordon dgx-spark-01
 ```
 
 For a **new minor** (1.36 → 1.37) the packages live in a new repo. Add it before step 1, with the role's own module arguments:
@@ -533,7 +533,7 @@ ansible k8s_control_plane:k8s_workers -b -m ansible.builtin.apt_repository \
   -a "repo='deb [signed-by=/etc/apt/keyrings/kubernetes-v1.37.asc] https://pkgs.k8s.io/core:/stable:/v1.37/deb/ /' filename=kubernetes"
 ```
 
-Then set `kubeadm_cluster_version` in `roles/kubeadm_cluster/defaults/main.yml` (and `KUBERNETES_VERSION` in `02 Kubernetes/lab/versions.env`) so a rebuild lands on the same version. On that run the role also prints its "kubeadm-config.yaml changed but the cluster already exists" notice: expected, because `kubeadm upgrade apply` already moved the control plane. Before a minor upgrade, check that vCluster 0.37 supports the new host version. With spark-02: upgrade the control plane, then drain spark-02, `sudo kubeadm upgrade node` on it, and converge its packages with `-l spark-02`.
+Then set `kubeadm_cluster_version` in `roles/kubeadm_cluster/defaults/main.yml` (and `KUBERNETES_VERSION` in `02 Kubernetes/lab/versions.env`) so a rebuild lands on the same version. On that run the role also prints its "kubeadm-config.yaml changed but the cluster already exists" notice: expected, because `kubeadm upgrade apply` already moved the control plane. Before a minor upgrade, check that vCluster 0.37 supports the new host version. With dgx-spark-02: upgrade the control plane, then drain dgx-spark-02, `sudo kubeadm upgrade node` on it, and converge its packages with `-l dgx-spark-02`.
 
 ---
 
@@ -547,7 +547,7 @@ Then set `kubeadm_cluster_version` in `roles/kubeadm_cluster/defaults/main.yml` 
 | NFS models (Volume 15) | `hostPath: /mnt/models` or `csi-driver-nfs` |
 | Vault (Volume 19) | stores the Secret-encryption key; pods get secrets via Vault Agent Injector or External Secrets |
 | Drift detection (Volume 22) | `05-kubernetes.yml --check` runs the read-only probes (`check_mode: false`) and reports containerd or package drift |
-| Drain & remediation (Volume 24) | single node: draining spark-01 stops both vClusters' workloads too |
+| Drain & remediation (Volume 24) | single node: draining dgx-spark-01 stops both vClusters' workloads too |
 | 02 Kubernetes lab | `scripts/install-addons.sh` (metrics-server, kube-prometheus-stack) and `scripts/apply-lab.sh root|dev-lab|llms` build on this cluster and the merged kubeconfig |
 
 ## 6. Troubleshooting & diagnostics
@@ -560,17 +560,17 @@ Then set `kubeadm_cluster_version` in `roles/kubeadm_cluster/defaults/main.yml` 
 | kubelet crash-loops **before** `init` | `journalctl -u kubelet -n 50` | Normal: kubelet waits for `/var/lib/kubelet/config.yaml`, which `kubeadm init` writes |
 | Pods start, then restart at random; kubelet logs cgroup errors | `grep SystemdCgroup /etc/containerd/config.toml` | Must be `true` (kubelet uses systemd). Fix, `systemctl restart containerd kubelet` |
 | Node `NotReady`, `NetworkPluginNotReady` | `ls /etc/cni/net.d`; `kubectl --context spark-root -n kube-system get pods -l k8s-app=cilium` | Cilium not installed or not ready (play 2 of 05). `cilium-dbg status` in the agent pod |
-| CoreDNS `Pending` | `kubectl --context spark-root -n kube-system describe pod -l k8s-app=kube-dns` | No CNI yet, or the node is tainted. `taints: []` only applies at `init`; remove a taint added later with `kubectl --context spark-root taint node spark-01 node-role.kubernetes.io/control-plane-` |
+| CoreDNS `Pending` | `kubectl --context spark-root -n kube-system describe pod -l k8s-app=kube-dns` | No CNI yet, or the node is tainted. `taints: []` only applies at `init`; remove a taint added later with `kubectl --context spark-root taint node dgx-spark-01 node-role.kubernetes.io/control-plane-` |
 | Worker join fails (token rejected, or `couldn't validate the identity of the API Server`) | `journalctl -u kubelet` on the worker; `controlPlaneEndpoint` in the config | Token expired (30 min) or the CA/endpoint changed since. Re-run 05: each run on an unjoined worker creates a fresh token and hash |
 | LoadBalancer Service stays `<pending>` | `kubectl --context spark-root -n metallb-system get ipaddresspool`; quota `services.loadbalancers` in `vc-*` | Pool missing (play 2 failed on the webhook: re-run), pool exhausted, or the vCluster's root quota is spent |
 | vCluster context: `x509: certificate is valid for …` or timeout | `kubectl --context spark-root -n vc-llms get svc llms` | MetalLB IP differs from `exportKubeConfig.server` / `proxy.extraSANs` in the values file |
 | GPU pod: `failed to create shim … nvidia-container-runtime: not found` | `which nvidia-container-runtime` | Run Volume 08 first, then re-run 05 (it re-registers the runtime) |
-| Pods evicted with `MemoryPressure` while a model loads | `kubectl --context spark-root describe node spark-01 \| grep -A5 Conditions`; `free -g` | Working as designed (eviction below 4 GiB). Reduce model or batch size, stop idle pods, tune the reserve |
+| Pods evicted with `MemoryPressure` while a model loads | `kubectl --context spark-root describe node dgx-spark-01 \| grep -A5 Conditions`; `free -g` | Working as designed (eviction below 4 GiB). Reduce model or batch size, stop idle pods, tune the reserve |
 | `ImagePullBackOff`: `no match for platform` | `kubectl --context <ctx> describe pod` | amd64-only image; find an arm64 build (Volume 08 §3.4) |
 
 ## 7. Validation
 
-- [ ] `kubectl --context spark-root get nodes`: every node `Ready`, arm64; spark-01 `Taints: <none>`.
+- [ ] `kubectl --context spark-root get nodes`: every node `Ready`, arm64; dgx-spark-01 `Taints: <none>`.
 - [ ] `/etc/containerd/config.toml` has CRI enabled, `SystemdCgroup = true`, default runtime `nvidia`; `sudo crictl ps` works.
 - [ ] kubelet, kubeadm, kubectl held at 1.36.5.
 - [ ] A Secret reads `k8s:enc:aescbc:v1:key1:` in etcd; the audit log records its creation; `etcd-snapshot.timer` is active and `/var/lib/etcd-snapshots` has a snapshot.

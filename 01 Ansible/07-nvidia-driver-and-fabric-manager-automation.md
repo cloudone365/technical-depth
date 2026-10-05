@@ -188,7 +188,7 @@ driver_audit:
 # This is what the DGX Dashboard "Update" button does, wrapped in the safety
 # steps a shared/multi-node lab needs.
 #
-#   ansible-playbook playbooks/17-dgxos-upgrade.yml -l spark-02 -K
+#   ansible-playbook playbooks/17-dgxos-upgrade.yml -l dgx-spark-02 -K
 #   ansible-playbook playbooks/17-dgxos-upgrade.yml -K -e upgrade_dry_run=true   # show what would change
 - name: Rolling DGX OS upgrade
   hosts: spark
@@ -292,10 +292,10 @@ driver_audit:
 
 ```bash
 ansible-playbook playbooks/17-dgxos-upgrade.yml -K -e upgrade_dry_run=true    # what's pending, on every node
-ansible-playbook playbooks/17-dgxos-upgrade.yml -K -l spark-02                  # canary
-ansible-playbook playbooks/16-driver-audit.yml -K -l spark-02
+ansible-playbook playbooks/17-dgxos-upgrade.yml -K -l dgx-spark-02                  # canary
+ansible-playbook playbooks/16-driver-audit.yml -K -l dgx-spark-02
 ansible-playbook playbooks/10-nccl-test.yml -K        # the cross-node check: mixed driver versions?
-ansible-playbook playbooks/17-dgxos-upgrade.yml -K -l spark-01
+ansible-playbook playbooks/17-dgxos-upgrade.yml -K -l dgx-spark-01
 ```
 
 **Canary discipline:** upgrade one Spark, run real work on it (a vLLM or NCCL job), then do the other. For NCCL across two Sparks, keep **matching driver and NCCL versions on both nodes**. A mixed state is only acceptable during the rollout window.

@@ -19,7 +19,7 @@ flowchart LR
   W1 --> W2 --> W3 --> W4
 ```
 
-**One Spark or two?** Steps 5–7 and the multi-node parts of 11–12 need two Sparks and a QSFP cable. Everything else works on one; remove `spark-02` from the inventory.
+**One Spark or two?** Steps 5–7 and the multi-node parts of 11–12 need two Sparks and a QSFP cable. Everything else works on one; remove `dgx-spark-02` from the inventory.
 
 ---
 
@@ -41,8 +41,8 @@ tests/run-local-checks.sh              # proves your toolchain before touching h
 2. Edit `inventory/hosts.yml` (IPs) and `inventory/host_vars/spark-0N.yml`.
 
 ```bash
-ansible-playbook playbooks/00-bootstrap.yml -l spark-01 -k -K -e bootstrap_current_ip=<dhcp-ip>
-ansible-playbook playbooks/00-bootstrap.yml -l spark-01 -K -e bootstrap_current_ip=<dhcp-ip> -e bootstrap_static_ip=true
+ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-01 -k -K -e bootstrap_current_ip=<dhcp-ip>
+ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-01 -K -e bootstrap_current_ip=<dhcp-ip> -e bootstrap_static_ip=true
 ansible-playbook playbooks/00-ping.yml
 ```
 
@@ -72,7 +72,7 @@ ansible-playbook playbooks/18-cuda-smoke.yml -K
 ansible-playbook playbooks/04-telemetry.yml -K
 ```
 
-✅ Grafana `http://<spark-01>:3000` → *Spark Lab / Overview* shows GPU, UMA and CX-7 panels.
+✅ Grafana `http://<dgx-spark-01>:3000` → *Spark Lab / Overview* shows GPU, UMA and CX-7 panels.
 
 ## Step 5 · CX-7 fabric (45 min, 2 Sparks) → [11](11-infiniband-fabric-automation-and-opensm.md)
 
@@ -98,7 +98,7 @@ ansible-playbook playbooks/10-nccl-test.yml -K
 ansible-playbook playbooks/09-nfs-rdma.yml -K
 ```
 
-✅ spark-02 `/proc/mounts` shows `proto=rdma,port=20049`.
+✅ dgx-spark-02 `/proc/mounts` shows `proto=rdma,port=20049`.
 
 ## Step 8 · Vault (60 min) → [03B](03-hashicorp-vault-deep-dive.md), [19](19-hashicorp-vault-approle-and-dynamic-secrets.md)
 
@@ -120,7 +120,7 @@ The end-state of steps 9–10b is **one kubeadm root cluster with two vClusters 
 
 | Context | What it is | Where |
 |---|---|---|
-| `spark-root` | kubeadm v1.36.5, `spark-01` is control plane *and* worker (no taint), `spark-02` joins as a worker if present; Cilium (VXLAN, kube-proxy kept), MetalLB L2 pool `192.168.0.110–119` | `https://192.168.0.100:6443` |
+| `spark-root` | kubeadm v1.36.5, `dgx-spark-01` is control plane *and* worker (no taint), `dgx-spark-02` joins as a worker if present; Cilium (VXLAN, kube-proxy kept), MetalLB L2 pool `192.168.0.110–119` | `https://192.168.0.100:6443` |
 | `dev-lab` | vCluster #1 in root namespace `vc-dev-lab`: 2 CPU · 8 Gi · 2 GPU slices | `https://192.168.0.111` |
 | `llms` | vCluster #2 in root namespace `vc-llms`: 4 CPU · 48 Gi · 8 GPU slices | `https://192.168.0.112` |
 
@@ -131,7 +131,7 @@ kubectl --context spark-root get nodes -o wide
 kubectl --context spark-root -n kube-system get pods     # static-pod control plane, etcd, CoreDNS, cilium, kube-proxy
 ```
 
-✅ `spark-01` is `Ready`; `kubectl --context spark-root -n kube-system exec ds/cilium -- cilium-dbg status --brief` prints `OK`; `ssh nvidia@192.168.0.100 sudo crictl ps` lists the control-plane containers. Broke it while learning? `ansible-playbook playbooks/99-reset-kubernetes.yml -K` (type `RESET`) and run step 9 again.
+✅ `dgx-spark-01` is `Ready`; `kubectl --context spark-root -n kube-system exec ds/cilium -- cilium-dbg status --brief` prints `OK`; `ssh nvidia@192.168.0.100 sudo crictl ps` lists the control-plane containers. Broke it while learning? `ansible-playbook playbooks/99-reset-kubernetes.yml -K` (type `RESET`) and run step 9 again.
 
 ## Step 10 · GPU Operator (30 min) → [17](17-nvidia-gpu-operator-helm-automation.md)
 
@@ -139,7 +139,7 @@ kubectl --context spark-root -n kube-system get pods     # static-pod control pl
 ansible-playbook playbooks/06-gpu-operator.yml
 ```
 
-✅ Each node advertises `nvidia.com/gpu: 15` (`kubectl --context spark-root get node spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}'`); the `cuda-smoke` pod in `default` prints the GB10.
+✅ Each node advertises `nvidia.com/gpu: 15` (`kubectl --context spark-root get node dgx-spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}'`); the `cuda-smoke` pod in `default` prints the GB10.
 
 ## Step 10b · vClusters dev-lab and llms (30 min) → [16](16-kubernetes-bare-metal-bootstrap-kubeadm.md), [02 Kubernetes · 27](../02%20Kubernetes/27-nested-clusters-with-vcluster.md)
 
@@ -162,7 +162,7 @@ ansible-playbook playbooks/13-multus-rdma.yml
 
 ## Step 12 · Slurm (45 min) → [18](18-slurm-cluster-orchestration-and-cgroup-gpus.md)
 
-> Cordon the node in Kubernetes first (`kubectl --context spark-root cordon spark-01`) or dedicate nodes: Slurm and Kubernetes don't know about each other's GPU use, and the time-sliced GPU is shared by root and vCluster pods alike.
+> Cordon the node in Kubernetes first (`kubectl --context spark-root cordon dgx-spark-01`) or dedicate nodes: Slurm and Kubernetes don't know about each other's GPU use, and the time-sliced GPU is shared by root and vCluster pods alike.
 
 ```bash
 ansible-playbook playbooks/07-slurm.yml -K
@@ -193,20 +193,20 @@ ansible-playbook playbooks/23-logging-audit.yml -K
 ```bash
 ansible-playbook playbooks/19-firmware-inventory.yml -K
 ansible-playbook playbooks/17-dgxos-upgrade.yml -K -e upgrade_dry_run=true
-ansible-playbook playbooks/17-dgxos-upgrade.yml -K -l spark-02 -e upgrade_firmware=true
+ansible-playbook playbooks/17-dgxos-upgrade.yml -K -l dgx-spark-02 -e upgrade_firmware=true
 ```
 
 ## Step 18 · Incidents (90 min of drills) → [24](24-cluster-wide-emergency-drain-and-remediation.md)
 
 ```bash
-ansible-playbook playbooks/21-emergency-drain.yml -l spark-02 -K -e node_drain_reboot=true -e node_drain_undrain_after=true
-ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K
+ansible-playbook playbooks/21-emergency-drain.yml -l dgx-spark-02 -K -e node_drain_reboot=true -e node_drain_undrain_after=true
+ansible-playbook playbooks/24-uma-relief.yml -l dgx-spark-01 -K
 ```
 
 ## Step 19 · Capstone → [25](25-hands-on-ansible-mastery-lab-and-test-harness.md)
 
 ```bash
-ansible-playbook playbooks/25-chaos.yml -l spark-02 -K -e chaos_fault=random
+ansible-playbook playbooks/25-chaos.yml -l dgx-spark-02 -K -e chaos_fault=random
 python3 tools/capstone_scorecard.py
 ```
 

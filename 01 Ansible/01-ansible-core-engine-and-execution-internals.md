@@ -34,7 +34,7 @@ With **pipelining** on (our `ansible.cfg`), steps 3–4 are a single SSH round-t
 
 ```bash
 cd "01 Ansible/lab"
-ansible spark-01 -m ping -vvvv 2>&1 | grep -E 'ESTABLISH|SSH: EXEC|PUT|<spark-01> (EXEC|SSH)'
+ansible dgx-spark-01 -m ping -vvvv 2>&1 | grep -E 'ESTABLISH|SSH: EXEC|PUT|<dgx-spark-01> (EXEC|SSH)'
 ```
 
 Look for `EXEC ... sudo -H -S -n -u root /bin/sh -c 'echo BECOME-SUCCESS-... ; /usr/bin/python3'` and the *absence* of `PUT`. That confirms pipelining is active.
@@ -43,7 +43,7 @@ Now switch pipelining off and keep the payload on the Spark so you can read it:
 
 ```bash
 ANSIBLE_PIPELINING=0 ANSIBLE_KEEP_REMOTE_FILES=1 \
-  ansible spark-01 -m ansible.builtin.stat -a path=/etc/dgx-release -vvv 2>&1 | grep -o '/home/nvidia/.ansible/tmp/[^ /]*' | head -1
+  ansible dgx-spark-01 -m ansible.builtin.stat -a path=/etc/dgx-release -vvv 2>&1 | grep -o '/home/nvidia/.ansible/tmp/[^ /]*' | head -1
 # → /home/nvidia/.ansible/tmp/ansible-tmp-1727630000.12-4242-1234
 
 ssh nvidia@192.168.0.100
@@ -80,7 +80,7 @@ flowchart TB
 | `serial: 1` | Batches of hosts, whole play per batch | `21-emergency-drain.yml`, fabric changes: never both nodes at once |
 | `throttle: 1` | Per-task concurrency limit | Tasks hitting a shared API (Vault, the Kubernetes API) |
 | `run_once` + `delegate_to` | One execution, on a chosen host | Generating the munge key; minting a `kubeadm token create` on the control plane for each joining worker (delegate only) |
-| `order: sorted` | Host ordering | `05-kubernetes.yml`: `order: sorted` + `serial` so spark-01 (control plane) finishes before spark-02 joins |
+| `order: sorted` | Host ordering | `05-kubernetes.yml`: `order: sorted` + `serial` so dgx-spark-01 (control plane) finishes before dgx-spark-02 joins |
 | `any_errors_fatal` / `max_fail_percentage` | Stop everything on first failure | Drain: one failed node → stop |
 
 ### 2.1 Handlers: why your config didn't reload
@@ -189,7 +189,7 @@ Other levers:
   debugger: on_failed
 ```
 
-or globally: `ANSIBLE_ENABLE_TASK_DEBUGGER=True ansible-playbook ...`. At the `[spark-01] TASK: ... (debug)>` prompt:
+or globally: `ANSIBLE_ENABLE_TASK_DEBUGGER=True ansible-playbook ...`. At the `[dgx-spark-01] TASK: ... (debug)>` prompt:
 
 ```
 p task.args                 # arguments after templating
@@ -205,7 +205,7 @@ c                           # continue
 ansible-console spark --become
 spark (2)[f:10]# nvidia-smi -L
 spark (2)[f:10]# setup filter=ansible_local
-spark (2)[f:10]# cd spark-01
+spark (2)[f:10]# cd dgx-spark-01
 ```
 
 ---
@@ -231,7 +231,7 @@ spark (2)[f:10]# cd spark-01
 | `sudo: a password is required` in the middle of a run | sudo | Did the task set `become: false` and then `become_user`? | `become_user` needs `become: true` at the same level (ansible-lint `partial-become`) |
 | Handler did not run | Play flow | `--list-tasks`; was the notifying task `changed`? | `meta: flush_handlers`, or `--force-handlers` |
 | Task takes 10+ minutes then fails with `timeout` | async missing | `ps -ef \| grep AnsiballZ` on the Spark | `async:` + `poll:` |
-| Different result on the Spark vs. your laptop | aarch64 | `ansible spark-01 -m setup -a filter=ansible_architecture` | Pin `platform: linux/arm64` for images; check the module's arch assumptions |
+| Different result on the Spark vs. your laptop | aarch64 | `ansible dgx-spark-01 -m setup -a filter=ansible_architecture` | Pin `platform: linux/arm64` for images; check the module's arch assumptions |
 
 ## 8. Validation
 

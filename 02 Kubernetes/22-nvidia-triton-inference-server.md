@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | A Triton deployment inside the `llms` vCluster serving a two-step **ensemble** (tokenise on CPU → score on the GB10), fed from a GitOps-friendly model repository. You'll measure dynamic batching with Triton's own metrics (scraped by the root's Prometheus), load-test it with `perf_analyzer` over gRPC, and find Triton's GPU process on the root |
-| **Hardware** | spark-01 |
+| **Hardware** | dgx-spark-01 |
 | **Time** | 75 min |
 | **Risk** | Low. Triton's 12 Gi limit doesn't fit `llm-serving` next to vLLM's 32 Gi: park vLLM first (Vol 21 §9) |
 | **Clusters** | `llms` (Triton, the perf Job, the `serving-budget` quota) · `spark-root` (the real pod, `nvidia-smi`, Prometheus) |

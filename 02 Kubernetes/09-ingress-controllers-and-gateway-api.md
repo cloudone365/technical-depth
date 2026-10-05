@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | Traefik v3 as both Ingress controller and Gateway API implementation in front of an OpenAI-compatible endpoint — running *inside* the `llms` vCluster as its API gateway, on a MetalLB address from the root. You'll prove token streaming isn't buffered, add body-size limits, rate limits and API-key auth, run a 90/10 canary with an `HTTPRoute`, terminate TLS and route gRPC to Triton. The mock LLM makes all of it GPU-free |
-| **Hardware** | spark-01 (MetalLB answers for **192.168.0.115** on the mgmt LAN). Your laptop is the client |
+| **Hardware** | dgx-spark-01 (MetalLB answers for **192.168.0.115** on the mgmt LAN). Your laptop is the client |
 | **Time** | 90 min |
 | **Risk** | Low |
 | **Clusters** | `llms` (Traefik in namespace `ingress`, Gateway API CRDs, Ingress/HTTPRoute/Middleware objects, mock-llm in `llm-serving`), `spark-root` (MetalLB, the synced LoadBalancer Service, Hubble) |

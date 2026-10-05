@@ -26,7 +26,7 @@ So a tenant's request crosses **two** API servers — the vCluster's (who are yo
 ```mermaid
 flowchart TB
   U(["users · SDKs · Open WebUI"]) --> GW
-  subgraph SPARK["spark-01 · DGX OS 7 · GB10 (15 time-slices) · ~119.7 GiB unified memory"]
+  subgraph SPARK["dgx-spark-01 · DGX OS 7 · GB10 (15 time-slices) · ~119.7 GiB unified memory"]
     direction TB
     subgraph ROOT["root cluster · kubeadm v1.36 · master + worker"]
       direction TB
@@ -52,7 +52,7 @@ flowchart TB
     end
     NV[("NVMe · model cache · PVCs")]
   end
-  S2["spark-02 (optional)<br/>root worker · CX-7 200 GbE"]
+  S2["dgx-spark-02 (optional)<br/>root worker · CX-7 200 GbE"]
   GW --> SRV
   SRV & BAT & TEN & PT --> GPU
   SRV --> NV
@@ -120,7 +120,7 @@ flowchart TB
 |---|---|---|
 | 13 | [GB10 hardware & driver stack](13-nvidia-hardware-and-driver-stack.md) | host/pod inventory, GEMM baseline, arch/CUDA triage |
 | 14 | [Container Toolkit, CDI, time-slicing, the GPU leak](14-nvidia-container-toolkit-and-gpu-virtualization.md) | contention table, leak closed |
-| 15 | [**DGX Spark datacenter simulation (end-to-end)**](15-dgx-spark-datacenter-simulation-lab.md) | the whole platform — root, both vClusters, gates, capacity plan, day-2 ops, spark-02 plan |
+| 15 | [**DGX Spark datacenter simulation (end-to-end)**](15-dgx-spark-datacenter-simulation-lab.md) | the whole platform — root, both vClusters, gates, capacity plan, day-2 ops, dgx-spark-02 plan |
 | 16 | [GPU Operator, Network Operator & observability](16-nvidia-gpu-operator-and-network-operator.md) | per-node profiles, kps + host exporters, alerts, RDMA pod networking |
 
 ### Part V — Distributed AI & diagnostics
@@ -173,7 +173,7 @@ flowchart LR
 
 | Item | Value |
 |---|---|
-| Nodes | spark-01 `192.168.0.100` (kubeadm control plane + worker). Optional spark-02 `192.168.0.101` (worker) |
+| Nodes | dgx-spark-01 `192.168.0.100` (kubeadm control plane + worker). Optional dgx-spark-02 `192.168.0.101` (worker) |
 | Clusters (contexts) | `spark-root` (kubeadm) · `dev-lab` (vCluster, `https://192.168.0.111`) · `llms` (vCluster, `https://192.168.0.112`) — one kubeconfig: `01 Ansible/lab/.cache/kubeconfig-spark-lab.yaml` |
 | Budgets | dev-lab 2 CPU · 8 Gi · 2 slices · 300 Gi — llms 4 CPU · 48 Gi · 8 slices · 500 Gi — root keeps 14 CPU · ~64 GiB · 5 slices ([Vol 27](27-nested-clusters-with-vcluster.md)) |
 | CX-7 | `192.168.100.0/24` + `192.168.101.0/24`, MTU 9000 |

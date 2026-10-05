@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | Real users with client certificates, tenant RBAC, four in-process admission policies written in CEL, fair-queuing lanes for tenant traffic **and** for the vCluster syncers, Secret encryption you can prove in etcd, and an audit log you can query |
-| **Hardware** | spark-01 (kubeadm root + two vClusters). Everything except the audit-log and etcd steps also works on the CI kind setup (`lab/tests/fake-gpu-node.sh` + two vClusters) |
+| **Hardware** | dgx-spark-01 (kubeadm root + two vClusters). Everything except the audit-log and etcd steps also works on the CI kind setup (`lab/tests/fake-gpu-node.sh` + two vClusters) |
 | **Time** | 90 min |
 | **Risk** | Low. Audit and encryption were configured at `kubeadm init` by 01 Ansible; nothing restarts |
 | **Clusters** | `dev-lab` (users, RBAC, CEL, tenant APF) · `llms` (CEL, CI ServiceAccount) · `spark-root` (audit, encryption, syncer APF) |

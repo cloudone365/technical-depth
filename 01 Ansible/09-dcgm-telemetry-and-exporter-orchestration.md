@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **You will build** | node_exporter plus a dependency-free **GPU/UMA/CX-7 textfile collector** on every Spark, a Prometheus + Alertmanager + Grafana stack on spark-01 with a provisioned dashboard and 7 alert rules (all validated with `promtool`), and an optional dcgm-exporter path |
+| **You will build** | node_exporter plus a dependency-free **GPU/UMA/CX-7 textfile collector** on every Spark, a Prometheus + Alertmanager + Grafana stack on dgx-spark-01 with a provisioned dashboard and 7 alert rules (all validated with `promtool`), and an optional dcgm-exporter path |
 | **Hardware** | 1–2× DGX Spark |
 | **Time** | 60 min |
 | **Risk** | Low. About 1 GiB RAM for the stack; data lives in Docker volumes |
@@ -28,7 +28,7 @@
 
 ```mermaid
 flowchart LR
-  subgraph S1["spark-01"]
+  subgraph S1["dgx-spark-01"]
     T1["systemd timer 15 s<br/>spark-gpu-metrics.sh"] -->|atomic write| TF1["/var/lib/prometheus/node-exporter/*.prom"]
     NE1["node_exporter :9100<br/>--collector.textfile"] --> TF1
     DC1["dcgm-exporter :9400<br/>(optional)"]
@@ -37,7 +37,7 @@ flowchart LR
       G["Grafana :3000<br/>provisioned DS + dashboard"] --> P
     end
   end
-  subgraph S2["spark-02"]
+  subgraph S2["dgx-spark-02"]
     T2["timer → collector"] --> TF2[".prom"] --> NE2["node_exporter :9100"]
   end
   P -->|scrape| NE1 & NE2
@@ -374,7 +374,7 @@ curl -s http://192.168.0.100:9090/api/v1/rules | jq -r '.data.groups[].rules[].n
 |---|---|
 | `SparkUnifiedMemoryLow` | In a PyTorch container, allocate until `MemAvailable` < 8 GiB: `x=[torch.empty(2**30, dtype=torch.uint8, device='cuda') for _ in range(110)]` (adjust the count), then free it |
 | `SparkCX7Degraded` | Unplug the QSFP cable (speed drops to −1/absent) or force 100G: `sudo ethtool -s enp1s0f1np1 speed 100000 autoneg off` (revert afterwards) |
-| `SparkNodeDown` | `sudo systemctl stop prometheus-node-exporter` on spark-02 for 90 s |
+| `SparkNodeDown` | `sudo systemctl stop prometheus-node-exporter` on dgx-spark-02 for 90 s |
 | `SparkGPUUnresponsive` | Temporarily break PATH for the collector: `sudo systemctl edit spark-gpu-metrics.service` → `Environment=PATH=/nonexistent` |
 | `SparkGPUMetricsStale` | `sudo systemctl stop spark-gpu-metrics.timer` for 4 min (the `.prom` file stops updating while node_exporter keeps serving it) |
 
@@ -406,7 +406,7 @@ Expect some fields (framebuffer memory in particular) to be absent or meaningles
 
 | System | How |
 |---|---|
-| Vault | Add a scrape job for `https://spark-01:8200/v1/sys/metrics?format=prometheus` with a `bearer_token` from a metrics-only policy; alert on `vault_core_unsealed == 0` |
+| Vault | Add a scrape job for `https://dgx-spark-01:8200/v1/sys/metrics?format=prometheus` with a `bearer_token` from a metrics-only policy; alert on `vault_core_unsealed == 0` |
 | Kubernetes / GPU Operator | The operator's DCGM exporter is off by default in the lab (`gpu_operator_dcgm_exporter: false` in `roles/gpu_operator`). Turn it on and the root's kube-prometheus-stack (namespace `observability`) scrapes it in-cluster. Pick one exporter path per node to avoid double counting. The GPU is the root's: pods in the `dev-lab` and `llms` vClusters run on the same GB10 and show up in the same per-node metrics |
 | Slurm | The same `spark_gpu_up`/Xid signals drive the Slurm health check (Volume 18). Alerts and scheduler agree |
 | Drift (Volume 22) | `spark_drift_report.py --prom` writes `spark_config_drift.prom` into the textfile dir, and it shows on the dashboard |
@@ -419,7 +419,7 @@ Expect some fields (framebuffer memory in particular) to be absent or meaningles
 | No `spark_*` metrics | `systemctl list-timers \| grep spark`; `journalctl -u spark-gpu-metrics -n 20` | Timer not enabled / script error; run `/usr/local/sbin/spark-gpu-metrics.sh` by hand |
 | node_exporter: `textfile ... was collected before with the same name and label values` | Two `.prom` files export the same series | One writer per metric family; delete stale files |
 | `spark_gpu_up 0` but `nvidia-smi` works interactively | The collector's PATH or permissions under systemd | `systemd-run --wait -p Environment=OUT_DIR=/tmp /usr/local/sbin/spark-gpu-metrics.sh` |
-| Prometheus target `DOWN: connection refused :9100` | `ss -ltnp \| grep 9100` on the node; host firewall | Start node_exporter; allow 9100 from spark-01 only |
+| Prometheus target `DOWN: connection refused :9100` | `ss -ltnp \| grep 9100` on the node; host firewall | Start node_exporter; allow 9100 from dgx-spark-01 only |
 | Stack play fails at promtool | Output shows the bad line | Usually an escaping error in `spark-alerts.yml.j2` (§3 note) |
 | Grafana dashboard empty | Datasource UID / variable `DS` | Dashboard uses `${DS}`; select "Prometheus" in the dropdown; check `http://127.0.0.1:9090` from Grafana (host network) |
 | CX-7 throughput panel empty | `node_network_receive_bytes_total{device=~"en[pP].*np[0-9]"}` | Interface regex; the netdev names differ on your unit (check `ibdev2netdev`) |

@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | The operating model hyperscalers use to keep 10k–100k-GPU jobs productive, rehearsed on one Spark. You'll have a failure-rate and checkpoint-interval calculator, a training Job in the `llms` vCluster that survives pod kills by resuming from **async** distributed checkpoints, a **silent-data-corruption canary** that fails fast, and node quarantine by taint — on the root, where the real node lives |
-| **Hardware** | spark-01 |
+| **Hardware** | dgx-spark-01 |
 | **Time** | 75 min |
 | **Risk** | Low. §5.4 taints the only node: nothing new schedules in any of the three clusters until you remove it |
 | **Clusters** | `llms` (the Job, its retry policy, the checkpoint PVC) · `spark-root` (the real pod, the eviction, the node taint, the checkpoint directory on the NVMe) |
@@ -75,7 +75,7 @@ flowchart TB
     HP["real pod resilient-train-…-x-batch-x-llms<br/>ns vc-llms"]
     PVC[("PV local-nvme<br/>/data/k8s/vc-llms/ckpt-x-batch-x-llms<br/>step-N/ + COMPLETE · keep newest 3")]
     KILL["pod killed / evicted / OOM"]
-    Q["quarantine node spark-01<br/>taint spark.lab/sdc=suspect:NoSchedule"]
+    Q["quarantine node dgx-spark-01<br/>taint spark.lab/sdc=suspect:NoSchedule"]
   end
   JOB -. "syncer" .-> HP
   AS --> PVC
@@ -189,7 +189,7 @@ EOF
 kubectl --context llms -n batch get job resilient-train -o jsonpath='failed={.status.failed} {"\n"}'   # 0: DisruptionTarget ignored
 ```
 
-The root's API server marks the evicted pod with the `DisruptionTarget` condition; the syncer copies the status back to the virtual pod; llms's Job controller reads the condition and applies the `Ignore` rule. Three components in two clusters, one retry policy. To see what a real drain would take with it: `kubectl --context spark-root drain spark-01 --ignore-daemonsets --delete-emptydir-data --dry-run=server`.
+The root's API server marks the evicted pod with the `DisruptionTarget` condition; the syncer copies the status back to the virtual pod; llms's Job controller reads the condition and applies the `Ignore` rule. Three components in two clusters, one retry policy. To see what a real drain would take with it: `kubectl --context spark-root drain dgx-spark-01 --ignore-daemonsets --delete-emptydir-data --dry-run=server`.
 
 ### 5.4 Simulate silent data corruption → fail fast → quarantine
 
@@ -206,10 +206,10 @@ kubectl --context llms -n batch get job resilient-train -o jsonpath='{.status.co
 Expected: `SDC SUSPECTED` at the first canary, exit 86, and the Job fails **immediately** with reason `PodFailurePolicy`. There are no retries, because retrying on a lying GPU makes things worse. Quarantine the node — on the root — and record why:
 
 ```bash
-kubectl --context spark-root taint node spark-01 spark.lab/sdc=suspect:NoSchedule
-kubectl --context spark-root annotate node spark-01 spark.lab/quarantine-reason="canary mismatch job llms/batch/resilient-train $(date -Is)"
-kubectl --context llms get node spark-01 -o jsonpath='{.spec.taints}{"\n"}'      # tenants see the quarantine
-kubectl --context dev-lab get node spark-01 -o jsonpath='{.spec.taints}{"\n"}'   # so does the other vCluster
+kubectl --context spark-root taint node dgx-spark-01 spark.lab/sdc=suspect:NoSchedule
+kubectl --context spark-root annotate node dgx-spark-01 spark.lab/quarantine-reason="canary mismatch job llms/batch/resilient-train $(date -Is)"
+kubectl --context llms get node dgx-spark-01 -o jsonpath='{.spec.taints}{"\n"}'      # tenants see the quarantine
+kubectl --context dev-lab get node dgx-spark-01 -o jsonpath='{.spec.taints}{"\n"}'   # so does the other vCluster
 ```
 
 Both vClusters show the taint because they sync the real node from the root. Neither can lift it: the virtual node is a copy, and edits to it are not written back to the root. With one node, the taint blocks *all* new scheduling in all three clusters — including a restarting vCluster control plane — while running pods carry on. That's what quarantine means, and why large clusters keep **hot spares** so a job restarts instantly on a replacement node.
@@ -218,8 +218,8 @@ After investigation (DCGM diag / vendor) — and restoring the real reference:
 
 ```bash
 ssh nvidia@192.168.0.100 'sudo rm /data/k8s/vc-llms/ckpt-x-batch-x-llms/canary.json'
-kubectl --context spark-root taint node spark-01 spark.lab/sdc-
-kubectl --context spark-root annotate node spark-01 spark.lab/quarantine-reason-
+kubectl --context spark-root taint node dgx-spark-01 spark.lab/sdc-
+kubectl --context spark-root annotate node dgx-spark-01 spark.lab/quarantine-reason-
 ```
 
 ### 5.5 Size your own checkpoint policy
@@ -278,7 +278,7 @@ kubectl --context llms delete -k manifests/llms/80-distributed/resilient    # Jo
 | pod-level retries by a tenant cluster's Job controller | in-place job restart with hot-spare nodes (seconds, not minutes). Elastic torchrun / TorchFT for membership changes |
 | one GEMM canary | burn-in + periodic canaries on every node, cross-replica checksums, automated quarantine and vendor RMA pipeline |
 | manual taint on the root | remediation controllers on the cluster that owns the nodes (NPD conditions → taint → drain → diag → return); tenant clusters only see the result |
-| one node = quarantine stops everything | spark-02 joins the root (01 Ansible `k8s_workers`): a quarantined Spark leaves the other schedulable for both vClusters |
+| one node = quarantine stops everything | dgx-spark-02 joins the root (01 Ansible `k8s_workers`): a quarantined Spark leaves the other schedulable for both vClusters |
 
 ---
 

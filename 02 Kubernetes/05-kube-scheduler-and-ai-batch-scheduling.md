@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | A priority ladder that lets serving pods preempt experiments — across cluster boundaries, because one scheduler places every pod on the Spark. A reproducible partial-gang deadlock inside dev-lab, the same shape of workload fixed with Kueue all-or-nothing admission inside llms, and taint/affinity rules ready for a second Spark |
-| **Hardware** | spark-01. The Kueue parts also run on kind with `tests/fake-gpu-node.sh` + two vClusters (that's what CI does) |
+| **Hardware** | dgx-spark-01. The Kueue parts also run on kind with `tests/fake-gpu-node.sh` + two vClusters (that's what CI does) |
 | **Time** | 90 min |
 | **Risk** | Low. Preemption kills *lab* pods on purpose |
 | **Clusters** | `spark-root` (the only scheduler, preemption demo in `platform-tools`, taints) · `dev-lab` (no-Kueue deadlock, affinity demo) · `llms` (Kueue, gang jobs, a serving pod that preempts root pods) |
@@ -59,7 +59,7 @@ flowchart LR
   RQ -->|"admitted"| Q
   RQ -.->|"refused: pod stays Pending in the vCluster,<br/>no scheduler events"| SY
   PT --> Q
-  B --> N["spark-01<br/>nvidia.com/gpu: 15"]
+  B --> N["dgx-spark-01<br/>nvidia.com/gpu: 15"]
   classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
   classDef gpu fill:#76b900,stroke:#3d6000,color:#000
   classDef tenant fill:#eaeef2,stroke:#57606a,color:#000
@@ -83,7 +83,7 @@ For a GPU pod in `llms/batch` that's three gates, each with its own number:
 |---|---|---|---|
 | Kueue `spark-cq` | llms | 4 slices for batch | Job stays `suspend: true`, Workload not admitted, **no pods** |
 | Root `vcluster-budget` on `vc-llms` | root (admission) | 8 slices for all of llms | pod `Pending` in llms with a sync error, **no scheduler events** |
-| Node allocatable | root (scheduler) | 15 slices on spark-01, for everyone | `0/1 nodes are available: 1 Insufficient nvidia.com/gpu`, then maybe preemption |
+| Node allocatable | root (scheduler) | 15 slices on dgx-spark-01, for everyone | `0/1 nodes are available: 1 Insufficient nvidia.com/gpu`, then maybe preemption |
 
 ---
 
@@ -124,7 +124,7 @@ Why only 4 slices in the ClusterQueue? llms has 8 in total (its root budget), an
 | `1 node(s) had untolerated taint {spark.lab/dedicated: gpu}` | pod events | missing toleration |
 | `1 node(s) didn't match Pod's node affinity/selector` | pod events | label mismatch (GFD label missing? Kueue flavor nodeLabels?) |
 | `preemption: 0/1 nodes are available: 1 No preemption victims found` | pod events | nothing of lower priority to evict |
-| `Preempted by pod … on node spark-01` | event on the **victim** | preemption happened |
+| `Preempted by pod … on node dgx-spark-01` | event on the **victim** | preemption happened |
 | `exceeded quota: vcluster-budget, requested: requests.nvidia.com/gpu=1, used: 2, limited: 2` | sync error event on the pod **inside the vCluster** | not a scheduler message at all: the root refused the pod (break/fix 02) |
 | *(no events)* + Job `suspend: true` | llms | Kueue hasn't admitted it |
 
@@ -162,8 +162,8 @@ Expected: `spark-cq` with `PENDING WORKLOADS 0`, and `train` pointing at it.
 
 ```bash
 kubectl --context spark-root -n kube-system get pods -l component=kube-scheduler     # the only scheduler
-kubectl --context spark-root describe node spark-01 | sed -n '/Allocated resources/,/Events/p'
-kubectl --context llms describe node spark-01 | sed -n '/Allocated resources/,/Events/p'
+kubectl --context spark-root describe node dgx-spark-01 | sed -n '/Allocated resources/,/Events/p'
+kubectl --context llms describe node dgx-spark-01 | sed -n '/Allocated resources/,/Events/p'
 kubectl --context spark-root get pods -A -o custom-columns='NS:.metadata.namespace,POD:.metadata.name,PRIO:.spec.priority,CLASS:.spec.priorityClassName,GPU:.spec.containers[*].resources.limits.nvidia\.com/gpu' \
   | awk 'NR==1 || $5!="<none>"'
 ```
@@ -177,7 +177,7 @@ Preemption needs a *full node*, and inside a vCluster the root quota refuses pod
 ```bash
 command -v yq >/dev/null || sudo sh -c 'wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.47.1/yq_linux_$(dpkg --print-architecture) && chmod +x /usr/local/bin/yq'
 yq 'select(.kind=="Deployment")' manifests/root/20-scheduling/preemption-demo.yaml | kubectl --context spark-root apply -f -
-alloc=$(kubectl --context spark-root get node spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}')
+alloc=$(kubectl --context spark-root get node dgx-spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}')
 used=$(kubectl --context spark-root get pods -A -o json | jq '[.items[] | select(.status.phase=="Running" and (.metadata.labels.app // "") != "filler") | .spec.containers[].resources.limits["nvidia.com/gpu"] // "0" | tonumber] | add // 0')
 kubectl --context spark-root -n platform-tools scale deploy filler --replicas=$((alloc - used))
 kubectl --context spark-root -n platform-tools get pods -l app=filler                 # all Running: no slice left
@@ -194,7 +194,7 @@ kubectl --context spark-root -n platform-tools get events --field-selector reaso
 Expected:
 
 ```text
-Normal  Preempted  pod/filler-7c9…-k2x  Preempted by pod … on node spark-01
+Normal  Preempted  pod/filler-7c9…-k2x  Preempted by pod … on node dgx-spark-01
 ```
 
 The filler Deployment immediately recreates its lost pod, which now sits `Pending` with `Insufficient nvidia.com/gpu`. Low priority waits, high priority runs. (`yq` is mikefarah yq, version `YQ_VERSION` in `versions.env`; `scripts/preflight.sh` checks for it.)
@@ -286,7 +286,7 @@ gang-a   false       3
 gang-b   true        <none>
 ```
 
-`gang-b` stays suspended, with **zero pods** anywhere, until `gang-a` finishes (~2 min). Then it's admitted whole. Kueue injected the `gb10` flavor's `nodeSelector` into `gang-a`'s pods; the root scheduler is what matched it to spark-01. Same check, automated: `tests/kueue-gang-test.sh`.
+`gang-b` stays suspended, with **zero pods** anywhere, until `gang-a` finishes (~2 min). Then it's admitted whole. Kueue injected the `gb10` flavor's `nodeSelector` into `gang-a`'s pods; the root scheduler is what matched it to dgx-spark-01. Same check, automated: `tests/kueue-gang-test.sh`.
 
 Try priority inside the queue. While `gang-a` runs, submit a copy of `gang-b` labelled `urgent`. It jumps ahead of the queued `routine` job:
 
@@ -300,20 +300,20 @@ When `gang-a` completes, `gang-c` (priority 1000) is admitted before `gang-b` (1
 
 Exercise: why didn't Kueue's 4 slices collide with the root? Add up `spark-cq` (4) + what `llm-serving` is using now, and compare with `kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget`. If serving were already at 6 slices, Kueue would admit `gang-a` and the root would refuse its third pod — a partial gang again, one layer down. Kueue's quota has to be sized for what the *root* will give it.
 
-### 5.6 Taints and affinity (ready for spark-02)
+### 5.6 Taints and affinity (ready for dgx-spark-02)
 
 Nodes belong to the root: only the platform admin can taint them, and both vClusters see the taint through node sync.
 
 ```bash
-kubectl --context spark-root taint node spark-01 spark.lab/dedicated=gpu:PreferNoSchedule
-kubectl --context dev-lab get node spark-01 -o jsonpath='{.spec.taints}{"\n"}'               # synced into the vCluster
+kubectl --context spark-root taint node dgx-spark-01 spark.lab/dedicated=gpu:PreferNoSchedule
+kubectl --context dev-lab get node dgx-spark-01 -o jsonpath='{.spec.taints}{"\n"}'               # synced into the vCluster
 kubectl --context dev-lab apply -f manifests/dev-lab/20-scheduling/taints-affinity.yaml
 kubectl --context dev-lab -n tenant-beta get pods -l app=affinity-demo -o wide
 kubectl --context dev-lab -n tenant-beta get pod -l app=affinity-demo -o jsonpath='{.items[0].spec.tolerations}' | jq
-kubectl --context spark-root taint node spark-01 spark.lab/dedicated-                           # remove
+kubectl --context spark-root taint node dgx-spark-01 spark.lab/dedicated-                           # remove
 ```
 
-With one node, both replicas land on spark-01 (the anti-affinity is *preferred*, not required). With spark-02 joined (01 Ansible `k8s_workers`), they spread one per Spark. Change `preferred…` to `required…` and scale to 3 on two nodes, and the third stays Pending. That's the behaviour you want for HA serving. The tolerations and affinity are written in dev-lab but evaluated by the root scheduler against the root's real node.
+With one node, both replicas land on dgx-spark-01 (the anti-affinity is *preferred*, not required). With dgx-spark-02 joined (01 Ansible `k8s_workers`), they spread one per Spark. Change `preferred…` to `required…` and scale to 3 on two nodes, and the third stays Pending. That's the behaviour you want for HA serving. The tolerations and affinity are written in dev-lab but evaluated by the root scheduler against the root's real node.
 
 Why `PreferNoSchedule` and not `NoSchedule`? On a one-node lab, `NoSchedule` stops every new pod in all three clusters at once — break/fix 13 is exactly that.
 
@@ -348,7 +348,7 @@ PASS: one gang admitted whole, the other held whole (no partial start)
 | Job runs **without** Kueue although labelled | Kueue webhook missed it (Kueue installed after the Job, or namespace excluded by `manageJobsWithoutQueueName`), or the Job was created in **dev-lab**, which has no Kueue | `kubectl --context llms -n kueue-system logs deploy/kueue-controller-manager` | recreate the Job in llms after Kueue is up |
 | Kueue admitted the job, some pods `Pending` in llms with no scheduler events | the **root** quota on `vc-llms` is spent (serving grew) — Kueue can't see it | sync error events on the pod; `kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget` | size `spark-cq` to fit beside serving inside the root budget (§5.5 exercise), or resize the vCluster (Vol 27 §6.5) |
 | Pods `Pending`, `Insufficient nvidia.com/gpu`, though the vCluster's own quota has room | the *node* is full: other clusters hold the slices | root view: §5.2 list, or `kubectl --context spark-root -n platform-tools get cm gpu-slice-ledger -o yaml` (Vol 04) | wait, preempt (priority), or free slices elsewhere |
-| Pods Pending, `didn't match Pod's node affinity` | GFD labels missing (GPU Operator not healthy) — so the synced node in the vCluster lacks them too | `kubectl --context spark-root get node spark-01 --show-labels \| tr , '\n' \| grep nvidia` | fix the GPU Operator (Vol 16) |
+| Pods Pending, `didn't match Pod's node affinity` | GFD labels missing (GPU Operator not healthy) — so the synced node in the vCluster lacks them too | `kubectl --context spark-root get node dgx-spark-01 --show-labels \| tr , '\n' \| grep nvidia` | fix the GPU Operator (Vol 16) |
 | Preemption doesn't happen | victim has **equal/higher** priority, or a PDB protects it (preemption respects PDBs as best effort; PDBs are synced from the vClusters), or the preemptor was refused by a **quota** — quota never preempts | `kubectl --context spark-root get pod -n <ns> <p> -o jsonpath='{.spec.priority}'`; sync errors in the vCluster | adjust classes. Remember `preemptionPolicy: Never` on the *preemptor* blocks it |
 | Serving pod preempted by a notebook | notebook class ≥ serving class | `kubectl --context spark-root get pc` | serving must be the highest non-platform class |
 | **A tenant's pods preempt platform or other tenants' pods** | someone created a PriorityClass with a high value **inside a vCluster**; priority classes sync to the root with their value, and the root scheduler honours it | `kubectl --context <vc> get pc`; compare with the five lab classes; `.spec.priority` of the host copies in `vc-*` | tenants must not be able to create PriorityClasses: the tenant role (`spark-tenant-developer`, Vol 02 §3.2) has no access to them, and the vCluster admin kubeconfig stays with the platform team. In a real platform, add an admission policy in each vCluster that allows only the lab's five classes |

@@ -17,7 +17,7 @@ flowchart TB
 | Skill | Practise with | Checkpoint (you can…) |
 |---|---|---|
 | Inventory, ad-hoc, playbook runs | `00-ping`, `01-baseline` | explain every line of `ansible.cfg` and `hosts.yml` |
-| Check/diff, tags, limits | `01-baseline --check --diff --tags sysctl -l spark-02` | predict what a run will change before it runs |
+| Check/diff, tags, limits | `01-baseline --check --diff --tags sysctl -l dgx-spark-02` | predict what a run will change before it runs |
 | Reading failures | [01B](01-ansible-core-engine-and-execution-internals.md) | tell whether a failure is SSH, sudo, Python, module, or logic from the error alone |
 
 ## Level 2 · Author (weeks 2–3)

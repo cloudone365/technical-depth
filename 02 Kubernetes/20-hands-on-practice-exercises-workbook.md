@@ -6,7 +6,7 @@
 |---|---|
 | **You will build** | Proof that you can operate the platform without the volumes open. Twenty timed challenges, each with a goal, constraints, a success check you can run, and a pointer to the volume with the answer |
 | **Clusters** | all three. Each exercise says which: `spark-root` (node, platform, budgets), `dev-lab` (tenants, `lab-tools`), `llms` (serving, batch, Traefik, Kueue) |
-| **Hardware** | spark-01 |
+| **Hardware** | dgx-spark-01 |
 | **Time** | 6–8 h total. Do 2–3 per session |
 | **Risk** | as per the referenced volume. Ex 20 restores root etcd |
 | **Lab files** | all of [`lab/`](lab/README.md) |
@@ -89,8 +89,8 @@ Progress log (copy into your notes):
 
 ### Ex 07 · Dedicated GPU node (20 min)
 **Cluster:** spark-root (taint), dev-lab (workload).
-**Goal:** taint spark-01 `spark.lab/dedicated=gpu:PreferNoSchedule` on the root, deploy `affinity-demo` from `manifests/dev-lab/20-scheduling/taints-affinity.yaml` in dev-lab, then remove the taint.
-**Success check:** `affinity-demo` pods Running in `tenant-beta`, with the toleration visible in the virtual pod's spec **and** in its root copy in `vc-dev-lab`; `kubectl --context dev-lab describe node spark-01` showed the taint while it was set.
+**Goal:** taint dgx-spark-01 `spark.lab/dedicated=gpu:PreferNoSchedule` on the root, deploy `affinity-demo` from `manifests/dev-lab/20-scheduling/taints-affinity.yaml` in dev-lab, then remove the taint.
+**Success check:** `affinity-demo` pods Running in `tenant-beta`, with the toleration visible in the virtual pod's spec **and** in its root copy in `vc-dev-lab`; `kubectl --context dev-lab describe node dgx-spark-01` showed the taint while it was set.
 **Answer:** [Vol 05 §5.6](05-kube-scheduler-and-ai-batch-scheduling.md).
 
 ### Ex 08 · Gang scheduling with Kueue (30 min)
@@ -161,7 +161,7 @@ Progress log (copy into your notes):
 
 ### Ex 18 · Device-plugin profile per node (20 min)
 **Cluster:** spark-root (switch, benchmark), llms (observe).
-**Goal:** switch spark-01 to `whole-gpu`, show allocatable 1 on the root **and** in llms, run `gemm-solo` in `platform-tools`, then switch back.
+**Goal:** switch dgx-spark-01 to `whole-gpu`, show allocatable 1 on the root **and** in llms, run `gemm-solo` in `platform-tools`, then switch back.
 **Success check:** allocatable goes 15 → 1 → 15 in both contexts while `vc-llms`'s quota keeps saying 8. GEMM TFLOPS equals your baseline.
 **Answer:** [Vol 16 §5.3](16-nvidia-gpu-operator-and-network-operator.md).
 

@@ -113,7 +113,7 @@ A typo in `host_vars` (`adress:` instead of `address:`) now fails immediately:
 
 ```
 TASK [cx7_fabric : Validating arguments against arg spec 'main' ...]
-fatal: [spark-01]: FAILED! => argument_errors:
+fatal: [dgx-spark-01]: FAILED! => argument_errors:
   - 'missing required arguments: address found in cx7_fabric_interfaces'
 ```
 
@@ -225,7 +225,7 @@ additional_build_steps:
 ```
 
 ```bash
-# on spark-01 (native arm64 build; no emulation)
+# on dgx-spark-01 (native arm64 build; no emulation)
 pip install ansible-builder ansible-navigator
 cd "01 Ansible/lab"
 ansible-builder build -t spark-ee:1.0 -f ee/execution-environment.yml --container-runtime docker -v 3

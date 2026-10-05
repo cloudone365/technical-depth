@@ -16,11 +16,11 @@
 
 | Question | Layer that answers it |
 |---|---|
-| "Which playbook run changed `/etc/sysctl.d/90-spark.conf` on spark-02 last Tuesday, and with what diff?" | **ARA** (+ `ansible.log`) |
+| "Which playbook run changed `/etc/sysctl.d/90-spark.conf` on dgx-spark-02 last Tuesday, and with what diff?" | **ARA** (+ `ansible.log`) |
 | "Did someone edit netplan by hand outside Ansible?" | **auditd** key `network` + drift (Volume 22) |
-| "What did the kernel say about the GPU right before the job died?" | **Loki**: `{host="spark-02"} \|= "NVRM: Xid"` |
+| "What did the kernel say about the GPU right before the job died?" | **Loki**: `{host="dgx-spark-02"} \|= "NVRM: Xid"` |
 | "Who read the NGC key?" | **Vault audit log** (Volume 03B) |
-| "Who raised the `vc-llms` GPU quota, and what did the request body say?" | **Kubernetes API audit log** on spark-01, `/var/log/kubernetes/audit/audit.log` (written by the root kube-apiserver; §4.5) |
+| "Who raised the `vc-llms` GPU quota, and what did the request body say?" | **Kubernetes API audit log** on dgx-spark-01, `/var/log/kubernetes/audit/audit.log` (written by the root kube-apiserver; §4.5) |
 | "Who launched the remediation job and who approved it?" | **AWX** activity stream + job history (Volume 20) |
 
 ## 2. Architecture
@@ -31,10 +31,10 @@ flowchart LR
     AU["auditd<br/>/etc/audit/rules.d/60-spark.rules<br/>→ /var/log/audit/audit.log"] --> AL
     K["kernel (NVRM, mlx5)"] --> J
     SVC["sshd · sudo · kubelet · containerd · slurmd · docker · vault"] --> J
-    KA["kube-apiserver (static pod, spark-01)<br/>→ /var/log/kubernetes/audit/audit.log"] -.->|"not shipped by default (§4.5)"| AL
+    KA["kube-apiserver (static pod, dgx-spark-01)<br/>→ /var/log/kubernetes/audit/audit.log"] -.->|"not shipped by default (§4.5)"| AL
     J["journald<br/>(persistent, 4G cap)"] --> AL["Grafana Alloy<br/>loki.source.journal + loki.source.file"]
   end
-  subgraph MON["monitoring host (spark-01)"]
+  subgraph MON["monitoring host (dgx-spark-01)"]
     LOKI["Loki :3100<br/>tsdb v13, 30d retention"]
     ARA["ARA API :8000<br/>sqlite"]
     GRAF["Grafana :3000<br/>datasources: Prometheus + Loki"]
@@ -393,7 +393,7 @@ To make it permanent, put the three variables in your shell profile or in the AW
 |---|---|
 | GPU Xid events, all nodes | `{job="systemd-journal", transport="kernel"} \|= "NVRM: Xid"` |
 | CX-7 link flaps | `{transport="kernel"} \|~ "mlx5_core.*(link down\|Link up\|module)"` |
-| sudo commands on spark-02 | `{host="spark-02", ident="sudo"}` |
+| sudo commands on dgx-spark-02 | `{host="dgx-spark-02", ident="sudo"}` |
 | Config file watches that fired (auditd log file) | `{job="auditd"} \|~ "key=\"(network\|sshd\|priv\|container-runtime)\""` |
 | SSH logins using Vault certificates | `{unit="ssh.service"} \|= "CA ED25519"` |
 | kubelet / containerd errors | `{unit=~"kubelet.service\|containerd.service", level="err"}` |
@@ -407,7 +407,7 @@ ssh nvidia@192.168.0.101 'sudo sed -i "s/mtu: 9000/mtu: 1500/" /etc/netplan/40-c
 ssh nvidia@192.168.0.101 'sudo ausearch -k network -i --start recent | tail -20'
 # → type=SYSCALL ... comm="sed" ... auid=nvidia ... key="network"
 tools/drift-cycle.sh      # drift reports the fabric template (and doesn't auto-heal it)
-ansible-playbook playbooks/02-fabric.yml -K -l spark-02    # a human puts it back
+ansible-playbook playbooks/02-fabric.yml -K -l dgx-spark-02    # a human puts it back
 ```
 
 ### 4.5 The Kubernetes API audit log: root vs vCluster

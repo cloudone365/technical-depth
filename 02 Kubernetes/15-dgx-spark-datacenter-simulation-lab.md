@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **You will build** | The whole "AI datacenter in a box" on one Spark: a kubeadm **root cluster** that owns the hardware, two **vClusters** with hard budgets (`dev-lab` for tenants, `llms` for serving and training), a serving tier behind an API gateway, a gang-scheduled batch tier, observability across all three clusters, backups and a scripted verification gate after every layer. Everything is designed to add spark-02 without rework |
+| **You will build** | The whole "AI datacenter in a box" on one Spark: a kubeadm **root cluster** that owns the hardware, two **vClusters** with hard budgets (`dev-lab` for tenants, `llms` for serving and training), a serving tier behind an API gateway, a gang-scheduled batch tier, observability across all three clusters, backups and a scripted verification gate after every layer. Everything is designed to add dgx-spark-02 without rework |
 | **Hardware** | 1 DGX Spark (2 optional) · your MacBook as the terminal (control node) |
 | **Time** | 4–6 h the first time, ~45 min once practised |
 | **Risk** | Medium. Everything is rebuildable: `01 Ansible playbooks/99-reset-kubernetes.yml` wipes Kubernetes, playbooks 05 → 06 → 06b rebuild it |
@@ -39,7 +39,7 @@ The goal isn't scale. It's the **same shape and the same failure modes** as a pr
 flowchart TB
   USER(["Users · SDKs · Open WebUI"]) --> EDGE
   ADMIN(["Your MacBook · kubectl<br/>contexts spark-root · dev-lab · llms"])
-  subgraph SPARK["spark-01 · DGX OS 7 · GB10 · 128 GB UMA (~119.7 GiB usable)"]
+  subgraph SPARK["dgx-spark-01 · DGX OS 7 · GB10 · 128 GB UMA (~119.7 GiB usable)"]
     direction TB
     subgraph ROOT["Root cluster · kubeadm v1.36 · master + worker"]
       direction TB
@@ -71,7 +71,7 @@ flowchart TB
     NVME[("NVMe 4 TB<br/>/data/k8s · model-cache")]
     GB10["GB10 GPU"]
   end
-  S2["spark-02 (optional)<br/>root worker · +15 slices<br/>CX-7 200 GbE"]
+  S2["dgx-spark-02 (optional)<br/>root worker · +15 slices<br/>CX-7 200 GbE"]
   ADMIN --> API
   EDGE --> SERVE
   SERVE & BATCH & TA & TB & PT --> GB10
@@ -118,7 +118,7 @@ flowchart TB
 | Host Grafana (01 Ansible) | `http://192.168.0.100:3000` | node/GPU view that survives a Kubernetes outage |
 | Pod CIDR / Service CIDR / DNS | 10.42.0.0/16 · 10.43.0.0/16 · 10.43.0.10 | set in the kubeadm config; vCluster Services get root ClusterIPs |
 | MetalLB pool | 192.168.0.110–119 | reserve in your router's DHCP |
-| CX-7 | 192.168.100.0/24, 192.168.101.0/24 | only with spark-02 |
+| CX-7 | 192.168.100.0/24, 192.168.101.0/24 | only with dgx-spark-02 |
 
 ### 3.2 Namespaces, budgets and policies
 
@@ -333,15 +333,15 @@ scripts/verify.sh
 
 ---
 
-## 9. Scale-out path: adding spark-02
+## 9. Scale-out path: adding dgx-spark-02
 
 ```mermaid
 flowchart LR
-  subgraph A["spark-01 · root control plane + worker"]
+  subgraph A["dgx-spark-01 · root control plane + worker"]
     A1["control plane · etcd<br/>platform · vCluster control planes"]
     A2["GB10 · 15 slices"]
   end
-  subgraph B["spark-02 · root worker (kubeadm join)"]
+  subgraph B["dgx-spark-02 · root worker (kubeadm join)"]
     B1["kubelet · Cilium agent"]
     B2["GB10 · 15 slices"]
   end
@@ -354,7 +354,7 @@ flowchart LR
 ```
 
 1. Cable the QSFP ports. Run 01 Ansible `02-fabric.yml` (CX-7 addressing, MTU 9000) and `11-rdma-perftest.yml` (≥ 180 Gb/s gate).
-2. Uncomment `spark-02` under `k8s_workers` in the inventory and run `05-kubernetes.yml` (kubeadm join, Cilium agent) and `06-gpu-operator.yml`.
+2. Uncomment `dgx-spark-02` under `k8s_workers` in the inventory and run `05-kubernetes.yml` (kubeadm join, Cilium agent) and `06-gpu-operator.yml`.
 3. `kubectl --context spark-root get nodes` → 2 Ready, 30 slices allocatable. Both vClusters see the new node at once (node sync). Raise the root budgets you want to grow (`root/05-vclusters/quotas.yaml`, then `tests/budget_check.py` with `SPARK` doubled) and `spark-cq`.
 4. Serve weights from NFS (Vol 11 §8) instead of per-node local PVs.
 5. Run `manifests/llms/80-distributed/two-spark` (NCCL over RoCE, Vol 17).
@@ -368,4 +368,4 @@ flowchart LR
 - [ ] I can say which of the three clusters any object lives in — and find a vCluster pod's real copy on the root.
 - [ ] I can rebuild the whole platform from `lab/` (reset → 05 → 06 → 06b → `install-addons.sh all` → `apply-lab.sh`) in under an hour.
 - [ ] Backups and a restore rehearsal exist for etcd **and** for a vCluster, not just the backups.
-- [ ] I have a written plan (and the inventory change ready) for spark-02.
+- [ ] I have a written plan (and the inventory change ready) for dgx-spark-02.

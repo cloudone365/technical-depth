@@ -1,9 +1,9 @@
 ---
 # Runbook C — unified-memory pressure on a DGX Spark.
 # Diagnose first (always), relieve second (opt-in flags).
-#   ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K                       # diagnose only
-#   ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K -e uma_drop_caches=true
-#   ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K -e uma_stop_label=spark.lab/idle=true
+#   ansible-playbook playbooks/24-uma-relief.yml -l dgx-spark-01 -K                       # diagnose only
+#   ansible-playbook playbooks/24-uma-relief.yml -l dgx-spark-01 -K -e uma_drop_caches=true
+#   ansible-playbook playbooks/24-uma-relief.yml -l dgx-spark-01 -K -e uma_stop_label=spark.lab/idle=true
 - name: UMA pressure diagnosis and relief
   hosts: spark
   become: true

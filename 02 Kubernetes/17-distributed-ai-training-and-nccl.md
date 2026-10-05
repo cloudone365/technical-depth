@@ -5,8 +5,8 @@
 | | |
 |---|---|
 | **You will build** | A torchrun job that needs no training operator: an Indexed Job, a headless Service and Kueue gang admission, inside the `llms` vCluster's `batch` tier. You'll run an all-reduce bandwidth sweep that uses `gloo` on one Spark and NCCL over RoCE on two, find out what happens when Kueue admits a gang that the root budget can't hold, and learn a repeatable procedure for the two classic failures: the silent hang and the straggler |
-| **Clusters** | `llms` (the job, Kueue, the headless Service) · `spark-root` (the root budget on `vc-llms`, the real pods, host-side evidence, spark-02) |
-| **Hardware** | spark-01 (§5.1–5.4). spark-02 + QSFP cable for §5.5 |
+| **Clusters** | `llms` (the job, Kueue, the headless Service) · `spark-root` (the root budget on `vc-llms`, the real pods, host-side evidence, dgx-spark-02) |
+| **Hardware** | dgx-spark-01 (§5.1–5.4). dgx-spark-02 + QSFP cable for §5.5 |
 | **Time** | 90 min |
 | **Risk** | Low |
 | **Lab files** | [`manifests/llms/80-distributed/base/`](lab/manifests/llms/80-distributed/base/) (`allreduce_bench.py`, `ddp-job.yaml`), [`two-spark/`](lab/manifests/llms/80-distributed/two-spark/kustomization.yaml), [`resilient/`](lab/manifests/llms/80-distributed/resilient/) (Vol 26), [`manifests/llms/20-scheduling/kueue.yaml`](lab/manifests/llms/20-scheduling/kueue.yaml), [`manifests/root/05-vclusters/quotas.yaml`](lab/manifests/root/05-vclusters/quotas.yaml), [`manifests/llms/85-network-operator/`](lab/manifests/llms/85-network-operator/) |
@@ -49,7 +49,7 @@ flowchart LR
     R0 & R1 --> G1["GB10 (shared slices)"]
   end
   subgraph TWO["2 Sparks — BACKEND=nccl (two-spark overlay)"]
-    A0["rank 0 · spark-01<br/>hostNetwork"] <==>|"NCCL NET/IB (RoCE v2)<br/>rocep1s0f1 + roceP2p1s0f1<br/>~200 Gb/s"| A1["rank 1 · spark-02<br/>hostNetwork"]
+    A0["rank 0 · dgx-spark-01<br/>hostNetwork"] <==>|"NCCL NET/IB (RoCE v2)<br/>rocep1s0f1 + roceP2p1s0f1<br/>~200 Gb/s"| A1["rank 1 · dgx-spark-02<br/>hostNetwork"]
     A0 --- GA["GB10"]
     A1 --- GB["GB10"]
   end
@@ -176,7 +176,7 @@ kubectl --context spark-root -n vc-llms get pods -o wide | grep -- '-x-batch-x-l
 kubectl --context spark-root -n vc-llms get svc | grep ddp-workers
 ```
 
-Two pods, renamed `ddp-0-…-x-batch-x-llms`, on spark-01, and the headless Service. There is no Job, no Workload, no ClusterQueue on the root: those stayed in `llms`.
+Two pods, renamed `ddp-0-…-x-batch-x-llms`, on dgx-spark-01, and the headless Service. There is no Job, no Workload, no ClusterQueue on the root: those stayed in `llms`.
 
 ### 5.2 See NCCL refuse duplicate GPUs
 
@@ -284,11 +284,11 @@ kubectl --context llms -n batch delete job ddp
 
 ### 5.5 Two Sparks: NCCL over RoCE
 
-Prerequisites: spark-02 joined the root as a worker (Vol 15 §9) and both vClusters list it (`kubectl --context llms get nodes`), 01 Ansible `11-rdma-perftest.yml` ≥ 180 Gb/s. The gang still needs 2 CPU · 12 Gi · 2 slices of the `llms` budget; spark-02 adds 15 slices to the root, not to `llms`.
+Prerequisites: dgx-spark-02 joined the root as a worker (Vol 15 §9) and both vClusters list it (`kubectl --context llms get nodes`), 01 Ansible `11-rdma-perftest.yml` ≥ 180 Gb/s. The gang still needs 2 CPU · 12 Gi · 2 slices of the `llms` budget; dgx-spark-02 adds 15 slices to the root, not to `llms`.
 
 ```bash
 kubectl --context llms apply -k manifests/llms/80-distributed/two-spark
-kubectl --context llms -n batch get pods -l job-name=ddp -o wide          # one on spark-01, one on spark-02
+kubectl --context llms -n batch get pods -l job-name=ddp -o wide          # one on dgx-spark-01, one on dgx-spark-02
 kubectl --context llms -n batch logs -l job-name=ddp --prefix | grep -E 'NCCL INFO (NET/|Using network|Channel 00)|busbw|correctness' | head -20
 ```
 

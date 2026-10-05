@@ -40,7 +40,7 @@ extends_documentation_fragment:
 EXAMPLES = r"""
 # inventory/spark.mdns.yml
 plugin: spark_mdns
-name_regex: '^spark-\d+$'
+name_regex: '^dgx-spark-\d+$'
 interface: enp0s31f6
 keyed_groups:
   - key: mdns_interface

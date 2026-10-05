@@ -71,11 +71,11 @@ ansible-playbook playbooks/15-jinja-lab.yml        # → "7/7 Jinja katas passed
       [ 9001.010] mlx5_core 0000:01:00.1: Port module event: module 1, Cable unplugged
     k8s_nodes_json:
       items:
-        - metadata: { name: spark-01, labels: { nvidia.com/gpu.product: GB10 } }
+        - metadata: { name: dgx-spark-01, labels: { nvidia.com/gpu.product: GB10 } }
           status:
             allocatable: { nvidia.com/gpu: "4", memory: 110Gi }
             conditions: [{ type: Ready, status: "True" }]
-        - metadata: { name: spark-02, labels: { nvidia.com/gpu.product: GB10 } }
+        - metadata: { name: dgx-spark-02, labels: { nvidia.com/gpu.product: GB10 } }
           status:
             allocatable: { memory: 110Gi }
             conditions: [{ type: Ready, status: "False" }]
@@ -157,7 +157,7 @@ ansible-playbook playbooks/15-jinja-lab.yml        # → "7/7 Jinja katas passed
           | [?status.allocatable."nvidia.com/gpu"].metadata.name
     - name: K4 check
       ansible.builtin.assert:
-        that: k4 == ['spark-01']
+        that: k4 == ['dgx-spark-01']
 
     # 5 ─ deep merge without clobbering (daemon.json pattern)
     - name: K5 recursive combine keeps unknown keys, list_merge controls arrays
@@ -183,7 +183,7 @@ ansible-playbook playbooks/15-jinja-lab.yml        # → "7/7 Jinja katas passed
              | map('join', ' ') | list }}
     - name: K6 check
       ansible.builtin.assert:
-        that: k6 == ['192.168.100.11 spark-01-fab', '192.168.100.12 spark-02-fab']
+        that: k6 == ['192.168.100.11 dgx-spark-01-fab', '192.168.100.12 dgx-spark-02-fab']
 
     # 7 ─ safe defaults & type tests
     - name: K7 Defaults that don't hide bugs
@@ -301,7 +301,7 @@ Tools for debugging expressions:
 
 ```bash
 ansible localhost -m debug -a "msg={{ '580.82.09' is version('580', '>=') }}"
-ansible spark-01 -m debug -a "msg={{ hostvars['spark-02'].cx7_interfaces | map(attribute='address') }}"
+ansible dgx-spark-01 -m debug -a "msg={{ hostvars['dgx-spark-02'].cx7_interfaces | map(attribute='address') }}"
 ansible-console localhost      # then: debug msg="{{ ... }}"
 ```
 

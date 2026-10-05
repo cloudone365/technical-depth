@@ -2,7 +2,7 @@
 # platform-tools namespace (--context spark-root) because preemption needs the
 # NODE to be full; inside a vCluster the root quota refuses pods long before.
 # 1) filler: scale to the free slices so preemptible pods take every one left
-#      free=$(( $(kubectl get node spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}') \
+#      free=$(( $(kubectl get node dgx-spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}') \
 #               - $(kubectl get pods -A -o json | jq '[.items[] | select(.status.phase=="Running") | .spec.containers[].resources.limits["nvidia.com/gpu"] // "0" | tonumber] | add') ))
 #      kubectl -n platform-tools scale deploy filler --replicas=$free
 # 2) urgent: one serving-priority pod arrives → the scheduler evicts one filler

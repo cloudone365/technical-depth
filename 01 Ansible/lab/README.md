@@ -55,15 +55,15 @@ lab/
 
 ```mermaid
 flowchart LR
-  subgraph CTL["Control node (laptop / VM / spark-01 itself)"]
+  subgraph CTL["Control node (laptop / VM / dgx-spark-01 itself)"]
     A["ansible-core 2.18<br/>collections, kubeconfig,<br/>vault CA, .cache/"]
   end
   subgraph MGMT["Mgmt LAN 192.168.0.0/24 (10GbE enP7s7)"]
   end
-  subgraph S1["spark-01 · 192.168.0.100"]
+  subgraph S1["dgx-spark-01 · 192.168.0.100"]
     S1a["kubeadm control plane + worker (spark-root)<br/>vClusters dev-lab · llms<br/>slurmctld+slurmd · Vault · Prometheus/Grafana<br/>NFS server /srv/models"]
   end
-  subgraph S2["spark-02 · 192.168.0.101"]
+  subgraph S2["dgx-spark-02 · 192.168.0.101"]
     S2a["root worker (k8s_workers) · slurmd<br/>NFS client /mnt/models"]
   end
   A -- SSH 22 --> MGMT
@@ -72,9 +72,9 @@ flowchart LR
   S1 <== "QSFP · CX-7 200GbE RoCE<br/>192.168.100.0/24 (enp1s0f1np1)<br/>192.168.101.0/24 (enP2p1s0f1np1)" ==> S2
 ```
 
-**Single Spark?** Remove `spark-02` from `inventory/hosts.yml` and from the
+**Single Spark?** Remove `dgx-spark-02` from `inventory/hosts.yml` and from the
 `k8s_workers`/`nfs_client` groups. Fabric, NCCL and NFS-over-RDMA steps skip
-themselves; everything else runs. `spark-01` keeps no control-plane taint, so on
+themselves; everything else runs. `dgx-spark-01` keeps no control-plane taint, so on
 its own it is a complete cluster.
 
 ## Kubernetes: one root cluster, two vClusters
@@ -124,7 +124,7 @@ ansible-playbook playbooks/site.yml -K
 
 # 4. Day-2
 tools/drift-cycle.sh                                             # what drifted? (exit 0/2/3)
-ansible-playbook playbooks/21-emergency-drain.yml -l spark-02 -K  # take a node out safely
+ansible-playbook playbooks/21-emergency-drain.yml -l dgx-spark-02 -K  # take a node out safely
 ansible-playbook playbooks/10-nccl-test.yml -K                   # 2-node NCCL bandwidth
 python3 tools/capstone_scorecard.py                              # evidence-based progress
 ```

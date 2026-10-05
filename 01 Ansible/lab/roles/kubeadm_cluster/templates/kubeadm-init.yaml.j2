@@ -10,7 +10,7 @@ nodeRegistration:
   name: {{ inventory_hostname }}
   criSocket: unix:///run/containerd/containerd.sock
   # Empty list = no node-role.kubernetes.io/control-plane:NoSchedule taint.
-  # spark-01 runs the control plane AND all workloads.
+  # dgx-spark-01 runs the control plane AND all workloads.
   taints: []
   kubeletExtraArgs:
     - name: node-ip
@@ -22,7 +22,7 @@ apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration
 clusterName: {{ kubeadm_cluster_name }}
 kubernetesVersion: v{{ kubeadm_cluster_version }}
-# A stable endpoint lets spark-02 (or a second control plane later) join.
+# A stable endpoint lets dgx-spark-02 (or a second control plane later) join.
 controlPlaneEndpoint: "{{ kubeadm_cluster_api_endpoint }}"
 networking:
   podSubnet: {{ kubeadm_cluster_pod_cidr }}
