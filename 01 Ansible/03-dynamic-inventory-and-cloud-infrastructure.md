@@ -18,7 +18,7 @@ On a real GPU cluster, most outages traced back to automation come down to *targ
 | Question | Answered by |
 |---|---|
 | *What hardware exists?* | static `spark` group, or NetBox |
-| *What does each box do?* | functional groups (`k3s_server`, `slurm_compute`, …) |
+| *What does each box do?* | functional groups (`k8s_control_plane`, `k8s_workers`, `slurm_compute`, …) |
 | *What state is it in right now?* | **constructed** groups from facts (`gpu_ready`, `uma_pressure`, `driver_580`) |
 | *What's on the network that I didn't write down?* | discovery (mDNS plugin) |
 
@@ -41,7 +41,7 @@ flowchart LR
   FC --> C --> MERGE
   M -.-> MERGE
   NB -.-> MERGE
-  MERGE --> PLAY[ansible-playbook -l 'gpu_ready:&k3s_agent:!uma_pressure']
+  MERGE --> PLAY[ansible-playbook -l 'gpu_ready:&k8s_workers:!uma_pressure']
 ```
 
 **LLD — the files in the lab:**
@@ -111,8 +111,9 @@ Output (example):
 Now **target by state** with inventory patterns:
 
 ```bash
-# only healthy GPU nodes that are k3s agents and NOT under memory pressure
-ansible-playbook playbooks/06-gpu-operator.yml -l 'gpu_ready:&k3s_agent:!uma_pressure'
+# only healthy GPU nodes that are Kubernetes workers and NOT under memory pressure
+# (30-validate targets the Sparks themselves; 05/06/06b run from localhost against the API)
+ansible-playbook playbooks/30-validate.yml -l 'gpu_ready:&k8s_workers:!uma_pressure'
 # every node still on an old driver major
 ansible 'driver_570' -m debug -a msg="needs upgrade"
 # one node at a time from a group
@@ -324,7 +325,7 @@ Seed NetBox from your inventory, so the model describes the Spark precisely:
           role: gpu-node
           site: home-lab
           custom_fields: {}
-          tags: ["{{ 'k3s-server' if inventory_hostname in groups['k3s_server'] else 'k3s-agent' }}"]
+          tags: ["{{ 'k8s-control-plane' if inventory_hostname in groups['k8s_control_plane'] else 'k8s-worker' }}"]
     - name: CX-7 interfaces + IPs
       netbox.netbox.netbox_interface:
         netbox_url: "{{ nb.url }}"
@@ -369,7 +370,7 @@ NETBOX_TOKEN=... ansible-inventory -i inventory-examples/netbox.yml --graph
 | AWX (Volume 02B/20) | Inventory source "Sourced from a Project" → `lab/inventory/`; NetBox has a native source type |
 | Drift (Volume 22) | `-l gpu_ready` keeps drift checks off nodes that are already known-bad |
 | Drain (Volume 24) | `-l uma_pressure` finds nodes to relieve first |
-| Slurm / k3s roles | functional groups decide who's controller vs worker |
+| Slurm / `kubeadm_cluster` roles | functional groups decide who's controller / control plane vs worker (`k8s_control_plane` runs `kubeadm init`, `k8s_workers` run `kubeadm join`) |
 
 ## 5. Troubleshooting & diagnostics
 

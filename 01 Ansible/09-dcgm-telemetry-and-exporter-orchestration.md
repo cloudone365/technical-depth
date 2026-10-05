@@ -407,7 +407,7 @@ Expect some fields (framebuffer memory in particular) to be absent or meaningles
 | System | How |
 |---|---|
 | Vault | Add a scrape job for `https://spark-01:8200/v1/sys/metrics?format=prometheus` with a `bearer_token` from a metrics-only policy; alert on `vault_core_unsealed == 0` |
-| k3s / GPU Operator | With the operator's `dcgmExporter.enabled=true` you get a ServiceMonitor-style endpoint in-cluster. Pick one exporter path per node to avoid double counting |
+| Kubernetes / GPU Operator | The operator's DCGM exporter is off by default in the lab (`gpu_operator_dcgm_exporter: false` in `roles/gpu_operator`). Turn it on and the root's kube-prometheus-stack (namespace `observability`) scrapes it in-cluster. Pick one exporter path per node to avoid double counting. The GPU is the root's: pods in the `dev-lab` and `llms` vClusters run on the same GB10 and show up in the same per-node metrics |
 | Slurm | The same `spark_gpu_up`/Xid signals drive the Slurm health check (Volume 18). Alerts and scheduler agree |
 | Drift (Volume 22) | `spark_drift_report.py --prom` writes `spark_config_drift.prom` into the textfile dir, and it shows on the dashboard |
 | DGX Dashboard | Stays as NVIDIA's local UI on `:11000` (reach it through an SSH tunnel). Prometheus is for history and alerting |

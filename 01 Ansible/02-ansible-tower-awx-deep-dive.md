@@ -4,8 +4,9 @@
 
 | | |
 |---|---|
-| **You will build** | AWX running on k3s on spark-01, configured *entirely from Ansible* (org, credentials, project, inventory, job templates, schedules), running the lab's own playbooks |
-| **Prerequisite** | k3s up ([Volume 16](16-kubernetes-bare-metal-bootstrap-kubespray.md), `playbooks/05-k3s.yml`) |
+| **You will build** | AWX running on the kubeadm root cluster (`spark-root`, namespace `awx`) on spark-01, configured *entirely from Ansible* (org, credentials, project, inventory, job templates, schedules), running the lab's own playbooks |
+| **Prerequisite** | Root cluster up ([Volume 16](16-kubernetes-bare-metal-bootstrap-kubeadm.md), `playbooks/05-kubernetes.yml`) and the `local-path` StorageClass (installed by `playbooks/06b-vclusters.yml`, or `"02 Kubernetes/lab/scripts/install-addons.sh" storage`) |
+| **Clusters** | `spark-root` only. AWX is platform tooling, so it lives on the root next to observability, not inside a tenant vCluster |
 | **Time** | 2 h |
 | **Risk** | Medium: AWX + Postgres use about 4–6 GiB of the unified memory pool. Budget it (§2.2) |
 
@@ -20,7 +21,7 @@ AWX is the upstream of Red Hat Ansible Automation Platform's controller. It give
 ```mermaid
 flowchart TB
   U["You / CI / webhook"] -->|HTTPS :30080| WEB
-  subgraph K3S["k3s on spark-01 · namespace awx"]
+  subgraph ROOT["spark-root (kubeadm) on spark-01 · namespace awx"]
     OP[awx-operator] -->|reconciles| CR[(AWX CR)]
     subgraph AWXPOD[AWX deployments]
       WEB["awx-web<br/>(Django API + UI)"]
@@ -47,13 +48,13 @@ flowchart TB
 |---|---|---|
 | Operator | `Deployment awx-operator-controller-manager` | Installed with kustomize, version pinned |
 | AWX | `AWX/awx` CR | `service_type: NodePort`, `nodeport_port: 30080`; resource **limits** set |
-| DB | `StatefulSet awx-postgres-15` | PVC on k3s `local-path` → `/var/lib/rancher/k3s/storage` on NVMe |
+| DB | `StatefulSet awx-postgres-15` | PVC on the root's `local-path` StorageClass → a directory under `/data/k8s` on the NVMe (the `vclusters` role points the provisioner there) |
 | Secrets | `awx-admin-password`, `awx-secret-key`, `awx-postgres-configuration` | Pre-created so they're stable across reinstalls. **Back them up** |
 | Jobs | Container Group `default` | `automation-job-*` pods, EE `quay.io/ansible/awx-ee` (or your arm64 build, §3.6) |
 
 ### 1.3 Memory budget on a UMA machine
 
-Everything on a Spark competes for one 128 GB pool, including the GPU. Give AWX hard limits so it can never starve a model server:
+Everything on a Spark competes for one unified pool (~119.7 GiB usable), including the GPU. AWX comes out of the root's share: the two vClusters' ResourceQuotas already claim 56 Gi (dev-lab 8, llms 48), and the root keeps the rest for platform services. Give AWX hard limits so it can never starve a model server:
 
 | Container | request | limit |
 |---|---|---|
@@ -88,7 +89,7 @@ done
 ### 3.1 Operator
 
 ```bash
-export KUBECONFIG="$PWD/.cache/kubeconfig-spark-lab.yaml"
+export KUBECONFIG="$PWD/.cache/kubeconfig-spark-lab.yaml"   # contexts spark-root, dev-lab, llms
 mkdir -p .cache/awx && cd .cache/awx
 cat > kustomization.yaml <<'EOF'
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -100,17 +101,17 @@ images:
   - name: quay.io/ansible/awx-operator
     newTag: 2.19.1
 EOF
-kubectl create namespace awx
-kubectl apply -k .
-kubectl -n awx rollout status deploy/awx-operator-controller-manager --timeout=5m
+kubectl --context spark-root create namespace awx
+kubectl --context spark-root apply -k .
+kubectl --context spark-root -n awx rollout status deploy/awx-operator-controller-manager --timeout=5m
 ```
 
 ### 3.2 Stable secrets (so a reinstall doesn't orphan the DB)
 
 ```bash
-kubectl -n awx create secret generic awx-admin-password --from-literal=password="$(openssl rand -base64 24)"
-kubectl -n awx create secret generic awx-secret-key      --from-literal=secret_key="$(openssl rand -base64 48)"
-kubectl -n awx get secret awx-admin-password awx-secret-key -o yaml > ../awx-secrets.backup.yaml   # keep safe
+kubectl --context spark-root -n awx create secret generic awx-admin-password --from-literal=password="$(openssl rand -base64 24)"
+kubectl --context spark-root -n awx create secret generic awx-secret-key      --from-literal=secret_key="$(openssl rand -base64 48)"
+kubectl --context spark-root -n awx get secret awx-admin-password awx-secret-key -o yaml > ../awx-secrets.backup.yaml   # keep safe
 ```
 
 ### 3.3 The AWX custom resource
@@ -138,9 +139,9 @@ spec:
 ```
 
 ```bash
-kubectl apply -f awx.yaml
-kubectl -n awx logs -f deploy/awx-operator-controller-manager -c awx-manager | grep -E 'PLAY RECAP|failed=[1-9]'
-kubectl -n awx get pods -w      # awx-web, awx-task, awx-postgres-15-0 → Running
+kubectl --context spark-root apply -f awx.yaml
+kubectl --context spark-root -n awx logs -f deploy/awx-operator-controller-manager -c awx-manager | grep -E 'PLAY RECAP|failed=[1-9]'
+kubectl --context spark-root -n awx get pods -w      # awx-web, awx-task, awx-postgres-15-0 → Running
 curl -s http://192.168.0.100:30080/api/v2/ping/ | jq .version
 ```
 
@@ -151,7 +152,7 @@ Clicking through the UI can't be reviewed or rebuilt. Use the `awx.awx` collecti
 ```bash
 ansible-galaxy collection install awx.awx -p ./collections
 export CONTROLLER_HOST=http://192.168.0.100:30080 CONTROLLER_USERNAME=admin
-export CONTROLLER_PASSWORD=$(kubectl -n awx get secret awx-admin-password -o jsonpath='{.data.password}' | base64 -d)
+export CONTROLLER_PASSWORD=$(kubectl --context spark-root -n awx get secret awx-admin-password -o jsonpath='{.data.password}' | base64 -d)
 ```
 
 ```yaml
@@ -243,7 +244,7 @@ sequenceDiagram
   participant UI as awx-web
   participant T as awx-task (dispatcher)
   participant R as receptor
-  participant K as k3s API
+  participant K as spark-root API
   participant J as automation-job pod (EE)
   UI->>T: create Job, status=pending
   T->>T: project update (git clone into /var/lib/awx/projects)
@@ -308,7 +309,7 @@ docker run --rm 192.168.0.100:5000/spark-ee:1.0 ansible-galaxy collection list |
 |---|---|---|
 | Git | Project SCM, update on launch; webhook from GitHub triggers job templates | 21 |
 | Vault | "HashiCorp Vault Secret Lookup" / "Signed SSH" credential types, so no static keys live in AWX | 19 |
-| k3s | Container Group runs job pods; you can add a second group with a GPU `nodeSelector` for GPU-touching jobs | 16/17 |
+| Kubernetes (`spark-root`) | Container Group runs job pods in `awx`; you can add a second group with a GPU `nodeSelector` for GPU-touching jobs (it comes out of the root's share of 5 time-slices). A job that must manage a vCluster uses a kubeconfig credential with the `dev-lab` / `llms` context | 16/17 |
 | Prometheus | `/api/v2/metrics/` (enable in settings). Scrape it from the Volume 09 stack | 09 |
 | ARA / logging | AWX external logging → Loki/Splunk; job events stay in Postgres | 23 |
 
@@ -324,20 +325,20 @@ docker run --rm 192.168.0.100:5000/spark-ee:1.0 ansible-galaxy collection list |
 
 | Symptom | Diagnose | Fix |
 |---|---|---|
-| Pods `ImagePullBackOff` with `no matching manifest for linux/arm64` | `kubectl -n awx describe pod <p>` | §2 hybrid pattern, or build that image for arm64 |
-| Operator loops, AWX never appears | `kubectl -n awx logs deploy/awx-operator-controller-manager -c awx-manager` → look for `failed=1` | Usually a CR typo or a PVC that can't bind: `kubectl get pvc -n awx` |
-| `awx-postgres-15-0` CrashLoop: permission denied on data dir | `kubectl logs` | local-path volume permissions: delete the PVC (lab only) and let the operator recreate it |
-| Job stuck `pending` | `kubectl -n awx get pods \| grep automation-job`; `awx-task` logs | Capacity: the instance group shows 0 capacity; raise `task_resource_requirements` or wait for running jobs |
+| Pods `ImagePullBackOff` with `no matching manifest for linux/arm64` | `kubectl --context spark-root -n awx describe pod <p>` | §2 hybrid pattern, or build that image for arm64 |
+| Operator loops, AWX never appears | `kubectl --context spark-root -n awx logs deploy/awx-operator-controller-manager -c awx-manager` → look for `failed=1` | Usually a CR typo or a PVC that can't bind: `kubectl --context spark-root get pvc -n awx`. On kubeadm there is no StorageClass until `local-path` is installed (prerequisite above) |
+| `awx-postgres-15-0` CrashLoop: permission denied on data dir | `kubectl --context spark-root -n awx logs awx-postgres-15-0` | local-path volume permissions: delete the PVC (lab only) and let the operator recreate it |
+| Job stuck `pending` | `kubectl --context spark-root -n awx get pods \| grep automation-job`; `awx-task` logs | Capacity: the instance group shows 0 capacity; raise `task_resource_requirements` or wait for running jobs |
 | Job fails instantly: `ERROR! the role 'spark_facts' was not found` | Job output → working directory | AWX runs from the project root, so `lab/ansible.cfg` (and its `roles_path`) is **not** read. The lab ships `playbooks/roles → ../roles` so role lookup works relative to the playbook. Set other settings via the job template's env or `AWX_TASK_ENV` |
 | `couldn't resolve module/action 'community.docker...'` | EE collection list | Build and use the custom EE (§3.6), or add `collections/requirements.yml` to the project |
-| Job can't reach 192.168.0.x | `kubectl exec` into a job pod → `nc -vz 192.168.0.101 22` | Pod network → mgmt LAN routing; the k3s node must be able to route to it (it's on the same LAN, so check host firewalls) |
+| Job can't reach 192.168.0.x | `kubectl --context spark-root -n awx exec` into a job pod → `nc -vz 192.168.0.101 22` | Pod → mgmt LAN traffic leaves through Cilium and is masqueraded to the node IP; check host firewalls, then `kubectl --context spark-root -n kube-system exec ds/cilium -- cilium-dbg monitor --type drop` for policy drops |
 | Job succeeds in AWX but the handlers didn't restart services | Job output shows `changed` but no `RUNNING HANDLER` | The job type was **Check**. The drift template is intentionally check-only |
 
 ## 7. Validation
 
 ```bash
 curl -s http://192.168.0.100:30080/api/v2/ping/ | jq '{version, active_node}'
-kubectl -n awx top pods                     # within the §1.3 budget
+kubectl --context spark-root -n awx top pods   # within the §1.3 budget (needs metrics-server: install-addons.sh metrics-server)
 ```
 
 - [ ] `spark · validate` succeeds from AWX (the per-host verdict is in the job output; the JSON report lands inside the ephemeral job pod unless you point `spark_validate_report_dir` at a PVC).

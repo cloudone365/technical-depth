@@ -4,11 +4,12 @@
 
 | | |
 |---|---|
-| **You will build** | A torchrun job that needs no training operator: an Indexed Job, a headless Service and Kueue gang admission. You'll run an all-reduce bandwidth sweep that uses `gloo` on one Spark and NCCL over RoCE on two, and a repeatable procedure for the two classic failures: the silent hang and the straggler |
+| **You will build** | A torchrun job that needs no training operator: an Indexed Job, a headless Service and Kueue gang admission, inside the `llms` vCluster's `batch` tier. You'll run an all-reduce bandwidth sweep that uses `gloo` on one Spark and NCCL over RoCE on two, find out what happens when Kueue admits a gang that the root budget can't hold, and learn a repeatable procedure for the two classic failures: the silent hang and the straggler |
+| **Clusters** | `llms` (the job, Kueue, the headless Service) · `spark-root` (the root budget on `vc-llms`, the real pods, host-side evidence, spark-02) |
 | **Hardware** | spark-01 (§5.1–5.4). spark-02 + QSFP cable for §5.5 |
 | **Time** | 90 min |
 | **Risk** | Low |
-| **Lab files** | [`manifests/80-distributed/base/`](lab/manifests/80-distributed/base/) (`allreduce_bench.py`, `ddp-job.yaml`), [`two-spark/`](lab/manifests/80-distributed/two-spark/kustomization.yaml), [`manifests/85-network-operator/`](lab/manifests/85-network-operator/) |
+| **Lab files** | [`manifests/llms/80-distributed/base/`](lab/manifests/llms/80-distributed/base/) (`allreduce_bench.py`, `ddp-job.yaml`), [`two-spark/`](lab/manifests/llms/80-distributed/two-spark/kustomization.yaml), [`resilient/`](lab/manifests/llms/80-distributed/resilient/) (Vol 26), [`manifests/llms/20-scheduling/kueue.yaml`](lab/manifests/llms/20-scheduling/kueue.yaml), [`manifests/root/05-vclusters/quotas.yaml`](lab/manifests/root/05-vclusters/quotas.yaml), [`manifests/llms/85-network-operator/`](lab/manifests/llms/85-network-operator/) |
 
 ---
 
@@ -16,18 +17,20 @@
 
 A single Spark trains and fine-tunes models up to its memory limit. Two Sparks joined by the CX-7 cable are a real 2-node distributed system, the smallest one that shows every production failure mode: rendezvous, NCCL transport selection, RDMA configuration, stragglers and hangs.
 
-### 1.1 The memory equation that decides single vs multi-node
+In this lab, training is a tenant workload. It runs in `llms` → `batch`, is admitted by Kueue's `spark-cq` **inside** the vCluster, and then has to fit the **root** budget of the whole `llms` vCluster, which it shares with the serving tier. That second gate is where single-box training most often surprises people.
+
+### 1.1 The memory equation that decides single vs multi-node — and which budget
 
 Training memory ≈ weights + gradients + optimizer state + activations. For mixed precision with Adam:
 
-| Method | Bytes per parameter (approx.) | 7B model | 32B model | Fits in one Spark (≈110 GiB usable)? |
-|---|---|---|---|---|
-| Full fine-tune, BF16 + FP32 Adam | ~16 | ~112 GB + activations | ~512 GB | 7B: no (borderline without activations). 32B: no |
-| Full fine-tune, 8-bit Adam | ~10 | ~70 GB | ~320 GB | 7B: yes. 32B: no |
-| LoRA on BF16 base | ~2 (+ small adapter) | ~15 GB | ~65 GB | yes / yes |
-| QLoRA on 4-bit base | ~0.6 (+ adapter) | ~5 GB | ~20 GB | yes / yes |
+| Method | Bytes per parameter (approx.) | 7B model | 32B model | Fits one Spark (~105.7 GiB allocatable)? | Fits `llms` batch (spark-cq 24 Gi; ≤ 40 Gi per container at the root)? |
+|---|---|---|---|---|---|
+| Full fine-tune, BF16 + FP32 Adam | ~16 | ~112 GB + activations | ~512 GB | 7B: no. 32B: no | no |
+| Full fine-tune, 8-bit Adam | ~10 | ~70 GB | ~320 GB | 7B: yes. 32B: no | no |
+| LoRA on BF16 base | ~2 (+ small adapter) | ~15 GB | ~65 GB | yes / yes | 7B: yes (tight with activations). 32B: no |
+| QLoRA on 4-bit base | ~0.6 (+ adapter) | ~5 GB | ~20 GB | yes / yes | yes / yes (32B tight) |
 
-Two Sparks with FSDP/ZeRO-3 shard weights, gradients and optimizer state, which roughly halves the per-node figure (modules 03 and 05 go deep).
+The Spark has ~119.7 GiB of unified memory, ~105.7 GiB allocatable after reservations (Vol 01 §3.3), and that is CPU *and* GPU memory. The `llms` vCluster gets 48 Gi of it (requests = limits), `spark-cq` hands batch 24 Gi of that, and the root LimitRange on `vc-llms` caps one container at 40 Gi. A bigger job is a decision for the platform team: resize `llms` (Vol 27 §6.5) or run it as a root job in `platform-tools`. Two Sparks with FSDP/ZeRO-3 shard weights, gradients and optimizer state, which roughly halves the per-node figure (modules 03 and 05 go deep).
 
 ---
 
@@ -35,11 +38,14 @@ Two Sparks with FSDP/ZeRO-3 shard weights, gradients and optimizer state, which 
 
 ```mermaid
 flowchart LR
-  subgraph KQ["Kueue"]
-    WL["Workload: ddp<br/>2 pods × (2 CPU · 8 Gi · 1 slice)"]
+  subgraph LLMS["vCluster llms · batch"]
+    direction TB
+    WL["Kueue Workload ddp<br/>spark-cq: 2 CPU · 24 Gi · 4 slices<br/>job: 2 × (1 CPU · 6 Gi · 1 slice)"]
+    HS["headless Service ddp-workers<br/>ddp-0.ddp-workers.batch.svc"]
   end
+  RQ["root quota vc-llms/vcluster-budget<br/>4 CPU · 48 Gi · 8 slices<br/>(shared with serving, Traefik, Kueue, KEDA, control plane)"]
   subgraph ONE["1 Spark — BACKEND=gloo"]
-    R0["ddp-0 · rank 0<br/>MASTER (29500)"] <-->|"TCP over pod network<br/>(cni0)"| R1["ddp-1 · rank 1"]
+    R0["ddp-0 · rank 0<br/>MASTER :29500"] <-->|"TCP over the pod network<br/>(Cilium lxc veths, same node)"| R1["ddp-1 · rank 1"]
     R0 & R1 --> G1["GB10 (shared slices)"]
   end
   subgraph TWO["2 Sparks — BACKEND=nccl (two-spark overlay)"]
@@ -47,50 +53,76 @@ flowchart LR
     A0 --- GA["GB10"]
     A1 --- GB["GB10"]
   end
-  HS["headless Service ddp-workers<br/>ddp-0.ddp-workers.batch.svc"] -. "rendezvous DNS" .-> R0
-  WL -->|"admit whole gang"| ONE
+  WL -->|"admit whole gang<br/>(unsuspend Job)"| RQ
+  RQ -->|"syncer creates both pods<br/>in vc-llms — if they fit"| ONE
+  HS -. "rendezvous DNS<br/>(llms CoreDNS)" .-> R0
   classDef gpu fill:#76b900,stroke:#3d6000,color:#000
   classDef net fill:#8250df,stroke:#4c2889,color:#fff
   classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef sec fill:#cf222e,stroke:#82071e,color:#fff
   classDef tenant fill:#eaeef2,stroke:#57606a,color:#000
   class G1,GA,GB gpu
   class HS net
   class WL ctrl
+  class RQ sec
   class R0,R1,A0,A1 tenant
+  style LLMS fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
   style ONE fill:#e6f4f5,stroke:#0e7c86
   style TWO fill:#e6f4f5,stroke:#0e7c86,stroke-dasharray:5 3
 ```
 
 **Why `gloo` on one Spark?** NCCL requires one distinct GPU per rank. Two ranks on two time-slices of the *same* GB10 fail with `Duplicate GPU detected`. On one Spark you learn the orchestration with gloo, and on two you get the real NCCL path.
 
+**Why two gates?** Kueue lives in the vCluster because Jobs only exist there; it knows `spark-cq` and nothing else. The root quota on `vc-llms` knows the real budget but sees *pods*, one at a time, as the syncer creates them. Kueue's all-or-nothing promise therefore holds only if the root has room for the whole gang (§5.3).
+
 ---
 
 ## 3. LLD
 
-### 3.1 Job wiring
+### 3.1 Job wiring ([`ddp-job.yaml`](lab/manifests/llms/80-distributed/base/ddp-job.yaml))
 
 | Piece | Value | Purpose |
 |---|---|---|
 | Job | `completionMode: Indexed`, `completions=parallelism=2`, `backoffLimit: 0` | rank = `JOB_COMPLETION_INDEX`. Any failure fails the job (no half-restarted ranks) |
-| Pod DNS | `subdomain: ddp-workers` → `ddp-<i>.ddp-workers.batch.svc.cluster.local` | stable rendezvous address |
-| Service | headless, `publishNotReadyAddresses: true` | rank 1 can resolve rank 0 before readiness |
-| Kueue | `queue-name: train`, `suspend: true` | both ranks or neither (Vol 05) |
-| `/dev/shm` | `emptyDir: {medium: Memory, sizeLimit: 2Gi}` | NCCL/gloo and DataLoader workers use shared memory. The 64 MiB default breaks them |
+| Pod DNS | `subdomain: ddp-workers` → `ddp-<i>.ddp-workers.batch.svc.cluster.local` | stable rendezvous address, answered by **llms's own CoreDNS** |
+| Service | headless, `publishNotReadyAddresses: true` | rank 1 can resolve rank 0 before readiness. Synced to `vc-llms`, so the root's Cilium routes to the same pod IPs |
+| Kueue | label `kueue.x-k8s.io/queue-name: train`, `suspend: true` | both ranks or neither — *inside spark-cq* (Vol 05) |
+| Resources per rank | requests = limits: `cpu: 1`, `memory: 6Gi`, `nvidia.com/gpu: 1` | gang total 2 CPU · 12 Gi · 2 slices; spark-cq's CPU is then full |
+| Priority | `spark-batch` | below `spark-serving`: the root scheduler preempts training before serving |
+| `/dev/shm` | `emptyDir: {medium: Memory, sizeLimit: 2Gi}` | NCCL/gloo and DataLoader workers use shared memory. The 64 MiB default breaks them. On UMA it's also GPU-side memory, so keep it sized |
 | `TORCH_NCCL_ASYNC_ERROR_HANDLING=1` | turns a hung collective into an exception after the timeout | hangs become failures you can see |
 
-### 3.2 NCCL environment (two-spark overlay)
+### 3.2 Budget arithmetic: what fits beside what
+
+| Consumer in `llms` | CPU req | Memory limit | Slices | Source |
+|---|---|---|---|---|
+| root budget `vc-llms` | **4** | **48 Gi** | **8** | `root/05-vclusters/quotas.yaml` |
+| vCluster control plane `llms-0` | 250m | 1536Mi | — | `vclusters/llms.yaml` |
+| Traefik, Kueue, KEDA, CoreDNS, mock-llm, Qdrant | read it live | read it live | — | `kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget` |
+| `ddp` gang (this volume) | 2 | 12 Gi | 2 | `80-distributed/base` |
+| `resilient-train` (Vol 26) | 1 | 12 Gi | 1 | `80-distributed/resilient` |
+| `vllm` (Vol 21) | 1500m | 32 Gi | 1 | `90-serving/vllm/vllm.yaml` |
+
+Add the rows you plan to run together before you start. The `ddp` gang and `vllm` alone ask for 3.5 CPU and 44 Gi out of 4 and 48, before the platform pieces inside `llms`. Whatever doesn't fit is refused by the root, one pod at a time.
+
+### 3.3 NCCL environment (two-spark overlay)
 
 | Variable | Value | Why |
 |---|---|---|
 | `NCCL_SOCKET_IFNAME` | `enp1s0f1np1` | bootstrap/OOB over the CX-7, not the 10 GbE |
-| `NCCL_IB_HCA` | `rocep1s0f1,roceP2p1s0f1` | both logical halves of the QSFP port (see 01 Ansible host_vars) |
+| `NCCL_IB_HCA` | `rocep1s0f1,roceP2p1s0f1` | both logical halves of the QSFP port (see 01 Ansible host_vars; confirm with `ibdev2netdev`) |
 | `NCCL_IB_GID_INDEX` | `3` | RoCE v2 IPv4 GID (`show_gids` to confirm) |
 | `NCCL_DEBUG` | `INFO` (then `WARN`) | shows the chosen transport: `NET/IB` good, `NET/Socket` bad |
-| pod | `hostNetwork: true`, `ClusterFirstWithHostNet`, required anti-affinity | sees RoCE devices, one rank per Spark |
+| pod | `hostNetwork: true`, `dnsPolicy: ClusterFirstWithHostNet`, required pod anti-affinity on `kubernetes.io/hostname` | sees RoCE devices, one rank per Spark. Allowed because `batch` (inside) and `vc-llms` (root) enforce PSA `privileged`, warning at `baseline` |
 
-Alternative to `hostNetwork`: Network Operator + `rdma/rdma_shared_cx7` + macvlan `net1` (Vol 16 §5.6). Set `NCCL_SOCKET_IFNAME=net1`.
+Alternatives to `hostNetwork`, both giving the pod a second interface `net1` on the CX-7 — set `NCCL_SOCKET_IFNAME=net1`:
 
-### 3.3 Bus bandwidth
+- Network Operator: `rdma/rdma_shared_cx7` + MacvlanNetwork `cx7-rdma` in `vc-llms` (Vol 16 §5.6).
+- 01 Ansible `13-multus-rdma.yml`: Multus + NADs `cx7-a`/`cx7-b` (static IPAM) in `platform-tools` and `vc-llms`. The pod picks its IP in the annotation, e.g. `k8s.v1.cni.cncf.io/networks: '[{"name":"cx7-a","ips":["192.168.100.21/24"]}]'`.
+
+Either way the NAD must be in `vc-llms`: Multus runs on the root and looks in the pod's *root* namespace.
+
+### 3.4 Bus bandwidth
 
 `busbw = algbw × 2(n−1)/n` for all-reduce, where algbw = bytes / time. For n = 2, busbw = algbw. That's the number to compare against the link's line rate (200 Gb/s ≈ 25 GB/s).
 
@@ -98,22 +130,30 @@ Alternative to `hostNetwork`: Network Operator + `rdma/rdma_shared_cx7` + macvla
 
 ## 4. Integrations
 
-- **01 Ansible `10-nccl-test.yml` / `11-rdma-perftest.yml`** give the **host baseline** (`ib_write_bw`, `all_reduce_perf`) with no Kubernetes. If the pod result is much lower than the host result, the gap is in the pod setup: network path, `/dev/shm`, `IPC_LOCK` or GID.
-- **Kueue (Vol 05)** gangs the ranks. **Storage (Vol 11)** holds checkpoints. **Vol 26** covers elastic/fault-tolerant torchrun.
+- **01 Ansible `10-nccl-test.yml` / `11-rdma-perftest.yml`** give the **host baseline** (`ib_write_bw`, `all_reduce_perf`) with no Kubernetes. If the pod result is much lower than the host result, the gap is in the pod setup: network path, `/dev/shm`, `IPC_LOCK`, GID — or CPU throttling from the 1-CPU limit.
+- **Kueue (Vol 05)** gangs the ranks inside `llms`. **Root budgets (Vol 27 §5)** decide whether the gang fits. **Storage (Vol 11)** holds checkpoints. **Vol 26** covers elastic/fault-tolerant training with `80-distributed/resilient`.
 - **Modules 03/05/06** replace `allreduce_bench.py` with real FSDP/DeepSpeed/Megatron jobs on the same wiring.
 
 ---
 
 ## 5. Lab
 
+```bash
+export KUBECONFIG="$PWD/01 Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
+cd "02 Kubernetes/lab"
+scripts/install-addons.sh kueue                       # inside llms, once
+kubectl --context llms apply -k manifests/llms/00-platform && kubectl --context llms apply -k manifests/llms/10-tenancy
+kubectl --context llms apply -k manifests/llms/20-scheduling       # ResourceFlavor gb10, ClusterQueue spark-cq, LocalQueue batch/train
+kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget   # note what's already used
+```
+
 ### 5.1 One Spark: gang-admitted 2-rank job with gloo
 
 ```bash
-cd "02 Kubernetes/lab"
-kubectl apply -k manifests/20-scheduling          # Kueue queues (Vol 05)
-kubectl apply -k manifests/80-distributed/base
-kubectl -n batch get workloads; kubectl -n batch get pods -l job-name=ddp -o wide
-kubectl -n batch logs -f -l job-name=ddp --prefix --max-log-requests=2
+kubectl --context llms apply -k manifests/llms/80-distributed/base
+kubectl --context llms -n batch get workloads
+kubectl --context llms -n batch get pods -l job-name=ddp -o wide
+kubectl --context llms -n batch logs -f -l job-name=ddp --prefix --max-log-requests=2
 ```
 
 Expected (rank 0; the numbers are illustrative):
@@ -127,69 +167,129 @@ backend=gloo world=2 device=cpu
 correctness OK: sum(1..2) = 3.0
 ```
 
-gloo moves CPU tensors over TCP through the pod network. The numbers measure *that* path, not the GPU.
+gloo moves CPU tensors over TCP through the pod network. The numbers measure *that* path (and a 1-CPU limit per rank), not the GPU.
+
+See the same job from the platform's side:
+
+```bash
+kubectl --context spark-root -n vc-llms get pods -o wide | grep -- '-x-batch-x-llms'
+kubectl --context spark-root -n vc-llms get svc | grep ddp-workers
+```
+
+Two pods, renamed `ddp-0-…-x-batch-x-llms`, on spark-01, and the headless Service. There is no Job, no Workload, no ClusterQueue on the root: those stayed in `llms`.
 
 ### 5.2 See NCCL refuse duplicate GPUs
 
 ```bash
-kubectl -n batch delete job ddp
-kubectl kustomize manifests/80-distributed/base | sed 's/value: gloo/value: nccl/' | kubectl apply -f -
-kubectl -n batch logs -l job-name=ddp --prefix | grep -iE 'duplicate|error' | head -3
-kubectl -n batch delete job ddp
+kubectl --context llms -n batch delete job ddp
+kubectl kustomize manifests/llms/80-distributed/base | sed 's/value: gloo/value: nccl/' | kubectl --context llms apply -f -
+kubectl --context llms -n batch logs -l job-name=ddp --prefix | grep -iE 'duplicate|error' | head -3
+kubectl --context llms -n batch delete job ddp
 ```
 
-Expected: `ncclInvalidUsage … Duplicate GPU detected : rank 1 and rank 0 both on CUDA device …`. **One rank per physical GPU** is a hard NCCL rule, and time-slicing doesn't change it.
+Expected: `ncclInvalidUsage … Duplicate GPU detected : rank 1 and rank 0 both on CUDA device …`. **One rank per physical GPU** is a hard NCCL rule, and time-slicing doesn't change it: the root's device plugin handed both pods the same GB10 UUID.
 
-### 5.3 Rendezvous and gang behaviour
+### 5.3 Rendezvous and the two gates
+
+First the familiar failure: no gang at all. Leave exactly one GPU slice free in the `llms` root budget with a filler, then submit the job **without** its Kueue label:
 
 ```bash
-# no Kueue queue label → rank 1 may be scheduled late; watch rank 0 wait in rendezvous
-kubectl kustomize manifests/80-distributed/base | yq 'with(select(.kind=="Job"); del(.metadata.labels["kueue.x-k8s.io/queue-name"]) | .spec.suspend = false)' | kubectl apply -f -
-kubectl -n lab-tools scale deploy gemm-contention --replicas=3     # leave only 1 free slice
-kubectl -n batch get pods -l job-name=ddp                           # ddp-0 Running, ddp-1 Pending
-kubectl -n batch logs -l job-name=ddp --prefix --tail=3            # rank 0 waiting on c10d rendezvous
-kubectl -n lab-tools scale deploy gemm-contention --replicas=0; kubectl -n batch delete job ddp
+kubectl --context llms -n batch create deployment slice-filler --replicas=0 \
+  --image=nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04 -- sleep infinity
+kubectl --context llms -n batch set resources deploy slice-filler --limits=nvidia.com/gpu=1,memory=32Mi --requests=cpu=10m,memory=32Mi
+read HARD USED < <(kubectl --context spark-root -n vc-llms get resourcequota vcluster-budget \
+  -o jsonpath='{.status.hard.requests\.nvidia\.com/gpu} {.status.used.requests\.nvidia\.com/gpu}')
+kubectl --context llms -n batch scale deploy slice-filler --replicas=$((HARD - USED - 1))
+kubectl kustomize manifests/llms/80-distributed/base \
+  | yq 'with(select(.kind=="Job"); del(.metadata.labels["kueue.x-k8s.io/queue-name"]) | .spec.suspend = false)' \
+  | kubectl --context llms apply -f -
+kubectl --context llms -n batch get pods -l job-name=ddp                 # one Running, one Pending
+kubectl --context llms -n batch logs -l job-name=ddp --prefix --tail=3   # the running rank waits in c10d rendezvous
 ```
 
-That's the partial-gang deadlock of Vol 05, as it looks in a real training job. The Kueue label is the fix.
+Now ask *why* the second rank is Pending:
+
+```bash
+P=$(kubectl --context llms -n batch get pods -l job-name=ddp --field-selector=status.phase=Pending -o name | head -1)
+kubectl --context llms -n batch describe "$P" | tail -5
+kubectl --context spark-root -n vc-llms get pods | grep -c -- '-x-batch-x-llms'
+```
+
+Expected: no scheduler events; a syncer warning that the root refused the pod — `exceeded quota: vcluster-budget, requested: requests.nvidia.com/gpu=1 …` (or `requests.cpu`, if `llms` is busy: read which resource). The Pending rank doesn't exist on the root, so the root scheduler never had a chance to queue it. Same deadlock as Vol 05, different layer.
+
+Then put the Kueue label back:
+
+```bash
+kubectl --context llms -n batch delete job ddp
+kubectl --context llms apply -k manifests/llms/80-distributed/base
+kubectl --context llms -n batch get workloads -o wide                    # ADMITTED: True
+kubectl --context llms -n batch get pods -l job-name=ddp                 # still one Running, one Pending
+```
+
+Kueue admitted the gang: `spark-cq` had 4 free slices, 2 CPU and 24 Gi on its books. It has no idea that the filler (outside any LocalQueue) or the serving tier spent the root budget. The syncer then created rank 0, the root quota let it in, and refused rank 1. **Kueue's all-or-nothing guarantee only holds when the root has room for the whole gang.** Three ways to make that true:
+
+1. Size `spark-cq` from what the root leaves after serving's *guaranteed* share, not from the inner `serving-budget` ceiling.
+2. Keep everything that uses GPU slices in `llms` under Kueue (serving included), so there is one ledger.
+3. Raise the root budget (Vol 27 §6.5) — the only fix that adds capacity.
+
+Clean up:
+
+```bash
+kubectl --context llms -n batch delete job ddp
+kubectl --context llms -n batch delete deploy slice-filler
+```
 
 ### 5.4 Diagnose a hang and a straggler
 
 Simulate a straggler: add a sleep to rank 1 only.
 
 ```bash
-kubectl -n batch delete job ddp --ignore-not-found
-kubectl kustomize manifests/80-distributed/base | yq 'with(select(.kind=="Job");
+kubectl --context llms -n batch delete job ddp --ignore-not-found
+kubectl kustomize manifests/llms/80-distributed/base | yq 'with(select(.kind=="Job");
   .spec.template.spec.containers[0].args[0] += " & if [ \"$JOB_COMPLETION_INDEX\" = 1 ]; then sleep 20; pkill -STOP -f \"allreduce_bench[.]py$\"; sleep 90; pkill -CONT -f \"allreduce_bench[.]py$\"; fi; wait")' \
-  | kubectl apply -f -
-kubectl -n batch logs -f -l job-name=ddp --prefix
+  | kubectl --context llms apply -f -
+kubectl --context llms -n batch logs -f -l job-name=ddp --prefix
 ```
 
 After 20 s, rank 1's Python processes freeze (SIGSTOP) for 90 s. The pattern `allreduce_bench[.]py$` matches torchrun and its worker but not the wrapping shell, whose command line doesn't *end* in `.py`. Rank 0's all-reduce timings jump from milliseconds to ~90 s for one step, **with no error**. That's what a straggler (thermal throttle, noisy neighbour, bad link) looks like from the healthy rank.
 
-The hang triage sequence:
+The hang triage sequence, from the tenant's side:
 
 ```bash
-R0=$(kubectl -n batch get pod -l job-name=ddp,batch.kubernetes.io/job-completion-index=0 -o name)
-R1=$(kubectl -n batch get pod -l job-name=ddp,batch.kubernetes.io/job-completion-index=1 -o name)
-kubectl -n batch exec "$R0" -- sh -c 'pip install -q py-spy && py-spy dump --pid $(pgrep -f "python.*allreduce_bench" | tail -1)'
-kubectl -n batch exec "$R1" -- sh -c 'for p in $(pgrep -f allreduce_bench); do grep State /proc/$p/status; done'
+R0=$(kubectl --context llms -n batch get pod -l job-name=ddp,batch.kubernetes.io/job-completion-index=0 -o name)
+R1=$(kubectl --context llms -n batch get pod -l job-name=ddp,batch.kubernetes.io/job-completion-index=1 -o name)
+kubectl --context llms -n batch exec "$R0" -- sh -c 'pip install -q py-spy && py-spy dump --pid $(pgrep -f "python.*allreduce_bench" | tail -1)'
+kubectl --context llms -n batch exec "$R1" -- sh -c 'for p in $(pgrep -f allreduce_bench); do grep State /proc/$p/status; done'
 ```
+
+…and from the platform's side, on the Spark, where the rank really runs:
+
+```bash
+scripts/cgroup-inspect.sh batch "${R1#pod/}" llms      # finds the root copy via vCluster's annotations
+```
+
+Look at `cpu.stat`: a rank capped at `cpu: 1` that runs a DataLoader with several workers shows `nr_throttled` climbing — a straggler the job built for itself (Vol 12 §5.3).
 
 | Evidence | Reading |
 |---|---|
 | all ranks in `all_reduce` / `ncclKernel` | collective waiting for a peer. Find the rank that *isn't* there |
 | one rank in dataloader / I/O / `T (stopped)` | that rank is the straggler |
+| one rank's cgroup with `nr_throttled` rising | CPU limit too tight for its data pipeline |
+| a rank `Pending` in `llms` with a syncer quota event | not a hang: the gang never formed (§5.3) |
 | `NCCL WARN … Timeout` then `ProcessGroupNCCL … watchdog` after `TORCH_NCCL_ASYNC_ERROR_HANDLING` | hang converted to an error. Check that rank's node |
+
+```bash
+kubectl --context llms -n batch delete job ddp
+```
 
 ### 5.5 Two Sparks: NCCL over RoCE
 
-Prerequisites: spark-02 joined (Vol 15 §9), 01 Ansible `11-rdma-perftest.yml` ≥ 180 Gb/s, Kueue `spark-cq` GPU quota raised to 4.
+Prerequisites: spark-02 joined the root as a worker (Vol 15 §9) and both vClusters list it (`kubectl --context llms get nodes`), 01 Ansible `11-rdma-perftest.yml` ≥ 180 Gb/s. The gang still needs 2 CPU · 12 Gi · 2 slices of the `llms` budget; spark-02 adds 15 slices to the root, not to `llms`.
 
 ```bash
-kubectl apply -k manifests/80-distributed/two-spark
-kubectl -n batch get pods -l job-name=ddp -o wide          # one on spark-01, one on spark-02
-kubectl -n batch logs -l job-name=ddp --prefix | grep -E 'NCCL INFO (NET/|Using network|Channel 00)|busbw|correctness' | head -20
+kubectl --context llms apply -k manifests/llms/80-distributed/two-spark
+kubectl --context llms -n batch get pods -l job-name=ddp -o wide          # one on spark-01, one on spark-02
+kubectl --context llms -n batch logs -l job-name=ddp --prefix | grep -E 'NCCL INFO (NET/|Using network|Channel 00)|busbw|correctness' | head -20
 ```
 
 Look for:
@@ -204,14 +304,28 @@ correctness OK: sum(1..2) = 2+1 = 3.0
 
 A large-message busbw in the low twenties of GB/s means you're close to line rate. If you see `NET/Socket` or single-digit GB/s, go to §7.
 
+With `hostNetwork`, the pod IPs are the node IPs, and rank 1 still has to resolve `ddp-0.ddp-workers.batch.svc.cluster.local`. If rendezvous fails, check what DNS the synced pod really got:
+
+```bash
+kubectl --context spark-root -n vc-llms get pods -o wide | grep -- '-x-batch-x-llms'
+kubectl --context spark-root -n vc-llms get pod <ddp-1 root name> -o jsonpath='{.spec.dnsPolicy}{"  "}{.spec.dnsConfig}{"\n"}'
+```
+
+The syncer rewrites pod DNS so names resolve through `llms`'s CoreDNS, not the root's.
+
+```bash
+kubectl --context llms delete -k manifests/llms/80-distributed/two-spark
+```
+
 ---
 
 ## 6. Verify
 
 | Check | Expected |
 |---|---|
-| gloo job | `correctness OK`, both ranks admitted together |
+| gloo job | `correctness OK`, both ranks admitted together, two `-x-batch-x-llms` pods on the root |
 | NCCL on one GPU | `Duplicate GPU detected` (by design) |
+| Kueue vs root budget | with the filler, the Workload is `Admitted` and one rank is refused by `vcluster-budget` — you can name the resource |
 | 2 Sparks | `Using network IB`, busbw at 1 GiB ≥ 80 % of the 01 Ansible host baseline |
 
 ---
@@ -220,12 +334,17 @@ A large-message busbw in the low twenties of GB/s means you're close to line rat
 
 | Symptom | Cause | Diagnose | Fix |
 |---|---|---|---|
-| rank 0 waits forever at start | rank 1 not scheduled (no gang) or can't resolve master | `kubectl get pods -o wide`. `getent hosts ddp-0.ddp-workers.batch.svc.cluster.local` from rank 1 | Kueue label. `publishNotReadyAddresses` on the headless Service |
+| rank 0 waits forever at start, rank 1 Pending in `llms` with **no** scheduler events | root quota on `vc-llms` refused rank 1 — even though Kueue admitted the gang | `kubectl --context llms -n batch describe pod <rank1>`; `kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget` | free budget (scale serving or other batch down), size `spark-cq` to what the root really leaves, or resize `llms` (§5.3, Vol 27 §6.5) |
+| rank 0 waits forever, rank 1 Pending with `Insufficient nvidia.com/gpu` | all 15 slices on the node taken (root, dev-lab, llms together) | root scheduler event; `kubectl --context spark-root get cm -n platform-tools gpu-slice-ledger -o yaml` | free slices; Kueue can't see other clusters' use |
+| rank 0 waits forever, both Running | rank 1 can't resolve the master | `getent hosts ddp-0.ddp-workers.batch.svc.cluster.local` from rank 1 | `publishNotReadyAddresses` on the headless Service; check llms CoreDNS (`kubectl --context llms -n kube-system get pods`) |
+| Workload never admitted | spark-cq full, or the LocalQueue/ClusterQueue missing | `kubectl --context llms -n batch describe workload <name>` | apply `llms/20-scheduling`; free spark-cq quota |
 | `Duplicate GPU detected` | two ranks on one GPU | NCCL log | 1 rank per GPU. gloo for single-GPU tests |
-| `NET/Socket` instead of `NET/IB` | RDMA devices not visible in the pod | `ibv_devices` inside the pod | hostNetwork or Network Operator. `NCCL_IB_HCA` names |
-| `ibv_create_qp failed` / `Cannot allocate memory` | no `IPC_LOCK` / memlock limit | pod securityContext | add `IPC_LOCK` (batch namespace is privileged for this) |
+| `NET/Socket` instead of `NET/IB` | RDMA devices not visible in the pod | `ibv_devices` inside the pod | hostNetwork or `net1` via Network Operator / Multus (NAD in `vc-llms`). `NCCL_IB_HCA` names |
+| pod rejected: `violates PodSecurity "baseline": host namespaces` | PSA on `batch` (inside) or `vc-llms` (root) tightened | the warning names the namespace and cluster | `privileged` enforce on both for RDMA work (`llms/00-platform`, root `05-vclusters`) |
+| `ibv_create_qp failed` / `Cannot allocate memory` | no `IPC_LOCK` / memlock limit | pod securityContext | add `IPC_LOCK` (batch is privileged for this) |
 | NCCL connects then very slow | wrong GID index (RoCE v1 vs v2), MTU mismatch, only one of the two logical ports used | `show_gids`, `ip link` MTU on both, NCCL log channel list | `NCCL_IB_GID_INDEX=3`, MTU 9000 both ends, list both HCAs |
-| `Bus error` / DataLoader crash | `/dev/shm` too small | `df -h /dev/shm` in the pod | memory-backed emptyDir (the lab sets 2 Gi) |
+| One rank consistently slower | CPU throttling at the 1-CPU limit, thermal throttle | `scripts/cgroup-inspect.sh batch <pod> llms`; `nvidia-smi -q -d PERFORMANCE` | more CPU for the rank (and for spark-cq), fewer DataLoader workers |
+| `Bus error` / DataLoader crash | `/dev/shm` too small | `df -h /dev/shm` in the pod | memory-backed emptyDir (the lab sets 2 Gi; it counts toward the container's memory) |
 | Job restarts one rank only | `backoffLimit > 0` with non-elastic torchrun | job events | `backoffLimit: 0` + restart the whole job, or elastic torchrun (Vol 26) |
 
 ---
@@ -235,6 +354,7 @@ A large-message busbw in the low twenties of GB/s means you're close to line rat
 | Lab | Datacenter |
 |---|---|
 | Indexed Job + headless Service | JobSet / Kubeflow Trainer (`TrainJob`) / MPI Operator: same wiring, more features |
+| Kueue inside a vCluster + a root quota | Kueue on the platform cluster with cohorts per team (one ledger), or MultiKueue dispatching to worker clusters |
 | 2 ranks, 1 link | 8 GPUs/node over NVLink (NCCL `P2P/NVLS`) + 8 rails of 400 Gb/s IB/RoCE between nodes (Vol 18) |
 | hostNetwork RoCE | SR-IOV VFs per rail, GPUDirect RDMA, topology-aware placement (Kueue TAS), SHARP in-network reductions |
 | gloo on one GPU | not needed. Real GPUs per rank |
@@ -243,7 +363,8 @@ A large-message busbw in the low twenties of GB/s means you're close to line rat
 
 ## 9. Checklist
 
-- [ ] I launched a gang-admitted 2-rank torchrun job with no training operator.
+- [ ] I launched a gang-admitted 2-rank torchrun job with no training operator, inside a vCluster, and found its pods on the root.
 - [ ] I can explain why NCCL refuses two ranks on one time-sliced GPU.
-- [ ] I produced and diagnosed a straggler from the healthy rank's point of view.
+- [ ] I reproduced "Kueue admitted, root refused" and can name the three ways to prevent it.
+- [ ] I produced and diagnosed a straggler from the healthy rank's point of view and from the host.
 - [ ] (2 Sparks) NCCL reports `NET/IB` over both CX-7 halves, near line rate.

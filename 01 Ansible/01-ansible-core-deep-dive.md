@@ -13,7 +13,7 @@
 
 ## 1. Why Ansible on a single desktop box?
 
-A DGX Spark looks like a workstation, but you'll treat it like a data-centre node: it runs DGX OS (Ubuntu 24.04 based, aarch64), a GB10 Grace Blackwell superchip (20 Arm cores + Blackwell GPU sharing **128 GB of coherent unified LPDDR5x memory**), a ConnectX-7 NIC with two 200 Gb/s QSFP cages, and eventually k3s, Slurm, Vault and a monitoring stack. Ansible gives you:
+A DGX Spark looks like a workstation, but you'll treat it like a data-centre node: it runs DGX OS (Ubuntu 24.04 based, aarch64), a GB10 Grace Blackwell superchip (20 Arm cores + Blackwell GPU sharing **128 GB of coherent unified LPDDR5x memory**), a ConnectX-7 NIC with two 200 Gb/s QSFP cages, and eventually a kubeadm Kubernetes cluster (with two vClusters inside it), Slurm, Vault and a monitoring stack. Ansible gives you:
 
 - **Rebuild in minutes after a re-image or a bad DGX OS update.** The playbooks describe the machine, so recovery doesn't depend on remembering what you changed.
 - **Moving from one Spark to two (or four) is a one-line inventory change.** You don't have to repeat every manual step on the new node.
@@ -56,19 +56,19 @@ Ansible is **agentless**. Nothing runs on the Spark between plays. Each task is 
 | Privilege | `become: true` via `sudo` (group_vars/spark.yml) | Everything we configure is root-owned |
 | Python on target | `/usr/bin/python3` pinned in `ansible.cfg` | Avoids interpreter discovery warnings; DGX OS ships 3.12 |
 | Mgmt network | `enP7s7` 10GbE, `192.168.0.0/24` | Ansible/SSH traffic never rides the CX-7 fabric |
-| Fabric | CX-7 `enp1s0f1np1` / `enP2p1s0f1np1`, `192.168.100/101.0/24` | Workload traffic only (NCCL, NFS/RDMA, flannel) |
+| Fabric | CX-7 `enp1s0f1np1` / `enP2p1s0f1np1`, `192.168.100/101.0/24` | Workload traffic only (NCCL, NFS/RDMA, Multus `net1` for RDMA pods); the Kubernetes API and Cilium VXLAN stay on mgmt |
 | Fact cache | `jsonfile` in `lab/.cache/facts`, 2 h | Ad-hoc runs and drift reports reuse facts |
 | Run log | `lab/.cache/ansible.log` | Free audit trail (Volume 23) |
 
-**Inventory model:** one *hardware* group (`spark`) plus *functional* groups (`k3s_server`, `slurm_compute`, `vault`, `monitoring`…). A host can belong to several. Roles target functional groups, so moving Vault to another box is an inventory edit, not a code change.
+**Inventory model:** one *hardware* group (`spark`) plus *functional* groups (`k8s_control_plane`, `k8s_workers`, `slurm_compute`, `vault`, `monitoring`…). A host can belong to several. Roles target functional groups, so moving Vault to another box is an inventory edit, not a code change.
 
 ```mermaid
 flowchart TB
   all --> spark
-  all --> k3s_server & k3s_agent & slurm_controller & slurm_compute & vault & monitoring & nfs_server & nfs_client
+  all --> k8s_control_plane & k8s_workers & slurm_controller & slurm_compute & vault & monitoring & nfs_server & nfs_client
   spark --> s1[spark-01] & s2[spark-02]
-  k3s_server --> s1
-  k3s_agent --> s2
+  k8s_control_plane --> s1
+  k8s_workers --> s2
   slurm_compute --> spark
   vault --> s1
   monitoring --> s1
@@ -199,10 +199,12 @@ all:
           ansible_host: 192.168.0.101
 
     # ---- functional groups (a host can be in several) -------------------
-    k3s_server:
+    # Kubernetes (Volume 16): kubeadm control plane on spark-01. It also runs
+    # workloads (no control-plane taint), so a single Spark is a complete cluster.
+    k8s_control_plane:
       hosts:
         spark-01:
-    k3s_agent:
+    k8s_workers:
       hosts:
         spark-02:
     slurm_controller:
@@ -271,7 +273,7 @@ spark_sysctls:
   vm.swappiness: 10
   vm.max_map_count: 1048576          # large mmap'ed model weights
   fs.inotify.max_user_watches: 1048576
-  fs.inotify.max_user_instances: 8192 # k3s + many containers
+  fs.inotify.max_user_instances: 8192 # kubelet + vClusters + many containers
   net.core.rmem_max: 268435456
   net.core.wmem_max: 268435456
   net.ipv4.tcp_rmem: "4096 87380 268435456"

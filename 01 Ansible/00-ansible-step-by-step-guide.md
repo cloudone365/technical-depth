@@ -11,7 +11,7 @@ flowchart LR
     B1[5 CX-7 fabric] --> B2[6 RDMA + NCCL] --> B3[7 NFS/RDMA] --> B4[8 Vault]
   end
   subgraph W3["Week 3 · Platforms"]
-    C1[9 k3s] --> C2[10 GPU Operator] --> C3[11 Multus/RDMA] --> C4[12 Slurm] --> C5[13 AWX]
+    C1[9 kubeadm root cluster] --> C2[10 GPU Operator] --> C2b[10b vClusters] --> C3[11 Multus/RDMA] --> C4[12 Slurm] --> C5[13 AWX]
   end
   subgraph W4["Week 4 · Operate"]
     D1[14 CI] --> D2[15 Drift] --> D3[16 Logging/audit] --> D4[17 Upgrades + firmware] --> D5[18 Incidents] --> D6[19 Capstone]
@@ -114,12 +114,24 @@ ansible-playbook playbooks/19-vault-integration.yml -K
 
 ✅ NGC login works from an AppRole token; SSH certificate issued.
 
-## Step 9 · k3s (30 min) → [16](16-kubernetes-bare-metal-bootstrap-kubespray.md)
+## Step 9 · Kubernetes root cluster (45 min) → [16](16-kubernetes-bare-metal-bootstrap-kubeadm.md)
+
+The end-state of steps 9–10b is **one kubeadm root cluster with two vClusters inside it**:
+
+| Context | What it is | Where |
+|---|---|---|
+| `spark-root` | kubeadm v1.36.5, `spark-01` is control plane *and* worker (no taint), `spark-02` joins as a worker if present; Cilium (VXLAN, kube-proxy kept), MetalLB L2 pool `192.168.0.110–119` | `https://192.168.0.100:6443` |
+| `dev-lab` | vCluster #1 in root namespace `vc-dev-lab`: 2 CPU · 8 Gi · 2 GPU slices | `https://192.168.0.111` |
+| `llms` | vCluster #2 in root namespace `vc-llms`: 4 CPU · 48 Gi · 8 GPU slices | `https://192.168.0.112` |
 
 ```bash
-ansible-playbook playbooks/05-k3s.yml -K
-export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml; kubectl get nodes -o wide
+ansible-playbook playbooks/05-kubernetes.yml -K          # kubeadm_cluster, then cilium + metallb from the control node
+export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml  # one file, every context
+kubectl --context spark-root get nodes -o wide
+kubectl --context spark-root -n kube-system get pods     # static-pod control plane, etcd, CoreDNS, cilium, kube-proxy
 ```
+
+✅ `spark-01` is `Ready`; `kubectl --context spark-root -n kube-system exec ds/cilium -- cilium-dbg status --brief` prints `OK`; `ssh nvidia@192.168.0.100 sudo crictl ps` lists the control-plane containers. Broke it while learning? `ansible-playbook playbooks/99-reset-kubernetes.yml -K` (type `RESET`) and run step 9 again.
 
 ## Step 10 · GPU Operator (30 min) → [17](17-nvidia-gpu-operator-helm-automation.md)
 
@@ -127,7 +139,20 @@ export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml; kubectl get nodes -o wi
 ansible-playbook playbooks/06-gpu-operator.yml
 ```
 
-✅ Each node advertises `nvidia.com/gpu: 4`; `cuda-smoke` pod prints the GB10.
+✅ Each node advertises `nvidia.com/gpu: 15` (`kubectl --context spark-root get node spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}'`); the `cuda-smoke` pod in `default` prints the GB10.
+
+## Step 10b · vClusters dev-lab and llms (30 min) → [16](16-kubernetes-bare-metal-bootstrap-kubeadm.md), [02 Kubernetes · 27](../02%20Kubernetes/27-nested-clusters-with-vcluster.md)
+
+Needs the [02 Kubernetes lab](../02%20Kubernetes/lab/README.md) checked out next to this one: the `vclusters` role applies its `vclusters/*.yaml` values and `manifests/root/05-vclusters` budgets rather than keeping a copy.
+
+```bash
+ansible-playbook playbooks/06b-vclusters.yml
+kubectl --context spark-root get ns vc-dev-lab vc-llms
+kubectl --context dev-lab get namespaces
+kubectl --context llms get namespaces
+```
+
+✅ Both vCluster contexts answer through their MetalLB IPs; `kubectl --context spark-root -n vc-llms get resourcequota` shows the llms budget.
 
 ## Step 11 · Multus + RDMA pods (45 min) → [13](13-multus-cni-and-secondary-rdma-networking.md)
 
@@ -137,7 +162,7 @@ ansible-playbook playbooks/13-multus-rdma.yml
 
 ## Step 12 · Slurm (45 min) → [18](18-slurm-cluster-orchestration-and-cgroup-gpus.md)
 
-> Drain the node in k3s first (`kubectl cordon`) or dedicate nodes: Slurm and Kubernetes don't know about each other's GPU use.
+> Cordon the node in Kubernetes first (`kubectl --context spark-root cordon spark-01`) or dedicate nodes: Slurm and Kubernetes don't know about each other's GPU use, and the time-sliced GPU is shared by root and vCluster pods alike.
 
 ```bash
 ansible-playbook playbooks/07-slurm.yml -K
@@ -197,7 +222,7 @@ python3 tools/capstone_scorecard.py
 | `02-fabric.yml` | CX-7 addressing + verification | 11 |
 | `03-containers.yml` | Docker, toolkit, CDI, NGC | 08 |
 | `04-telemetry.yml` | node_exporter, collector, Prometheus/Grafana/Alertmanager | 09 |
-| `05-k3s.yml` · `06-gpu-operator.yml` | Kubernetes + GPU Operator | 16–17 |
+| `05-kubernetes.yml` · `06-gpu-operator.yml` · `06b-vclusters.yml` | kubeadm root cluster (Cilium, MetalLB) → GPU Operator → vClusters dev-lab + llms | 16–17 |
 | `07-slurm.yml` | Slurm | 18 |
 | `08-vault.yml` · `19-vault-integration.yml` | Vault server + Ansible integration | 03B, 19 |
 | `09-nfs-rdma.yml` | Shared model cache | 15 |
@@ -214,3 +239,4 @@ python3 tools/capstone_scorecard.py
 | `21-emergency-drain.yml` · `24-uma-relief.yml` | Incident response | 24 |
 | `23-logging-audit.yml` | auditd, Loki, Alloy, ARA | 23 |
 | `25-chaos.yml` · `30-validate.yml` · `site.yml` | Capstone, validation, full build | 25 |
+| `99-reset-kubernetes.yml` | Wipe Kubernetes and every vCluster for a clean rebuild (`RESET` prompt) | 16 |

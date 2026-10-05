@@ -222,21 +222,34 @@ scripts/verify.sh serving
 
 ## Step 17 · Triton, SGLang, KServe (90 min) → [22](22-nvidia-triton-inference-server.md), [23](23-llm-inference-alternatives-and-kserve.md)
 
+`serving-budget` holds **one 32 Gi engine at a time** ([Vol 21 §9](21-vllm-high-throughput-llm-serving.md)), so park vLLM before starting another. Pause its ScaledObject rather than scaling the Deployment — KEDA's `minReplicaCount: 1` would bring it straight back:
+
 ```bash
-kubectl --context llms apply -k manifests/llms/90-serving/triton
-kubectl --context llms -n llm-serving scale deploy vllm --replicas=0
+park()   { kubectl --context llms -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite; }
+unpark() { kubectl --context llms -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas-; }
+park
+kubectl --context llms apply -k manifests/llms/90-serving/triton                     # Vol 22, then delete it again
+kubectl --context llms delete -k manifests/llms/90-serving/triton
 kubectl --context llms apply -k manifests/llms/90-serving/sglang && kubectl --context llms -n llm-serving scale deploy sglang --replicas=1
 kubectl --context llms -n llm-serving port-forward svc/sglang 30000 &
 python3 scripts/ttft_probe.py --url http://localhost:30000 --model qwen2.5-0.5b
+kubectl --context llms -n llm-serving scale deploy sglang --replicas=0
 scripts/install-addons.sh kserve                        # cert-manager + KServe inside llms (Vol 23)
 ```
 
-✅ Triton batch size > 1 under load. Prefix-cache speed-up measured on two engines. The llms memory budget (48 Gi) decides which engines run at the same time.
+✅ Triton batch size > 1 under load. Prefix-cache speed-up measured on two engines. Every engine ran alone in `serving-budget` (36 Gi), and the root's `vcluster-budget` (48 Gi) never refused a pod.
 
 ## Step 18 · Prefill/decode split (45 min) (2×) → [24](24-disaggregated-prefill-and-decode-serving.md)
 
+Prefill + decode need 40 Gi of limits, more than the 36 Gi ceiling: Vol 24 §5.2 checks the root has room and lifts `serving-budget` to 44 Gi for the run.
+
 ```bash
+kubectl --context llms -n llm-serving patch resourcequota serving-budget --type merge -p '{"spec":{"hard":{"limits.memory":"44Gi"}}}'
 kubectl --context llms apply -k manifests/llms/90-serving/pd-disagg
+# … afterwards
+kubectl --context llms delete -k manifests/llms/90-serving/pd-disagg
+kubectl --context llms apply -k manifests/llms/10-tenancy                     # serving-budget back to 36 Gi
+unpark                                                                         # vLLM returns
 ```
 
 ✅ `X-Prefill-Ms` header and NIXL activity in the decode log.

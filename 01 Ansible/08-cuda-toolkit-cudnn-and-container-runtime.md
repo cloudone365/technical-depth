@@ -415,7 +415,7 @@ docker system df
 docker image prune -a --filter "until=720h"   # images unused for 30 days
 ```
 
-Automate it with a weekly systemd timer from Ansible (exercise), but **never** prune images that a running k3s or Slurm job needs. In k3s, prune with `crictl rmi --prune` instead, since k3s runs its own containerd.
+Automate it with a weekly systemd timer from Ansible (exercise), but **never** prune images that a running Kubernetes or Slurm job needs. Docker and the kubeadm cluster share **one** containerd (DGX OS's `containerd.io`), but in different containerd namespaces: Docker's images live in `moby`, the kubelet's in `k8s.io`. So `docker image prune` never touches Kubernetes images; prune those with `sudo crictl rmi --prune` (crictl is pointed at containerd by `/etc/crictl.yaml`), which removes only images no container uses. Every vCluster pod is a real container on the root's kubelet, so it shows up in `sudo crictl ps` too. List both sides with `sudo ctr -n moby images ls` and `sudo ctr -n k8s.io images ls`.
 
 ---
 
@@ -424,7 +424,7 @@ Automate it with a weekly systemd timer from Ansible (exercise), but **never** p
 | System | Integration point |
 |---|---|
 | Vault (Volume 19) | `container_runtime_ngc_api_key` from `community.hashi_vault` lookup; `no_log` on login |
-| k3s (Volume 16) | k3s's **own** containerd auto-detects `nvidia-container-runtime` and registers the `nvidia` runtime. Docker config doesn't affect k3s |
+| Kubernetes (Volume 16) | The `kubeadm_cluster` role reuses this containerd: it enables the CRI plugin (Docker's stock config disables it), sets `SystemdCgroup = true`, and runs `nvidia-ctk runtime configure --runtime=containerd --set-as-default`. `daemon.json` doesn't affect Kubernetes, but a `systemctl restart containerd` restarts the runtime under **both** Docker and every pod (root and vCluster) |
 | GPU Operator (Volume 17) | `toolkit.enabled=false`: the host toolkit from this volume is the one used |
 | Slurm (Volume 18) | Jobs run containers via `srun docker run --gpus …` or enroot/pyxis (a plugin that runs container images inside Slurm jobs) |
 | Drift (Volume 22) | `daemon.json` keys and CDI freshness are checked every run |

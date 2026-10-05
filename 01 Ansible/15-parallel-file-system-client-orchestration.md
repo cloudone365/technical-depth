@@ -1,6 +1,6 @@
 # Volume 15 — Shared Storage for a Spark Pair: NFSv4.2 over RDMA as a Model Cache (and How It Maps to Lustre/Weka/VAST Clients)
 
-> **Module 01 · Part III — High-Speed Fabric & Storage** · Prev: [14 GDS on UMA](14-gpudirect-storage-gds-and-cufile-provisioning.md) · Next: [16 Kubernetes (k3s)](16-kubernetes-bare-metal-bootstrap-kubespray.md)
+> **Module 01 · Part III — High-Speed Fabric & Storage** · Prev: [14 GDS on UMA](14-gpudirect-storage-gds-and-cufile-provisioning.md) · Next: [16 Kubernetes (kubeadm + vClusters)](16-kubernetes-bare-metal-bootstrap-kubeadm.md)
 
 | | |
 |---|---|
@@ -244,7 +244,7 @@ The lesson carries over: **every storage client with a kernel module must be par
 
 | System | Integration |
 |---|---|
-| k3s (Volume 16) | Expose `/mnt/models` to pods with a `hostPath` volume, or install `csi-driver-nfs` with `mountOptions: [vers=4.2, proto=rdma, port=20049]` |
+| Kubernetes (Volume 16) | On the root cluster (`spark-root`), expose `/mnt/models` to platform pods with a `hostPath` volume, or install `csi-driver-nfs` with `mountOptions: [vers=4.2, proto=rdma, port=20049]`. Inside the `llms` vCluster, `llm-serving` enforces Pod Security `baseline`, which forbids `hostPath`; use a PVC instead. The vCluster syncs it to the root (namespace `vc-llms`) and sees the root's StorageClasses, so an NFS-backed class on the root works there too |
 | Slurm (Volume 18) | Same path on every compute node, so jobs are location-independent |
 | Telemetry (Volume 09) | node_exporter's `nfs`/`mountstats` collectors expose client RPC latency |
 | Drain (Volume 24) | Drain the client **before** rebooting the server, or `hard` mounts will hang processes until it's back |

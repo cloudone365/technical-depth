@@ -64,7 +64,7 @@ On a real HGX node, the rule you'd automate is "Fabric Manager version == driver
 | Unhold → upgrade → re-hold | `17-dgxos-upgrade.yml` | Driver moves only inside a drained, validated window |
 | `serial: 1`, `max_fail_percentage: 0` | upgrade play | Never both Sparks at once; the first failure stops the rollout |
 
-> **The DGX Dashboard "Update" button** upgrades packages *and firmware* and then reboots. That's fine for a single personal box. Once the Spark is a shared node (k3s/Slurm workloads, a second Spark depending on it), use the playbook so drain, validation and holds wrap the same apt operation. Firmware is covered in Volume 10.
+> **The DGX Dashboard "Update" button** upgrades packages *and firmware* and then reboots. That's fine for a single personal box. Once the Spark is a shared node (Kubernetes/vCluster and Slurm workloads, a second Spark depending on it), use the playbook so drain, validation and holds wrap the same apt operation. Firmware is covered in Volume 10.
 
 ---
 
@@ -284,7 +284,7 @@ driver_audit:
       ansible.builtin.include_role:
         name: node_drain
       vars:
-        node_drain_k8s: "{{ inventory_hostname in (groups['k3s_server'] | default([])) + (groups['k3s_agent'] | default([])) }}"
+        node_drain_k8s: "{{ inventory_hostname in (groups['k8s_control_plane'] | default([])) + (groups['k8s_workers'] | default([])) }}"
         node_drain_collect: false
         node_drain_stop_containers: false
         node_drain_undrain_after: true
@@ -316,7 +316,7 @@ free -g        # the real memory signal for GPU workloads
 | Downstream | Why it cares about the driver |
 |---|---|
 | CDI spec (Volume 08) | Hard-codes library paths and versions. **Regenerate after every driver change** (the upgrade playbook does) |
-| k3s + GPU Operator (Volumes 16–17) | Operator validator pods check the host driver; a mismatch blocks the device plugin |
+| Kubernetes + GPU Operator (Volumes 16–17) | Operator validator pods check the host driver; a mismatch blocks the device plugin |
 | Slurm (Volume 18) | The health check drains a node when `nvidia-smi` fails, which is what a mismatch looks like |
 | NCCL (Volume 12) | Mixed driver or NCCL versions across Sparks: hangs or crashes at init |
 | Drift (Volume 22) | `module_loaded != module_on_disk` = "reboot pending", a first-class drift signal |

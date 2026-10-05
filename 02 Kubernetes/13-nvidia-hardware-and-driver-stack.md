@@ -1,6 +1,6 @@
 # Volume 13 — NVIDIA Hardware & Driver Stack as Kubernetes Sees It: GB10, NVLink-C2C, Unified Memory, Drivers, CUDA Compatibility
 
-> **Module 02 · Part IV — NVIDIA platform** · Prev: [12 Multi-tenancy](12-multi-tenancy-resource-quotas-and-cgroups.md) · Next: [14 Container Toolkit & GPU sharing](14-nvidia-container-toolkit-and-gpu-virtualization.md)
+> **Module 02 · Part IV — NVIDIA platform** · Prev: [12 Multi-tenancy](12-multi-tenancy-resource-quotas-and-cgroups.md) · Next: [14 Container Toolkit & GPU sharing](14-nvidia-container-toolkit-and-gpu-virtualization.md) · The lab's shape: [27 Nested clusters](27-nested-clusters-with-vcluster.md)
 
 | | |
 |---|---|
@@ -8,7 +8,8 @@
 | **Hardware** | spark-01 |
 | **Time** | 60 min |
 | **Risk** | None |
-| **Lab files** | [`manifests/70-gpu/gemm_bench.py`](lab/manifests/70-gpu/gemm_bench.py), [`gemm-solo.yaml`](lab/manifests/70-gpu/gemm-solo.yaml), [`gpu-smoke.yaml`](lab/manifests/70-gpu/gpu-smoke.yaml). Module [07 Nvidia](../07%20Nvidia/README.md) goes to silicon depth |
+| **Clusters** | `spark-root` (node labels, the benchmark in `platform-tools`), `dev-lab` (`gpu-smoke`, the arch test) |
+| **Lab files** | [`manifests/root/70-gpu/gemm_bench.py`](lab/manifests/root/70-gpu/gemm_bench.py), [`gemm-solo.yaml`](lab/manifests/root/70-gpu/gemm-solo.yaml), [`manifests/dev-lab/70-gpu/gpu-smoke.yaml`](lab/manifests/dev-lab/70-gpu/gpu-smoke.yaml). Module [07 Nvidia](../07%20Nvidia/README.md) goes to silicon depth |
 
 ---
 
@@ -22,7 +23,7 @@ Kubernetes treats a GPU as an opaque integer (`nvidia.com/gpu: 1`). Everything t
 |---|---|---|
 | CPU | 20 Arm cores: 10× Cortex-X925 + 10× Cortex-A725 | arm64 images only. CPU limits in whole-core terms (Vol 12) |
 | GPU | Blackwell, compute capability **12.1** (`sm_121`) | images and kernels must target sm_121 (or carry PTX) |
-| Memory | **128 GB LPDDR5x, unified**, ~273 GB/s | no separate framebuffer. `nvidia-smi` memory reads **N/A** |
+| Memory | **128 GB LPDDR5x, unified** (≈119.7 GiB visible to DGX OS), ~273 GB/s | no separate framebuffer. `nvidia-smi` memory reads **N/A**; the node's `memory` capacity is the GPU's memory too |
 | CPU↔GPU link | NVLink-C2C (coherent, on package) | no PCIe copy between host RAM and "GPU RAM" |
 | Tensor-core peak | up to 1 PFLOP FP4 (sparse) | FP4/FP8 quantised models are first-class (modules 03–06) |
 | Network | ConnectX-7, 2× QSFP (200 GbE), 10 GbE RJ-45 | RDMA for 2-Spark NCCL (Vol 17) |
@@ -55,8 +56,8 @@ flowchart TB
   subgraph K8S["Kubernetes view"]
     direction LR
     CTK["nvidia-container-toolkit<br/>injects devices + libs"]
-    DP["device plugin<br/>nvidia.com/gpu: 4"]
-    GFD["GFD labels<br/>gpu.product=GB10 · compute.major=12"]
+    DP["device plugin<br/>nvidia.com/gpu: 15 (time-sliced)"]
+    GFD["GFD labels<br/>gpu.product=…GB10-SHARED · compute.major=12"]
   end
   GPU --> KM --> DEV
   KM --> LIB --> SMI
@@ -95,11 +96,11 @@ flowchart TB
 
 | Label | Example |
 |---|---|
-| `nvidia.com/gpu.product` | `GB10` (the 01 Ansible k3s role also sets it statically) |
+| `nvidia.com/gpu.product` | the product name the driver reports; with time-slicing GFD appends `-SHARED`. Because GFD owns and rewrites this label, the lab's selectors use `spark.lab/gpu=gb10`, which the 01 Ansible `kubeadm_cluster` role sets at join |
 | `nvidia.com/gpu.compute.major` / `.minor` | `12` / `1` |
 | `nvidia.com/cuda.driver-version.major` | `580` |
 | `nvidia.com/gpu.count` | `1` |
-| `nvidia.com/gpu.replicas` | `4` (time-slicing) |
+| `nvidia.com/gpu.replicas` | `15` (time-slicing) |
 | `nvidia.com/gpu.sharing-strategy` | `time-slicing` |
 | `feature.node.kubernetes.io/cpu-model.vendor_id` | `ARM` |
 
@@ -150,47 +151,60 @@ CPU(s): 20
 
 ### 5.2 What Kubernetes knows
 
-```bash
-kubectl get node spark-01 -o json | jq '.metadata.labels | with_entries(select(.key|test("nvidia.com|cpu-model")))'
-kubectl get node spark-01 -o jsonpath='{.status.capacity}{"\n"}{.status.allocatable}{"\n"}' | jq -c .
-```
-
-### 5.3 The same view from inside a pod
+Only the root has real nodes; both vClusters show the same node, copied in (`sync.fromHost.nodes`):
 
 ```bash
 cd "02 Kubernetes/lab"
-kubectl apply -f manifests/70-gpu/gpu-smoke.yaml
-kubectl -n tenant-beta logs gpu-smoke
-kubectl -n tenant-beta delete pod gpu-smoke
+export KUBECONFIG="$PWD/../../01 Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
+kubectl --context spark-root get node spark-01 -o json | jq '.metadata.labels | with_entries(select(.key|test("nvidia.com|cpu-model")))'
+kubectl --context spark-root get node spark-01 -o jsonpath='{.status.capacity}{"\n"}{.status.allocatable}{"\n"}' | jq -c .
+kubectl --context llms get node spark-01 -L spark.lab/gpu,nvidia.com/gpu.product,nvidia.com/gpu.replicas
+```
+
+Capacity shows `nvidia.com/gpu: 15` and a `memory` figure that is the whole unified pool; allocatable is lower by the kubelet reservations (Vol 12 §3.1). Inside llms the node looks the same — 15 slices — although llms may only use 8: budgets are quotas, not node properties.
+
+### 5.3 The same view from inside a pod
+
+`gpu-smoke` is a tenant pod in dev-lab, so it exercises the whole chain: dev-lab API → syncer → root scheduler → kubelet → nvidia runtime.
+
+```bash
+kubectl --context dev-lab apply -f manifests/dev-lab/70-gpu/gpu-smoke.yaml
+kubectl --context dev-lab -n tenant-beta wait --for=jsonpath='{.status.phase}'=Succeeded pod/gpu-smoke --timeout=180s
+kubectl --context dev-lab -n tenant-beta logs gpu-smoke
+kubectl --context dev-lab -n tenant-beta delete pod gpu-smoke
 ```
 
 ### 5.4 Throughput baseline (single time-slice, no contention)
 
+The benchmark runs on the root in `platform-tools` — a platform job, outside any vCluster budget:
+
 ```bash
-kubectl apply -k manifests/70-gpu               # ConfigMap with gemm_bench.py (+ contention Deployment at 0 replicas)
-kubectl apply -f manifests/70-gpu/gemm-solo.yaml
-kubectl -n lab-tools logs -f job/gemm-solo
+kubectl --context spark-root apply -k manifests/root/00-platform
+kubectl --context spark-root apply -k manifests/root/70-gpu        # ConfigMap with gemm_bench.py (+ contention Deployment at 0 replicas)
+kubectl --context spark-root apply -f manifests/root/70-gpu/gemm-solo.yaml
+kubectl --context spark-root -n platform-tools logs -f job/gemm-solo
 ```
 
 ```json
 {"pod": "gemm-solo-…", "device": "NVIDIA GB10", "cc": "12.1", "n": 8192, "tflops": 87.4, "mem_total_gib": 119.7, "mem_free_gib": 101.2}
 ```
 
-The TFLOPS figure is illustrative, so **record your own**. It's your "one tenant, no contention" baseline for Vol 14. `mem_total_gib` from CUDA equals the whole UMA pool, and `mem_free_gib` moves as the OS and other pods allocate.
+The TFLOPS figure is illustrative, so **record your own**. It's your "one tenant, no contention" baseline for Vol 14. `mem_total_gib` from CUDA equals the whole UMA pool, and `mem_free_gib` moves as the OS and other pods — in all three clusters — allocate.
 
 ### 5.5 Watch clocks and power under load
 
 ```bash
-kubectl delete job -n lab-tools gemm-solo; kubectl apply -f manifests/70-gpu/gemm-solo.yaml
+kubectl --context spark-root -n platform-tools delete job gemm-solo
+kubectl --context spark-root apply -f manifests/root/70-gpu/gemm-solo.yaml
 nvidia-smi dmon -s pucv -d 1         # on the Spark: power, util, clocks, violations
 ```
 
 ### 5.6 Break it: wrong architecture / wrong CUDA
 
 ```bash
-# amd64-only image on arm64 → exec format error (runs as a plain pod, no GPU needed)
-kubectl -n lab-tools run arch-test --image=docker.io/amd64/busybox:1.37 --restart=Never -- uname -m
-sleep 10; kubectl -n lab-tools logs arch-test; kubectl -n lab-tools delete pod arch-test
+# amd64-only image on arm64 → exec format error (a plain pod in dev-lab, no GPU needed)
+kubectl --context dev-lab -n lab-tools run arch-test --image=docker.io/amd64/busybox:1.37 --restart=Never -- uname -m
+sleep 10; kubectl --context dev-lab -n lab-tools logs arch-test; kubectl --context dev-lab -n lab-tools delete pod arch-test
 ```
 
 Expected: `exec /bin/uname: exec format error`, with the pod in `Error`. Everything in this lab pins multi-arch or arm64 images for this reason.
@@ -202,7 +216,8 @@ Expected: `exec /bin/uname: exec format error`, with the pod in `Error`. Everyth
 | Check | Expected |
 |---|---|
 | `nvidia-smi --query-gpu=compute_cap --format=csv,noheader` | `12.1` |
-| node label `nvidia.com/gpu.product` | `GB10` |
+| node labels `spark.lab/gpu` / `nvidia.com/gpu.product` | `gb10` / GFD's product name with `-SHARED` (on the root, and the same in both vClusters) |
+| allocatable `nvidia.com/gpu` | `15` |
 | `gpu-smoke` log | lists GB10 with the same UUID as the host |
 | `gemm-solo` | JSON line with `cc: 12.1`. TFLOPS recorded as your baseline |
 | `sudo dmesg -T \| grep -ci xid` | `0` |
@@ -214,13 +229,13 @@ Expected: `exec /bin/uname: exec format error`, with the pod in `Error`. Everyth
 | Symptom | Layer | Diagnose | Fix |
 |---|---|---|---|
 | `nvidia-smi: NVIDIA-SMI has failed…couldn't communicate with the driver` (host) | kernel module | `lsmod`, `dmesg`, `systemctl status nvidia-persistenced` | DGX OS update finished? Reboot. Re-install the DGX OS driver packages, not a runfile |
-| Pod: `Failed to initialize NVML: Unknown Error` | cgroup device access after a systemd reload | `kubectl logs`. Toolkit version | upgrade nvidia-container-toolkit. Use CDI mode (Vol 14) |
+| Pod: `Failed to initialize NVML: Unknown Error` | cgroup device access after a systemd reload | `kubectl --context <cluster> logs`. Toolkit version | upgrade nvidia-container-toolkit. Use CDI mode (Vol 14) |
 | `no kernel image is available for execution on the device` | wheel/kernel lacks sm_121 | `python -c "import torch;print(torch.cuda.get_arch_list())"` | use NGC images or wheels built for sm_120/121 (+PTX) |
 | `CUDA driver version is insufficient for CUDA runtime version` | container CUDA newer than the driver | compare `nvidia-smi` "CUDA Version" and the image's CUDA | older image tag, or upgrade DGX OS |
 | `exec format error` | amd64 image | `docker manifest inspect` | arm64/multi-arch tag |
-| Throughput half of baseline | thermal/power throttling or another tenant | `nvidia-smi -q -d PERFORMANCE`, `kubectl get pods -A` with GPU requests | airflow. Vol 14 contention |
+| Throughput half of baseline | thermal/power throttling or another tenant | `nvidia-smi -q -d PERFORMANCE`; GPU pods of *all* clusters: `kubectl --context spark-root get pods -A -o wide` (vCluster pods are in `vc-*`) | airflow. Vol 14 contention |
 | `Xid 13/31/43` in dmesg | app fault (bad kernel, illegal address) | `dmesg -T \| grep -i xid` | fix the workload. The node is fine |
-| `Xid 79` / `GPU has fallen off the bus` / `48` | hardware / severe | same | drain + reboot (01 Ansible `node_drain`). If it repeats, open an RMA |
+| `Xid 79` / `GPU has fallen off the bus` / `48` | hardware / severe | same | drain + reboot (01 Ansible `node_drain`, Vol 10 §5.5 — on one Spark that stops all three clusters). If it repeats, open an RMA |
 
 ---
 
@@ -230,7 +245,7 @@ Expected: `exec /bin/uname: exec format error`, with the pod in `Error`. Everyth
 |---|---|
 | 1 GPU, UMA, no MIG | 8 GPUs/node with HBM, NVLink/NVSwitch domain, MIG available |
 | host-managed driver | GPU Operator may own the driver (precompiled/signed), or the OS image owns it (DGX OS, BCM) |
-| `nvidia.com/gpu: 4` time-sliced | whole GPUs or MIG profiles (`nvidia.com/mig-1g.23gb`), DRA claims |
+| `nvidia.com/gpu: 15` time-sliced, split by quota between clusters | whole GPUs or MIG profiles (`nvidia.com/mig-1g.23gb`), DRA claims |
 | manual health checks | DCGM diagnostics (`dcgmi diag -r 3`) as a pre-admission gate, node-problem-detector, automated remediation |
 
 ---

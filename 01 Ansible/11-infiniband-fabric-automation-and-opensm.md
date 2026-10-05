@@ -59,7 +59,7 @@ One **subnet per logical link** (`.100.x` and `.101.x`), so the kernel routes ea
 | `optional: true` | Boot doesn't wait for an unplugged cable | template |
 | Link verification | operstate `up`, speed `200000`, MTU, `ibv_devinfo` `PORT_ACTIVE` | role asserts |
 | Reachability | `ping -M do -s 8972` (DF set, jumbo) to each same-subnet peer | role |
-| Published facts | `cx7_fabric_primary_if`, `_primary_ip`, `_hca_list`, `_roce_gid_index` | consumed by NCCL, vLLM, k3s, NFS |
+| Published facts | `cx7_fabric_primary_if`, `_primary_ip`, `_hca_list`, `_roce_gid_index` | consumed by NCCL, vLLM, Kubernetes (Multus NADs), NFS |
 
 ### 2.3 Scaling past two Sparks (NVIDIA-documented topologies)
 
@@ -269,7 +269,7 @@ Use the **same cage number** on both Sparks. It keeps the config symmetric, and 
   loop_control:
     label: "{{ item.rdma_dev }}"
 
-- name: Publish fabric facts for later roles (NCCL, Slurm, k3s, vLLM)
+- name: Publish fabric facts for later roles (NCCL, Slurm, Kubernetes, vLLM)
   ansible.builtin.set_fact:
     cx7_fabric_primary_if: "{{ cx7_fabric_interfaces[0].name }}"
     cx7_fabric_primary_ip: "{{ cx7_fabric_interfaces[0].address.split('/')[0] }}"

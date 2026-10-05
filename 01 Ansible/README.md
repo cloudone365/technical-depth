@@ -1,6 +1,6 @@
 # Module 01 — Ansible for AI Infrastructure, Hands-On on NVIDIA DGX Spark
 
-Production-grade automation you can actually run: every volume is built around a **working Ansible project in [`lab/`](lab/)** targeting one or two **DGX Spark** systems (GB10 Grace Blackwell, 128 GB unified memory, ConnectX-7 200GbE). Each volume has HLD/LLD diagrams, the real roles and playbooks, integrations, a troubleshooting runbook and a validation checklist.
+Production-grade automation you can actually run: every volume is built around a **working Ansible project in [`lab/`](lab/)** targeting one or two **DGX Spark** systems (GB10 Grace Blackwell, 128 GB unified memory of which ~119.7 GiB is usable, ConnectX-7 200GbE). Each volume has HLD/LLD diagrams, the real roles and playbooks, integrations, a troubleshooting runbook and a validation checklist.
 
 Where a data-centre concept doesn't exist on a Spark (NVSwitch/Fabric Manager, InfiniBand subnet managers, BMC/Redfish, parallel file systems), the volume says so, maps the concept to what the Spark actually has, and gives you a way to practise the data-centre version.
 
@@ -15,22 +15,26 @@ flowchart LR
   end
   subgraph S1["spark-01 · 192.168.0.100"]
     direction TB
-    S1A["k3s server · GPU Operator · AWX"]
+    S1A["kubeadm root cluster spark-root (control plane + worker)<br/>Cilium · MetalLB · GPU Operator · AWX"]
+    S1V["vClusters dev-lab (192.168.0.111) · llms (192.168.0.112)"]
     S1B["slurmctld + slurmd"]
     S1C["Vault · Prometheus · Grafana · Loki · ARA"]
     S1D["NFS/RDMA server /srv/models"]
   end
   subgraph S2["spark-02 · 192.168.0.101"]
     direction TB
-    S2A["k3s agent · slurmd"]
+    S2A["(optional) root worker · slurmd"]
     S2B["NFS/RDMA client /mnt/models"]
     S2C["(optional) AWX execution node"]
   end
   ANS -- "SSH · mgmt 10GbE (enP7s7)" --> S1 & S2
+  S1A --> S1V
   S1 <== "QSFP · CX-7 200GbE RoCEv2<br/>192.168.100.0/24 · 192.168.101.0/24" ==> S2
 ```
 
-Single Spark? Remove `spark-02` from the inventory. The fabric, NCCL and NFS/RDMA steps skip themselves.
+Single Spark? Remove `spark-02` from the inventory. The fabric, NCCL and NFS/RDMA steps skip themselves, and `spark-01` alone is a complete Kubernetes cluster (no control-plane taint).
+
+The Kubernetes end-state is one **kubeadm** root cluster (`spark-root`) with two **vClusters** inside it, `dev-lab` and `llms`. Ansible builds it in three stages: `05-kubernetes.yml` (kubeadm, Cilium, MetalLB) → `06-gpu-operator.yml` (15 GPU time-slices) → `06b-vclusters.yml` (the two vClusters, applied from the [02 Kubernetes lab](../02%20Kubernetes/lab/README.md)). All three contexts land in one file, `lab/.cache/kubeconfig-spark-lab.yaml`.
 
 ## Start here
 
@@ -78,7 +82,7 @@ ansible-playbook playbooks/site.yml -K       # the whole lab
 |---|---|---|
 | 11 | [ConnectX-7 fabric automation (RoCE), IB/OpenSM mapping](11-infiniband-fabric-automation-and-opensm.md) | `cx7_fabric`, `11-rdma-perftest` |
 | 12 | [RoCEv2 done right: MTU, QoS, proving NCCL uses RDMA](12-lossless-rocev2-and-pfc-switch-host-tuning.md) | `12b-roce-qos`, `10-nccl-test` |
-| 13 | [Multus & secondary RDMA networks on k3s](13-multus-cni-and-secondary-rdma-networking.md) | `13-multus-rdma` |
+| 13 | [Multus & secondary RDMA networks on Kubernetes](13-multus-cni-and-secondary-rdma-networking.md) | `13-multus-rdma` |
 | 14 | [GPUDirect Storage on a unified-memory machine](14-gpudirect-storage-gds-and-cufile-provisioning.md) | `14-gds-check` |
 | 15 | [NFS over RDMA model cache (→ Lustre/Weka/VAST clients)](15-parallel-file-system-client-orchestration.md) | `nfs_rdma` |
 
@@ -86,8 +90,8 @@ ansible-playbook playbooks/site.yml -K       # the whole lab
 
 | Vol | Title | Lab pieces |
 |---|---|---|
-| 16 | [Kubernetes with k3s (and when Kubespray)](16-kubernetes-bare-metal-bootstrap-kubespray.md) | `k3s_cluster` |
-| 17 | [GPU Operator: host-driver mode, time-slicing](17-nvidia-gpu-operator-helm-automation.md) | `gpu_operator` |
+| 16 | [Kubernetes with kubeadm: root cluster, Cilium, MetalLB, vClusters](16-kubernetes-bare-metal-bootstrap-kubeadm.md) | `kubeadm_cluster`, `cilium`, `metallb`, `vclusters`, `05-kubernetes`, `06b-vclusters`, `99-reset-kubernetes` |
+| 17 | [GPU Operator: host-driver mode, time-slicing](17-nvidia-gpu-operator-helm-automation.md) | `gpu_operator`, `06-gpu-operator` |
 | 18 | [Slurm: GRES, cgroup v2, health checks, 2-node NCCL](18-slurm-cluster-orchestration-and-cgroup-gpus.md) | `slurm_cluster` |
 | 19 | [Vault ↔ Ansible: AppRole, KV, SSH certificates](19-hashicorp-vault-approle-and-dynamic-secrets.md) | `vault_config`, `19-vault-integration` |
 | 20 | [AWX in production: execution nodes, Vault creds, workflows, backup](20-awx-tower-production-cluster-and-receptor.md) | receptor, `AWXBackup` |
@@ -113,11 +117,11 @@ Built and checked in a workspace **without** Spark hardware, so it was verified 
 | `ansible-lint` (production profile) + `yamllint` | pass |
 | `ansible-playbook --syntax-check` on every playbook | pass |
 | Jinja katas against real Spark command output | 7/7 |
-| Template rendering (netplan, k3s, slurm.conf, Prometheus, Vault HCL) | rendered and YAML-validated |
+| Template rendering (netplan, slurm.conf, Prometheus, Vault HCL) | rendered and YAML-validated |
 | Prometheus config + 7 alert rules + collector output | `promtool check config/rules/metrics` pass |
 | Loki config / Alloy pipeline | `loki -verify-config` / `alloy fmt` pass |
 | `uma_probe.cu` | compiles for `sm_121` with nvcc 13.x |
 | Vault integration (AppRole → token → KV v2 → SSH sign) | exercised against a stand-in for Vault's HTTP API |
 | Custom inventory plugin, drift reporter, firmware diff, argument specs, collection build | fixture-tested |
 
-**Not yet run on a real Spark.** Your first pass through the step-by-step guide is the hardware test. Versions pinned in the lab (k3s, GPU Operator chart, container images, NCCL) are current as of this writing; check them before you run.
+**Not yet run on a real Spark.** Your first pass through the step-by-step guide is the hardware test. Versions pinned in the lab (Kubernetes, Cilium, MetalLB, GPU Operator and vCluster charts, container images, NCCL) are current as of this writing; check them before you run.

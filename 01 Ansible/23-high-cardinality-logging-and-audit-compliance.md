@@ -4,8 +4,9 @@
 
 | | |
 |---|---|
-| **You will build** | Four linked audit layers: **auditd** on every Spark (changes to sudoers, sshd, netplan, docker, k3s, slurm, vault; every root command), **journald → Grafana Alloy → Loki** for searchable logs (including NVRM/Xid kernel lines), **ARA** recording every playbook run task by task, and the **Vault audit log** for secret access, all viewable in the Grafana from Volume 09 |
+| **You will build** | Four linked audit layers: **auditd** on every Spark (changes to sudoers, sshd, netplan, docker, containerd, `/etc/kubernetes`, kubelet config, slurm, vault; every root command), **journald → Grafana Alloy → Loki** for searchable logs (including NVRM/Xid kernel lines), **ARA** recording every playbook run task by task, and the **Vault audit log** for secret access, all viewable in the Grafana from Volume 09 |
 | **Hardware** | 1–2× DGX Spark (Loki + ARA on the monitoring host) |
+| **Clusters** | `spark-root` (its API-server audit log, §4.5) and `dev-lab` (to generate a tenant write) |
 | **Time** | 60 min |
 | **Risk** | Low. Watch disk: Loki retention is 30 days by default |
 
@@ -19,6 +20,7 @@
 | "Did someone edit netplan by hand outside Ansible?" | **auditd** key `network` + drift (Volume 22) |
 | "What did the kernel say about the GPU right before the job died?" | **Loki**: `{host="spark-02"} \|= "NVRM: Xid"` |
 | "Who read the NGC key?" | **Vault audit log** (Volume 03B) |
+| "Who raised the `vc-llms` GPU quota, and what did the request body say?" | **Kubernetes API audit log** on spark-01, `/var/log/kubernetes/audit/audit.log` (written by the root kube-apiserver; §4.5) |
 | "Who launched the remediation job and who approved it?" | **AWX** activity stream + job history (Volume 20) |
 
 ## 2. Architecture
@@ -28,7 +30,8 @@ flowchart LR
   subgraph NODES["Every Spark"]
     AU["auditd<br/>/etc/audit/rules.d/60-spark.rules<br/>→ /var/log/audit/audit.log"] --> AL
     K["kernel (NVRM, mlx5)"] --> J
-    SVC["sshd · sudo · k3s · slurmd · docker · vault"] --> J
+    SVC["sshd · sudo · kubelet · containerd · slurmd · docker · vault"] --> J
+    KA["kube-apiserver (static pod, spark-01)<br/>→ /var/log/kubernetes/audit/audit.log"] -.->|"not shipped by default (§4.5)"| AL
     J["journald<br/>(persistent, 4G cap)"] --> AL["Grafana Alloy<br/>loki.source.journal + loki.source.file"]
   end
   subgraph MON["monitoring host (spark-01)"]
@@ -69,7 +72,9 @@ flowchart LR
 -w /etc/docker/daemon.json -p wa -k container-runtime
 -w /etc/cdi/ -p wa -k container-runtime
 -w /etc/nvidia-container-runtime/ -p wa -k container-runtime
--w /etc/rancher/k3s/ -p wa -k k3s
+-w /etc/kubernetes/ -p wa -k kubernetes
+-w /var/lib/kubelet/config.yaml -p wa -k kubernetes
+-w /etc/containerd/ -p wa -k container-runtime
 -w /etc/slurm/ -p wa -k slurm
 -w /etc/munge/munge.key -p rwa -k slurm-secret
 -w /etc/vault.d/ -p wa -k vault
@@ -87,7 +92,7 @@ flowchart LR
 # lab/playbooks/templates/alloy.river.j2
 // {{ ansible_managed }}
 // Grafana Alloy on {{ inventory_hostname }}: ship the systemd journal (kernel NVRM/Xid,
-// sshd, sudo, k3s, slurmd, docker, vault, auditd via journald) to Loki.
+// sshd, sudo, kubelet, containerd, slurmd, docker, vault, auditd via journald) to Loki.
 loki.relabel "journal" {
   forward_to = []
   rule {
@@ -169,7 +174,7 @@ compactor:
 # lab/playbooks/23-logging-audit.yml
 ---
 # Audit & logging stack:
-#   * auditd rules on every Spark (who changed sudoers, sshd, netplan, docker, k3s, slurm, vault…)
+#   * auditd rules on every Spark (who changed sudoers, sshd, netplan, docker, kubernetes, slurm, vault…)
 #   * Loki on the monitoring host + Grafana Alloy on every Spark shipping the journal
 #   * Loki datasource in the Volume 09 Grafana
 #   * ARA API server recording every ansible-playbook run
@@ -391,7 +396,8 @@ To make it permanent, put the three variables in your shell profile or in the AW
 | sudo commands on spark-02 | `{host="spark-02", ident="sudo"}` |
 | Config file watches that fired (auditd log file) | `{job="auditd"} \|~ "key=\"(network\|sshd\|priv\|container-runtime)\""` |
 | SSH logins using Vault certificates | `{unit="ssh.service"} \|= "CA ED25519"` |
-| k3s errors | `{unit=~"k3s.*", level="err"}` |
+| kubelet / containerd errors | `{unit=~"kubelet.service\|containerd.service", level="err"}` |
+| Who touched Kubernetes host config (auditd) | `{job="auditd"} \|= "key=\"kubernetes\""` |
 | Rate of Xids per host (graph) | `sum by (host) (count_over_time({transport="kernel"} \|= "NVRM: Xid" [5m]))` |
 
 ### 4.4 auditd: prove it catches a manual change
@@ -404,6 +410,30 @@ tools/drift-cycle.sh      # drift reports the fabric template (and doesn't auto-
 ansible-playbook playbooks/02-fabric.yml -K -l spark-02    # a human puts it back
 ```
 
+### 4.5 The Kubernetes API audit log: root vs vCluster
+
+auditd sees *files* changing. It can't see `kubectl patch resourcequota`, which only touches etcd. For that, the `kubeadm_cluster` role starts the root kube-apiserver with `--audit-policy-file=/etc/kubernetes/audit/audit-policy.yaml` (from `roles/kubeadm_cluster/files/audit-policy.yaml`) and `--audit-log-path=/var/log/kubernetes/audit/audit.log`. The policy logs Secrets and ConfigMaps at `Metadata` only (never payloads), drops kubelet and health-check noise, and records **full request and response** for every write in `vc-dev-lab`, `vc-llms`, `gpu-operator` and `platform-tools`.
+
+The nesting adds one twist. Each vCluster has its **own** API server. A tenant's `kubectl --context dev-lab create …` is decided by that API server, and the root only sees the result: the vCluster's syncer writing a translated object into `vc-dev-lab` under its own ServiceAccount.
+
+```bash
+export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
+# 1. A platform change on the root: who touched the llms budget?
+kubectl --context spark-root -n vc-llms annotate resourcequota vcluster-budget spark.lab/audit-test="$(date +%s)" --overwrite
+ssh nvidia@192.168.0.100 "sudo tail -n 2000 /var/log/kubernetes/audit/audit.log | jq -c 'select(.objectRef.resource==\"resourcequotas\" and .verb==\"patch\") | {user: .user.username, verb, ns: .objectRef.namespace, name: .objectRef.name}' | tail -1"
+# → {"user":"kubernetes-admin","verb":"patch","ns":"vc-llms","name":"vcluster-budget"}
+
+# 2. A tenant write inside dev-lab: the root logs the syncer, not the tenant
+kubectl --context dev-lab -n default create configmap audit-probe --from-literal=k=v
+ssh nvidia@192.168.0.100 "sudo tail -n 2000 /var/log/kubernetes/audit/audit.log | jq -c 'select(.objectRef.namespace==\"vc-dev-lab\" and .objectRef.resource==\"configmaps\" and .verb==\"create\") | {user: .user.username, name: .objectRef.name}' | tail -1"
+# → user is a ServiceAccount in vc-dev-lab (system:serviceaccount:vc-dev-lab:…), name audit-probe-x-default-x-dev-lab
+kubectl --context dev-lab -n default delete configmap audit-probe
+```
+
+So "which tenant did this?" has to be answered from the vCluster's own audit trail, not the root's. That is the same split a hosting provider has between its own audit log and a customer's.
+
+The 4-layer stack above does **not** ship this file yet: Alloy tails `/var/log/audit/audit.log` only, and the `alloy` container doesn't mount `/var/log/kubernetes`. Exercise: add a second `local.file_match` for `/var/log/kubernetes/audit/audit.log` (label `job="kube-audit"`) to `alloy.river.j2`, add the read-only mount to the `Alloy container` task in `23-logging-audit.yml`, and filter by `objectRef.namespace` in LogQL with `| json`, never as a label.
+
 ---
 
 ## 5. Retention, volume and "high cardinality"
@@ -413,6 +443,8 @@ ansible-playbook playbooks/02-fabric.yml -K -l spark-02    # a human puts it bac
 | Kernel/NVRM | Bursts during faults | Keep. It's the evidence |
 | auditd `root-cmd` (every root execve) | Automation runs generate many | Keep in Loki with 30d retention; exclude noisy automation users with `-F auid!=<ansible uid>` if you must |
 | Container stdout (Docker) | Model servers can be chatty | Not shipped by default (journald only). Add a `loki.source.docker` block selectively |
+| Pod logs (root and vCluster pods) | Under `/var/log/pods/<ns>_<pod>_<uid>/` on the node; vCluster pods use their translated root names (`<pod>-x-<ns>-x-<vcluster>` in `vc-<vcluster>`) | Not shipped by default; the root's kube-prometheus-stack covers metrics, not logs |
+| Kubernetes API audit | Every write in the `vc-*` namespaces at `RequestResponse` | Rotated by kube-apiserver (`--audit-log-maxsize`/`maxbackup` in the kubeadm config); ship it per §4.5 |
 | Labels | `host`, `unit`, `ident`, `level`, `transport` only | **Never** use request IDs, PIDs or pod UIDs as labels. That's how you get a high-cardinality Loki meltdown; filter those in queries with `\|=` instead |
 
 ## 6. Integrations
@@ -441,3 +473,4 @@ ansible-playbook playbooks/02-fabric.yml -K -l spark-02    # a human puts it bac
 - [ ] The Xid query returns results after a test (or at least runs clean).
 - [ ] `ara playbook list` shows your last runs, with per-task changed results.
 - [ ] A manual netplan edit is visible in `ausearch -k network` **and** in the drift report.
+- [ ] A change to the `vc-llms` ResourceQuota is in `/var/log/kubernetes/audit/audit.log` with the user who made it, and a tenant write in `dev-lab` shows up there as the syncer's ServiceAccount.

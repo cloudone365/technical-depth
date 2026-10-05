@@ -234,7 +234,7 @@ scripts/install-addons.sh vclusters
 
 ```bash
 kubectl --context spark-root get nodes                    # 1 node: control plane + worker
-kubectl --context dev-lab get nodes -L nvidia.com/gpu.product
+kubectl --context dev-lab get nodes -L spark.lab/gpu,nvidia.com/gpu.product
 kubectl --context dev-lab get node spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'   # 15
 kubectl --context spark-root -n vc-dev-lab get pods        # dev-lab-0 = the whole vCluster control plane
 kubectl --context dev-lab get ns                           # its own world
@@ -333,7 +333,7 @@ scripts/verify.sh vclusters
 |---|---|---|
 | Pod `Pending` in a vCluster, **no** scheduler events | root quota on `vc-<name>` spent | `kubectl --context spark-root -n vc-<name> describe resourcequota vcluster-budget`; resize (§6.5) or free capacity |
 | Pod `Pending` with `Insufficient nvidia.com/gpu` | all 15 slices in use across the Spark | root scheduler event; `kubectl --context spark-root get cm -n platform-tools gpu-slice-ledger -o yaml` |
-| `context dev-lab` times out | control-plane pod not Running, or MetalLB didn't give `.111` | `kubectl --context spark-root -n vc-dev-lab get pods,svc`; `kubectl --context spark-root -n metallb-system logs -l component=speaker` |
+| `context dev-lab` times out | control-plane pod not Running, or MetalLB didn't give `.111` | `kubectl --context spark-root -n vc-dev-lab get pods,svc`; `kubectl --context spark-root -n metallb-system logs -l app.kubernetes.io/component=speaker` |
 | x509 error on `https://192.168.0.11x` | IP missing from `proxy.extraSANs` | fix `vclusters/<name>.yaml`, `helm upgrade` |
 | `services.loadbalancers` quota exceeded | a tenant created a LoadBalancer Service | the root budget allows 1 (dev-lab) / 2 (llms) — by design |
 | `runtimeclass "nvidia" not found` inside a vCluster | `00-platform` not applied in that vCluster | `kubectl --context <v> apply -k manifests/<v>/00-platform` |

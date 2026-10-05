@@ -200,6 +200,8 @@ molecule converge && molecule login   # iterate interactively
 | Hardware assertions in a separate role | `spark_validate`, which runs only on real nodes |
 | Pure functions (parsers) moved to filter plugins or fixture-tested Jinja | `ibdev2netdev` filter (Volume 04 §2.3) |
 | Side-effect tasks guarded by `when: not ansible_check_mode` where check mode can't simulate them | Drift checks stay clean |
+| Read-only probes marked `check_mode: false` so they still run under `--check` | `kubeadm_cluster` (CRI reachable, node registered), `spark_validate`, `node_drain` forensics |
+| One source of truth shared with another lab, instead of a copy | `vclusters` applies `02 Kubernetes/lab/vclusters/*.yaml` and `manifests/root/05-vclusters`, so the 02 lab's CI tests the same files |
 
 ---
 
@@ -277,6 +279,16 @@ sudo ./svc.sh install && sudo ./svc.sh start
 In the repo's branch protection, require the `ansible-lab / static` check. Molecule stays manual (it needs the Spark to be online), and hardware validation is part of the release checklist (Volume 25).
 
 ---
+
+### 4.3 What the Kubernetes roles get from CI
+
+The Kubernetes stage (`kubeadm_cluster`, `cilium`, `metallb`, `gpu_operator`, `vclusters`) can't converge on a GitHub runner: kubeadm wants a real host, and the GPU Operator wants a GB10. It gets three layers of cover:
+
+| Layer | Where | What it proves |
+|---|---|---|
+| Lint + `--syntax-check` | `ansible-lab` workflow (`tests/run-local-checks.sh`) | `05-kubernetes.yml`, `06-gpu-operator.yml`, `06b-vclusters.yml`, `99-reset-kubernetes.yml` parse; production-profile lint on every role |
+| Same manifests on kind | `.github/workflows/k8s-lab-ci.yml`, which also triggers on `01 Ansible/lab/roles/**` | A kind cluster renamed to context `spark-root` (fake GB10 node) runs the root budgets, both vClusters from `vclusters/*.yaml`, and the tenant checks: the exact files the `vclusters` role applies |
+| Hardware | `playbooks/30-validate.yml` on the Spark (Volume 25) | `k8s_ready_gpu`: the node is `Ready` and advertises `nvidia.com/gpu` > 0 |
 
 ## 5. Troubleshooting & diagnostics
 

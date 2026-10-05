@@ -4,8 +4,9 @@
 
 | | |
 |---|---|
-| **You will build** | One drain role that works across k3s and Slurm (`node_drain`), a forensics bundle collected **before** anything is restarted, runbooks A–E for the failure modes a Spark actually has (GPU hang, Xid, unified-memory pressure, CX-7 degradation, unreachable node), and an alert-to-automation path |
+| **You will build** | One drain role that works across Kubernetes (root cluster *and* the vClusters inside it) and Slurm (`node_drain`), a forensics bundle collected **before** anything is restarted, runbooks A–E for the failure modes a Spark actually has (GPU hang, Xid, unified-memory pressure, CX-7 degradation, unreachable node), and an alert-to-automation path |
 | **Hardware** | 1–2× DGX Spark |
+| **Clusters** | `spark-root` (the drain itself); `dev-lab` and `llms` to watch what tenants see |
 | **Time** | 90 min (including drills) |
 | **Risk** | Medium. You'll deliberately take nodes out of service |
 
@@ -35,7 +36,7 @@ flowchart LR
 # lab/roles/node_drain/defaults/main.yml
 ---
 # What the drain does, in order. Toggle stages per incident.
-node_drain_k8s: "{{ inventory_hostname in groups['k3s_server'] | default([]) + groups['k3s_agent'] | default([]) }}"
+node_drain_k8s: "{{ inventory_hostname in groups['k8s_control_plane'] | default([]) + groups['k8s_workers'] | default([]) }}"
 node_drain_slurm: "{{ inventory_hostname in groups['slurm_compute'] | default([]) }}"
 node_drain_stop_containers: true        # docker containers using the GPU
 node_drain_collect: true                # forensic bundle before anything is restarted
@@ -44,6 +45,7 @@ node_drain_reboot: false
 node_drain_undrain_after: false         # only after reboot + validation passes
 node_drain_reason: "maint: ansible drain {{ now(utc=true, fmt='%Y-%m-%dT%H:%MZ') }}"
 node_drain_kubeconfig: "{{ playbook_dir }}/../.cache/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
+node_drain_context: spark-root          # the root owns the nodes; vCluster pods are drained as root pods
 node_drain_bundle_dir: "{{ playbook_dir }}/../.cache/incidents"
 ```
 
@@ -54,6 +56,7 @@ node_drain_bundle_dir: "{{ playbook_dir }}/../.cache/incidents"
 - name: "1/6 Cordon + drain Kubernetes node"
   kubernetes.core.k8s_drain:
     kubeconfig: "{{ node_drain_kubeconfig }}"
+    context: "{{ node_drain_context }}"
     name: "{{ inventory_hostname }}"
     state: drain
     delete_options:
@@ -90,7 +93,7 @@ node_drain_bundle_dir: "{{ playbook_dir }}/../.cache/incidents"
         journalctl -k --since "-2h" --no-pager  > kernel.log 2>&1
         journalctl -k -b -1 --no-pager          > kernel-prev-boot.log 2>&1 || true   # after a hard power-cycle
         journalctl -k --no-pager | grep -E 'NVRM|Xid|mlx5' > nvrm-xid.log 2>&1 || true
-        journalctl -u docker -u k3s -u k3s-agent -u slurmd --since "-2h" --no-pager > services.log 2>&1
+        journalctl -u docker -u containerd -u kubelet -u slurmd --since "-2h" --no-pager > services.log 2>&1
         cat /proc/meminfo > meminfo.txt
         ibdev2netdev > ibdev2netdev.txt 2>&1
         for d in $(ls /sys/class/infiniband 2>/dev/null); do ibv_devinfo -d $d; done > ibv_devinfo.txt 2>&1
@@ -142,6 +145,7 @@ node_drain_bundle_dir: "{{ playbook_dir }}/../.cache/incidents"
     - name: Uncordon Kubernetes node
       kubernetes.core.k8s_drain:
         kubeconfig: "{{ node_drain_kubeconfig }}"
+        context: "{{ node_drain_context }}"
         name: "{{ inventory_hostname }}"
         state: uncordon
       delegate_to: localhost
@@ -174,6 +178,33 @@ node_drain_bundle_dir: "{{ playbook_dir }}/../.cache/incidents"
   roles:
     - role: node_drain
 ```
+
+### 2.1 What a drain does to the nested clusters
+
+`node_drain_kubeconfig` is the lab file `.cache/kubeconfig-spark-lab.yaml`, and `node_drain_context` pins `k8s_drain` to `spark-root` — whatever the file's `current-context` happens to be (someone may have run `kubectl config use-context llms` on it). Only the root has nodes to cordon. The by-hand equivalent is:
+
+```bash
+export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
+kubectl --context spark-root drain spark-02 --ignore-daemonsets --delete-emptydir-data --grace-period=60 --timeout=300s
+```
+
+A vCluster has no kubelet and no nodes of its own, so there's nothing to drain "inside" it. Every vCluster pod is a real pod on the root, renamed `<pod>-x-<namespace>-x-<vcluster>` in `vc-dev-lab` or `vc-llms`, and the root drain evicts it like any other pod:
+
+| What runs on the node | What the drain does | What you see |
+|---|---|---|
+| Static control-plane pods (kube-apiserver, etcd, …) on spark-01 | Skipped: they are mirror pods, owned by the kubelet, not the API | The root API stays up |
+| DaemonSets (cilium, kube-proxy, GPU Operator device plugin, MetalLB speaker) | Skipped (`ignore_daemonsets`) | Networking and the GPU stay advertised |
+| vCluster control planes (`dev-lab`, `llms` StatefulSets in `vc-*`) | Evicted | That vCluster's API (`https://192.168.0.111` / `.112`) is down until it reschedules. On a single Spark that means until you uncordon |
+| Tenant pods synced from a vCluster | Evicted | The tenant's controller recreates its pod; the syncer creates a new root pod, which stays `Pending` while the node is cordoned |
+| Tenant PodDisruptionBudgets | Respected: vCluster syncs PDBs to the root | A tight tenant PDB can block the drain until `wait_timeout` (§5) |
+
+```bash
+kubectl --context spark-root get pods -A -o wide --field-selector spec.nodeName=spark-02   # what is still there
+kubectl --context spark-root -n vc-llms get pods                                           # tenant pods, root names
+kubectl --context spark-root get pdb -A                                                    # synced PDBs show up in vc-*
+```
+
+**Single Spark:** `spark-01` is the only node, so draining it stops *every* workload in all three clusters (the root API itself keeps running). That's correct for a GPU hang, but it isn't a rolling drain. Use `node_drain_k8s=false` if you only need the evidence bundle.
 
 ---
 
@@ -213,7 +244,9 @@ The Slurm health check (Volume 18) auto-drains on the hardware-class codes; the 
 
 ### Runbook C — Unified-memory pressure
 
-**Signals:** `SparkUnifiedMemoryLow`; CUDA OOM "while nvidia-smi shows nothing"; k3s `MemoryPressure` evictions; the OOM killer in `dmesg`.
+**Signals:** `SparkUnifiedMemoryLow`; CUDA OOM "while nvidia-smi shows nothing"; kubelet `MemoryPressure` evictions (the kubelet evicts below `memory.available` 4Gi, `roles/kubeadm_cluster/defaults`); the OOM killer in `dmesg`.
+
+Kubernetes side first: `kubectl --context spark-root get pods -A --field-selector=status.phase=Failed` lists evicted pods, vCluster pods included under their root names. The vCluster budgets cap memory with `limits.memory` (dev-lab 8Gi, llms 48Gi), but they are ceilings, not reservations. A model server started outside Kubernetes (Docker, Slurm) still takes from the same pool.
 
 ```yaml
 # lab/playbooks/24-uma-relief.yml
@@ -289,7 +322,7 @@ ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K                     
 ansible-playbook playbooks/24-uma-relief.yml -l spark-01 -K -e uma_drop_caches=true   # relieve
 ```
 
-Prevent it from recurring: set memory limits on model-server containers, keep the kubelet reserve (Volume 16), give idle services the `spark.lab/idle=true` label so this runbook can stop them, and don't run k3s and Slurm GPU jobs on the same node at the same time.
+Prevent it from recurring: set memory limits on model-server containers, keep the kubelet reserve (Volume 16), give idle services the `spark.lab/idle=true` label so this runbook can stop them, and don't run Kubernetes and Slurm GPU jobs on the same node at the same time.
 
 ### Runbook D — CX-7 link degraded / down
 
@@ -301,7 +334,7 @@ ansible-playbook playbooks/02-fabric.yml -K                   # re-assert config
 ansible-playbook playbooks/11-rdma-perftest.yml -K            # measure after fixing
 ```
 
-Fix order: reseat the cable, then check that the same cage is used on both ends, then check the switch port speed (forced 200G), and finally reboot both nodes (NVIDIA's documented step when links won't come up). Drain dependent Slurm or k3s multi-node jobs first. A 2-node job can't run on a broken link.
+Fix order: reseat the cable, then check that the same cage is used on both ends, then check the switch port speed (forced 200G), and finally reboot both nodes (NVIDIA's documented step when links won't come up). Drain dependent Slurm or Kubernetes multi-node jobs first (the llms vCluster's `batch` jobs use the CX-7 through the Multus NADs in `vc-llms`). A 2-node job can't run on a broken link.
 
 ### Runbook E — Node unreachable (no BMC)
 
@@ -339,7 +372,8 @@ Automate **steps 1–3** (safe and reversible). Gate **step 4** (reboot or reloa
 
 | Symptom | Diagnose | Fix |
 |---|---|---|
-| k8s drain times out | `kubectl get pods -A -o wide --field-selector spec.nodeName=spark-02` | PodDisruptionBudgets or unmanaged pods; `terminate_grace_period`; delete stuck pods with the owner's consent |
+| k8s drain times out | `kubectl --context spark-root get pods -A -o wide --field-selector spec.nodeName=spark-02`; `kubectl --context spark-root get pdb -A` | PodDisruptionBudgets (including tenant PDBs synced from a vCluster into `vc-*`) or unmanaged pods; `terminate_grace_period`; delete stuck pods with the owner's consent. For a tenant pod, ask the tenant to delete it through their own context (`--context llms`), or the syncer may fight you |
+| Drain fails with "node not found" / context error | `kubectl --kubeconfig .cache/kubeconfig-spark-lab.yaml config get-contexts` | `node_drain_context` must name the root (`spark-root`); a vCluster context has synced nodes you can't cordon from there. Fix the variable or re-run `05-kubernetes.yml` to restore the context |
 | Slurm DRAIN never reaches DRAINED | `squeue -w spark-02` | Running jobs finish first (by design); `scancel` only if agreed |
 | Evidence capture hangs | Which command? Everything is wrapped in `timeout` | A new command without `timeout` → add it |
 | Reboot task times out | Console | Capsule/firmware work on boot takes long (Volume 10), or the node didn't come back: Runbook E |

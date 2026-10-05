@@ -21,6 +21,8 @@
 | Fabric | netplan edited, MTU changed | `cx7_fabric` template diff | ❌ Notify only: a wrong heal cuts the link |
 | Driver / kernel | DGX Dashboard update moved versions | Volume 07 audit (loaded ≠ on-disk = reboot pending) | ❌ Route to the upgrade playbook |
 | Runtime | `daemon.json` edited, CDI stale | `container_runtime` diff + CDI freshness probe | ⚠️ Only when no containers are running (manual) |
+| Kubernetes host config | `/etc/containerd/config.toml` lost the CRI plugin or `SystemdCgroup = true`; `/etc/kubernetes/kubeadm-config.yaml` edited | **Not** in `20-drift-check.yml`. Run `ansible-playbook playbooks/05-kubernetes.yml --check --diff -l spark-01 -K` by hand; auditd key `kubernetes` / `container-runtime` shows who did it (Volume 23) | ❌ Never: restarting containerd restarts every pod on the node (root *and* both vClusters), and kubeadm doesn't reconcile a running control plane (the role prints the `kubeadm init phase` command instead) |
+| Kubernetes objects | someone `kubectl edit`s the `vc-llms` ResourceQuota | Not Ansible's job: `kubectl --context spark-root diff -k "../02 Kubernetes/lab/manifests/root/05-vclusters"`, or Argo CD in the 02 Kubernetes production-mlops track | Via GitOps, not this loop |
 
 ```mermaid
 flowchart LR
@@ -232,7 +234,7 @@ cd "$(dirname "$0")/.."
 export ANSIBLE_CONFIG=$PWD/ansible.cfg
 OUT=.cache/drift; mkdir -p "$OUT"
 TS=$(date -u +%Y%m%dT%H%M%SZ)
-SAFE_TAGS=${SAFE_TAGS:-baseline,telemetry_node}      # never auto-heal fabric/driver/k3s
+SAFE_TAGS=${SAFE_TAGS:-baseline,telemetry_node}      # never auto-heal fabric/driver/kubernetes
 BECOME_ARGS=${BECOME_ARGS:-}                          # e.g. "--become-password-file /path" for unattended runs
 
 run_check() {

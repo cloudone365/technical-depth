@@ -199,7 +199,7 @@ scripts/etcd-drill.sh status && scripts/etcd-drill.sh snapshot
 systemctl list-timers etcd-snapshot.timer
 ```
 
-**Gate:** 1 etcd member, leader, no alarms, ≥ 1 snapshot, timer scheduled. Secrets in etcd start with `k8s:enc:aescbc:v1:` (Vol 02 §5.6).
+**Gate:** 1 etcd member, leader, no alarms, ≥ 1 snapshot, timer scheduled. Secrets in etcd start with `k8s:enc:aescbc:v1:` (Vol 02 §5 Step 1).
 
 ### Step 3 · Platform add-ons and vClusters
 

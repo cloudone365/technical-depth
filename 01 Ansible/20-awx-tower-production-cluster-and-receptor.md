@@ -5,7 +5,8 @@
 | | |
 |---|---|
 | **You will build** | The operational layer around AWX: a Spark as a **Receptor execution node** (the hybrid pattern), Vault-backed credentials, a **drift → approval → remediate** workflow, scheduled backups with a tested restore, and metrics in Prometheus |
-| **Prerequisite** | AWX from Volume 02B (on k3s, or on an x86 box for the hybrid pattern) |
+| **Prerequisite** | AWX from Volume 02B (on the kubeadm root cluster, or on an x86 box for the hybrid pattern) |
+| **Clusters** | `spark-root` (namespace `awx`) for the AWX control plane and container group |
 | **Time** | 2–3 h |
 | **Risk** | Medium. Restores and upgrades touch the AWX database; rehearse them on purpose |
 
@@ -17,10 +18,10 @@
 
 ```mermaid
 flowchart LR
-  subgraph CP["AWX control plane (k3s on spark-01, or an x86 VM)"]
+  subgraph CP["AWX control plane (spark-root on spark-01, or an x86 VM)"]
     WEB[awx-web] --- TASK[awx-task + receptor<br/>control node]
     TASK --- PG[(Postgres)]
-    CG["Container group<br/>(automation-job pods on k3s)"]
+    CG["Container group<br/>(automation-job pods in spark-root ns awx)"]
   end
   subgraph MESH["Receptor mesh (TCP 27199, mutual TLS)"]
     HOP["hop node (optional)<br/>DMZ / other site"]
@@ -187,8 +188,8 @@ spec:
 ```
 
 ```bash
-kubectl apply -f .cache/awx/backup.yaml
-kubectl -n awx get awxbackup awx-backup-2026-09-29 -o jsonpath='{.status}' | jq
+kubectl --context spark-root apply -f .cache/awx/backup.yaml
+kubectl --context spark-root -n awx get awxbackup awx-backup-2026-09-29 -o jsonpath='{.status}' | jq
 ```
 
 Schedule it with a Kubernetes CronJob that applies a dated `AWXBackup`, or with an AWX job that runs `kubernetes.core.k8s`. **Restore drill:** deploy a second AWX named `awx-restore` in a scratch namespace from that backup (`AWXRestore` with `backup_name`), log in, and confirm credentials decrypt (open one; it must not error).
@@ -211,7 +212,7 @@ Useful series: `awx_pending_jobs_total`, `awx_running_jobs_total`, `awx_instance
 
 | Task | How |
 |---|---|
-| Upgrade AWX | Back up → bump the operator `ref` in `kustomization.yaml` → `kubectl apply -k` → the operator migrates the DB. Never skip the backup |
+| Upgrade AWX | Back up → bump the operator `ref` in `kustomization.yaml` → `kubectl --context spark-root apply -k` → the operator migrates the DB. Never skip the backup |
 | Rotate `secret_key` | Not supported in place. It encrypts every credential; treat it as permanent and back it up with the DB |
 | Add an execution node | Instances → Add → bundle → `install_receptor.yml` → add to the instance group |
 | Remove a node | Disable it in AWX, wait for running jobs, remove from the instance group, delete the instance, `systemctl disable --now receptor` |

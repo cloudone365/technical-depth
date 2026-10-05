@@ -5,10 +5,11 @@
 | | |
 |---|---|
 | **You will build** | A working model of datacenter AI fabrics anchored in hardware you can touch: the two-Spark CX-7 link as a "one-rail, zero-switch" fabric. You'll read and interpret NIC counters, simulate a degraded link and watch NCCL react, and size a rail-optimised fat tree with a calculator |
+| **Clusters** | mostly the hosts and the cable. `spark-root` (nodes, conditions, taints, spark-02 as a worker) · `llms` (the NCCL job in `batch`, §5.3–5.4) |
 | **Hardware** | 1 Spark for §5.1–5.2 and §5.5. 2 Sparks + QSFP cable for §5.3–5.4 |
 | **Time** | 75 min |
 | **Risk** | Low. §5.4 takes one logical CX-7 port down for a minute |
-| **Lab files** | [`scripts/fabric_calc.py`](lab/scripts/fabric_calc.py), [`manifests/80-distributed/two-spark/`](lab/manifests/80-distributed/two-spark/kustomization.yaml). 01 Ansible `playbooks/02-fabric.yml`, `11-rdma-perftest.yml`, `12b-roce-qos.yml` |
+| **Lab files** | [`scripts/fabric_calc.py`](lab/scripts/fabric_calc.py), [`manifests/llms/80-distributed/two-spark/`](lab/manifests/llms/80-distributed/two-spark/kustomization.yaml). 01 Ansible `playbooks/02-fabric.yml`, `11-rdma-perftest.yml`, `12b-roce-qos.yml` |
 
 ---
 
@@ -24,6 +25,9 @@ You won't cable 1,000 GPUs at home. You *will* meet every concept in a SuperPOD 
 | Out-of-band management (BMC) | none on the Spark. The 01 Ansible Redfish lab simulates it |
 | Lossless Ethernet (PFC/ECN) or InfiniBand credit flow control | RoCE QoS settings from 01 Ansible `12b-roce-qos.yml` |
 | Link flaps, symbol errors, degraded lanes | `ethtool -S` counters, a downed logical port |
+| Frontend vs backend inside Kubernetes | pod network = Cilium VXLAN over `enP7s7`; a second pod interface `net1` on the CX-7 via Multus (Vol 16 §5.6) or `hostNetwork` |
+| Many tenants on one shared fabric | both vClusters' pods run on the root's nodes and share the same NICs and cable; the fabric is a **root** concern no tenant can see or configure |
+| Fabric-aware admission (health gates, topology) | a node condition or taint on the root, synced into both vClusters; the root scheduler enforces it for everyone |
 
 ---
 
@@ -120,12 +124,23 @@ In a node with 8 GPUs and 8 NICs, NIC *i* sits next to GPU *i* (same PCIe switch
 | `np_cnp_sent` / `rp_cnp_handled` | ECN/DCQCN congestion notifications | present under heavy load, not at idle |
 | `link_down_events_phy` | flaps | 0 |
 
+### 3.5 Where the fabric sits in the nested design
+
+| Layer | Owns | Sees the fabric as |
+|---|---|---|
+| hosts (01 Ansible) | netplan, MTU, GIDs, PFC/ECN, perftest gate | netdevs `enp1s0f1np1`, `enP2p1s0f1np1`; RDMA devices `rocep1s0f1`, `roceP2p1s0f1` |
+| root cluster (`spark-root`) | nodes, Multus / Network Operator, NADs (in `platform-tools`, `vc-llms`), RDMA device plugin, node conditions and taints | allocatable `rdma/rdma_shared_cx7`, node labels, `net1` attachments |
+| vCluster `llms` | the training Job, Kueue, its PSA (`batch` privileged) | a node list (synced) and a resource name to request — nothing else |
+| vCluster `dev-lab` | nothing on the fabric | it could request the resource, but its PSA (`baseline` on `vc-dev-lab`) forbids `hostNetwork` and `IPC_LOCK` |
+
+A tenant can't tell a degraded rail from a slow job. The platform team's health check (§5.5) has to turn fabric state into something the shared scheduler acts on.
+
 ---
 
 ## 4. Integrations
 
 - **01 Ansible** owns the link: `cx7_fabric` role (netplan, MTU, GIDs), `12b-roce-qos.yml` (PFC/ECN trust, DSCP), `11-rdma-perftest.yml` (the ≥ 180 Gb/s gate).
-- **Vol 17** puts NCCL on this link. **Vol 16** can hand it to pods via the Network Operator.
+- **Vol 17** puts NCCL on this link from inside the `llms` vCluster. **Vol 16 §5.6** can hand it to pods via the Network Operator (NAD in `vc-llms`).
 - **Module 07 Nvidia** (NVLink/NVSwitch, Quantum/Spectrum, UFM) and **module 08 Storage** (RoCE for storage traffic) go deeper on the same fabric ideas.
 
 ---
@@ -170,9 +185,11 @@ Then run the NCCL job (Vol 17 §5.5) and diff the counters before and after. PFC
 ```bash
 # take ONE logical half down on spark-02 for the duration of a run
 ssh nvidia@192.168.0.101 'sudo ip link set enP2p1s0f1np1 down'
-kubectl delete -k manifests/80-distributed/two-spark --ignore-not-found; kubectl apply -k manifests/80-distributed/two-spark
-kubectl -n batch logs -l job-name=ddp --prefix | grep -E 'NET/IB|busbw|1073741824|WARN' | head
+kubectl --context llms delete -k manifests/llms/80-distributed/two-spark --ignore-not-found
+kubectl --context llms apply -k manifests/llms/80-distributed/two-spark
+kubectl --context llms -n batch logs -l job-name=ddp --prefix | grep -E 'NET/IB|busbw|1073741824|WARN' | head
 ssh nvidia@192.168.0.101 'sudo ip link set enP2p1s0f1np1 up'
+kubectl --context llms delete -k manifests/llms/80-distributed/two-spark
 ```
 
 Expected: NCCL warns about the missing HCA or uses only one device, and large-message busbw drops to roughly **half**. That's the signature of a degraded rail or a half-seated cable. It's also why fabric health checks run *before* a job is admitted in large clusters.
@@ -197,7 +214,18 @@ EOF
 chmod +x /tmp/fabric-health.sh && /tmp/fabric-health.sh && echo HEALTHY
 ```
 
-In Kubernetes, this becomes a node-problem-detector custom plugin. A failing check sets a node condition, and a taint keeps distributed jobs away. The 01 Ansible `spark_validate` role runs the same checks at the host level.
+In Kubernetes, this becomes a node-problem-detector custom plugin on the **root**. A failing check sets a node condition, and a taint keeps distributed jobs away. Simulate the outcome by hand:
+
+```bash
+kubectl --context spark-root taint node spark-02 spark.lab/fabric=degraded:NoSchedule
+kubectl --context llms describe node spark-02 | grep -i taint          # synced into the vCluster
+kubectl --context llms apply -k manifests/llms/80-distributed/two-spark
+kubectl --context llms -n batch get pods -l job-name=ddp -o wide       # rank 1 Pending: untolerated taint
+kubectl --context llms delete -k manifests/llms/80-distributed/two-spark
+kubectl --context spark-root taint node spark-02 spark.lab/fabric-
+```
+
+The tenant sees the reason in its own events (`1 node(s) had untolerated taint {spark.lab/fabric: degraded}`) without any access to the fabric. Note the scope: a taint stops *every* new pod on that node, in every cluster — break/fix 13 shows that blast radius on one node. A production check would use a dedicated taint that only distributed jobs care about, or a node label that the training ResourceFlavor selects on. The 01 Ansible `spark_validate` role runs the same checks at the host level.
 
 ---
 
@@ -219,7 +247,7 @@ In Kubernetes, this becomes a node-problem-detector custom plugin. A failing che
 | Link `Up` but ~100 Gb/s | only one logical half in use | NCCL log device list, `rdma link` | list both HCAs. Both IPs configured |
 | CRC/symbol errors increasing | cable/optic/dirty connector | `ethtool -S` twice, 60 s apart | reseat, clean, replace the DAC/AOC |
 | Throughput collapses under load, pause counters huge | PFC storm / mismatched QoS | `rx_pause_ctrl_phy`, `mlnx_qos -i <if>` | align trust mode + PFC priority both ends (01 Ansible `12b-roce-qos.yml`) |
-| RDMA works host-to-host, NCCL in pods uses sockets | pod can't see RDMA devices | `ibv_devices` in pod | hostNetwork / Network Operator (Vol 16/17) |
+| RDMA works host-to-host, NCCL in pods uses sockets | pod can't see RDMA devices | `kubectl --context llms -n batch exec <pod> -- ibv_devices` | hostNetwork / Network Operator; the NAD must be in `vc-llms` (Vol 16 §5.6, Vol 17 §3.3) |
 | Link flaps | thermal/power, bad cable | `link_down_events_phy`, `dmesg \| grep mlx5` | replace the cable. Check airflow |
 
 ---
@@ -245,3 +273,4 @@ Design rules that carry over unchanged from your two Sparks: MTU and QoS identic
 - [ ] I sized a 32-node and a 127-node rail-optimised fabric and can explain leaf/spine counts.
 - [ ] I read CX-7 counters and know which ones mean "bad cable" vs "congestion".
 - [ ] I degraded a link on purpose and saw NCCL bandwidth halve.
+- [ ] I can say which fabric facts a vCluster tenant can see (node taints, labels, a resource name) and which only the root can.

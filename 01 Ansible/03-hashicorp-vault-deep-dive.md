@@ -9,7 +9,7 @@
 | **Time** | 90 min |
 | **Risk** | Medium. **Losing the unseal keys means losing every secret.** Read §5 before running |
 
-The lab needs secrets for NGC API keys, the Grafana admin password, the AWX credentials, SSH signing and the k3s join token. Vault gives you one audited place to keep them, short-lived credentials, and an API that Ansible, AWX and pods can all use.
+The lab needs secrets for NGC API keys, the Grafana admin password, the AWX credentials, SSH signing and Kubernetes credentials (the lab kubeconfig, vCluster user certificates). Vault gives you one audited place to keep them, short-lived credentials, and an API that Ansible, AWX and pods can all use.
 
 ---
 
@@ -33,7 +33,7 @@ flowchart LR
   PB -->|install, TLS, init, unseal| V
   PB -->|"HTTP API (vault_config role)"| V
   V --- R & A & T
-  CONS["Consumers:<br/>Ansible lookups · AWX credentials ·<br/>k3s pods (Vault Agent) · sshd (SSH CA)"] -->|HTTPS + token| V
+  CONS["Consumers:<br/>Ansible lookups · AWX credentials ·<br/>Kubernetes pods on spark-root and in the vClusters (Vault Agent) · sshd (SSH CA)"] -->|HTTPS + token| V
 ```
 
 ### 1.2 LLD
@@ -391,7 +391,7 @@ Add a Prometheus job in Volume 09 (use a token with a `sys/metrics` read policy)
 | Ansible playbooks | `community.hashi_vault` lookup with AppRole auth | 19 |
 | SSH | Vault SSH CA signs short-lived user certs; sshd trusts `TrustedUserCAKeys` | 19 (+ `08-vault.yml` play 3) |
 | AWX | "HashiCorp Vault Secret Lookup" credential type | 20 |
-| k3s pods | Vault Agent Injector or the External Secrets Operator | 17 |
+| Kubernetes pods (root cluster or inside `dev-lab` / `llms`) | Vault Agent Injector or the External Secrets Operator; each vCluster has its own API server and ServiceAccount issuer, so it needs its own Kubernetes auth mount | 17 |
 | NGC / Docker | `container_runtime_ngc_api_key` from a Vault lookup | 08 |
 
 ## 5. Production hardening

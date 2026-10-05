@@ -155,7 +155,7 @@ name: spark
 version: $VERSION
 readme: README.md
 authors: [cloudone365]
-description: DGX Spark automation — baseline, CX-7 fabric, containers, telemetry, k3s, Slurm, Vault, drain, validation
+description: DGX Spark automation — baseline, CX-7 fabric, containers, telemetry, kubeadm Kubernetes + vClusters, Slurm, Vault, drain, validation
 license: [MIT]
 tags: [nvidia, dgx, gpu, rdma, infrastructure]
 dependencies:

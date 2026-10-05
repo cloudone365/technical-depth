@@ -356,7 +356,7 @@ Break-glass: keep console access (monitor and keyboard) and one static key in a 
 | Consumer | Pattern |
 |---|---|
 | AWX (Volume 20) | Credential type **HashiCorp Vault Secret Lookup** (AppRole) + **HashiCorp Vault Signed SSH**, so AWX never stores the NGC key or a private SSH key |
-| k3s pods (Volume 17) | Vault Agent Injector or External Secrets; a Kubernetes auth method replaces AppRole for pods |
+| Kubernetes pods (Volume 17) | Vault Agent Injector or External Secrets; a Kubernetes auth method replaces AppRole for pods. Use one auth mount per cluster (`spark-root`, `dev-lab`, `llms`): each vCluster has its own API server and ServiceAccount token issuer |
 | Grafana / Prometheus (Volume 09) | `gpu_telemetry_grafana_admin_password` via lookup |
 | CI (Volume 21) | A CI-specific AppRole with a *read-only, lint-only* policy, or no Vault access at all |
 

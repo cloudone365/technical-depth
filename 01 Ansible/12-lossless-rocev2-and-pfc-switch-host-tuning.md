@@ -1,6 +1,6 @@
 # Volume 12 — RoCEv2 Done Right: MTU, QoS (DSCP/PFC/ECN), and Proving NCCL Uses RDMA Across Sparks
 
-> **Module 01 · Part III — High-Speed Fabric** · Prev: [11 CX-7 fabric](11-infiniband-fabric-automation-and-opensm.md) · Next: [13 Multus & secondary networks in k3s](13-multus-cni-and-secondary-rdma-networking.md)
+> **Module 01 · Part III — High-Speed Fabric** · Prev: [11 CX-7 fabric](11-infiniband-fabric-automation-and-opensm.md) · Next: [13 Multus & secondary networks in Kubernetes](13-multus-cni-and-secondary-rdma-networking.md)
 
 | | |
 |---|---|
@@ -322,7 +322,7 @@ The same variables go into vLLM or TRT-LLM multi-node launches. NVIDIA's vLLM Sp
 |---|---|
 | vLLM / TRT-LLM tensor-parallel across 2 Sparks | NCCL env from fabric facts; `--tensor-parallel-size 2` |
 | Slurm (Volume 18) | `srun --mpi=pmix` or `mpirun` jobs inherit the same NCCL env via `/etc/profile.d/nccl.sh` (template it) |
-| k3s + Multus (Volume 13) | Pods need the RDMA device, plus the same GID/HCA choices |
+| Kubernetes + Multus (Volume 13) | Pods need the RDMA device, plus the same GID/HCA choices |
 | NFS over RDMA (Volume 15) | Uses RDMA-CM, so it inherits the ToS set by `12b-roce-qos.yml` |
 
 ## 5. Troubleshooting & diagnostics

@@ -28,7 +28,7 @@ stateDiagram-v2
   OOBE --> DHCP_Ready: wizard (user, Wi-Fi/Ethernet, updates)
   DHCP_Ready --> Bootstrapped: 00-bootstrap.yml (-k -K)
   Bootstrapped --> Baselined: 01-baseline.yml
-  Baselined --> Operational: 02..09 (fabric, runtime, k3s, slurm…)
+  Baselined --> Operational: 02..09 (fabric, runtime, kubeadm + vClusters, slurm…)
   Operational --> Operational: drift check / day-2
   Operational --> Recovery: disk failure · bad update · "start clean"
   Recovery --> OOBE: USB recovery image (25–30 min)

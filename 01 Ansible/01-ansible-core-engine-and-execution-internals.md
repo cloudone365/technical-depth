@@ -78,9 +78,9 @@ flowchart TB
 | `strategy: linear` (default) | Every host finishes task N before any starts N+1 | Most plays: predictable output |
 | `strategy: free` | Hosts race ahead independently | Long independent builds (NCCL compile on 2+ nodes) |
 | `serial: 1` | Batches of hosts, whole play per batch | `21-emergency-drain.yml`, fabric changes: never both nodes at once |
-| `throttle: 1` | Per-task concurrency limit | Tasks hitting a shared API (Vault, the k3s API) |
-| `run_once` + `delegate_to` | One execution, on a chosen host | Generating the munge key, reading the k3s join token |
-| `order: sorted` | Host ordering | `05-k3s.yml`: spark-01 (server) before spark-02 |
+| `throttle: 1` | Per-task concurrency limit | Tasks hitting a shared API (Vault, the Kubernetes API) |
+| `run_once` + `delegate_to` | One execution, on a chosen host | Generating the munge key; minting a `kubeadm token create` on the control plane for each joining worker (delegate only) |
+| `order: sorted` | Host ordering | `05-kubernetes.yml`: `order: sorted` + `serial` so spark-01 (control plane) finishes before spark-02 joins |
 | `any_errors_fatal` / `max_fail_percentage` | Stop everything on first failure | Drain: one failed node → stop |
 
 ### 2.1 Handlers: why your config didn't reload

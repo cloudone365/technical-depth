@@ -84,11 +84,11 @@ Why three angles? Each can lie in a different way. Ansible can validate a stale 
 - name: Kubernetes node Ready + GPU allocatable
   ansible.builtin.shell: |
     set -o pipefail
-    k3s kubectl get node {{ inventory_hostname }} -o json \
+    kubectl --kubeconfig /etc/kubernetes/admin.conf get node {{ inventory_hostname }} -o json \
       | jq -r '[(.status.conditions[] | select(.type=="Ready") | .status), (.status.allocatable["nvidia.com/gpu"] // "0")] | @tsv'
   args:
     executable: /bin/bash
-  delegate_to: "{{ groups['k3s_server'][0] }}"
+  delegate_to: "{{ groups['k8s_control_plane'][0] }}"
   register: spark_validate_k8s_out
   changed_when: false
   check_mode: false        # read-only probe: must also run under --check (drift detection)
@@ -405,7 +405,7 @@ def _():
     return len(b) > 0, f"{len(b)} bundles"
 
 
-@check("16", "kubeconfig fetched from k3s")
+@check("16", "kubeconfig fetched from the kubeadm root cluster")
 def _():
     k = glob.glob(p("kubeconfig-*.yaml"))
     ok = any("https://127.0.0.1" not in read(x) and "server: https://" in read(x) for x in k)
@@ -456,8 +456,8 @@ Complete them in order. "Evidence" is what the scorecard or a reviewer checks.
 | 1 | 01A | Control node from scratch; `00-ping` shows aarch64/20 cores/GB10 facts | `.cache/facts/*` with `ansible_local.spark` |
 | 2 | 01B | Explode and execute an AnsiballZ payload on the Spark | Screenshot / notes |
 | 3 | 02A | 64-node fleet benchmark matrix | `.cache/bench.csv` ≥ 7 rows |
-| 4 | 02B | AWX running on k3s (or hybrid), configured as code | `awx-config.yml` applied; job history |
-| 5 | 03A | Target by state: `-l 'gpu_ready:&k3s_agent:!uma_pressure'` | `--list-hosts` output |
+| 4 | 02B | AWX running on the root cluster `spark-root` (or hybrid), configured as code | `awx-config.yml` applied; job history |
+| 5 | 03A | Target by state: `-l 'gpu_ready:&k8s_workers:!uma_pressure'` | `--list-hosts` output |
 | 6 | 03B | Vault up; restart → sealed → playbook unseals | `vault status` before/after |
 | 7 | 04 | 7/7 Jinja katas + one kata on live data | CI green |
 | 8 | 05 | Collection built; arm64 EE built on the Spark | `cloudone-spark-*.tar.gz`, `docker image inspect` arm64 |
@@ -471,8 +471,8 @@ Complete them in order. "Evidence" is what the scorecard or a reviewer checks.
 | 16 | 13 | Pod-to-pod RDMA over Multus | `ib_write_bw` from pods |
 | 17 | 14 | GDS assessment + cold/warm load comparison | `gds_summary` |
 | 18 | 15 | NFS over RDMA model cache | `/proc/mounts` `proto=rdma` |
-| 19 | 16 | k3s with flannel on CX-7 | `ip -d link show flannel.1` |
-| 20 | 17 | 4 time-sliced pods on one GB10 | `kubectl get pods` + `nvidia-smi` |
+| 19 | 16 | kubeadm root cluster with Cilium (VXLAN) and MetalLB; both vClusters answer on `.111` / `.112`; reset and rebuild once with `99-reset-kubernetes.yml` | `ip -d link show cilium_vxlan`; `kubectl --context dev-lab get ns` and `kubectl --context llms get ns` |
+| 20 | 17 | 15 time-slices on one GB10, and the vCluster budget holds: with two 1-slice pods running in `dev-lab`, a third is accepted by the vCluster API but stays `Pending`, because the root quota in `vc-dev-lab` refuses the synced pod | `kubectl --context spark-root get node spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}'` = 15; `kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget` |
 | 21 | 18 | Slurm: confinement proven; 2-node NCCL job | job output |
 | 22 | 19 | Automation run with only AppRole creds; SSH via Vault certificate | Vault audit log |
 | 23 | 21 | CI green; Molecule green on the Spark runner | Actions run |
@@ -518,6 +518,9 @@ ansible-playbook playbooks/site.yml -K                 # everything, idempotentl
 ansible-playbook playbooks/site.yml -K                 # second run: changed=0 across the board
 ansible-playbook playbooks/30-validate.yml -K
 tools/drift-cycle.sh; echo "drift exit=$?"             # 0
+# Kubernetes from zero: reset, then the three stages bring back spark-root, dev-lab and llms
+ansible-playbook playbooks/99-reset-kubernetes.yml -K   # type RESET
+ansible-playbook playbooks/05-kubernetes.yml -K && ansible-playbook playbooks/06-gpu-operator.yml && ansible-playbook playbooks/06b-vclusters.yml
 ansible-playbook playbooks/19-firmware-inventory.yml -K
 python3 tools/capstone_scorecard.py                    # target 10/10
 ```
@@ -536,6 +539,6 @@ python3 tools/capstone_scorecard.py                    # target 10/10
 | Direction | Start with |
 |---|---|
 | More Sparks (3-ring or 4+ with a switch) | Volume 11 §2.3, Volume 12 QoS; NVIDIA's multi-Spark playbooks |
-| Real DGX/HGX cluster | Swap k3s for Kubespray or Base Command Manager; Redfish modules for real BMCs (Volume 06 §4); Fabric Manager in the driver flow (Volume 07); InfiniBand + UFM (Volume 11 §4) |
+| Real DGX/HGX cluster | Grow the single kubeadm control plane into three (stacked etcd behind a VIP), or use Kubespray / Base Command Manager; keep vClusters for tenant isolation; Redfish modules for real BMCs (Volume 06 §4); Fabric Manager in the driver flow (Volume 07); InfiniBand + UFM (Volume 11 §4) |
 | Inference platform on the Spark pair | vLLM/TRT-LLM multi-node with the NCCL env from Volume 12, models from Volume 15, secrets from Volume 19 |
 | The rest of this repo | [`02 Kubernetes`](../02%20Kubernetes/README.md), [`07 Nvidia`](../07%20Nvidia/), [`08 Storage`](../08%20Storage/README.md) |

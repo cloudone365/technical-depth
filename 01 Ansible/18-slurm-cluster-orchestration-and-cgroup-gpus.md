@@ -9,7 +9,7 @@
 | **Time** | 60 min |
 | **Risk** | Low. Distro packages; configs are templated and identical on every node |
 
-Slurm and k3s can coexist on the same Sparks for learning purposes, but **they don't know about each other**. Both will happily schedule onto the same GPU. In the lab, use one at a time (drain one while you play with the other), or dedicate nodes.
+Slurm and Kubernetes can coexist on the same Sparks for learning purposes, but **they don't know about each other**. Both will happily schedule onto the same GPU, and so will both vClusters, because the 15 time-slices the root advertises are all backed by the one GB10. In the lab, use one at a time (drain one while you play with the other), or dedicate nodes.
 
 ---
 
