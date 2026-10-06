@@ -2,12 +2,12 @@
 
 Everything the 27 volumes (plus the [step-by-step guide](../00-kubernetes-step-by-step-guide.md)) teach, as manifests, scripts and drills. The [01 Ansible lab](../../01%20Ansible/lab/README.md) builds the base on one DGX Spark (a second Spark is optional):
 
-- a **root cluster** with kubeadm — dgx-spark-01 is control plane *and* worker — with Cilium, MetalLB and the GPU Operator (15 time-slices), and
+- a **root cluster** with kubeadm — dgx-spark-1 is control plane *and* worker — with Cilium, MetalLB and the GPU Operator (15 time-slices), and
 - two **vClusters** inside it ([Volume 27](../27-nested-clusters-with-vcluster.md)): `dev-lab` (2 CPU · 8 Gi · 2 slices) and `llms` (4 CPU · 48 Gi · 8 slices).
 
 This directory holds their definitions and everything that runs on them. Every code block in the volumes is taken from here.
 
-> **Convention:** `ansible-playbook playbooks/NN-….yml` in this module = run Semaphore template NN in project `spark-lab` ([01 Ansible 00b](../../01%20Ansible/00b-dgx-spark-semaphore-target.md#7-build-the-lab-from-semaphore)); the CLI form is break-glass from the MacBook (`-l dgx-spark-01,localhost -K`).
+> **Convention:** `ansible-playbook playbooks/NN-….yml` in this module = run Semaphore template NN in project `spark-lab` ([01 Ansible 00b](../../01%20Ansible/00b-dgx-spark-semaphore-target.md#7-build-the-lab-from-semaphore)); the CLI form is break-glass from the MacBook (`-l dgx-spark-1,localhost -K`).
 
 ```
 lab/
@@ -71,7 +71,7 @@ flowchart LR
     SEMA["sema01 · 192.168.0.210<br/>Semaphore :3000 · runs every playbook<br/>state volume: kubeconfig"]
     VLT["vault01 · 192.168.0.211<br/>SSH CA · 15-min certs · lab secrets"]
   end
-  subgraph S1["dgx-spark-01 · 192.168.0.100 · root cluster (kubeadm)"]
+  subgraph S1["dgx-spark-1 · 192.168.0.100 · root cluster (kubeadm)"]
     direction TB
     CP["API server · etcd · scheduler<br/>controller-manager (static pods)"]
     PL["Cilium · MetalLB · GPU Operator<br/>kps (Grafana :32000) · platform-tools"]
@@ -83,7 +83,7 @@ flowchart LR
     end
     GPU["GB10 → 15 time-slices<br/>root 5 · dev-lab 2 · llms 8"]
   end
-  subgraph S2["dgx-spark-02 · 192.168.0.101 · optional root worker"]
+  subgraph S2["dgx-spark-2 · 192.168.0.101 · optional root worker"]
     G2["GB10 → 15 slices"]
   end
   K -->|"browser :3000"| SEMA

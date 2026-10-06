@@ -4,8 +4,8 @@
 # with the normal playbooks. Faults are documented in Volume 25 — no peeking at
 # the task list until you've found it.
 #
-#   ansible-playbook playbooks/25-chaos.yml -l dgx-spark-02 -K -e chaos_fault=random
-#   ansible-playbook playbooks/25-chaos.yml -l dgx-spark-02 -K -e chaos_fault=3
+#   ansible-playbook playbooks/25-chaos.yml -l dgx-spark-2 -K -e chaos_fault=random
+#   ansible-playbook playbooks/25-chaos.yml -l dgx-spark-2 -K -e chaos_fault=3
 - name: Short-lived SSH certificate from vault01 (Semaphore runs only)
   ansible.builtin.import_playbook: 00-vault-cert.yml
 

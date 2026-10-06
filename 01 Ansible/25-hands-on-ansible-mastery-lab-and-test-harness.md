@@ -490,7 +490,7 @@ Complete them in order. "Evidence" is what the scorecard or a reviewer checks.
 | 17 | 14 | GDS assessment + cold/warm load comparison | `gds_summary` |
 | 18 | 15 | NFS over RDMA model cache | `/proc/mounts` `proto=rdma` |
 | 19 | 16 | kubeadm root cluster with Cilium (VXLAN) and MetalLB; both vClusters answer on `.111` / `.112`; reset and rebuild once with `99-reset-kubernetes.yml` | `ip -d link show cilium_vxlan`; `kubectl --context dev-lab get ns` and `kubectl --context llms get ns` |
-| 20 | 17 | 15 time-slices on one GB10, and the vCluster budget holds: with two 1-slice pods running in `dev-lab`, a third is accepted by the vCluster API but stays `Pending`, because the root quota in `vc-dev-lab` refuses the synced pod | `kubectl --context spark-root get node dgx-spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}'` = 15; `kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget` |
+| 20 | 17 | 15 time-slices on one GB10, and the vCluster budget holds: with two 1-slice pods running in `dev-lab`, a third is accepted by the vCluster API but stays `Pending`, because the root quota in `vc-dev-lab` refuses the synced pod | `kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}'` = 15; `kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget` |
 | 21 | 18 | Slurm: confinement proven; 2-node NCCL job | job output |
 | 22 | 19 | Every build template runs with only the AppRole in Semaphore's variable group; SSH as `svc-ansible` via a 15-minute vault01 certificate; `19 Vault integration` reads `kv/spark-lab/ngc` without printing it | vault01 audit log (`auth/approle/login`, `sign/ansible`, the KV read) per task; `ED25519-CERT` lines in the Spark's sshd log; scorecard `03B/19` |
 | 23 | 21 | CI green; Molecule green on the Spark runner | Actions run |
@@ -501,15 +501,15 @@ Complete them in order. "Evidence" is what the scorecard or a reviewer checks.
 
 ## 3. Chaos drill
 
-Run the Semaphore template `25 Chaos` with `--limit dgx-spark-02,localhost` (or `dgx-spark-01,localhost` with one Spark) and extra variable `chaos_fault: random`. Break-glass equivalent:
+Run the Semaphore template `25 Chaos` with `--limit dgx-spark-2,localhost` (or `dgx-spark-1,localhost` with one Spark) and extra variable `chaos_fault: random`. Break-glass equivalent:
 
 ```bash
 cd "01 Ansible/lab"
-ansible-playbook playbooks/25-chaos.yml -l dgx-spark-02,localhost -K -e chaos_fault=random
+ansible-playbook playbooks/25-chaos.yml -l dgx-spark-2,localhost -K -e chaos_fault=random
 # Now find it using ONLY: 30 Validate, tools/drift-cycle.sh, Grafana/alerts, Loki, spark_invariants.py, 16 Driver audit
 # Then fix it with the normal templates and prove it with all three angles.
-sudo base64 -d /opt/spark-lab/cache/chaos-dgx-spark-02.sealed   # on sema01; reveal AFTER you've fixed it
-#   (break-glass run: base64 -d .cache/chaos-dgx-spark-02.sealed on the MacBook)
+sudo base64 -d /opt/spark-lab/cache/chaos-dgx-spark-2.sealed   # on sema01; reveal AFTER you've fixed it
+#   (break-glass run: base64 -d .cache/chaos-dgx-spark-2.sealed on the MacBook)
 ```
 
 <details>
@@ -545,11 +545,11 @@ In Semaphore, one template after the other, each ending in `failed=0`:
 
 ```bash
 cd "01 Ansible/lab"
-ansible-playbook playbooks/site.yml -l dgx-spark-01,localhost -K                 # everything, idempotently
-ansible-playbook playbooks/site.yml -l dgx-spark-01,localhost -K                 # second run: changed=0 across the board
-ansible-playbook playbooks/30-validate.yml -l dgx-spark-01,localhost -K
-ansible-playbook playbooks/99-reset-kubernetes.yml -l dgx-spark-01,localhost -K   # type RESET
-ansible-playbook playbooks/05-kubernetes.yml -l dgx-spark-01,localhost -K && ansible-playbook playbooks/06-gpu-operator.yml && ansible-playbook playbooks/06b-vclusters.yml
+ansible-playbook playbooks/site.yml -l dgx-spark-1,localhost -K                 # everything, idempotently
+ansible-playbook playbooks/site.yml -l dgx-spark-1,localhost -K                 # second run: changed=0 across the board
+ansible-playbook playbooks/30-validate.yml -l dgx-spark-1,localhost -K
+ansible-playbook playbooks/99-reset-kubernetes.yml -l dgx-spark-1,localhost -K   # type RESET
+ansible-playbook playbooks/05-kubernetes.yml -l dgx-spark-1,localhost -K && ansible-playbook playbooks/06-gpu-operator.yml && ansible-playbook playbooks/06b-vclusters.yml
 ```
 
 ## 5. Mastery criteria

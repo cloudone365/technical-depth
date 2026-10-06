@@ -1,12 +1,12 @@
-# Step 0b · Add dgx-spark-01 as a Semaphore Target
+# Step 0b · Add dgx-spark-1 as a Semaphore Target
 
 > **01 Ansible · Step 0b**, right after the MacBook toolchain (Step 0 of the [step-by-step guide](00-ansible-step-by-step-guide.md)). Prerequisite: [00a · Semaphore UI + Vault](00a-semaphore-vault-lab-guide.md) works end to end (its §9 passes). This guide makes the DGX Spark the next target of that same Semaphore and Vault. Afterwards **every playbook of the Spark lab runs as a Semaphore task**. The [step-by-step guide](00-ansible-step-by-step-guide.md) continues with Step 1 (first contact, the `00 Ping` template from §5.6) and Step 2, and the [02 Kubernetes](../02%20Kubernetes/README.md) module builds on the clusters those tasks create.
 
-**Goal:** the same rule as in 00a: no human holds the automation credential. `sema01` and `vault01` stay outside the Spark. `dgx-spark-01` trusts vault01's SSH CA, and every Semaphore task logs in as `svc-ansible` with a 15-minute certificate. Kubernetes work (kubeadm, Cilium, the GPU Operator, the vClusters) is driven from the Semaphore container over the LAN.
+**Goal:** the same rule as in 00a: no human holds the automation credential. `sema01` and `vault01` stay outside the Spark. `dgx-spark-1` trusts vault01's SSH CA, and every Semaphore task logs in as `svc-ansible` with a 15-minute certificate. Kubernetes work (kubeadm, Cilium, the GPU Operator, the vClusters) is driven from the Semaphore container over the LAN.
 
-Each step has a **Why**, then commands with a comment on every line, then a **Verify** block. Steps say where to type: **on your MacBook**, **on sema01**, **on vault01**, **on dgx-spark-01**, or **in Semaphore** (the web UI).
+Each step has a **Why**, then commands with a comment on every line, then a **Verify** block. Steps say where to type: **on your MacBook**, **on sema01**, **on vault01**, **on dgx-spark-1**, or **in Semaphore** (the web UI).
 
-![The DGX Spark as a Semaphore target: sema01 and vault01 outside the Spark, dgx-spark-01 with the root cluster and two vClusters inside](diagrams/semaphore-dgx-spark.svg)
+![The DGX Spark as a Semaphore target: sema01 and vault01 outside the Spark, dgx-spark-1 with the root cluster and two vClusters inside](diagrams/semaphore-dgx-spark.svg)
 
 ---
 
@@ -17,16 +17,16 @@ Each step has a **Why**, then commands with a comment on every line, then a **Ve
 | MacBook | DHCP | your terminal: browser to Semaphore, `git push`, `kubectl` for the 02 Kubernetes labs, and the two bootstrap playbooks | [00 guide Step 0](00-ansible-step-by-step-guide.md) |
 | `sema01` | 192.168.0.210 | **runs every lab playbook** (Semaphore + PostgreSQL in Docker). Its container is the Ansible *controller*: play 1, `kubectl`, `helm` and the `kubernetes.core` modules run there | 00a §7, plus §4 here |
 | `vault01` | 192.168.0.211 | SSH CA (`ssh-client-signer`, role `ansible`), AppRole `semaphore`, audit log; plus the lab's secrets (§6) | 00a §3–4, plus §6 here |
-| `dgx-spark-01` | 192.168.0.100 | the target: DGX OS, then the kubeadm root cluster `spark-root` with the vClusters `dev-lab` and `llms` inside it | the lab playbooks, run by Semaphore |
+| `dgx-spark-1` | 192.168.0.100 | the target: DGX OS, then the kubeadm root cluster `spark-root` with the vClusters `dev-lab` and `llms` inside it | the lab playbooks, run by Semaphore |
 | 192.168.0.201 / .202 | — | your existing 00a targets, unchanged (project `lab`) | 00a |
 
 **One Semaphore task, step by step** (template `05 Kubernetes` as the example):
 
 1. You click **Run**. Semaphore checks your role and clones `technical-depth` (branch `main`).
 2. **Play 1** (`playbooks/00-vault-cert.yml`, the same play as 00a §8.3) runs inside the container. It logs in to vault01 with the AppRole from the variable group and gets a 15-minute certificate for `svc-ansible`.
-3. The host plays SSH to `dgx-spark-01` as `svc-ansible` with that certificate. sshd checks the CA signature, the principal and the expiry, and `sudo` (NOPASSWD) runs the tasks.
+3. The host plays SSH to `dgx-spark-1` as `svc-ansible` with that certificate. sshd checks the CA signature, the principal and the expiry, and `sudo` (NOPASSWD) runs the tasks.
 4. The controller plays run `kubectl`/`helm` in the container against `https://192.168.0.100:6443`. The kubeconfig with the contexts `spark-root`, `dev-lab` and `llms` lives on sema01's **state volume** (§4), not in the temporary checkout.
-5. The task log and history stay in Semaphore. vault01's audit log has the login and the signature, and dgx-spark-01's sshd log has `Accepted publickey … ED25519-CERT`.
+5. The task log and history stay in Semaphore. vault01's audit log has the login and the signature, and dgx-spark-1's sshd log has `Accepted publickey … ED25519-CERT`.
 
 **Two ways in, decided by one variable.** [`inventory/group_vars/spark.yml`](lab/inventory/group_vars/spark.yml) switches the login on whether the Semaphore variable group (`vault_role_id`) is attached:
 
@@ -59,7 +59,7 @@ Each step has a **Why**, then commands with a comment on every line, then a **Ve
   Host sema01
     HostName 192.168.0.210
     User <your-user>
-  Host dgx-spark-01
+  Host dgx-spark-1
     HostName 192.168.0.100
     User nvidia
   EOF
@@ -81,23 +81,23 @@ ssh -t nvidia@192.168.0.100 'hostname; sudo -v && echo sudo-ok'   # admin login 
 ```bash
 ls -l .cache/vault-ca.crt                                    # the certificate is there
 curl -s --cacert .cache/vault-ca.crt https://192.168.0.211:8200/v1/ssh-client-signer/public_key | cut -c1-20   # expect: ssh-rsa AAAA… (public, no token)
-ansible -m ping dgx-spark-01 -K                              # expect: pong (as nvidia, your key)
+ansible -m ping dgx-spark-1 -K                              # expect: pong (as nvidia, your key)
 ```
 
 ### 2.1 Fresh DGX OS only: bootstrap
 
-Skip this if the Spark is already named `dgx-spark-01`, sits on 192.168.0.100 and takes your key as `nvidia` (the last command in Verify 2 answers `pong`). On a Spark that has just finished the first-boot wizard (password login, DHCP address), `00-bootstrap.yml` sets the hostname, installs your key for `nvidia` and, on the second run, moves it to the static IP. A dead-man timer rolls the network back if Ansible can't reconnect.
+Skip this if the Spark is already named `dgx-spark-1`, sits on 192.168.0.100 and takes your key as `nvidia` (the last command in Verify 2 answers `pong`). On a Spark that has just finished the first-boot wizard (password login, DHCP address), `00-bootstrap.yml` sets the hostname, installs your key for `nvidia` and, on the second run, moves it to the static IP. A dead-man timer rolls the network back if Ansible can't reconnect.
 
 ```bash
-ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-01 -k -K -e bootstrap_current_ip=<its DHCP IP>                              # -k: SSH password, still on
-ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-01 -K -e bootstrap_current_ip=<its DHCP IP> -e bootstrap_static_ip=true     # move to 192.168.0.100
+ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-1 -k -K -e bootstrap_current_ip=<its DHCP IP>                              # -k: SSH password, still on
+ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-1 -K -e bootstrap_current_ip=<its DHCP IP> -e bootstrap_static_ip=true     # move to 192.168.0.100
 ```
 
 Then repeat Verify 2. Details: [Volume 06](06-bare-metal-os-provisioning-pxe-and-redfish.md) and the playbook's header.
 
 ---
 
-## 3. Make dgx-spark-01 trust vault01 (on your MacBook)
+## 3. Make dgx-spark-1 trust vault01 (on your MacBook)
 
 **Why:** this is 00a §5 for the Spark, as a playbook instead of by hand. `00b-semaphore-target.yml`:
 
@@ -112,12 +112,12 @@ Your `nvidia` login is untouched, so you can't lock yourself out.
 ### 3.1 Run it
 
 ```bash
-ansible-playbook playbooks/00b-semaphore-target.yml -l dgx-spark-01,localhost -K   # localhost: fetches the CA key from vault01
+ansible-playbook playbooks/00b-semaphore-target.yml -l dgx-spark-1,localhost -K   # localhost: fetches the CA key from vault01
 ```
 
-`-l dgx-spark-01,localhost` is optional while `dgx-spark-02` is commented out in [`inventory/hosts.yml`](lab/inventory/hosts.yml), as it is now. If you limit a run, keep `localhost` in the limit: the CA key is fetched there, and play 1 runs there in every Semaphore template (§5.5).
+`-l dgx-spark-1,localhost` is optional while `dgx-spark-2` is commented out in [`inventory/hosts.yml`](lab/inventory/hosts.yml), as it is now. If you limit a run, keep `localhost` in the limit: the CA key is fetched there, and play 1 runs there in every Semaphore template (§5.5).
 
-### 3.2 Verify on dgx-spark-01
+### 3.2 Verify on dgx-spark-1
 
 ```bash
 id svc-ansible                                               # expect a uid line
@@ -139,7 +139,7 @@ vault write -field=signed_key ssh-client-signer/sign/ansible \
 ssh -i ~/semaphore_lab -o CertificateFile=~/semaphore_lab-cert.pub svc-ansible@192.168.0.100 'hostname; sudo -n whoami'
 ```
 
-Expected: `dgx-spark-01` and `root`. `01 Ansible/lab/tools/vault-ssh-cert.sh` does the same in one command if you have the repository on vault01.
+Expected: `dgx-spark-1` and `root`. `01 Ansible/lab/tools/vault-ssh-cert.sh` does the same in one command if you have the repository on vault01.
 
 ---
 
@@ -215,7 +215,7 @@ Your 00a project `lab` keeps working: same database, same keys, and the new imag
 
 The inventory file comes with its `group_vars/` and `host_vars/`, so addresses, the automation user, the certificate path and `StrictHostKeyChecking=accept-new` are all already there; you don't retype them.
 
-**One Spark or two:** `dgx-spark-02` is commented out in the inventory, so the templates need no limit. When spark-02 joins, uncomment its lines in `hosts.yml` (groups `spark`, `k8s_workers`, `nfs_client`) and push. If you ever add a `--limit` to a template, include `localhost`: play 1 and all the Kubernetes plays run there.
+**One Spark or two:** `dgx-spark-2` is commented out in the inventory, so the templates need no limit. When spark-02 joins, uncomment its lines in `hosts.yml` (groups `spark`, `k8s_workers`, `nfs_client`) and push. If you ever add a `--limit` to a template, include `localhost`: play 1 and all the Kubernetes plays run there.
 
 ### 5.6 First template: `00 Ping`
 
@@ -228,19 +228,19 @@ The inventory file comes with its `group_vars/` and `host_vars/`, so addresses, 
 | Inventory | `spark-lab` |
 | Repository | `technical-depth` |
 | Variable group (Environment) | `vault-approle` |
-| CLI args | none needed with one Spark (if you add a limit: `["--limit", "dgx-spark-01,localhost"]`) |
+| CLI args | none needed with one Spark (if you add a limit: `["--limit", "dgx-spark-1,localhost"]`) |
 
 Save, then **Run**.
 
 **Verify 5:** the task log shows two plays.
 
 - **Get an SSH certificate from Vault** (on `localhost`), with its secret tasks hidden.
-- **Connectivity and identity check**, with `ok` on `dgx-spark-01` and a line like `dgx-spark-01 aarch64 20 cores 119.7 GiB Ubuntu 24.04`, ending in `failed=0`.
+- **Connectivity and identity check**, with `ok` on `dgx-spark-1` and a line like `dgx-spark-1 aarch64 20 cores 119.7 GiB Ubuntu 24.04`, ending in `failed=0`.
 
 Then check all three systems:
 
 ```bash
-sudo journalctl -u ssh --since "10 minutes ago" | grep svc-ansible   # on dgx-spark-01: "Accepted publickey for svc-ansible … ED25519-CERT"
+sudo journalctl -u ssh --since "10 minutes ago" | grep svc-ansible   # on dgx-spark-1: "Accepted publickey for svc-ansible … ED25519-CERT"
 sudo grep -c 'sign/ansible' /var/log/vault_audit.log                 # on vault01: the count grows with each task run
 docker compose exec semaphore ssh-keygen -L -f /tmp/lab_ssh/id_ed25519-cert.pub | grep -A1 Principals   # on sema01: svc-ansible
 ```
@@ -302,7 +302,7 @@ Create these templates. The **Volume** column says where each one is explained; 
 | `06 GPU Operator` | `06-gpu-operator.yml` | 17 | 15 time-slices |
 | `06b vClusters` | `06b-vclusters.yml` | 16 §3.4, 02 Kubernetes Vol 27 | `dev-lab` and `llms`; adds their contexts |
 | `13 Multus RDMA` | `13-multus-rdma.yml` | 13 | secondary CX-7 networks |
-| `07 Slurm`, `09 NFS RDMA`, `10 NCCL test`, `11 RDMA perftest`, `14 GDS check`, `16 Driver audit`, `18 CUDA smoke`, `19 Firmware inventory`, `23 Logging audit`, `24 UMA relief`, `25 Chaos` | the playbook of the same number | 18, 15, 11, 12, 14, 07, 08, 10, 23, 24, 25 | same pattern; `10`/`11` need dgx-spark-02 |
+| `07 Slurm`, `09 NFS RDMA`, `10 NCCL test`, `11 RDMA perftest`, `14 GDS check`, `16 Driver audit`, `18 CUDA smoke`, `19 Firmware inventory`, `23 Logging audit`, `24 UMA relief`, `25 Chaos` | the playbook of the same number | 18, 15, 11, 12, 14, 07, 08, 10, 23, 24, 25 | same pattern; `10`/`11` need dgx-spark-2 |
 | `17 DGX OS upgrade` | `17-dgxos-upgrade.yml` | 07, 10 | reboots: extra variable `vault_ssh_cert_ttl: 1h` (§12) |
 | `site` | `site.yml` | — | 01 → 04, 05 → 06b, Slurm, NFS, validation in one task; extra variable `vault_ssh_cert_ttl: 1h` |
 | `20 Drift check` | `20-drift-check.yml` | 22 | check mode is built in (changes nothing); schedule it nightly |
@@ -330,7 +330,7 @@ Never schedule it.
 ```bash
 tools/fetch-kubeconfig.sh sema01                                     # reads it through the container, writes .cache/kubeconfig-spark-lab.yaml (0600)
 export KUBECONFIG="$PWD/.cache/kubeconfig-spark-lab.yaml"            # what every 02 Kubernetes command uses
-kubectl --context spark-root get nodes                               # expect: dgx-spark-01 Ready control-plane
+kubectl --context spark-root get nodes                               # expect: dgx-spark-1 Ready control-plane
 kubectl --context dev-lab get ns && kubectl --context llms get ns    # both vClusters answer
 ```
 
@@ -342,12 +342,12 @@ This kubeconfig holds cluster-admin certificates, the human side of the lab, and
 
 | Where | What to check | What it proves |
 |---|---|---|
-| Semaphore task log | Play 1 ok (secret tasks hidden), then host plays on `dgx-spark-01`, `failed=0` | Semaphore → Vault → Spark works |
-| dgx-spark-01: `sudo journalctl -u ssh \| grep svc-ansible` | `Accepted publickey … ED25519-CERT ID …` | login used a certificate, not a plain key |
-| dgx-spark-01: `sudo grep svc-ansible /var/log/auth.log \| grep COMMAND` | sudo lines for the tasks | privileged actions are traceable to the automation account |
+| Semaphore task log | Play 1 ok (secret tasks hidden), then host plays on `dgx-spark-1`, `failed=0` | Semaphore → Vault → Spark works |
+| dgx-spark-1: `sudo journalctl -u ssh \| grep svc-ansible` | `Accepted publickey … ED25519-CERT ID …` | login used a certificate, not a plain key |
+| dgx-spark-1: `sudo grep svc-ansible /var/log/auth.log \| grep COMMAND` | sudo lines for the tasks | privileged actions are traceable to the automation account |
 | vault01: `sudo grep -c 'sign/ansible' /var/log/vault_audit.log` | grows by one per task | every certificate request is recorded |
 | sema01: `docker compose exec semaphore ls /var/lib/spark-lab/cache` | `kubeconfig-spark-lab.yaml`, `kubeconfig-dev-lab.yaml`, `kubeconfig-llms.yaml`, `validation/` … | lab state survives the temporary checkout |
-| MacBook: `kubectl --context llms get nodes` | `dgx-spark-01` (synced from the root) | the 02 Kubernetes labs can start |
+| MacBook: `kubectl --context llms get nodes` | `dgx-spark-1` (synced from the root) | the 02 Kubernetes labs can start |
 | Expiry test | 16 minutes after a task, `docker compose exec semaphore ssh -i /tmp/lab_ssh/id_ed25519 svc-ansible@192.168.0.100 true` is refused; a new task run succeeds | credentials expire without cleanup |
 
 ---
@@ -367,7 +367,7 @@ When sema01 or vault01 is down, you can still reach the Spark the way you did in
 
 ```bash
 cd ~/technical-depth/"01 Ansible/lab"
-ansible-playbook playbooks/21-emergency-drain.yml -l dgx-spark-01,localhost -K   # no vault_role_id → nvidia + your key; play 1 is skipped
+ansible-playbook playbooks/21-emergency-drain.yml -l dgx-spark-1,localhost -K   # no vault_role_id → nvidia + your key; play 1 is skipped
 ```
 
 State then goes to the MacBook's `.cache/` instead of sema01's volume. After the emergency, re-run the affected template in Semaphore, so the record and the state are back in one place.
@@ -395,9 +395,9 @@ State then goes to the MacBook's `.cache/` instead of sema01's volume. After the
 | `Permission denied (publickey)` for svc-ansible | sshd doesn't trust vault01's CA, or the certificate expired | §3.2 fingerprints; run the task again for a fresh certificate; check clocks (00a §10.2) |
 | A long task fails after a reboot or a long pause: `Permission denied` / `UNREACHABLE` halfway | the 15-minute certificate expired; the open SSH connection kept working, the new one after the reboot is refused | template extra variable `vault_ssh_cert_ttl: 1h` (the vault01 role's `max_ttl`) |
 | Play 1 skipped and then `Permission denied` for **nvidia** | the template has no variable group, so the lab thinks it's a MacBook run | attach `vault-approle` to the template |
-| Play 1 never runs, hosts unreachable | `--limit` without `localhost` | `--limit dgx-spark-01,localhost` |
-| `UNREACHABLE … 192.168.0.101` | dgx-spark-02 is uncommented in the inventory but not there yet | comment it out again, or add `--limit dgx-spark-01,localhost` (§5.5) |
-| `Host key verification failed` | dgx-spark-01 was reinstalled, so its host key changed | on sema01: `docker compose exec semaphore ssh-keygen -R 192.168.0.100` (only after you know why the key changed) |
+| Play 1 never runs, hosts unreachable | `--limit` without `localhost` | `--limit dgx-spark-1,localhost` |
+| `UNREACHABLE … 192.168.0.101` | dgx-spark-2 is uncommented in the inventory but not there yet | comment it out again, or add `--limit dgx-spark-1,localhost` (§5.5) |
+| `Host key verification failed` | dgx-spark-1 was reinstalled, so its host key changed | on sema01: `docker compose exec semaphore ssh-keygen -R 192.168.0.100` (only after you know why the key changed) |
 | `No module named 'kubernetes'` / `helm: not found` | the stock image is running | §4: `docker compose build semaphore && docker compose up -d`, check `docker compose ps` shows `semaphore-spark-lab:local` |
 | `Could not find … kubeconfig-spark-lab.yaml` in 06/06b/13/21 | state is not on the volume (SPARK_LAB_CACHE unset) or 05 never ran from Semaphore | §4 Verify; run `05 Kubernetes` from Semaphore |
 | `08-vault.yml`: `export VAULT_TOKEN=…` assertion | no admin token in the environment | §6 |

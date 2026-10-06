@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | Git as the only way to change the platform: CI validates every change without a GPU (on kind, with the same root + two vClusters shape), one Argo CD on the root syncs the lab layers to **three clusters** in dependency order, models and engines are promoted through canaries, and a rollback is `git revert` |
-| **Hardware** | dgx-spark-01 + a GitHub fork of this repo |
+| **Hardware** | dgx-spark-1 + a GitHub fork of this repo |
 | **Time** | 60 min |
 | **Clusters** | `spark-root` (Argo CD in `argocd`, the root layers, the vCluster budgets) · `dev-lab` and `llms` (Argo CD destinations, reached on their MetalLB API IPs `.111` / `.112`) |
 | **Lab files** | [`gitops/applications.yaml`](lab/gitops/applications.yaml), [`scripts/argocd-register-vclusters.sh`](lab/scripts/argocd-register-vclusters.sh), [`scripts/install-addons.sh`](lab/scripts/install-addons.sh) `argocd`, [`.github/workflows/k8s-lab-ci.yml`](../.github/workflows/k8s-lab-ci.yml), [`tests/`](lab/tests/), [`versions.env`](lab/versions.env) |

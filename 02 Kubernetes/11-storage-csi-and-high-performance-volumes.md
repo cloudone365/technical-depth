@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | A storage tier the root cluster owns and both vClusters consume: local-path-provisioner on the Spark's NVMe with two extra StorageClasses (scratch/Delete and models/Retain), a shared `model-cache` PVC in llms pre-filled by a prefetch Job, an in-pod fio benchmark with AI-shaped I/O profiles, and a measured view of what the page cache does to unified memory when you load a model |
-| **Hardware** | dgx-spark-01 (4 TB NVMe on the Founders Edition). §8 needs dgx-spark-02 |
+| **Hardware** | dgx-spark-1 (4 TB NVMe on the Founders Edition). §8 needs dgx-spark-2 |
 | **Time** | 90 min |
 | **Risk** | Low. fio writes 16 GiB of scratch data (deleted afterwards) |
 | **Clusters** | `spark-root` (provisioner, StorageClasses, real PVs, fio), `llms` (model cache, prefetch), `dev-lab` (Retain vs Delete) |
@@ -43,7 +43,7 @@ flowchart LR
     SCHED["root scheduler<br/>picks the node"]
     PROV["local-path-provisioner<br/>namespace local-path-storage"]
   end
-  subgraph HOST["dgx-spark-01 · 4 TB NVMe (ext4, /)"]
+  subgraph HOST["dgx-spark-1 · 4 TB NVMe (ext4, /)"]
     D1[("/data/k8s/retain/vc-llms/<br/>model-cache-x-llm-serving-x-llms")]
     D2[("/data/k8s/platform-tools/fio-scratch")]
     D3[("/var/lib/etcd · /var/lib/containerd<br/>/data/k8s/vc-*/data-*-0 (vCluster SQLite)")]
@@ -55,7 +55,7 @@ flowchart LR
   PVCR --> SC1 --> PROV
   PVC2 --> SC2 --> PROV
   SCHED -->|"selected-node annotation"| PVCR
-  PROV -->|"helper pod: mkdir + hostPath PV<br/>nodeAffinity: dgx-spark-01"| D1 & D2
+  PROV -->|"helper pod: mkdir + hostPath PV<br/>nodeAffinity: dgx-spark-1"| D1 & D2
   D1 <--> PC
   PC <--> GPU["GB10 reads weights<br/>from the same memory"]
   classDef store fill:#bf8700,stroke:#7a5600,color:#fff
@@ -130,7 +130,7 @@ A PVC has to fit **both**. The inner refusal comes from the vCluster's API serve
 
 - **Serving (Vol 21, 23, 24)** mounts `model-cache` at `/models` with `HF_HOME=/models/hf`. The prefetch Job fills it once. vLLM, SGLang and the P/D pair all read it — all inside llms, in `llm-serving`.
 - **Workloads (Vol 10)**: Qdrant's `volumeClaimTemplates` use `local-nvme-retain` the same way.
-- **01 Ansible NFS-over-RDMA (`playbooks/09-nfs-rdma.yml`)** exports `/srv/models` from dgx-spark-01 to dgx-spark-02. For 2 Sparks, back the model cache with a static NFS PV (§8) so both nodes share one copy.
+- **01 Ansible NFS-over-RDMA (`playbooks/09-nfs-rdma.yml`)** exports `/srv/models` from dgx-spark-1 to dgx-spark-2. For 2 Sparks, back the model cache with a static NFS PV (§8) so both nodes share one copy.
 - **Module 08 Storage** benchmarks the same NVMe with deeper tools (GDS, `gdsio`, MinIO, JuiceFS).
 - **etcd (Vol 03)**: run §5.4 while watching `etcd_disk_wal_fsync_duration_seconds` to see checkpoint-sized writes hurt the root control plane — and with it both vClusters, whose syncers write through it.
 
@@ -201,8 +201,8 @@ Expected:
 ```text
 downloaded Qwen/Qwen2.5-0.5B-Instruct@main in 9s
 model-cache   Bound   pvc-…   …   RWO   local-nvme-retain
-dgx-spark-01
-/data/k8s/retain/vc-llms/model-cache-x-llm-serving-x-llms  Retain  ["dgx-spark-01"]
+dgx-spark-1
+/data/k8s/retain/vc-llms/model-cache-x-llm-serving-x-llms  Retain  ["dgx-spark-1"]
 ```
 
 The download time is illustrative. `kubectl --context llms get pv` may show a PV object too, but that's a stand-in the syncer keeps so the claim looks bound inside the vCluster; the authoritative PV, with the hostPath and node affinity, is the root's. To fetch a larger model for modules 03–06, edit `MODEL` and re-run (delete the finished Job first).
@@ -255,7 +255,7 @@ Pull the JSON summary. The job wrote `/scratch/result.all` (human-readable text 
 sudo sed -n '/^{/,/^}/p' /data/k8s/platform-tools/fio-scratch/result.all | jq -r '.jobs[] | [.jobname, (.read.bw_bytes/1e9|tostring+" GB/s rd"), (.write.bw_bytes/1e9|tostring+" GB/s wr"), (.read.iops|floor|tostring+" rIOPS"), ((.read.clat_ns.percentile["99.000000"] // 0)/1000|floor|tostring+" µs p99")] | @tsv'
 ```
 
-Record your numbers. They're your baseline for everything in modules 03–08. As a rough guide for a PCIe Gen4/Gen5 NVMe: several GB/s sequential, hundreds of thousands of 4K random IOPS. **Any 99th-percentile latency in milliseconds under this load means something else is hammering the disk.** While the write phase runs, watch the root's etcd in Grafana (or `kubectl --context spark-root -n kube-system logs etcd-dgx-spark-01 | grep -i 'slow fdatasync'`): the same NVMe carries the WAL.
+Record your numbers. They're your baseline for everything in modules 03–08. As a rough guide for a PCIe Gen4/Gen5 NVMe: several GB/s sequential, hundreds of thousands of 4K random IOPS. **Any 99th-percentile latency in milliseconds under this load means something else is hammering the disk.** While the write phase runs, watch the root's etcd in Grafana (or `kubectl --context spark-root -n kube-system logs etcd-dgx-spark-1 | grep -i 'slow fdatasync'`): the same NVMe carries the WAL.
 
 Clean up: `kubectl --context spark-root delete -f manifests/root/60-storage/fio-job.yaml`.
 
@@ -308,7 +308,7 @@ scripts/verify.sh storage
 | `exceeded quota: serving-budget, requested: requests.storage=…` on apply | the PVC is larger than the inner ceiling | `kubectl --context llms -n llm-serving describe resourcequota serving-budget` | shrink the claim; the inner quota is the llms admin's |
 | PVC exists in the vCluster but `Pending` with a sync error mentioning `vcluster-budget` | the root's storage budget for the whole vCluster is spent | `kubectl --context spark-root -n vc-<name> describe resourcequota vcluster-budget` | delete unused PVCs (Released Retain PVs don't count; their claims did) or resize the vCluster |
 | `kubectl get sc` in a vCluster is empty | `sync.fromHost.storageClasses` off | `vclusters/<name>.yaml` | enable, `helm upgrade` |
-| Pod `Pending`: `volume node affinity conflict` | local PV lives on another node (dgx-spark-02 joined) | `kubectl --context spark-root get pv <pv> -o yaml` → `nodeAffinity` | schedule to that node, or use shared storage (NFS, §8) |
+| Pod `Pending`: `volume node affinity conflict` | local PV lives on another node (dgx-spark-2 joined) | `kubectl --context spark-root get pv <pv> -o yaml` → `nodeAffinity` | schedule to that node, or use shared storage (NFS, §8) |
 | `MountVolume.SetUp failed … permission denied` | non-root pod on a root-owned dir | `sudo ls -ln /data/k8s/…` | `fsGroup` in the pod securityContext (as in the prefetch Job) |
 | Pods evicted, `The node was low on resource: ephemeral-storage` | images + emptyDirs + logs fill `/` | `df -h /`, `sudo crictl images`, `docker system df` | `sudo crictl rmi --prune`, `docker image prune`, set `emptyDir.sizeLimit`, move models to PVCs |
 | Model load 5× slower than fio says | cold page cache + small-file layout / network FS | `iostat -x 1` during load | prefetch, safetensors, O_DIRECT-capable loaders |
@@ -320,14 +320,14 @@ scripts/verify.sh storage
 
 | Lab | 2 Sparks | Datacenter |
 |---|---|---|
-| local-path, one node | static NFS PV from `/srv/models` on dgx-spark-01 (NFS over RDMA, 01 Ansible `playbooks/09-nfs-rdma.yml`). `ReadOnlyMany` for weights | parallel FS (Weka, VAST, Lustre, GPFS) via CSI. Module 08 |
+| local-path, one node | static NFS PV from `/srv/models` on dgx-spark-1 (NFS over RDMA, 01 Ansible `playbooks/09-nfs-rdma.yml`). `ReadOnlyMany` for weights | parallel FS (Weka, VAST, Lustre, GPFS) via CSI. Module 08 |
 | no capacity enforcement | XFS project quotas | CSI with real quotas + snapshots (`VolumeSnapshot`) |
 | prefetch Job per model | same, run once on the NFS server | model registry + node-local cache DaemonSet (e.g. Fluid/Alluxio, KServe LocalModelCache) |
 | storage owned by one root, consumed by vClusters | same split | the same split at scale: a platform team runs CSI, tenant clusters only see classes |
 
 ### 8.1 Shared model store for two Sparks
 
-When dgx-spark-02 joins the root as a worker, a `local-nvme-retain` PV pins every model server to dgx-spark-01. The fix is a volume both nodes can mount. 01 Ansible's `nfs_rdma` role exports `/srv/models` from dgx-spark-01 over NFSv4.2 on RDMA (port 20049) across the CX-7 link (`192.168.100.11`), and installs the client side on dgx-spark-02.
+When dgx-spark-2 joins the root as a worker, a `local-nvme-retain` PV pins every model server to dgx-spark-1. The fix is a volume both nodes can mount. 01 Ansible's `nfs_rdma` role exports `/srv/models` from dgx-spark-1 over NFSv4.2 on RDMA (port 20049) across the CX-7 link (`192.168.100.11`), and installs the client side on dgx-spark-2.
 
 The PV is a **root** object — tenants can't create PVs — and a vCluster can't name a root PV directly (`spec.volumeName` inside the vCluster refers to its own objects). So match by class: the root offers a class with no provisioner, the platform team creates the PV in that class, and a tenant claim in that class binds to it.
 
@@ -363,7 +363,7 @@ spec:
   resources: {requests: {storage: 100Gi}}
 ```
 
-The claim's root copy binds to `models-nfs`, and every kubelet that runs a pod using it mounts the export itself — so both nodes need the NFS client and the `rpcrdma` module (the role handles that). Note the quota detail: `requests.storage` counts the **claim's** 100 Gi, not the PV's 2 Ti, against `serving-budget` and the root budget. Write the model once from dgx-spark-01 (a prefetch Job on a read-write claim, or directly into `/srv/models`), then serve it read-only from both nodes. With only one Spark, the role's TCP fallback works the same way — just drop `proto=rdma,port=20049`.
+The claim's root copy binds to `models-nfs`, and every kubelet that runs a pod using it mounts the export itself — so both nodes need the NFS client and the `rpcrdma` module (the role handles that). Note the quota detail: `requests.storage` counts the **claim's** 100 Gi, not the PV's 2 Ti, against `serving-budget` and the root budget. Write the model once from dgx-spark-1 (a prefetch Job on a read-write claim, or directly into `/srv/models`), then serve it read-only from both nodes. With only one Spark, the role's TCP fallback works the same way — just drop `proto=rdma,port=20049`.
 
 ---
 

@@ -23,11 +23,11 @@
       [ 9001.010] mlx5_core 0000:01:00.1: Port module event: module 1, Cable unplugged
     k8s_nodes_json:
       items:
-        - metadata: { name: dgx-spark-01, labels: { nvidia.com/gpu.product: GB10 } }
+        - metadata: { name: dgx-spark-1, labels: { nvidia.com/gpu.product: GB10 } }
           status:
             allocatable: { nvidia.com/gpu: "4", memory: 110Gi }
             conditions: [{ type: Ready, status: "True" }]
-        - metadata: { name: dgx-spark-02, labels: { nvidia.com/gpu.product: GB10 } }
+        - metadata: { name: dgx-spark-2, labels: { nvidia.com/gpu.product: GB10 } }
           status:
             allocatable: { memory: 110Gi }
             conditions: [{ type: Ready, status: "False" }]
@@ -109,7 +109,7 @@
           | [?status.allocatable."nvidia.com/gpu"].metadata.name
     - name: K4 check
       ansible.builtin.assert:
-        that: k4 == ['dgx-spark-01']
+        that: k4 == ['dgx-spark-1']
 
     # 5 ─ deep merge without clobbering (daemon.json pattern)
     - name: K5 recursive combine keeps unknown keys, list_merge controls arrays
@@ -136,9 +136,9 @@
     - name: K6 check
       ansible.builtin.assert:
         that: >-
-          k6 == (['192.168.100.11 dgx-spark-01-fab', '192.168.100.12 dgx-spark-02-fab']
+          k6 == (['192.168.100.11 dgx-spark-1-fab', '192.168.100.12 dgx-spark-2-fab']
                  | select('search', ' (' ~ (groups['spark'] | join('|')) ~ ')-fab$') | list)
-      # one Spark in the inventory → one line, two → two (dgx-spark-02 is commented out until it joins)
+      # one Spark in the inventory → one line, two → two (dgx-spark-2 is commented out until it joins)
 
     # 7 ─ safe defaults & type tests
     - name: K7 Defaults that don't hide bugs

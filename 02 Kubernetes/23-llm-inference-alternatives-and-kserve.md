@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | SGLang side by side with vLLM on the same model and hardware, a measured prefix-cache speed-up with a portable TTFT probe, the same model served through **KServe** in RawDeployment mode — an operator with CRDs and webhooks installed only in the `llms` vCluster — and a decision matrix grounded in your own numbers |
-| **Hardware** | dgx-spark-01. Engines run one at a time (`llm-serving` budget, Vol 21 §9) |
+| **Hardware** | dgx-spark-1. Engines run one at a time (`llm-serving` budget, Vol 21 §9) |
 | **Time** | 90 min |
 | **Risk** | Low. KServe installs cert-manager and webhooks — inside llms only; the root and dev-lab never see them |
 | **Clusters** | `llms` (vLLM, SGLang, cert-manager, KServe and its CRDs) · `spark-root` (the real pods, the root quota, and — for Ollama — the host outside every quota) |

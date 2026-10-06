@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | A working prefill/decode (P/D) split inside the `llms` vCluster: two vLLM instances with the NIXL KV connector and a small proxy that routes each request prefill → decode. You'll see the KV handoff in logs and headers, plus a transfer-time model that tells you when disaggregation is worth it. On two Sparks, the KV cache moves over the CX-7 |
-| **Hardware** | dgx-spark-01 (both roles share the GB10 via 2 slices: mechanics, not speed). 2 Sparks for §5.5 |
+| **Hardware** | dgx-spark-1 (both roles share the GB10 via 2 slices: mechanics, not speed). 2 Sparks for §5.5 |
 | **Time** | 90 min |
 | **Risk** | Medium-low. Experimental feature: pin versions, and verify `import nixl` in your image first. Prefill + decode need 40 Gi of memory limits — more than `llm-serving`'s 36 Gi ceiling, so §5.2 lifts it for the experiment |
 | **Clusters** | `llms` (P, D, proxy, the `serving-budget` ceiling) · `spark-root` (the `vcluster-budget` cap, pod IPs, Cilium, and on two Sparks the CX-7 NetworkAttachmentDefinition in `vc-llms`) |
@@ -56,11 +56,11 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-  subgraph ONE["1 Spark (lab) · vc-llms on dgx-spark-01"]
+  subgraph ONE["1 Spark (lab) · vc-llms on dgx-spark-1"]
     P1["vllm-prefill<br/>slice 1 · util 0.15"] <-->|"UCX: cuda_ipc / shm<br/>pod IP → pod IP (Cilium)"| D1["vllm-decode<br/>slice 2 · util 0.15"]
   end
-  subgraph TWO["2 Sparks · root workers dgx-spark-01 + dgx-spark-02"]
-    P2["prefill · dgx-spark-01<br/>net1 = cx7-rdma"] <==>|"UCX rc over RoCE<br/>CX-7 200 Gb/s"| D2["decode · dgx-spark-02<br/>net1 = cx7-rdma"]
+  subgraph TWO["2 Sparks · root workers dgx-spark-1 + dgx-spark-2"]
+    P2["prefill · dgx-spark-1<br/>net1 = cx7-rdma"] <==>|"UCX rc over RoCE<br/>CX-7 200 Gb/s"| D2["decode · dgx-spark-2<br/>net1 = cx7-rdma"]
   end
   classDef gpu fill:#76b900,stroke:#3d6000,color:#000
   class P1,D1,P2,D2 gpu
@@ -188,12 +188,12 @@ python3 scripts/ttft_probe.py --url http://localhost:8000 --model qwen2.5-0.5b -
 
 On one GB10 expect **no latency win**, and possibly a small loss: both roles share the same compute, and the proxy adds a hop. That's the honest result, and it's the point. Disaggregation is an *interference* fix for separate hardware. Write down both numbers. §5.5 is where the architecture starts to make sense.
 
-### 5.5 (2 Sparks) Prefill on dgx-spark-01, decode on dgx-spark-02
+### 5.5 (2 Sparks) Prefill on dgx-spark-1, decode on dgx-spark-2
 
-dgx-spark-02 joins the **root** (01 Ansible `k8s_workers`); llms sees it immediately through node sync, and `13-multus-rdma.yml` has put the `cx7-rdma` NetworkAttachmentDefinition into `vc-llms`. Check the plumbing with the lab's test pod first:
+dgx-spark-2 joins the **root** (01 Ansible `k8s_workers`); llms sees it immediately through node sync, and `13-multus-rdma.yml` has put the `cx7-rdma` NetworkAttachmentDefinition into `vc-llms`. Check the plumbing with the lab's test pod first:
 
 ```bash
-kubectl --context llms get nodes                                          # dgx-spark-01, dgx-spark-02
+kubectl --context llms get nodes                                          # dgx-spark-1, dgx-spark-2
 kubectl --context spark-root -n vc-llms get network-attachment-definitions  # cx7-rdma
 kubectl --context llms apply -f manifests/llms/85-network-operator/rdma-test-pod.yaml
 kubectl --context llms -n batch logs rdma-test                            # net1 + the rocep* devices
@@ -207,7 +207,7 @@ kubectl --context llms label ns llm-serving pod-security.kubernetes.io/enforce=p
 # afterwards: kubectl --context llms apply -k manifests/llms/00-platform
 ```
 
-Then add to the prefill Deployment `nodeSelector: {kubernetes.io/hostname: dgx-spark-01}`, to decode `dgx-spark-02`, plus on both:
+Then add to the prefill Deployment `nodeSelector: {kubernetes.io/hostname: dgx-spark-1}`, to decode `dgx-spark-2`, plus on both:
 
 ```yaml
       metadata:

@@ -21,7 +21,7 @@
 | Fabric | netplan edited, MTU changed | `cx7_fabric` template diff | ❌ Notify only: a wrong heal cuts the link |
 | Driver / kernel | DGX Dashboard update moved versions | Volume 07 audit (loaded ≠ on-disk = reboot pending) | ❌ Route to the upgrade playbook |
 | Runtime | `daemon.json` edited, CDI stale | `container_runtime` diff + CDI freshness probe | ⚠️ Only when no containers are running (manual) |
-| Kubernetes host config | `/etc/containerd/config.toml` lost the CRI plugin or `SystemdCgroup = true`; `/etc/kubernetes/kubeadm-config.yaml` edited | **Not** in `20-drift-check.yml`. Run the template `05 Kubernetes` as a dry run (`--check --diff`), or from the MacBook `ansible-playbook playbooks/05-kubernetes.yml --check --diff -l dgx-spark-01,localhost -K`; auditd key `kubernetes` / `container-runtime` shows who did it (Volume 23) | ❌ Never: restarting containerd restarts every pod on the node (root *and* both vClusters), and kubeadm doesn't reconcile a running control plane (the role prints the `kubeadm init phase` command instead) |
+| Kubernetes host config | `/etc/containerd/config.toml` lost the CRI plugin or `SystemdCgroup = true`; `/etc/kubernetes/kubeadm-config.yaml` edited | **Not** in `20-drift-check.yml`. Run the template `05 Kubernetes` as a dry run (`--check --diff`), or from the MacBook `ansible-playbook playbooks/05-kubernetes.yml --check --diff -l dgx-spark-1,localhost -K`; auditd key `kubernetes` / `container-runtime` shows who did it (Volume 23) | ❌ Never: restarting containerd restarts every pod on the node (root *and* both vClusters), and kubeadm doesn't reconcile a running control plane (the role prints the `kubeadm init phase` command instead) |
 | Kubernetes objects | someone `kubectl edit`s the `vc-llms` ResourceQuota | Not Ansible's job: `kubectl --context spark-root diff -k "../02 Kubernetes/lab/manifests/root/05-vclusters"`, or Argo CD in the 02 Kubernetes production-mlops track | Via GitOps, not this loop |
 
 ```mermaid
@@ -274,8 +274,8 @@ exit $rc
 
 Two ways to run the same check:
 
-- **Semaphore template `20 Drift check`** (`20-drift-check.yml`, check mode built in, CLI args `--limit dgx-spark-01,localhost` while there's one Spark). Play 1 gets the certificate; the host play changes nothing. The task log shows drift as `changed=N` in the recap, and `--diff` shows the lines. This is what runs every night (§4.4).
-- **`tools/drift-cycle.sh`** wraps the same playbook with the JSON callback, the report, the Prometheus metric and the guarded heal. It runs `ansible-playbook` itself, so it runs where you have the repository and a login: your MacBook (as `nvidia`, pass `BECOME_ARGS=-K`). Its output goes to `$SPARK_LAB_CACHE/drift`, or `.cache/drift` when that's unset. The script has no limit option: with one Spark, add the limit through `BECOME_ARGS`, which it passes to every Ansible command: `BECOME_ARGS="-K -l dgx-spark-01,localhost" tools/drift-cycle.sh`.
+- **Semaphore template `20 Drift check`** (`20-drift-check.yml`, check mode built in, CLI args `--limit dgx-spark-1,localhost` while there's one Spark). Play 1 gets the certificate; the host play changes nothing. The task log shows drift as `changed=N` in the recap, and `--diff` shows the lines. This is what runs every night (§4.4).
+- **`tools/drift-cycle.sh`** wraps the same playbook with the JSON callback, the report, the Prometheus metric and the guarded heal. It runs `ansible-playbook` itself, so it runs where you have the repository and a login: your MacBook (as `nvidia`, pass `BECOME_ARGS=-K`). Its output goes to `$SPARK_LAB_CACHE/drift`, or `.cache/drift` when that's unset. The script has no limit option: with one Spark, add the limit through `BECOME_ARGS`, which it passes to every Ansible command: `BECOME_ARGS="-K -l dgx-spark-1,localhost" tools/drift-cycle.sh`.
 
 ```bash
 cd "01 Ansible/lab"
@@ -288,26 +288,26 @@ cat .cache/drift/check-*.md | tail -20
 ```bash
 ssh nvidia@192.168.0.101 'sudo sysctl -w vm.swappiness=60 && sudo sed -i "s/^vm.swappiness.*/vm.swappiness = 60/" /etc/sysctl.d/90-spark.conf'
 ssh nvidia@192.168.0.101 'sudo apt-mark unhold $(apt-mark showhold | grep -m1 nvidia)'
-tools/drift-cycle.sh; echo "exit=$?"          # → 2, dgx-spark-02 listed with both tasks
+tools/drift-cycle.sh; echo "exit=$?"          # → 2, dgx-spark-2 listed with both tasks
 ```
 
 Expected report (abridged):
 
 ```markdown
 | Host | Drifted tasks | Failures |
-| dgx-spark-01 | 0 | 0 |
-| dgx-spark-02 | 2 | 0 |
-## dgx-spark-02
+| dgx-spark-1 | 0 | 0 |
+| dgx-spark-2 | 2 | 0 |
+## dgx-spark-2
 - DRIFT `Apply sysctl tuning (persisted to /etc/sysctl.d/90-spark.conf)` (…) keys: …
 - DRIFT `Report missing holds as drift in check mode` (…)
 ```
 
-The Grafana "Config drift (tasks)" stat on the overview dashboard (Volume 09) turns orange for dgx-spark-02.
+The Grafana "Config drift (tasks)" stat on the overview dashboard (Volume 09) turns orange for dgx-spark-2.
 
 ### 4.3 Heal (safe tags only) and confirm
 
 ```bash
-AUTO_HEAL=1 tools/drift-cycle.sh; echo "exit=$?"     # → heal on dgx-spark-02 only → recheck → 0
+AUTO_HEAL=1 tools/drift-cycle.sh; echo "exit=$?"     # → heal on dgx-spark-2 only → recheck → 0
 ```
 
 ### 4.4 Schedule it
@@ -358,7 +358,7 @@ Or use AWX: the Volume 20 workflow (drift → **approval** → remediate) adds w
 |---|---|---|
 | Every run shows drift on the same task | Run that play twice normally, then check `changed=0` | Non-idempotent task (missing `changed_when`, templated timestamps, unsorted dict output) |
 | Report parser: `JSONDecodeError` | `head -c 300 .cache/drift/check-*.json` | Another callback printed to stdout; the script sets `ANSIBLE_CALLBACKS_ENABLED=` for that reason |
-| Exit 3 on a healthy lab | `.cache/drift/check-*.stderr`; FAIL lines in the report | Sudo password missing for unattended runs (`BECOME_ARGS`); a node unreachable (one Spark: the optional dgx-spark-02 at .101, so add `-l dgx-spark-01,localhost` to `BECOME_ARGS`) |
+| Exit 3 on a healthy lab | `.cache/drift/check-*.stderr`; FAIL lines in the report | Sudo password missing for unattended runs (`BECOME_ARGS`); a node unreachable (one Spark: the optional dgx-spark-2 at .101, so add `-l dgx-spark-1,localhost` to `BECOME_ARGS`) |
 | Check mode errors `'dict object' has no attribute 'stdout'` | Which task registered it? | A probe missing `check_mode: false` (§2 rule 1) |
 | Heal "succeeded" but the recheck still shows drift | `.cache/drift/heal-*.log` | Drift is in a non-safe tag (fabric/runtime): expected, so escalate |
 | Drift metrics missing in Grafana | `ls /var/lib/prometheus/node-exporter/` on the monitoring host | The publish step failed (see the WARN line); node_exporter textfile dir path |
@@ -367,5 +367,5 @@ Or use AWX: the Volume 20 workflow (drift → **approval** → remediate) adds w
 
 - [ ] Clean lab → `exit=0`, report shows zero drift.
 - [ ] Introduced sysctl + hold drift → `exit=2`, both detected, dashboard reflects it.
-- [ ] `AUTO_HEAL=1` fixes only dgx-spark-02 and only safe tags; recheck exits 0.
+- [ ] `AUTO_HEAL=1` fixes only dgx-spark-2 and only safe tags; recheck exits 0.
 - [ ] A fabric drift (edit `40-cx7.yaml` MTU) is **reported but not healed**.

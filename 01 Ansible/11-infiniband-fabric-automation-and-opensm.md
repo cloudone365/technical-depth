@@ -32,12 +32,12 @@ Each Spark has a **ConnectX-7** with **two QSFP cages**, up to 200 Gb/s. Two thi
 
 ```mermaid
 flowchart LR
-  subgraph S1["dgx-spark-01"]
+  subgraph S1["dgx-spark-1"]
     A1["enp1s0f1np1<br/>192.168.100.11/24<br/>rocep1s0f1"]
     B1["enP2p1s0f1np1<br/>192.168.101.11/24<br/>roceP2p1s0f1"]
     M1["enP7s7 10GbE<br/>192.168.0.100 (mgmt)"]
   end
-  subgraph S2["dgx-spark-02"]
+  subgraph S2["dgx-spark-2"]
     A2["enp1s0f1np1<br/>192.168.100.12/24"]
     B2["enP2p1s0f1np1<br/>192.168.101.12/24"]
     M2["enP7s7<br/>192.168.0.101"]
@@ -312,9 +312,9 @@ Expected tail:
 
 ```
 TASK [cx7_fabric : Assert link health]
-ok: [dgx-spark-01] => (item=enp1s0f1np1) => msg: 'enp1s0f1np1 OK: {''speed'': 200000, ''mtu'': 9000, ''oper'': ''up'', ''rdma_state'': ''PORT_ACTIVE''}'
+ok: [dgx-spark-1] => (item=enp1s0f1np1) => msg: 'enp1s0f1np1 OK: {''speed'': 200000, ''mtu'': 9000, ''oper'': ''up'', ''rdma_state'': ''PORT_ACTIVE''}'
 TASK [cx7_fabric : Jumbo-frame reachability to peers (DF bit set, MTU-28 byte payload)]
-ok: [dgx-spark-01] => (item=enp1s0f1np1 -> dgx-spark-02 (192.168.100.12))
+ok: [dgx-spark-1] => (item=enp1s0f1np1 -> dgx-spark-2 (192.168.100.12))
 TASK [Print NCCL environment derived from the fabric]
   - export NCCL_SOCKET_IFNAME=enp1s0f1np1
   - export NCCL_IB_HCA=rocep1s0f1,roceP2p1s0f1
@@ -431,9 +431,9 @@ ansible-playbook playbooks/11-rdma-perftest.yml -K -e perftest_qps=1     # see w
 Manual equivalents, for when you're debugging by hand:
 
 ```bash
-# dgx-spark-02 (server)
+# dgx-spark-2 (server)
 ib_write_bw -d rocep1s0f1 -x 3 -q 4 -D 10 --report_gbits -F
-# dgx-spark-01 (client)
+# dgx-spark-1 (client)
 ib_write_bw -d rocep1s0f1 -x 3 -q 4 -D 10 --report_gbits -F 192.168.100.12
 show_gids | grep -E 'rocep1s0f1|v2'          # which index is RoCE v2 + IPv4
 ```

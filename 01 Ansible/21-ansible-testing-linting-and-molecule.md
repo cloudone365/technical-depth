@@ -45,7 +45,7 @@ echo "== ansible-lint";  ansible-lint
 echo "== syntax-check";  for p in playbooks/*.yml; do ansible-playbook --syntax-check "$p" >/dev/null; done
 echo "== jinja katas";   kata=$(ansible-playbook playbooks/15-jinja-lab.yml); grep -q '7/7 Jinja katas passed' <<<"$kata"
 echo "== mdns plugin";   out=$(ANSIBLE_INVENTORY_ENABLED=spark_mdns ansible-inventory -i tests/fixtures/spark.mdns.yml --list)
-                         echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert sorted(d["spark"]["hosts"])==["dgx-spark-01","dgx-spark-02"], d'
+                         echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert sorted(d["spark"]["hosts"])==["dgx-spark-1","dgx-spark-2"], d'
 echo "== drift report";  set +e; python3 tools/spark_drift_report.py tests/fixtures/drift-sample.json >/dev/null; rc=$?; set -e
                          [ "$rc" -eq 2 ] || { echo "expected exit 2 (drift), got $rc"; exit 1; }
 echo "== python tools";  python3 -m py_compile tools/*.py roles/spark_facts/files/spark.fact inventory_plugins/*.py
@@ -182,7 +182,7 @@ scenario:
 ```
 
 ```bash
-# on dgx-spark-01 (native arm64 container; no emulation)
+# on dgx-spark-1 (native arm64 container; no emulation)
 cd "01 Ansible/lab/roles/spark_baseline"
 python3 -m venv ~/.venvs/molecule && . ~/.venvs/molecule/bin/activate
 pip install -r ../../requirements.txt
@@ -265,7 +265,7 @@ jobs:
 ### 4.1 Register the Spark as a self-hosted runner
 
 ```bash
-# on dgx-spark-01, as a non-root user in the docker group
+# on dgx-spark-1, as a non-root user in the docker group
 mkdir ~/actions-runner && cd ~/actions-runner
 # download the linux-arm64 runner from: GitHub repo → Settings → Actions → Runners → New self-hosted runner
 ./config.sh --url https://github.com/cloudone365/technical-depth --token <TOKEN> --labels spark --unattended

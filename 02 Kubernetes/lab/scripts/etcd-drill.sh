@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # etcd backup / restore drill for the kubeadm ROOT cluster (Volume 03, Workbook ex. 20).
-# Run ON the Spark (dgx-spark-01). etcd is a static pod; 01 Ansible installed
+# Run ON the Spark (dgx-spark-1). etcd is a static pod; 01 Ansible installed
 # etcdctl/etcdutl matching its version and an etcd-snapshot timer (every 6 h).
 #   scripts/etcd-drill.sh status            # members, DB size, alarms, snapshots
 #   scripts/etcd-drill.sh snapshot          # on-demand snapshot (/usr/local/sbin/etcd-snapshot)

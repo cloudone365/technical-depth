@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | A map of the lab's **three** DNS servers (the root's CoreDNS and one per vCluster), a measured before/after of DNS query amplification for model downloads and external APIs, query logging and a forward zone for `lab.local` in the root's kubeadm-managed Corefile, and a rehearsed DNS outage whose blast radius is uneven by design |
-| **Hardware** | dgx-spark-01 |
+| **Hardware** | dgx-spark-1 |
 | **Time** | 60 min |
 | **Risk** | Low. The outage drill (`breakfix 07`) breaks name resolution for root pods for ~5 min |
 | **Clusters** | `spark-root` (CoreDNS at 10.43.0.10, its Corefile, `netshoot-host`), `dev-lab` (its own CoreDNS, the ndots pods, echo), `llms` (the replicated `default/prometheus`) |
@@ -115,7 +115,7 @@ Three fixes, in order of preference:
 
 ## 4. Integrations
 
-- **01 Ansible site DNS (`dns_servers: [192.168.0.1, …]`)**: the root's `lab.local` forward zone lets platform pods resolve `dgx-spark-02.lab.local` and your NAS by name.
+- **01 Ansible site DNS (`dns_servers: [192.168.0.1, …]`)**: the root's `lab.local` forward zone lets platform pods resolve `dgx-spark-2.lab.local` and your NAS by name.
 - **Model downloads (Vol 21, modules 03–06)**: set `HF_ENDPOINT`/`HF_HUB_*` and any registry mirrors as FQDNs. These pods live in llms, so it's llms' CoreDNS that pays the ndots tax.
 - **KEDA in llms (Vol 21)** queries `http://prometheus.default:9090`: a name that only exists because llms replicates the root's `observability/kps-prometheus` into itself. DNS is how a vCluster is given *selected* root services and nothing else.
 - **Prometheus (Vol 16)**: the root's CoreDNS exposes `coredns_dns_requests_total{type}` and `coredns_dns_responses_total{rcode}`. An NXDOMAIN ratio > 50 % is the ndots tax showing up in a graph. The vClusters' CoreDNS pods are not in the root's `vcluster-workloads` ServiceMonitor; adding them is an exercise.
@@ -237,7 +237,7 @@ kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- dig +short kubern
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- dig +short kps-prometheus.observability.svc.cluster.local   # empty: root-only
 kubectl --context spark-root -n platform-tools exec deploy/netshoot-host -- dig +short echo.lab-tools.svc.cluster.local    # empty: dev-lab-only
 kubectl --context spark-root -n platform-tools exec deploy/netshoot-host -- dig +short echo-x-lab-tools-x-dev-lab.vc-dev-lab.svc.cluster.local  # the root's name for it
-kubectl --context spark-root -n platform-tools exec deploy/netshoot-host -- dig +short dgx-spark-02.lab.local                   # via the root's lab.local zone
+kubectl --context spark-root -n platform-tools exec deploy/netshoot-host -- dig +short dgx-spark-2.lab.local                   # via the root's lab.local zone
 ```
 
 Expected: a ClusterIP, three pod IPs, an SRV record pointing at `echo.lab-tools.svc.cluster.local` port 80, dev-lab's own `kubernetes` ClusterIP — and empty answers for names that belong to another cluster. The last-but-one shows the same ClusterIP as the first: one Service, two names, two DNS servers.

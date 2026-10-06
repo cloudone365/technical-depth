@@ -10,7 +10,7 @@ Where a data-centre concept doesn't exist on a Spark (NVSwitch/Fabric Manager, I
 
 The lab has two halves. The **management plane** stays outside the Spark: `sema01` (Semaphore UI) runs every playbook, and `vault01` (HashiCorp Vault) signs a 15-minute SSH certificate for each task and keeps the lab's secrets. The **DGX Spark** is only a target, so you can reset or re-image it without losing the tool that rebuilds it.
 
-![The DGX Spark as a Semaphore target: sema01 and vault01 outside the Spark, dgx-spark-01 with the root cluster and two vClusters inside](diagrams/semaphore-dgx-spark.svg)
+![The DGX Spark as a Semaphore target: sema01 and vault01 outside the Spark, dgx-spark-1 with the root cluster and two vClusters inside](diagrams/semaphore-dgx-spark.svg)
 
 ```mermaid
 flowchart LR
@@ -22,7 +22,7 @@ flowchart LR
     SEMA["sema01 · 192.168.0.210<br/>Semaphore UI + PostgreSQL<br/>controller: play 1, kubectl, helm<br/>state volume /opt/spark-lab/cache"]
     VAULT["vault01 · 192.168.0.211<br/>SSH CA ssh-client-signer · AppRole semaphore<br/>KV kv/spark-lab/* · audit log"]
   end
-  subgraph S1["dgx-spark-01 · 192.168.0.100"]
+  subgraph S1["dgx-spark-1 · 192.168.0.100"]
     direction TB
     S1A["kubeadm root cluster spark-root (control plane + worker)<br/>Cilium · MetalLB · GPU Operator · AWX (optional)"]
     S1V["vClusters dev-lab (192.168.0.111) · llms (192.168.0.112)"]
@@ -30,7 +30,7 @@ flowchart LR
     S1C["Prometheus · Grafana · Loki · ARA"]
     S1D["NFS/RDMA server /srv/models"]
   end
-  subgraph S2["dgx-spark-02 · 192.168.0.101"]
+  subgraph S2["dgx-spark-2 · 192.168.0.101"]
     direction TB
     S2A["(optional) root worker · slurmd"]
     S2B["NFS/RDMA client /mnt/models"]
@@ -47,18 +47,18 @@ flowchart LR
   class SEMA,VAULT mgmt
 ```
 
-Single Spark? Keep `dgx-spark-02` in the inventory and give every Semaphore template the CLI argument `--limit dgx-spark-01,localhost` ([00b §5.5](00b-dgx-spark-semaphore-target.md)). The fabric, NCCL and NFS/RDMA steps skip themselves, and `dgx-spark-01` alone is a complete Kubernetes cluster (no control-plane taint).
+Single Spark? Keep `dgx-spark-2` in the inventory and give every Semaphore template the CLI argument `--limit dgx-spark-1,localhost` ([00b §5.5](00b-dgx-spark-semaphore-target.md)). The fabric, NCCL and NFS/RDMA steps skip themselves, and `dgx-spark-1` alone is a complete Kubernetes cluster (no control-plane taint).
 
 The Kubernetes end-state is one **kubeadm** root cluster (`spark-root`) with two **vClusters** inside it, `dev-lab` and `llms`. Ansible builds it in three stages: `05-kubernetes.yml` (kubeadm, Cilium, MetalLB) → `06-gpu-operator.yml` (15 GPU time-slices) → `06b-vclusters.yml` (the two vClusters, applied from the [02 Kubernetes lab](../02%20Kubernetes/lab/README.md)). All three contexts land in one file, `kubeconfig-spark-lab.yaml`, on sema01's state volume; `lab/tools/fetch-kubeconfig.sh sema01` copies it to `lab/.cache/` on your MacBook, where the 02 Kubernetes labs expect it.
 
-> **Convention used in every volume.** A command written as `ansible-playbook playbooks/NN-….yml …` means **run the Semaphore template `NN …`** in project `spark-lab` (template names follow the playbook names: `05 Kubernetes` ↔ `05-kubernetes.yml`). The CLI form stays valid as the **break-glass** path from the MacBook, with `-l dgx-spark-01,localhost -K`: without the Semaphore variable group, play 1 is skipped and you log in as `nvidia` with your own key. Only `00-bootstrap.yml`, `00b-semaphore-target.yml` and `08-vault.yml` are run from the MacBook as the normal path.
+> **Convention used in every volume.** A command written as `ansible-playbook playbooks/NN-….yml …` means **run the Semaphore template `NN …`** in project `spark-lab` (template names follow the playbook names: `05 Kubernetes` ↔ `05-kubernetes.yml`). The CLI form stays valid as the **break-glass** path from the MacBook, with `-l dgx-spark-1,localhost -K`: without the Semaphore variable group, play 1 is skipped and you log in as `nvidia` with your own key. Only `00-bootstrap.yml`, `00b-semaphore-target.yml` and `08-vault.yml` are run from the MacBook as the normal path.
 
 ## Start here
 
 Build in this order:
 
 1. **[00a · Semaphore UI + Vault](00a-semaphore-vault-lab-guide.md)**: the management plane, `vault01` and `sema01`, built by hand (Step 0a).
-2. **[00b · Add dgx-spark-01 as a Semaphore target](00b-dgx-spark-semaphore-target.md)**: trust vault01's CA on the Spark (bootstrap first if it's a fresh DGX OS), the lab's Semaphore image and project, lab secrets in vault01 (Step 0b, right after the MacBook toolchain).
+2. **[00b · Add dgx-spark-1 as a Semaphore target](00b-dgx-spark-semaphore-target.md)**: trust vault01's CA on the Spark (bootstrap first if it's a fresh DGX OS), the lab's Semaphore image and project, lab secrets in vault01 (Step 0b, right after the MacBook toolchain).
 3. **[Step-by-step build guide](00-ansible-step-by-step-guide.md)**: the whole build order, from the MacBook toolchain (Step 0), the Spark as a Semaphore target (Step 0b) and first contact (Step 1) to the capstone, with the Semaphore template for every step.
 4. **[Learning roadmap](ansible-tower-vault-roadmap.md)**: skills and checkpoints by level.
 5. **[`lab/README.md`](lab/README.md)**: the project layout and quick start.
@@ -80,7 +80,7 @@ Then, in Semaphore (project `spark-lab`), run the template `site` for the whole 
 | Vol | Title | Lab pieces |
 |---|---|---|
 | 00a | [Management plane: Semaphore UI + Vault, automation account](00a-semaphore-vault-lab-guide.md) | `sema01`, `vault01`, `00-vault-cert.yml` (play 1) |
-| 00b | [Add dgx-spark-01 as a Semaphore target](00b-dgx-spark-semaphore-target.md) | `00b-semaphore-target.yml`, `semaphore/`, `tools/fetch-kubeconfig.sh`, `08-vault.yml` |
+| 00b | [Add dgx-spark-1 as a Semaphore target](00b-dgx-spark-semaphore-target.md) | `00b-semaphore-target.yml`, `semaphore/`, `tools/fetch-kubeconfig.sh`, `08-vault.yml` |
 | 01A | [Core on DGX Spark: controllers (Semaphore + MacBook), inventory, first contact](01-ansible-core-deep-dive.md) | `ansible.cfg`, inventory, `spark_facts`, `spark_baseline` |
 | 01B | [Execution internals & debugging](01-ansible-core-engine-and-execution-internals.md) | AnsiballZ explode/execute, async, debugger |
 | 02A | [Performance at scale: SSH mux, pipelining, forks, Mitogen](02-high-concurrency-tuning-mitogen-and-ssh-mux.md) | `13-fleet-sim`, `14-fleet-bench` |

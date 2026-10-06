@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| **You will build** | A Semaphore task that holds **no long-lived credential except the AppRole pair in Semaphore's encrypted variable group**: AppRole login → 10-minute token (`semaphore-ssh` + `spark-lab-read`) → 15-minute SSH certificate for `svc-ansible` → NGC key read from `kv/spark-lab/ngc` → `docker login nvcr.io` on dgx-spark-01. Then you rotate that AppRole secret_id with response wrapping and a CIDR binding, and source an ansible-vault password from Vault |
-| **Hardware** | `vault01` and `sema01` ([00a](00a-semaphore-vault-lab-guide.md)), `dgx-spark-01` prepared with [00b](00b-dgx-spark-semaphore-target.md) (§3 and §6 done); MacBook |
+| **You will build** | A Semaphore task that holds **no long-lived credential except the AppRole pair in Semaphore's encrypted variable group**: AppRole login → 10-minute token (`semaphore-ssh` + `spark-lab-read`) → 15-minute SSH certificate for `svc-ansible` → NGC key read from `kv/spark-lab/ngc` → `docker login nvcr.io` on dgx-spark-1. Then you rotate that AppRole secret_id with response wrapping and a CIDR binding, and source an ansible-vault password from Vault |
+| **Hardware** | `vault01` and `sema01` ([00a](00a-semaphore-vault-lab-guide.md)), `dgx-spark-1` prepared with [00b](00b-dgx-spark-semaphore-target.md) (§3 and §6 done); MacBook |
 | **Time** | 75 min |
 | **Risk** | Low. The step to rehearse is the secret_id rotation (§3.5): destroy the old secret_id only after **every** variable group that uses it has the new one and a task has passed |
 
@@ -32,7 +32,7 @@ sequenceDiagram
   participant ADM as Admin (vault01 CLI, once)
   participant SEM as Semaphore task on sema01 (play 1 + host plays)
   participant V as vault01 :8200
-  participant SP as dgx-spark-01 (sshd trusts vault01 CA)
+  participant SP as dgx-spark-1 (sshd trusts vault01 CA)
   ADM->>V: read role-id, write secret-id (wrapped, CIDR 192.168.0.210/32)
   ADM-->>SEM: role_id + secret_id into variable group vault-approle
   SEM->>V: POST auth/approle/login {role_id, secret_id}
@@ -242,7 +242,7 @@ Design choices worth copying:
 
 **Prerequisites:** 03B §3.2 / 00b §6 done (KV, policy, your real NGC key in `kv/spark-lab/ngc`), and `vault_lab_secrets_enabled` set to `true` in the variable group `vault-approle`.
 
-**Run:** in Semaphore, project `spark-lab`, create (00b §6) and run the template **19 Vault integration**: playbook `01 Ansible/lab/playbooks/19-vault-integration.yml`, inventory `spark-lab`, variable group `vault-approle`, CLI args `["--limit", "dgx-spark-01,localhost"]`.
+**Run:** in Semaphore, project `spark-lab`, create (00b §6) and run the template **19 Vault integration**: playbook `01 Ansible/lab/playbooks/19-vault-integration.yml`, inventory `spark-lab`, variable group `vault-approle`, CLI args `["--limit", "dgx-spark-1,localhost"]`.
 
 Expected in the task log:
 
@@ -253,8 +253,8 @@ TASK [What we got (no secret values)]
   "SSH certificate: /tmp/lab_ssh/id_ed25519-cert.pub (inspect: ssh-keygen -L -f …)"
   "Lab secrets read from kv/spark-lab/: ['ngc']"
   "NGC key present: True"
-TASK [container_runtime : Log in to nvcr.io]   ok/changed: [dgx-spark-01]
-PLAY RECAP  dgx-spark-01 : … failed=0   localhost : … failed=0
+TASK [container_runtime : Log in to nvcr.io]   ok/changed: [dgx-spark-1]
+PLAY RECAP  dgx-spark-1 : … failed=0   localhost : … failed=0
 ```
 
 **Verify on all three systems:**
@@ -264,7 +264,7 @@ PLAY RECAP  dgx-spark-01 : … failed=0   localhost : … failed=0
 sudo jq -c 'select(.type=="response" and .request.path=="kv/data/spark-lab/ngc") | {time, role: .auth.metadata.role_name, policies: .auth.policies}' \
   /var/log/vault_audit.log | tail -1                     # role "semaphore", policies [default semaphore-ssh spark-lab-read]
 
-# dgx-spark-01: logged in by certificate, and Docker holds an nvcr.io login
+# dgx-spark-1: logged in by certificate, and Docker holds an nvcr.io login
 sudo journalctl -u ssh --since "15 min ago" | grep 'svc-ansible.*CERT'   # Accepted publickey for svc-ansible … ED25519-CERT
 sudo jq '.auths | keys' /root/.docker/config.json                        # ["nvcr.io"]
 
@@ -276,7 +276,7 @@ docker compose exec semaphore ssh-keygen -L -f /tmp/lab_ssh/id_ed25519-cert.pub 
 
 ```bash
 cd ~/technical-depth/"01 Ansible/lab"
-ansible-playbook playbooks/19-vault-integration.yml -l dgx-spark-01,localhost -K
+ansible-playbook playbooks/19-vault-integration.yml -l dgx-spark-1,localhost -K
 # play 1 is skipped (no vault_role_id), then the assert stops with "Run it from Semaphore …"
 ```
 
@@ -326,7 +326,7 @@ ansible-vault encrypt_string --vault-password-file tools/vault-pass.sh \
   "$(vault kv get -field=api_key kv/spark-lab/ngc)" --name ngc_api_key > .cache/ngc.vault.yml   # encrypted, git-ignored
 ansible localhost -m ansible.builtin.debug -a 'msg={{ ngc_api_key[:6] }}' \
   -e @.cache/ngc.vault.yml --vault-password-file tools/vault-pass.sh          # the first characters of your key = decryption works
-ansible-playbook playbooks/03-containers.yml -l dgx-spark-01,localhost -K \
+ansible-playbook playbooks/03-containers.yml -l dgx-spark-1,localhost -K \
   -e @.cache/ngc.vault.yml --vault-password-file tools/vault-pass.sh          # break-glass run as nvidia, NGC key from ansible-vault
 ```
 
@@ -389,7 +389,7 @@ Test the CA by hand on vault01 with [`tools/vault-ssh-cert.sh`](lab/tools/vault-
 
 ```bash
 tools/vault-ssh-cert.sh ~/semaphore_lab svc-ansible                 # signs ~/semaphore_lab.pub, prints the certificate
-ssh -i ~/semaphore_lab -o CertificateFile=~/semaphore_lab-cert.pub svc-ansible@192.168.0.100 'hostname; sudo -n whoami'   # dgx-spark-01, root
+ssh -i ~/semaphore_lab -o CertificateFile=~/semaphore_lab-cert.pub svc-ansible@192.168.0.100 'hostname; sudo -n whoami'   # dgx-spark-1, root
 ```
 
 Now try what the role must refuse:

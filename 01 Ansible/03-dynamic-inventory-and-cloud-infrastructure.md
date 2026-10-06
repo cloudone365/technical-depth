@@ -95,19 +95,19 @@ Do this from your MacBook. Semaphore's inventory (00b §5.5) is the **file** `01
 
 ```bash
 cd "01 Ansible/lab"
-ansible-playbook playbooks/00-ping.yml -l dgx-spark-01,localhost -K                   # populates .cache/facts/*
-ansible-playbook playbooks/01-baseline.yml -l dgx-spark-01,localhost -K --tags facts  # adds ansible_local.spark
+ansible-playbook playbooks/00-ping.yml -l dgx-spark-1,localhost -K                   # populates .cache/facts/*
+ansible-playbook playbooks/01-baseline.yml -l dgx-spark-1,localhost -K --tags facts  # adds ansible_local.spark
 ansible-inventory --graph
 ```
 
 Output (example):
 
 ```
-  |--@gpu_ready:        |--dgx-spark-01 |--dgx-spark-02
-  |--@fabric_cabled:    |--dgx-spark-01 |--dgx-spark-02
-  |--@driver_580:       |--dgx-spark-01 |--dgx-spark-02
-  |--@cuda_13_0:        |--dgx-spark-01 |--dgx-spark-02
-  |--@arch_aarch64:     |--dgx-spark-01 |--dgx-spark-02
+  |--@gpu_ready:        |--dgx-spark-1 |--dgx-spark-2
+  |--@fabric_cabled:    |--dgx-spark-1 |--dgx-spark-2
+  |--@driver_580:       |--dgx-spark-1 |--dgx-spark-2
+  |--@cuda_13_0:        |--dgx-spark-1 |--dgx-spark-2
+  |--@arch_aarch64:     |--dgx-spark-1 |--dgx-spark-2
 ```
 
 Now **target by state** with inventory patterns:
@@ -274,10 +274,10 @@ A MacBook has no `avahi-browse` (macOS uses `dns-sd`). Take the capture on a Spa
 The plugin accepts `from_file:` so you can unit-test it against a saved capture without any Sparks on the network. That's how it was validated for this lab:
 
 ```text
-=;enp0s31f6;IPv4;dgx-spark-01;_ssh._tcp;local;dgx-spark-01.local;192.168.0.100;22;
-=;enp0s31f6;IPv4;dgx-spark-02;_ssh._tcp;local;dgx-spark-02.local;192.168.0.101;22;
+=;enp0s31f6;IPv4;dgx-spark-1;_ssh._tcp;local;dgx-spark-1.local;192.168.0.100;22;
+=;enp0s31f6;IPv4;dgx-spark-2;_ssh._tcp;local;dgx-spark-2.local;192.168.0.101;22;
 =;enp0s31f6;IPv4;nas;_ssh._tcp;local;nas.local;192.168.0.200;22;          <- filtered by name_regex
-=;wlp2s0;IPv4;dgx-spark-01;_ssh._tcp;local;dgx-spark-01.local;192.168.1.77;22;   <- filtered by interface
+=;wlp2s0;IPv4;dgx-spark-1;_ssh._tcp;local;dgx-spark-1.local;192.168.1.77;22;   <- filtered by interface
 ```
 
 **Discovery vs. source of truth.** Use discovery to *find* what's there, and compare it against what *should* be there:
@@ -386,10 +386,10 @@ NETBOX_TOKEN=... ansible-inventory -i inventory-examples/netbox.yml --graph
 | Symptom | Diagnose | Fix |
 |---|---|---|
 | `[WARNING]: Unable to parse ... as an inventory source` | `ansible-inventory -i <file> --list -vvv` | For custom plugins the file name must pass `verify_file` (`spark.mdns.yml`), and the plugin must be in `enable_plugins` |
-| Constructed groups empty | `ls .cache/facts/`; `jq .ansible_local .cache/facts/dgx-spark-01` | Gather facts first; check `fact_caching_timeout`; `strict: false` hides errors, so set `strict: true` temporarily |
+| Constructed groups empty | `ls .cache/facts/`; `jq .ansible_local .cache/facts/dgx-spark-1` | Gather facts first; check `fact_caching_timeout`; `strict: false` hides errors, so set `strict: true` temporarily |
 | Host appears twice with different names (IP vs name) | `ansible-inventory --list \| jq '._meta.hostvars \| keys'` | Keep one naming source. Use `compose: ansible_host` rather than naming hosts by IP |
 | mDNS finds nothing | `avahi-browse -a -t` on the machine running discovery | Different L2 segment, or multicast filtered (Wi-Fi APs, VLANs); `systemctl status avahi-daemon` on the Spark |
-| Variables from `group_vars/spark.yml` missing for mDNS hosts | `ansible-inventory --host dgx-spark-01` | group_vars load relative to the inventory *source*. Pass both `-i inventory -i inventory-examples/...` so the directory's group_vars apply |
+| Variables from `group_vars/spark.yml` missing for mDNS hosts | `ansible-inventory --host dgx-spark-1` | group_vars load relative to the inventory *source*. Pass both `-i inventory -i inventory-examples/...` so the directory's group_vars apply |
 | NetBox plugin: `ansible.utils.ipaddr` not found | — | `ansible-galaxy collection install ansible.utils`; `pip install netaddr` |
 
 ## 6. Validation

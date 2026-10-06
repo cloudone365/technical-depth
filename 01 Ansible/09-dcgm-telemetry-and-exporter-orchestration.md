@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **You will build** | node_exporter plus a dependency-free **GPU/UMA/CX-7 textfile collector** on every Spark, a Prometheus + Alertmanager + Grafana stack on dgx-spark-01 with a provisioned dashboard and 7 alert rules (all validated with `promtool`), and an optional dcgm-exporter path |
+| **You will build** | node_exporter plus a dependency-free **GPU/UMA/CX-7 textfile collector** on every Spark, a Prometheus + Alertmanager + Grafana stack on dgx-spark-1 with a provisioned dashboard and 7 alert rules (all validated with `promtool`), and an optional dcgm-exporter path |
 | **Hardware** | 1–2× DGX Spark |
 | **Time** | 60 min |
 | **Risk** | Low. About 1 GiB RAM for the stack; data lives in Docker volumes |
@@ -28,7 +28,7 @@
 
 ```mermaid
 flowchart LR
-  subgraph S1["dgx-spark-01"]
+  subgraph S1["dgx-spark-1"]
     T1["systemd timer 15 s<br/>spark-gpu-metrics.sh"] -->|atomic write| TF1["/var/lib/prometheus/node-exporter/*.prom"]
     NE1["node_exporter :9100<br/>--collector.textfile"] --> TF1
     DC1["dcgm-exporter :9400<br/>(optional)"]
@@ -37,7 +37,7 @@ flowchart LR
       G["Grafana :3000<br/>provisioned DS + dashboard"] --> P
     end
   end
-  subgraph S2["dgx-spark-02"]
+  subgraph S2["dgx-spark-2"]
     T2["timer → collector"] --> TF2[".prom"] --> NE2["node_exporter :9100"]
   end
   P -->|scrape| NE1 & NE2
@@ -359,7 +359,7 @@ groups:
 
 ## 4. Hands-on
 
-Run the Semaphore template **`04 Telemetry`** (break-glass: `ansible-playbook playbooks/04-telemetry.yml -l dgx-spark-01,localhost -K`), then check from the MacBook:
+Run the Semaphore template **`04 Telemetry`** (break-glass: `ansible-playbook playbooks/04-telemetry.yml -l dgx-spark-1,localhost -K`), then check from the MacBook:
 
 ```bash
 cd "01 Ansible/lab"
@@ -378,7 +378,7 @@ curl -s http://192.168.0.100:9090/api/v1/rules | jq -r '.data.groups[].rules[].n
 |---|---|
 | `SparkUnifiedMemoryLow` | In a PyTorch container, allocate until `MemAvailable` < 8 GiB: `x=[torch.empty(2**30, dtype=torch.uint8, device='cuda') for _ in range(110)]` (adjust the count), then free it |
 | `SparkCX7Degraded` | Unplug the QSFP cable (speed drops to −1/absent) or force 100G: `sudo ethtool -s enp1s0f1np1 speed 100000 autoneg off` (revert afterwards) |
-| `SparkNodeDown` | `sudo systemctl stop prometheus-node-exporter` on dgx-spark-02 for 90 s |
+| `SparkNodeDown` | `sudo systemctl stop prometheus-node-exporter` on dgx-spark-2 for 90 s |
 | `SparkGPUUnresponsive` | Temporarily break PATH for the collector: `sudo systemctl edit spark-gpu-metrics.service` → `Environment=PATH=/nonexistent` |
 | `SparkGPUMetricsStale` | `sudo systemctl stop spark-gpu-metrics.timer` for 4 min (the `.prom` file stops updating while node_exporter keeps serving it) |
 
@@ -398,7 +398,7 @@ dcgmi dmon -e 150,155,203 -c 5   # temp, power, util
 If the GPU is listed, enable the exporter container:
 
 ```bash
-ansible-playbook playbooks/04-telemetry.yml -l dgx-spark-01,localhost -K -e gpu_telemetry_dcgm_enabled=true   # or template 04 Telemetry + extra variable
+ansible-playbook playbooks/04-telemetry.yml -l dgx-spark-1,localhost -K -e gpu_telemetry_dcgm_enabled=true   # or template 04 Telemetry + extra variable
 curl -s localhost:9400/metrics | grep -E '^DCGM_FI_DEV_(GPU_TEMP|POWER_USAGE|GPU_UTIL)'
 ```
 
@@ -424,7 +424,7 @@ Expect some fields (framebuffer memory in particular) to be absent or meaningles
 | No `spark_*` metrics | `systemctl list-timers \| grep spark`; `journalctl -u spark-gpu-metrics -n 20` | Timer not enabled / script error; run `/usr/local/sbin/spark-gpu-metrics.sh` by hand |
 | node_exporter: `textfile ... was collected before with the same name and label values` | Two `.prom` files export the same series | One writer per metric family; delete stale files |
 | `spark_gpu_up 0` but `nvidia-smi` works interactively | The collector's PATH or permissions under systemd | `systemd-run --wait -p Environment=OUT_DIR=/tmp /usr/local/sbin/spark-gpu-metrics.sh` |
-| Prometheus target `DOWN: connection refused :9100` | `ss -ltnp \| grep 9100` on the node; host firewall | Start node_exporter; allow 9100 from dgx-spark-01 only |
+| Prometheus target `DOWN: connection refused :9100` | `ss -ltnp \| grep 9100` on the node; host firewall | Start node_exporter; allow 9100 from dgx-spark-1 only |
 | Stack play fails at promtool | Output shows the bad line | Usually an escaping error in `spark-alerts.yml.j2` (§3 note) |
 | Grafana dashboard empty | Datasource UID / variable `DS` | Dashboard uses `${DS}`; select "Prometheus" in the dropdown; check `http://127.0.0.1:9090` from Grafana (host network) |
 | CX-7 throughput panel empty | `node_network_receive_bytes_total{device=~"en[pP].*np[0-9]"}` | Interface regex; the netdev names differ on your unit (check `ibdev2netdev`) |

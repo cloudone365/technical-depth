@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | A budget hierarchy on one node: kubelet reservations, root quotas that cap each vCluster (CPU, memory, GPU slices, storage, LoadBalancers), and tenant quotas inside a vCluster. You'll watch each layer refuse a pod in its own way, trace Kubernetes requests and limits to cgroup v2 files, reproduce CPU throttling and OOM kills, and run the experiment that decides how you protect a unified-memory node: *is CUDA memory charged to the pod?* |
-| **Hardware** | dgx-spark-01 |
+| **Hardware** | dgx-spark-1 |
 | **Time** | 90 min |
 | **Risk** | Low. The OOM and UMA experiments are bounded by limits and `restartPolicy: Never`. §5.6 is optional and fills memory on purpose |
 | **Clusters** | `spark-root` (kubelet, root budgets, QoS/cgroup experiments in `platform-tools`), `dev-lab` (tenant budgets, break/fix 01, 02, 04) |
@@ -32,7 +32,7 @@ Two facts shape everything below. First, **quotas are admission, cgroups are run
 
 ```mermaid
 flowchart TB
-  subgraph NODE["dgx-spark-01 · 20 cores · ≈119.7 GiB UMA"]
+  subgraph NODE["dgx-spark-1 · 20 cores · ≈119.7 GiB UMA"]
     direction TB
     SR["system-reserved<br/>2 CPU · 8 Gi<br/>DGX OS, Docker, Dashboard"]
     KR["kube-reserved<br/>1 CPU · 2 Gi<br/>kubelet, containerd"]
@@ -170,7 +170,7 @@ export KUBECONFIG="$PWD/../../01 Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 ### 5.1 Capacity, allocatable, and both budget layers
 
 ```bash
-kubectl --context spark-root get node dgx-spark-01 -o jsonpath='{.status.capacity}{"\n"}{.status.allocatable}{"\n"}' | jq -c '{cpu, memory, "nvidia.com/gpu"}'
+kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.capacity}{"\n"}{.status.allocatable}{"\n"}' | jq -c '{cpu, memory, "nvidia.com/gpu"}'
 sudo grep -A3 -E '^(systemReserved|kubeReserved|evictionHard):' /var/lib/kubelet/config.yaml
 kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget
 kubectl --context dev-lab apply -k manifests/dev-lab/00-platform
@@ -311,7 +311,7 @@ kubectl --context spark-root delete -f manifests/root/12-cgroups/uma-cgroup-expe
 
 ```bash
 scripts/breakfix.sh inject 15      # asks for confirmation; self-terminates after 150 s
-kubectl --context spark-root describe node dgx-spark-01 | grep -A8 Conditions
+kubectl --context spark-root describe node dgx-spark-1 | grep -A8 Conditions
 kubectl --context spark-root get events -A --field-selector reason=Evicted
 ```
 

@@ -36,7 +36,7 @@ flowchart LR
   class D1,D2,D3,D4,D5,D6 gpu
 ```
 
-**One Spark or two?** Everything works on one. Steps marked **(2×)** have an optional second part that needs dgx-spark-02 and the QSFP cable.
+**One Spark or two?** Everything works on one. Steps marked **(2×)** have an optional second part that needs dgx-spark-2 and the QSFP cable.
 
 **The Spark is your playground.** Every step can be undone: `scripts/breakfix.sh reset all` for drills, and for a full rebuild the Semaphore templates `99 Reset Kubernetes` → `05 Kubernetes` → `06 GPU Operator` → `06b vClusters` (then `fetch-kubeconfig.sh sema01` again). Semaphore and Vault live outside the Spark, so nothing you break here can take them with it. Breaking things on purpose is part of the course.
 

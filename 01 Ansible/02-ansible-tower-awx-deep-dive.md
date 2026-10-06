@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **You will build** | AWX running on the kubeadm root cluster (`spark-root`, namespace `awx`) on dgx-spark-01, configured *entirely from Ansible* (org, credentials, project, inventory, job templates, schedules), running the lab's own playbooks |
+| **You will build** | AWX running on the kubeadm root cluster (`spark-root`, namespace `awx`) on dgx-spark-1, configured *entirely from Ansible* (org, credentials, project, inventory, job templates, schedules), running the lab's own playbooks |
 | **Prerequisite** | Root cluster up ([Volume 16](16-kubernetes-bare-metal-bootstrap-kubeadm.md), `playbooks/05-kubernetes.yml`) and the `local-path` StorageClass (installed by `playbooks/06b-vclusters.yml`, or `"02 Kubernetes/lab/scripts/install-addons.sh" storage`) |
 | **Clusters** | `spark-root` only. AWX is platform tooling, so it lives on the root next to observability, not inside a tenant vCluster |
 | **Time** | 2 h |
@@ -29,7 +29,7 @@ AWX is the upstream of Red Hat Ansible Automation Platform's controller. It give
 ```mermaid
 flowchart TB
   U["You / CI / webhook"] -->|HTTPS :30080| WEB
-  subgraph ROOT["spark-root (kubeadm) on dgx-spark-01 · namespace awx"]
+  subgraph ROOT["spark-root (kubeadm) on dgx-spark-1 · namespace awx"]
     OP[awx-operator] -->|reconciles| CR[(AWX CR)]
     subgraph AWXPOD[AWX deployments]
       WEB["awx-web<br/>(Django API + UI)"]
@@ -43,7 +43,7 @@ flowchart TB
   WEB <--> PG
   TASK <--> PG
   TASK --> RCPT -->|launch| JOB
-  JOB -->|SSH 22 over mgmt LAN| S1[dgx-spark-01] & S2[dgx-spark-02]
+  JOB -->|SSH 22 over mgmt LAN| S1[dgx-spark-1] & S2[dgx-spark-2]
   JOB -->|git clone| GH[(GitHub: technical-depth)]
   JOB -->|HTTPS 8200| V[("vault01 · 192.168.0.211<br/>Vol 19")]
   classDef mgmt fill:#fff3e6,stroke:#fb8500,color:#000

@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | A verified hardware and driver inventory of your Spark from the host and from inside a pod. You'll see how GPU Feature Discovery turns that inventory into node labels, set a GEMM throughput baseline, and learn the handful of `nvidia-smi` and `dmesg` checks that catch most GPU problems |
-| **Hardware** | dgx-spark-01 |
+| **Hardware** | dgx-spark-1 |
 | **Time** | 60 min |
 | **Risk** | None |
 | **Clusters** | `spark-root` (node labels, the benchmark in `platform-tools`), `dev-lab` (`gpu-smoke`, the arch test) |
@@ -156,9 +156,9 @@ Only the root has real nodes; both vClusters show the same node, copied in (`syn
 ```bash
 cd "02 Kubernetes/lab"
 export KUBECONFIG="$PWD/../../01 Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
-kubectl --context spark-root get node dgx-spark-01 -o json | jq '.metadata.labels | with_entries(select(.key|test("nvidia.com|cpu-model")))'
-kubectl --context spark-root get node dgx-spark-01 -o jsonpath='{.status.capacity}{"\n"}{.status.allocatable}{"\n"}' | jq -c .
-kubectl --context llms get node dgx-spark-01 -L spark.lab/gpu,nvidia.com/gpu.product,nvidia.com/gpu.replicas
+kubectl --context spark-root get node dgx-spark-1 -o json | jq '.metadata.labels | with_entries(select(.key|test("nvidia.com|cpu-model")))'
+kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.capacity}{"\n"}{.status.allocatable}{"\n"}' | jq -c .
+kubectl --context llms get node dgx-spark-1 -L spark.lab/gpu,nvidia.com/gpu.product,nvidia.com/gpu.replicas
 ```
 
 Capacity shows `nvidia.com/gpu: 15` and a `memory` figure that is the whole unified pool; allocatable is lower by the kubelet reservations (Vol 12 §3.1). Inside llms the node looks the same — 15 slices — although llms may only use 8: budgets are quotas, not node properties.

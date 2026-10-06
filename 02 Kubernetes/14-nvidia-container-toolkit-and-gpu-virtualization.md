@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | A clear picture of how a GPU gets into a container on the root's containerd (runtime hook vs CDI), and how one GB10 becomes 15 time-slices split 5 / 2 / 8 between the root and the two vClusters. You'll measure what time-slicing actually gives several pods on one GB10, and close the "GPU leak" where pods that asked for no GPU — in any cluster — still get one |
-| **Hardware** | dgx-spark-01 |
+| **Hardware** | dgx-spark-1 |
 | **Time** | 75 min |
 | **Risk** | Low. §5.5 (runtime hardening) restarts containerd, which Docker shares |
 | **Clusters** | `spark-root` (containerd, device plugin, RuntimeClass, the benchmark in `platform-tools`), `dev-lab` (`gpu-smoke`, the leak) |
@@ -39,7 +39,7 @@ flowchart LR
     DQ["dev-lab → vc-dev-lab<br/>quota 2"]
     LQ["llms → vc-llms<br/>quota 8"]
   end
-  subgraph ROOT["dgx-spark-01 · root node"]
+  subgraph ROOT["dgx-spark-1 · root node"]
     direction LR
     DP["nvidia-device-plugin (GPU Operator)<br/>time-slicing replicas=15<br/>advertises 15 × nvidia.com/gpu"]
     subgraph KUBELET["kubelet"]
@@ -151,7 +151,7 @@ That container used one of nobody's 15 slices: Docker talks to the same containe
 ### 5.2 See what the device plugin hands a pod — from a vCluster
 
 ```bash
-kubectl --context spark-root get node dgx-spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'   # 15
+kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'   # 15
 kubectl --context spark-root get runtimeclass nvidia
 kubectl --context dev-lab get runtimeclass nvidia || kubectl --context dev-lab apply -k manifests/dev-lab/00-platform
 kubectl --context dev-lab apply -f manifests/dev-lab/70-gpu/gpu-smoke.yaml
@@ -249,7 +249,7 @@ scripts/verify.sh gpu
 
 ```text
 ── gpu
-[PASS] GB10 node: dgx-spark-01
+[PASS] GB10 node: dgx-spark-1
 [PASS] allocatable nvidia.com/gpu=15 (root 5 · dev-lab 2 · llms 8)
 [PASS] operator-validator Running
 [....] gpu-smoke from INSIDE dev-lab (tenant-beta → syncer → root scheduler → nvidia runtime)

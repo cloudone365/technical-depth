@@ -3,8 +3,8 @@
 # take 2 slices and 40 Gi of the llms vCluster's 48 Gi memory budget.
 # One Spark: both roles share the GB10 via time-slicing (2 slices), so this
 # demonstrates the *mechanics* (KV handoff over NIXL/UCX, routing, metrics),
-# not a speed-up. On two Sparks, pin prefill to dgx-spark-01 and decode to
-# dgx-spark-02 and let UCX use the CX-7 RDMA link (see Volume 24 §8).
+# not a speed-up. On two Sparks, pin prefill to dgx-spark-1 and decode to
+# dgx-spark-2 and let UCX use the CX-7 RDMA link (see Volume 24 §8).
 # Pre-flight: kubectl exec deploy/vllm-prefill -- python3 -c "import nixl"
 apiVersion: apps/v1
 kind: Deployment

@@ -105,7 +105,7 @@ This is one of the few playbooks that runs **from your MacBook**, not from Semap
 # Day-1 bootstrap for a Spark that just finished the first-boot wizard.
 # Password auth is still on, you have no key trust yet, and it's on DHCP.
 #
-#   ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-02 -k -K \
+#   ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-2 -k -K \
 #     -e bootstrap_current_ip=<current DHCP IP> [-e bootstrap_static_ip=true]
 #
 # NOTE: don't pass -e ansible_host=… — extra vars outrank set_fact, so Ansible
@@ -230,17 +230,17 @@ This is one of the few playbooks that runs **from your MacBook**, not from Semap
 ```bash
 cd "01 Ansible/lab"
 # First run: password SSH (-k) and sudo (-K), on the DHCP address, no IP change yet
-ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-02 -k -K -e bootstrap_current_ip=192.168.0.137
+ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-2 -k -K -e bootstrap_current_ip=192.168.0.137
 
 # Second run: move it to its inventory IP (192.168.0.101) with the dead-man switch
-ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-02 -K \
+ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-2 -K \
   -e bootstrap_current_ip=192.168.0.137 -e bootstrap_static_ip=true
 
 # Make it a Semaphore target (00b guide §3): svc-ansible, NOPASSWD sudo, trust vault01's CA
-ansible-playbook playbooks/00b-semaphore-target.yml -l dgx-spark-02,localhost -K
+ansible-playbook playbooks/00b-semaphore-target.yml -l dgx-spark-2,localhost -K
 ```
 
-From now on, plain inventory addressing works and the node belongs to Semaphore: run the templates `00 Ping` and `01 Baseline` with CLI args `--limit dgx-spark-02,localhost`. (When spark-02 is permanent, drop the `--limit dgx-spark-01,localhost` from all templates, 00b §5.5.)
+From now on, plain inventory addressing works and the node belongs to Semaphore: run the templates `00 Ping` and `01 Baseline` with CLI args `--limit dgx-spark-2,localhost`. (When spark-02 is permanent, drop the `--limit dgx-spark-1,localhost` from all templates, 00b §5.5.)
 
 **Test the rollback on purpose, once.** Point the node at an address your MacBook can't reach, e.g. `-e bootstrap_target_ip=10.99.99.99`. (`-e` beats the playbook's own `set_fact`, so this is a handy way to force a bad target.) The reconnect times out, and 180 s later the Spark is back on its old address. `journalctl -t bootstrap` on the Spark shows the rollback.
 
@@ -286,10 +286,10 @@ DGX OS ships tuned kernel parameters, so don't change them casually. When you mu
 
 The real test of provisioning automation is to wipe a node and rebuild it:
 
-1. Record the state: Semaphore template `30 Validate` with `--limit dgx-spark-02,localhost` (keep `validation/dgx-spark-02.json` from sema01's state volume, `/opt/spark-lab/cache`).
-2. Re-image dgx-spark-02 from the USB recovery media (the OEM/NVIDIA guide covers creating it with `dd`; verify the checksum first).
+1. Record the state: Semaphore template `30 Validate` with `--limit dgx-spark-2,localhost` (keep `validation/dgx-spark-2.json` from sema01's state volume, `/opt/spark-lab/cache`).
+2. Re-image dgx-spark-2 from the USB recovery media (the OEM/NVIDIA guide covers creating it with `dd`; verify the checksum first).
 3. Complete the wizard (§3.1).
-4. From the MacBook: `00-bootstrap.yml` (both runs), then `00b-semaphore-target.yml -l dgx-spark-02,localhost -K`. The re-image gave the node a new SSH host key, so on sema01 remove the old one first (`docker compose exec semaphore ssh-keygen -R 192.168.0.101`, 00b §12). Then the Semaphore template `site` with `--limit dgx-spark-02,localhost`.
+4. From the MacBook: `00-bootstrap.yml` (both runs), then `00b-semaphore-target.yml -l dgx-spark-2,localhost -K`. The re-image gave the node a new SSH host key, so on sema01 remove the old one first (`docker compose exec semaphore ssh-keygen -R 192.168.0.101`, 00b §12). Then the Semaphore template `site` with `--limit dgx-spark-2,localhost`.
 5. Validate again and `diff` the two JSON reports. **Anything that differs is something you did by hand and never automated.**
 
 Semaphore, vault01 and the task history of the first build are untouched by the re-image: that's why the controller lives outside the Spark.
@@ -361,7 +361,7 @@ The Spark has no BMC, but the Redfish automation you'll use on DGX B200/GB200 sy
 Semaphore template `12 Redfish practice`, or break-glass from the MacBook:
 
 ```bash
-ansible-playbook playbooks/12-redfish-practice.yml -l dgx-spark-01,localhost -K
+ansible-playbook playbooks/12-redfish-practice.yml -l dgx-spark-1,localhost -K
 curl -s http://192.168.0.100:8000/redfish/v1/Systems | jq '.Members'
 ```
 

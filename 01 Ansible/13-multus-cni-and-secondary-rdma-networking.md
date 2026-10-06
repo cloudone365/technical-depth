@@ -344,17 +344,17 @@ Expected on each node: `RDMA` 64, `GPU` 15. In `/etc/cni/net.d`, `00-multus.conf
 ### 3.1 Pod-to-pod RDMA across Sparks
 
 ```bash
-kubectl --context spark-root -n platform-tools exec rdma-test-dgx-spark-02 -- ib_write_bw -d rocep1s0f1 -q 4 -D 10 --report_gbits -F &
+kubectl --context spark-root -n platform-tools exec rdma-test-dgx-spark-2 -- ib_write_bw -d rocep1s0f1 -q 4 -D 10 --report_gbits -F &
 sleep 3
-kubectl --context spark-root -n platform-tools exec rdma-test-dgx-spark-01 -- ib_write_bw -d rocep1s0f1 -q 4 -D 10 --report_gbits -F 192.168.100.202
+kubectl --context spark-root -n platform-tools exec rdma-test-dgx-spark-1 -- ib_write_bw -d rocep1s0f1 -q 4 -D 10 --report_gbits -F 192.168.100.202
 ```
 
-Inside the pods, `ibv_devices` shows the host's RDMA devices, because the shared plugin exposes them (not isolated). The traffic's source address is the pod's macvlan IP, `.201`/`.202`. Compare the number with the host-level perftest from Volume 11: it should be within a few percent. On a single Spark both pods sit on dgx-spark-01 and the test runs through the NIC's internal switch; the number says nothing about the cable.
+Inside the pods, `ibv_devices` shows the host's RDMA devices, because the shared plugin exposes them (not isolated). The traffic's source address is the pod's macvlan IP, `.201`/`.202`. Compare the number with the host-level perftest from Volume 11: it should be within a few percent. On a single Spark both pods sit on dgx-spark-1 and the test runs through the NIC's internal switch; the number says nothing about the cable.
 
 Multus also records what it did, on the root object:
 
 ```bash
-kubectl --context spark-root -n platform-tools get pod rdma-test-dgx-spark-01 \
+kubectl --context spark-root -n platform-tools get pod rdma-test-dgx-spark-1 \
   -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}' | jq '.[] | {name, interface, ips}'
 ```
 
@@ -372,7 +372,7 @@ metadata:
   annotations:
     k8s.v1.cni.cncf.io/networks: '[{"name":"cx7-a","ips":["192.168.100.211/24"]},{"name":"cx7-b","ips":["192.168.101.211/24"]}]'
 spec:
-  nodeSelector: { kubernetes.io/hostname: dgx-spark-01 }
+  nodeSelector: { kubernetes.io/hostname: dgx-spark-1 }
   containers:
     - name: w
       image: nvcr.io/nvidia/pytorch:25.09-py3
@@ -412,7 +412,7 @@ kubectl --context llms -n batch delete pod nccl-worker-0
 
 Read the result as a chain. The tenant wrote an annotation in `llms`. The syncer copied it to the root pod in `vc-llms`. Multus on the node read the **root** pod and resolved `cx7-a` in `vc-llms`. It created `net1` and `net2` (macvlan), and `network-status` lands on the root copy, the object Multus knows about. Read it there. The tenant's `kubectl exec` works through the vCluster, which proxies it to the root kubelet.
 
-The ping shows the §2.3 gap. A pod in `llms` reaches a `platform-tools` pod on the fabric subnet: Cilium policies, the root's `vcluster-boundary` included, only govern `eth0`. Two macvlan pods on the same master talk to each other in bridge mode, even on one node; only the node's own host can't reach them. Use the `.202` pod on dgx-spark-02 for a cross-node test. The 02 lab's [`rdma-test-pod.yaml`](../02%20Kubernetes/lab/manifests/llms/85-network-operator/rdma-test-pod.yaml) does the same with the Network Operator's NAD `cx7-rdma` (whereabouts IPAM, no `ips` needed). That NAD exists only on the Network Operator path, so with this playbook use `cx7-a` as above.
+The ping shows the §2.3 gap. A pod in `llms` reaches a `platform-tools` pod on the fabric subnet: Cilium policies, the root's `vcluster-boundary` included, only govern `eth0`. Two macvlan pods on the same master talk to each other in bridge mode, even on one node; only the node's own host can't reach them. Use the `.202` pod on dgx-spark-2 for a cross-node test. The 02 lab's [`rdma-test-pod.yaml`](../02%20Kubernetes/lab/manifests/llms/85-network-operator/rdma-test-pod.yaml) does the same with the Network Operator's NAD `cx7-rdma` (whereabouts IPAM, no `ips` needed). That NAD exists only on the Network Operator path, so with this playbook use `cx7-a` as above.
 
 ---
 

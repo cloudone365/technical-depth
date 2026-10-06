@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | An operator's understanding of `vault01`, the lab's **single** Vault (built by hand in [00a §3–4](00a-semaphore-vault-lab-guide.md)): integrated Raft storage, TLS, the Shamir seal, policies, the audit log and snapshots. Then you add the Spark lab's KV engine and read-only policy with `08-vault.yml`, the one playbook that writes to vault01 |
-| **Hardware** | `vault01` (192.168.0.211), your MacBook; `sema01` + `dgx-spark-01` for the seal test (§3.3) |
+| **Hardware** | `vault01` (192.168.0.211), your MacBook; `sema01` + `dgx-spark-1` for the seal test (§3.3) |
 | **Time** | 75 min |
 | **Risk** | Medium. **Losing the unseal keys means losing every secret, including the SSH CA that every Semaphore task depends on.** A restart of vault01 halts all new Semaphore tasks until you unseal it (§3.3). Read §5 before you change anything on vault01 |
 
@@ -36,7 +36,7 @@ flowchart LR
   subgraph S1["sema01 · 192.168.0.210"]
     P1["Semaphore task<br/>play 1 (00-vault-cert.yml)"]
   end
-  SP["dgx-spark-01<br/>sshd trusts vault01's CA"]
+  SP["dgx-spark-1<br/>sshd trusts vault01's CA"]
   PB -->|"HTTP API: KV mount, policy spark-lab-read"| V
   P1 -->|"AppRole login, sign, read kv/spark-lab/*"| V
   P1 -->|"SSH as svc-ansible + 15-min cert"| SP

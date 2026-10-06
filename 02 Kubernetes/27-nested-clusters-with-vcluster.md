@@ -51,7 +51,7 @@ flowchart TB
   ADMIN -- "llms · 192.168.0.112" --> LAPI
   subgraph SPARK["DGX Spark · DGX OS 7 · GB10 (15 time-slices) · ~119.7 GiB unified memory"]
     direction TB
-    subgraph ROOT["Root cluster · kubeadm v1.36 · dgx-spark-01 = master + worker"]
+    subgraph ROOT["Root cluster · kubeadm v1.36 · dgx-spark-1 = master + worker"]
       direction TB
       subgraph RCP["control plane (static pods)"]
         direction LR
@@ -188,7 +188,7 @@ sequenceDiagram
   SY->>VA: watch new Pod
   SY->>RA: create Pod vllm-…-x-llm-serving-x-llms in vc-llms
   Note over RA: root admission: vcluster-budget quota<br/>(4 CPU · 48 Gi · 8 slices), PSA, LimitRange
-  RS->>RA: bind Pod → dgx-spark-01 (slices free?)
+  RS->>RA: bind Pod → dgx-spark-1 (slices free?)
   KL->>RA: watch, start container, device plugin gives 1 slice
   KL->>RA: status Running
   SY->>VA: copy status back
@@ -221,7 +221,7 @@ Inner quotas are ceilings, not reservations: `tenant-alpha` + `tenant-beta` + `l
 
 Either path gives the same result. The vCluster definitions live once, in the 02 lab; Ansible applies those files.
 
-**A — 01 Ansible, from Semaphore** (project `spark-lab` on sema01): run the templates `05 Kubernetes` → `06 GPU Operator` → `06b vClusters`, each to `failed=0`. They write the kubeconfig with all three contexts to sema01's state volume. Break-glass CLI from the MacBook: the same playbooks with `-l dgx-spark-01,localhost -K`.
+**A — 01 Ansible, from Semaphore** (project `spark-lab` on sema01): run the templates `05 Kubernetes` → `06 GPU Operator` → `06b vClusters`, each to `failed=0`. They write the kubeconfig with all three contexts to sema01's state volume. Break-glass CLI from the MacBook: the same playbooks with `-l dgx-spark-1,localhost -K`.
 
 ```bash
 # after A (or after 05 + 06 for B) — on your MacBook
@@ -244,7 +244,7 @@ scripts/install-addons.sh vclusters
 ```bash
 kubectl --context spark-root get nodes                    # 1 node: control plane + worker
 kubectl --context dev-lab get nodes -L spark.lab/gpu,nvidia.com/gpu.product
-kubectl --context dev-lab get node dgx-spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'   # 15
+kubectl --context dev-lab get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'   # 15
 kubectl --context spark-root -n vc-dev-lab get pods        # dev-lab-0 = the whole vCluster control plane
 kubectl --context dev-lab get ns                           # its own world
 kubectl --context spark-root get ns | grep -c tenant       # 0 — tenants don't exist at the root
@@ -354,7 +354,7 @@ scripts/verify.sh vclusters
 
 ## 9. Scale-out and limits
 
-- **dgx-spark-02** joins the *root* as a worker (01 Ansible `k8s_workers`). Both vClusters see the new node immediately (node sync) and the root scheduler spreads their pods. Budgets don't grow by themselves — raise the root quotas.
+- **dgx-spark-2** joins the *root* as a worker (01 Ansible `k8s_workers`). Both vClusters see the new node immediately (node sync) and the root scheduler spreads their pods. Budgets don't grow by themselves — raise the root quotas.
 - **Control-plane HA**: each vCluster runs one control-plane replica with SQLite. For HA, vCluster supports several replicas with an embedded or external etcd; the root needs three control-plane nodes first (Volume 03 §8).
 - **Hard isolation**: vClusters share the node, the kernel and the GPU. For tenants you don't trust, use separate nodes (a vCluster can pin its pods with a node selector) or separate physical clusters.
 - **More clusters**: each extra vCluster costs ~0.3 CPU and ~0.5–1.5 Gi for its control plane, taken from its own budget.

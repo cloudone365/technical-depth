@@ -6,7 +6,7 @@
 |---|---|
 | **You will build** | Operational command of the GPU Operator that 01 Ansible installed on the root cluster: read its ClusterPolicy, switch device-plugin profiles per node and see both vClusters follow, and read the validator. You'll run kube-prometheus-stack on the root with host exporters, alert rules, a *Spark · Kubernetes* dashboard and one ServiceMonitor that reaches into the vClusters, and prepare the Network Operator for RDMA pod networking on 2 Sparks |
 | **Clusters** | `spark-root` (GPU Operator, Network Operator, observability, `platform-tools` load) · `dev-lab` (`gpu-smoke`, break/fix 02) · `llms` (the RDMA test pod, serving metrics) |
-| **Hardware** | dgx-spark-01. §5.6 needs dgx-spark-02 |
+| **Hardware** | dgx-spark-1. §5.6 needs dgx-spark-2 |
 | **Time** | 90 min |
 | **Risk** | Low. Profile switches restart the device plugin (GPU pods keep running) |
 | **Lab files** | [`addons/kube-prometheus-stack-values.yaml`](lab/addons/kube-prometheus-stack-values.yaml), [`addons/dcgm-exporter-values.md`](lab/addons/dcgm-exporter-values.md), [`manifests/root/95-observability/`](lab/manifests/root/95-observability/), [`manifests/root/70-gpu/`](lab/manifests/root/70-gpu/), [`manifests/dev-lab/70-gpu/gpu-smoke.yaml`](lab/manifests/dev-lab/70-gpu/gpu-smoke.yaml), [`manifests/root/85-network-operator/`](lab/manifests/root/85-network-operator/), [`manifests/llms/85-network-operator/`](lab/manifests/llms/85-network-operator/), 01 Ansible [`roles/gpu_operator`](../01%20Ansible/lab/roles/gpu_operator) |
@@ -54,7 +54,7 @@ flowchart TB
       TRF["traefik-lab-metrics<br/>(llms · ingress)"]
     end
   end
-  subgraph HOST["dgx-spark-01 host (01 Ansible)"]
+  subgraph HOST["dgx-spark-1 host (01 Ansible)"]
     direction LR
     NE["node-exporter :9100<br/>+ textfile: spark_gpu_* · spark_uma_*"]
     HP["host Prometheus/Grafana :3000<br/>(survives k8s outages)"]
@@ -110,7 +110,7 @@ flowchart TB
 | Profile key in `time-slicing-config` | Effect | Select with |
 |---|---|---|
 | `any` (default) | 15 time-slices | nothing |
-| `whole-gpu` (you add it in §5.3) | 1 exclusive GPU | `kubectl --context spark-root label node dgx-spark-01 nvidia.com/device-plugin.config=whole-gpu` |
+| `whole-gpu` (you add it in §5.3) | 1 exclusive GPU | `kubectl --context spark-root label node dgx-spark-1 nvidia.com/device-plugin.config=whole-gpu` |
 
 The 15 slices are split by **root ResourceQuotas**, not by the device plugin:
 
@@ -195,7 +195,7 @@ Now look for the operator from inside a vCluster:
 
 ```bash
 kubectl --context dev-lab get ns gpu-operator                     # NotFound — the operator is root-only
-kubectl --context dev-lab get node dgx-spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'   # 15
+kubectl --context dev-lab get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'   # 15
 kubectl --context dev-lab get runtimeclass nvidia                 # from manifests/common/runtimeclass
 ```
 
@@ -204,9 +204,9 @@ The tenant sees the *result* (15 allocatable slices, GFD labels, a RuntimeClass)
 ### 5.2 Labels GFD wrote — and who can use them
 
 ```bash
-kubectl --context spark-root get node dgx-spark-01 -o json \
+kubectl --context spark-root get node dgx-spark-1 -o json \
   | jq -r '.metadata.labels | to_entries[] | select(.key|startswith("nvidia.com/")) | "\(.key)=\(.value)"' | sort
-kubectl --context llms get node dgx-spark-01 --show-labels | tr ',' '\n' | grep -c '^nvidia.com/'
+kubectl --context llms get node dgx-spark-1 --show-labels | tr ',' '\n' | grep -c '^nvidia.com/'
 ```
 
 Both commands count the same labels: node sync copies them into `llms`, which is why Kueue's ResourceFlavor `gb10` (`nodeLabels: spark.lab/gpu: gb10`) works inside a vCluster that has no GFD.
@@ -224,10 +224,10 @@ Expected: `[PASS] allocatable nvidia.com/gpu=15 (root 5 · dev-lab 2 · llms 8)`
 ```bash
 kubectl --context spark-root -n gpu-operator patch cm time-slicing-config --type merge \
   -p '{"data":{"whole-gpu":"version: v1\nflags:\n  migStrategy: none\n"}}'
-kubectl --context spark-root label node dgx-spark-01 nvidia.com/device-plugin.config=whole-gpu --overwrite
+kubectl --context spark-root label node dgx-spark-1 nvidia.com/device-plugin.config=whole-gpu --overwrite
 sleep 45
-kubectl --context spark-root get node dgx-spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"  "}{.metadata.labels.nvidia\.com/gpu\.replicas}{"\n"}'   # 1  1
-kubectl --context llms get node dgx-spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'                                                    # 1 — node sync
+kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"  "}{.metadata.labels.nvidia\.com/gpu\.replicas}{"\n"}'   # 1  1
+kubectl --context llms get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'                                                    # 1 — node sync
 kubectl --context spark-root -n vc-llms get resourcequota vcluster-budget -o jsonpath='{.spec.hard.requests\.nvidia\.com/gpu}{"\n"}'                   # still 8
 ```
 
@@ -238,8 +238,8 @@ kubectl --context spark-root -n platform-tools delete job gemm-solo --ignore-not
 kubectl --context spark-root apply -k manifests/root/70-gpu        # the gemm-bench ConfigMap
 kubectl --context spark-root apply -f manifests/root/70-gpu/gemm-solo.yaml
 kubectl --context spark-root -n platform-tools logs -f job/gemm-solo
-kubectl --context spark-root label node dgx-spark-01 nvidia.com/device-plugin.config-                                                                      # back to default
-sleep 45; kubectl --context spark-root get node dgx-spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'                                     # 15
+kubectl --context spark-root label node dgx-spark-1 nvidia.com/device-plugin.config-                                                                      # back to default
+sleep 45; kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'                                     # 15
 ```
 
 Use `whole-gpu` for a benchmark or a big single-model run, when you want no one else on the GPU. Running pods keep their allocation. New pods see the new count — in every cluster at once. While the node advertises 1, the vCluster budgets (2 and 8) are promises the hardware can't keep: the first GPU pod wins and every other one, in any cluster, gets `0/1 nodes are available: 1 Insufficient nvidia.com/gpu` from the root scheduler. Quotas cap demand; they never create supply.
@@ -305,7 +305,7 @@ kubectl --context spark-root delete -f manifests/root/12-cgroups/cpu-throttle.ya
 ```bash
 ssh nvidia@192.168.0.100 'dcgmi discovery -l'        # must list GB10
 # Semaphore: run template "06 GPU Operator" with extra variables {"gpu_operator_dcgm_exporter": true}
-# (break-glass CLI: cd "../../01 Ansible/lab" && ansible-playbook playbooks/06-gpu-operator.yml -l dgx-spark-01,localhost -K -e gpu_operator_dcgm_exporter=true)
+# (break-glass CLI: cd "../../01 Ansible/lab" && ansible-playbook playbooks/06-gpu-operator.yml -l dgx-spark-1,localhost -K -e gpu_operator_dcgm_exporter=true)
 kubectl --context spark-root -n gpu-operator port-forward ds/nvidia-dcgm-exporter 9400 & sleep 2
 curl -s localhost:9400/metrics | grep -E '^DCGM_FI_DEV_(GPU_UTIL|GPU_TEMP|POWER_USAGE)' | head; kill %1
 ```
@@ -314,7 +314,7 @@ If `dcgmi` doesn't list the GB10 on your DGX OS release, keep it off. The textfi
 
 ### 5.6 (2 Sparks) Network Operator for RDMA pod networking
 
-Prerequisites: dgx-spark-02 joined the root (Vol 15 §9), 01 Ansible `02-fabric.yml` and `11-rdma-perftest.yml` passed, and **01 Ansible `13-multus-rdma.yml` not applied** (both install Multus and an RDMA device plugin).
+Prerequisites: dgx-spark-2 joined the root (Vol 15 §9), 01 Ansible `02-fabric.yml` and `11-rdma-perftest.yml` passed, and **01 Ansible `13-multus-rdma.yml` not applied** (both install Multus and an RDMA device plugin).
 
 ```bash
 helm repo add nvidia https://helm.ngc.nvidia.com/nvidia && helm repo update

@@ -14,7 +14,7 @@
 >
 > | Semaphore in this lab | AWX equivalent (this volume) |
 > |---|---|
-> | Task template + CLI args `--limit dgx-spark-01,localhost` | Job template + `ask_limit_on_launch` |
+> | Task template + CLI args `--limit dgx-spark-1,localhost` | Job template + `ask_limit_on_launch` |
 > | Variable group `vault-approle` (AppRole `semaphore`) + play 1 `00-vault-cert.yml` | *HashiCorp Vault Signed SSH* credential linked to a Machine credential (§2.2) |
 > | `vault_lab_secrets_enabled` → play 1 reads `kv/spark-lab/*` | *HashiCorp Vault Secret Lookup* credential |
 > | Schedule on `20 Drift check` | `awx.awx.schedule` |
@@ -31,7 +31,7 @@
 
 ```mermaid
 flowchart LR
-  subgraph CP["AWX control plane (spark-root on dgx-spark-01, or an x86 VM)"]
+  subgraph CP["AWX control plane (spark-root on dgx-spark-1, or an x86 VM)"]
     WEB[awx-web] --- TASK[awx-task + receptor<br/>control node]
     TASK --- PG[(Postgres)]
     CG["Container group<br/>(automation-job pods in spark-root ns awx)"]
@@ -40,12 +40,12 @@ flowchart LR
     HOP["hop node (optional)<br/>DMZ / other site"]
   end
   subgraph EX["Execution nodes"]
-    E1["dgx-spark-02<br/>receptor + podman + EE image"]
+    E1["dgx-spark-2<br/>receptor + podman + EE image"]
   end
   TASK -->|"work units"| CG
   TASK -->|"receptor"| HOP -->|receptor| E1
   TASK -.->|"direct receptor peer (lab)"| E1
-  E1 -->|SSH| T1[dgx-spark-01] & T2[dgx-spark-02]
+  E1 -->|SSH| T1[dgx-spark-1] & T2[dgx-spark-2]
   E1 -->|HTTPS :8200| V[("vault01 · 192.168.0.211")]
   classDef mgmt fill:#fff3e6,stroke:#fb8500,color:#000
   class V mgmt
@@ -72,20 +72,20 @@ flowchart LR
 
 ## 2. Hands-on
 
-### 2.1 Make dgx-spark-02 an execution node
+### 2.1 Make dgx-spark-2 an execution node
 
-1. In AWX: **Instances → Add** → hostname `dgx-spark-02`, node type **execution**, listener port `27199`, peers from control. Save and **download the install bundle** (`dgx-spark-02_install_bundle.tar.gz`).
+1. In AWX: **Instances → Add** → hostname `dgx-spark-2`, node type **execution**, listener port `27199`, peers from control. Save and **download the install bundle** (`dgx-spark-2_install_bundle.tar.gz`).
 2. From your MacBook (as `nvidia`, the bootstrap path):
 
 ```bash
-mkdir -p .cache/receptor && tar xzf ~/Downloads/dgx-spark-02_install_bundle.tar.gz -C .cache/receptor
-cd .cache/receptor/dgx-spark-02_install_bundle
+mkdir -p .cache/receptor && tar xzf ~/Downloads/dgx-spark-2_install_bundle.tar.gz -C .cache/receptor
+cd .cache/receptor/dgx-spark-2_install_bundle
 ansible-galaxy collection install -r requirements.yml       # ansible.receptor
 # the bundle ships install_receptor.yml + inventory.yml; point it at the Spark:
 ansible-playbook -i inventory.yml install_receptor.yml -e ansible_user=nvidia -K
 ```
 
-3. Back in AWX the instance moves to **Ready**. Health-check it: `awx instances health_check dgx-spark-02`.
+3. Back in AWX the instance moves to **Ready**. Health-check it: `awx instances health_check dgx-spark-2`.
 4. Put it in an instance group `spark-exec` and point job templates at it.
 
 On the Spark, check it:
@@ -251,7 +251,7 @@ Useful series: `awx_pending_jobs_total`, `awx_running_jobs_total`, `awx_instance
 
 ## 5. Validation
 
-- [ ] dgx-spark-02 shows **Ready** as an execution node and runs `spark · validate`.
+- [ ] dgx-spark-2 shows **Ready** as an execution node and runs `spark · validate`.
 - [ ] A job's machine credential uses a vault01-signed cert (job output shows `Signed SSH` lookup; the Spark's `/var/log/auth.log` shows `Accepted publickey for svc-ansible ... ED25519-CERT ID ... (serial N) CA`).
 - [ ] The drift workflow pauses for approval when you introduce drift.
 - [ ] Restore drill: credentials decrypt in the restored instance.

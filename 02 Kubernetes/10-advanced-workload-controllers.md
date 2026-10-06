@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | A Qdrant vector database as a StatefulSet whose data survives pod deletion, a per-node GPU/UMA probe DaemonSet feeding Prometheus, a sharded tokenizer as an Indexed Job with per-shard retries and a corrupt-shard rehearsal, and PodDisruptionBudgets — written inside a vCluster — that make a root `kubectl drain` safe |
-| **Hardware** | dgx-spark-01 |
+| **Hardware** | dgx-spark-1 |
 | **Time** | 90 min |
 | **Risk** | Low. §5.5 drains only with `--dry-run=server`; a real drain of the only node stops all three clusters' workloads |
 | **Clusters** | `llms` (Qdrant + PDBs), `dev-lab` (tokenizer Job), `spark-root` (node probe, the drain, and where every pod really runs) |
@@ -52,7 +52,7 @@ flowchart TB
     direction LR
     JOB["Indexed Job tokenize-shards<br/>8 completions · 2 parallel"]
   end
-  subgraph ROOT["Root cluster spark-root · dgx-spark-01"]
+  subgraph ROOT["Root cluster spark-root · dgx-spark-1"]
     direction TB
     subgraph VCL["namespace vc-llms"]
       Q0["qdrant-0-x-llm-serving-x-llms"] --> PVC0[("PVC data-qdrant-0-x-llm-serving-x-llms<br/>local-nvme-retain 20Gi")]
@@ -62,7 +62,7 @@ flowchart TB
       I0["tokenize-shards-0-…-x-tenant-alpha-x-dev-lab"] --- I1["index 1 … 7"]
     end
     subgraph PT["namespace platform-tools"]
-      NP1["DaemonSet spark-node-probe<br/>pod on dgx-spark-01"]
+      NP1["DaemonSet spark-node-probe<br/>pod on dgx-spark-1"]
     end
     EVICT["Eviction API"]
   end
@@ -71,7 +71,7 @@ flowchart TB
   JOB -. "syncer" .-> I0
   NP1 --> TF[("/var/lib/prometheus/node-exporter<br/>k8s_node_probe.prom")]
   TF --> NE["host node-exporter :9100"] --> PROM["Prometheus (observability)"]
-  DRAIN(["kubectl --context spark-root drain dgx-spark-01"]) --> EVICT
+  DRAIN(["kubectl --context spark-root drain dgx-spark-1"]) --> EVICT
   EVICT -. "checks" .-> PDBR
   PDBR -. "blocks eviction" .-> Q0
   classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
@@ -218,7 +218,7 @@ kill %1
 sudo ls /data/k8s/retain/vc-llms/data-qdrant-0-x-llm-serving-x-llms/collections/   # on the Spark: spark
 ```
 
-Who recreated `qdrant-0`? llms's StatefulSet controller, which saw its pod disappear. The root never knew a StatefulSet was involved — it just got a new pod from the syncer, with the same name and the same PVC, and the root scheduler put it back on dgx-spark-01 because that's where the local PV lives.
+Who recreated `qdrant-0`? llms's StatefulSet controller, which saw its pod disappear. The root never knew a StatefulSet was involved — it just got a new pod from the syncer, with the same name and the same PVC, and the root scheduler put it back on dgx-spark-1 because that's where the local PV lives.
 
 ### 5.2 Canary a StatefulSet update with `partition`
 
@@ -247,20 +247,20 @@ curl -s localhost:9100/metrics | grep spark_probe_               # host node-exp
 ```
 
 ```text
-spark_probe_gpu_temp_celsius{node="dgx-spark-01"} 41
-spark_probe_mem_available_bytes{node="dgx-spark-01"} 9.87e+10
+spark_probe_gpu_temp_celsius{node="dgx-spark-1"} 41
+spark_probe_mem_available_bytes{node="dgx-spark-1"} 9.87e+10
 ```
 
-`DESIRED` is the number of nodes labelled `spark.lab/gpu=gb10` — 1 now, 2 when dgx-spark-02 joins as a root worker. Both vClusters see the same nodes (`sync.fromHost.nodes`), so a DaemonSet written *inside* a vCluster would also get one pod per node; the reason this one lives on the root is the hostPath it needs, not the node count.
+`DESIRED` is the number of nodes labelled `spark.lab/gpu=gb10` — 1 now, 2 when dgx-spark-2 joins as a root worker. Both vClusters see the same nodes (`sync.fromHost.nodes`), so a DaemonSet written *inside* a vCluster would also get one pod per node; the reason this one lives on the root is the hostPath it needs, not the node count.
 
 Cordon the node and confirm the probe keeps running (it tolerates everything). On a one-node lab, a cordon stops new pods in **all three clusters**, so uncordon straight away:
 
 ```bash
-kubectl --context spark-root cordon dgx-spark-01
+kubectl --context spark-root cordon dgx-spark-1
 kubectl --context spark-root -n platform-tools rollout restart ds spark-node-probe
 kubectl --context spark-root -n platform-tools rollout status ds spark-node-probe --timeout=60s
 kubectl --context spark-root -n platform-tools get pods -l app=spark-node-probe
-kubectl --context spark-root uncordon dgx-spark-01
+kubectl --context spark-root uncordon dgx-spark-1
 ```
 
 The DaemonSet pod comes back on a cordoned node because the DaemonSet controller adds a toleration for `node.kubernetes.io/unschedulable` to every pod it creates, and `operator: Exists` covers any other taint.
@@ -330,7 +330,7 @@ vc-llms     qdrant-x-llm-serving-x-llms      N/A             0                 0
 
 ```bash
 scripts/breakfix.sh inject 11          # (re)applies llms/50-workloads and prints the drain command
-kubectl --context spark-root drain dgx-spark-01 --ignore-daemonsets --delete-emptydir-data --dry-run=server 2>&1 | grep -E 'qdrant|llms-0|dev-lab-0|disruption'
+kubectl --context spark-root drain dgx-spark-1 --ignore-daemonsets --delete-emptydir-data --dry-run=server 2>&1 | grep -E 'qdrant|llms-0|dev-lab-0|disruption'
 ```
 
 Expected:
@@ -346,7 +346,7 @@ Three things to read out of that:
 
 1. **The block is correct.** One replica, `maxUnavailable: 0` → zero allowed disruptions. Without PDB sync the root would have no idea the pod mattered and would evict a tenant's only copy of its data. That's exactly why the sync is switched on.
 2. **The vCluster control planes are evictable.** `llms-0` and `dev-lab-0` are ordinary StatefulSet pods on the root. A real drain takes both tenant API servers down; tenant pods that are already running are root pods and live on until they are evicted too. The root's own control plane is different: static pods are mirror pods, which `drain` skips.
-3. **One node is every cluster's only node.** Draining dgx-spark-01 for real is a full outage of all three clusters. With dgx-spark-02 joined, the same drain moves pods instead of stopping them, and the PDBs decide the pace.
+3. **One node is every cluster's only node.** Draining dgx-spark-1 for real is a full outage of all three clusters. With dgx-spark-2 joined, the same drain moves pods instead of stopping them, and the PDBs decide the pace.
 
 `scripts/breakfix.sh hint 11` / `answer 11` walk the same diagnosis. The runbook for planned maintenance on a single-replica store: **snapshot → scale to 0 (or delete the PDB) → drain → maintain → uncordon → restore**:
 
@@ -355,9 +355,9 @@ kubectl --context llms -n llm-serving port-forward svc/qdrant 6333 & sleep 2
 curl -s -X POST localhost:6333/collections/spark/snapshots | jq -r .result.name
 kill %1
 kubectl --context llms -n llm-serving scale sts qdrant --replicas=0
-kubectl --context spark-root drain dgx-spark-01 --ignore-daemonsets --delete-emptydir-data     # really, on maintenance day
+kubectl --context spark-root drain dgx-spark-1 --ignore-daemonsets --delete-emptydir-data     # really, on maintenance day
 # … maintain, reboot …
-kubectl --context spark-root uncordon dgx-spark-01
+kubectl --context spark-root uncordon dgx-spark-1
 kubectl --context llms -n llm-serving scale sts qdrant --replicas=1
 ```
 
@@ -371,7 +371,7 @@ Note who does what: the *tenant* (llms admin) scales Qdrant; the *platform* (roo
 |---|---|
 | `points_count` after deleting `qdrant-0` | 2 |
 | `kubectl --context spark-root -n vc-llms get sts` | only `llms` |
-| DaemonSet `DESIRED = READY` | 1 (2 with dgx-spark-02) |
+| DaemonSet `DESIRED = READY` | 1 (2 with dgx-spark-2) |
 | tokenizer at `parallelism: 3` | `FailedCreate … exceeded quota: tenant-budget` in dev-lab, still 2 pods running |
 | `completedIndexes` of a clean run | `0-7` |
 | corrupt-shard run | `failedIndexes: 3`, one pod for index 3 |
@@ -388,7 +388,7 @@ Note who does what: the *tenant* (llms admin) scales Qdrant; the *platform* (roo
 | `qdrant-0` Pending in llms with a sync error, no scheduler events | root quota on `vc-llms` spent (memory or `requests.storage`) | `kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget` | free capacity in llms or resize the vCluster (Vol 27 §6.5) |
 | Rolling update stuck on the highest ordinal | new pod never Ready (bad image/config), and OrderedReady waits forever | `kubectl --context llms -n llm-serving rollout status sts/qdrant`, pod events | fix the spec, then **delete the stuck pod** (StatefulSets don't auto-replace a broken new revision) |
 | Data "lost" after `kubectl delete sts` | you also deleted PVCs, or reclaimPolicy was Delete | `kubectl --context spark-root get pv \| grep qdrant` | use `local-nvme-retain` + retention policy Retain (as in the lab) |
-| DaemonSet `DESIRED 0` | nodeSelector label missing (node joined without the role's kubelet labels) | `kubectl --context spark-root get nodes -L spark.lab/gpu` | re-run `05-kubernetes.yml`, or `kubectl --context spark-root label node dgx-spark-01 spark.lab/gpu=gb10` |
+| DaemonSet `DESIRED 0` | nodeSelector label missing (node joined without the role's kubelet labels) | `kubectl --context spark-root get nodes -L spark.lab/gpu` | re-run `05-kubernetes.yml`, or `kubectl --context spark-root label node dgx-spark-1 spark.lab/gpu=gb10` |
 | DaemonSet pod rejected by PSA | applied into a `baseline` namespace (e.g. a vCluster) | the `FailedCreate` event names `hostPath` | node-level tools go in root `platform-tools` |
 | Job creates fewer pods than `parallelism` | tenant quota inside dev-lab | `kubectl --context dev-lab -n tenant-alpha get events` → `exceeded quota: tenant-budget` | lower parallelism or requests; the quota is the platform team's (dev-lab/10-tenancy) |
 | Job `BackoffLimitExceeded` | one bad shard exhausted a job-wide `backoffLimit` | `kubectl --context dev-lab -n tenant-alpha describe job tokenize-shards` | `backoffLimitPerIndex` + `podFailurePolicy` |

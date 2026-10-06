@@ -72,7 +72,7 @@ flowchart TB
   all --> spark
   all --> control & k8s_control_plane & k8s_workers & slurm_controller & slurm_compute & monitoring & nfs_server & nfs_client
   control --> lh[localhost]
-  spark --> s1[dgx-spark-01] & s2[dgx-spark-02]
+  spark --> s1[dgx-spark-1] & s2[dgx-spark-2]
   k8s_control_plane --> s1
   k8s_workers --> s2
   slurm_compute --> spark
@@ -208,7 +208,7 @@ Each physical QSFP cage shows up as **two** netdevs (`enp1s0f1np1` and `enP2p1s0
 ---
 # Static inventory for the DGX Spark lab.
 #
-#   Single-Spark mode: delete dgx-spark-02 (or leave it commented) — every playbook
+#   Single-Spark mode: delete dgx-spark-2 (or leave it commented) — every playbook
 #   works on one node; 2-node sections are skipped automatically.
 #
 #   Management network (10GbE RJ-45, enP7s7) : 192.168.0.0/24
@@ -224,23 +224,23 @@ all:
           ansible_python_interpreter: "{{ ansible_playbook_python }}"
     spark:
       hosts:
-        dgx-spark-01:
+        dgx-spark-1:
           ansible_host: 192.168.0.100
-        dgx-spark-02:
+        dgx-spark-2:
           ansible_host: 192.168.0.101
 
     # ---- functional groups (a host can be in several) -------------------
-    # Kubernetes (Volume 16): kubeadm control plane on dgx-spark-01. It also runs
+    # Kubernetes (Volume 16): kubeadm control plane on dgx-spark-1. It also runs
     # workloads (no control-plane taint), so a single Spark is a complete cluster.
     k8s_control_plane:
       hosts:
-        dgx-spark-01:
+        dgx-spark-1:
     k8s_workers:
       hosts:
-        dgx-spark-02:
+        dgx-spark-2:
     slurm_controller:
       hosts:
-        dgx-spark-01:
+        dgx-spark-1:
     slurm_compute:
       children:
         spark:
@@ -249,13 +249,13 @@ all:
     # never configured by these playbooks. Their addresses live in group_vars/all.yml.
     monitoring:
       hosts:
-        dgx-spark-01:
+        dgx-spark-1:
     nfs_server:
       hosts:
-        dgx-spark-01:
+        dgx-spark-1:
     nfs_client:
       hosts:
-        dgx-spark-02:
+        dgx-spark-2:
 ```
 
 ```yaml
@@ -328,7 +328,7 @@ spark_sysctls:
 ```
 
 ```yaml
-# lab/inventory/host_vars/dgx-spark-01.yml
+# lab/inventory/host_vars/dgx-spark-1.yml
 ---
 spark_node_index: 1
 
@@ -350,7 +350,7 @@ Check that Ansible sees what you meant:
 
 ```bash
 ansible-inventory --graph
-ansible-inventory --host dgx-spark-01 --yaml | head -40     # merged vars for one host
+ansible-inventory --host dgx-spark-1 --yaml | head -40     # merged vars for one host
 ansible -m debug -a "var=cx7_interfaces" spark           # per-host value
 ```
 
@@ -386,24 +386,24 @@ ansible -m debug -a "var=cx7_interfaces" spark           # per-host value
 In Semaphore this is the template **`00 Ping`** ([00b §5.6](00b-dgx-spark-semaphore-target.md)): the log shows play 1, *Get an SSH certificate from Vault*, then this play. From the MacBook (bootstrap or break-glass):
 
 ```bash
-ansible-playbook playbooks/00-ping.yml -l dgx-spark-01,localhost -K     # -K prompts for nvidia's sudo password
+ansible-playbook playbooks/00-ping.yml -l dgx-spark-1,localhost -K     # -K prompts for nvidia's sudo password
 ```
 
 Expected output (trimmed; your exact numbers and kernel will differ):
 
 ```
-ok: [dgx-spark-01] => msg: dgx-spark-01 aarch64 20 cores 119.6 GiB Ubuntu 24.04 kernel 6.x-…-nvidia
+ok: [dgx-spark-1] => msg: dgx-spark-1 aarch64 20 cores 119.6 GiB Ubuntu 24.04 kernel 6.x-…-nvidia
 ```
 
 > The reported memory is slightly under 128 GB: firmware and carve-outs take some. The `spark_expected.mem_total_gib_min: 110` guard allows for that.
 
-Ad-hoc commands are how you poke a box without writing a playbook. Semaphore runs playbooks, not ad-hoc commands, so these run **from your MacBook** as `nvidia` (no Semaphore variable group → your own key). Name the host instead of the group `spark` while the optional dgx-spark-02 isn't there:
+Ad-hoc commands are how you poke a box without writing a playbook. Semaphore runs playbooks, not ad-hoc commands, so these run **from your MacBook** as `nvidia` (no Semaphore variable group → your own key). Name the host instead of the group `spark` while the optional dgx-spark-2 isn't there:
 
 ```bash
-ansible dgx-spark-01 -m command -a "nvidia-smi --query-gpu=name,driver_version --format=csv"
-ansible dgx-spark-01 -m shell   -a "free -g | head -2"
-ansible dgx-spark-01 -m setup   -a "filter=ansible_processor*"
-ansible dgx-spark-01 -b -K -m apt -a "name=nvtop state=present"   # -b = become, -K = nvidia's sudo password
+ansible dgx-spark-1 -m command -a "nvidia-smi --query-gpu=name,driver_version --format=csv"
+ansible dgx-spark-1 -m shell   -a "free -g | head -2"
+ansible dgx-spark-1 -m setup   -a "filter=ansible_processor*"
+ansible dgx-spark-1 -b -K -m apt -a "name=nvtop state=present"   # -b = become, -K = nvidia's sudo password
 ```
 
 ### Step 5 — Teach Ansible about the GPU: custom facts
@@ -704,9 +704,9 @@ The `spark_baseline` role installs the tooling you'll need in every later volume
 In Semaphore: template `01 Baseline` (tick *Dry run* / `--check --diff` for the preview), run it, then run it again. From the MacBook:
 
 ```bash
-ansible-playbook playbooks/01-baseline.yml -l dgx-spark-01,localhost -K --check --diff   # preview
-ansible-playbook playbooks/01-baseline.yml -l dgx-spark-01,localhost -K                  # apply
-ansible-playbook playbooks/01-baseline.yml -l dgx-spark-01,localhost -K                  # again → changed=0
+ansible-playbook playbooks/01-baseline.yml -l dgx-spark-1,localhost -K --check --diff   # preview
+ansible-playbook playbooks/01-baseline.yml -l dgx-spark-1,localhost -K                  # apply
+ansible-playbook playbooks/01-baseline.yml -l dgx-spark-1,localhost -K                  # again → changed=0
 ```
 
 **The second run must report `changed=0`.** If it doesn't, a task isn't idempotent. Fix it before moving on, or drift detection (Volume 22) will cry wolf forever.
@@ -755,7 +755,7 @@ A diagnostic sequence worth memorising:
 ```bash
 ansible spark -m ping -vvv 2>&1 | grep -E 'ESTABLISH|EXEC|SSH:'   # is it SSH, sudo or Python?
 ansible-config dump --only-changed                                # which config is actually in effect
-ansible-inventory --host dgx-spark-02 --yaml                          # which vars will be used
+ansible-inventory --host dgx-spark-2 --yaml                          # which vars will be used
 ansible-playbook playbooks/01-baseline.yml --list-tasks --list-tags
 ansible-playbook playbooks/01-baseline.yml --start-at-task "Harden sshd (drop-in, validated before reload)" -K
 ```

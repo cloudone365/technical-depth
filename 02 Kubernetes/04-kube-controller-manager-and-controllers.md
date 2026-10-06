@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | Observed reconciliation (Deployment → ReplicaSet → Pod, quota status, garbage collection) in a vCluster and at the root, an outage of the root's controller-manager that dev-lab doesn't notice, the vCluster syncer seen as just another controller, and a working controller in ~150 lines of dependency-free Python. It watches every GPU pod on the Spark — the platform's and the ones both vClusters synced — and keeps a live "who holds which GB10 slice" ledger |
-| **Hardware** | dgx-spark-01. The controller also runs on the fake-GPU kind cluster (`tests/fake-gpu-node.sh`) |
+| **Hardware** | dgx-spark-1. The controller also runs on the fake-GPU kind cluster (`tests/fake-gpu-node.sh`) |
 | **Time** | 90 min |
 | **Risk** | Low. §5.3 stops the root's controller-manager for a minute (the kubelet restarts it when you put the manifest back) |
 | **Clusters** | `dev-lab` (Deployment/ReplicaSet/Job/quota/GC inside a vCluster) · `spark-root` (leases, the root controller-manager, the syncer's writes, `slice-ledger` in `platform-tools`) |
@@ -64,7 +64,7 @@ flowchart TB
     DKCM <--> DAPI
     SYN <--> DAPI
   end
-  subgraph ROOT["root control plane · static pods on dgx-spark-01"]
+  subgraph ROOT["root control plane · static pods on dgx-spark-1"]
     RAPI["root API server<br/>(etcd)"]
     RKCM["root controller-manager<br/>node lifecycle · node IPAM · PV binding · quota on vc-* · GC<br/>+ Deployments of the platform"]
     RS["root scheduler"]
@@ -111,9 +111,9 @@ A tenant's Deployment never reaches the root. Its **ReplicaSet and Pods are crea
 
 | Lease | Cluster / namespace | Holder format | Renew / lease duration |
 |---|---|---|---|
-| `kube-controller-manager` | root / kube-system | `dgx-spark-01_<uuid>` | 2 s / 15 s |
-| `kube-scheduler` | root / kube-system | `dgx-spark-01_<uuid>` | 2 s / 15 s |
-| `dgx-spark-01` (node heartbeat) | root / kube-node-lease | `dgx-spark-01` | 10 s / 40 s |
+| `kube-controller-manager` | root / kube-system | `dgx-spark-1_<uuid>` | 2 s / 15 s |
+| `kube-scheduler` | root / kube-system | `dgx-spark-1_<uuid>` | 2 s / 15 s |
+| `dgx-spark-1` (node heartbeat) | root / kube-node-lease | `dgx-spark-1` | 10 s / 40 s |
 | controller-manager of a vCluster | inside that vCluster, if leader election is on | — | check in §5.1: with one control-plane replica there's nothing to elect |
 
 ### 3.3 slice-ledger design
@@ -271,7 +271,7 @@ kubectl --context spark-root -n platform-tools logs deploy/slice-ledger -f &
 kubectl --context spark-root apply -k manifests/root/70-gpu
 kubectl --context spark-root -n platform-tools scale deploy gemm-contention --replicas=2   # NGC PyTorch ≈ 10 GB on first pull
 scripts/breakfix.sh inject 02                                         # dev-lab: 6 × 1 slice, the root quota lets 2 through
-kubectl --context spark-root -n platform-tools get cm gpu-slice-ledger -o jsonpath='{.data.dgx-spark-01}' | jq
+kubectl --context spark-root -n platform-tools get cm gpu-slice-ledger -o jsonpath='{.data.dgx-spark-1}' | jq
 kubectl --context spark-root -n platform-tools get cm gpu-slice-ledger -o jsonpath='{.data.by-namespace}' | jq
 ```
 
@@ -279,8 +279,8 @@ Expected log and ledger (counts include anything else holding slices, such as se
 
 ```text
 relist: 0 GPU pods, resourceVersion=81234
-reconciled: dgx-spark-01=2/15
-reconciled: dgx-spark-01=4/15
+reconciled: dgx-spark-1=2/15
+reconciled: dgx-spark-1=4/15
 ```
 
 ```json
@@ -302,9 +302,9 @@ Now test the three robustness properties:
 sleep 130; kubectl --context spark-root -n platform-tools logs deploy/slice-ledger --since=2m | grep -c reconciled   # 0
 
 # level-triggered: edit the ConfigMap behind its back; the next event or resync repairs… only if it differs from *its* memory
-kubectl --context spark-root -n platform-tools patch cm gpu-slice-ledger --type merge -p '{"data":{"dgx-spark-01":"tampered"}}'
+kubectl --context spark-root -n platform-tools patch cm gpu-slice-ledger --type merge -p '{"data":{"dgx-spark-1":"tampered"}}'
 kubectl --context spark-root -n platform-tools scale deploy gemm-contention --replicas=1   # any change → reconcile → rewrite
-kubectl --context spark-root -n platform-tools get cm gpu-slice-ledger -o jsonpath='{.data.dgx-spark-01}' | jq .used
+kubectl --context spark-root -n platform-tools get cm gpu-slice-ledger -o jsonpath='{.data.dgx-spark-1}' | jq .used
 
 # least privilege: it can't touch other ConfigMaps
 kubectl --context spark-root auth can-i update configmaps/other -n platform-tools \

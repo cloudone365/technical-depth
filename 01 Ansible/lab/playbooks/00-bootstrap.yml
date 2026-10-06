@@ -2,7 +2,7 @@
 # Day-1 bootstrap for a Spark that just finished the first-boot wizard.
 # Password auth is still on, you have no key trust yet, and it's on DHCP.
 #
-#   ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-02 -k -K \
+#   ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-2 -k -K \
 #     -e bootstrap_current_ip=<current DHCP IP> [-e bootstrap_static_ip=true]
 #
 # NOTE: don't pass -e ansible_host=… — extra vars outrank set_fact, so Ansible

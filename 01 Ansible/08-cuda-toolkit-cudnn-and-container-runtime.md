@@ -232,7 +232,7 @@ Your NGC key lives in **vault01** at `kv/spark-lab/ngc` ([00b §6](00b-dgx-spark
 ```bash
 cd "01 Ansible/lab"
 export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=$PWD/.cache/vault-ca.crt   # vault login first
-ansible-playbook playbooks/03-containers.yml -l dgx-spark-01,localhost -K \
+ansible-playbook playbooks/03-containers.yml -l dgx-spark-1,localhost -K \
   -e ngc_api_key="$(vault kv get -field=api_key kv/spark-lab/ngc)"
 ```
 
@@ -388,7 +388,7 @@ int main() {
 Semaphore template `18 CUDA smoke`, or break-glass:
 
 ```bash
-ansible-playbook playbooks/18-cuda-smoke.yml -l dgx-spark-01,localhost -K
+ansible-playbook playbooks/18-cuda-smoke.yml -l dgx-spark-1,localhost -K
 ```
 
 What to look for in the output:
@@ -455,8 +455,8 @@ Automate it with a weekly systemd timer from Ansible (exercise), but **never** p
 
 ```bash
 # MacBook (as nvidia); in Semaphore, run 18 CUDA smoke instead of the second line
-ansible dgx-spark-01 -b -K -m command -a "docker run --rm --device nvidia.com/gpu=all nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04 nvidia-smi -L"
-ansible-playbook playbooks/18-cuda-smoke.yml -l dgx-spark-01,localhost -K
+ansible dgx-spark-1 -b -K -m command -a "docker run --rm --device nvidia.com/gpu=all nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04 nvidia-smi -L"
+ansible-playbook playbooks/18-cuda-smoke.yml -l dgx-spark-1,localhost -K
 ```
 
 - [ ] Both `--gpus` and CDI smoke tests pass.

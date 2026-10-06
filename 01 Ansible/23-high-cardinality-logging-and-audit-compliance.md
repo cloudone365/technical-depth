@@ -16,13 +16,13 @@
 
 | Question | Layer that answers it |
 |---|---|
-| "Which playbook run changed `/etc/sysctl.d/90-spark.conf` on dgx-spark-02 last Tuesday, and with what diff?" | **ARA** (+ `ansible.log`) |
+| "Which playbook run changed `/etc/sysctl.d/90-spark.conf` on dgx-spark-2 last Tuesday, and with what diff?" | **ARA** (+ `ansible.log`) |
 | "Did someone edit netplan by hand outside Ansible?" | **auditd** key `network` + drift (Volume 22) |
-| "What did the kernel say about the GPU right before the job died?" | **Loki**: `{host="dgx-spark-02"} \|= "NVRM: Xid"` |
+| "What did the kernel say about the GPU right before the job died?" | **Loki**: `{host="dgx-spark-2"} \|= "NVRM: Xid"` |
 | "Who read the NGC key?" | **vault01's audit log**, `/var/log/vault_audit.log` on vault01 (00a §3.5): the `kv/data/spark-lab/ngc` read by the `semaphore` AppRole token, or by an admin |
 | "Who ran `21 Emergency drain` on Saturday, with which extra variables, and did it succeed?" | **Semaphore task history** on sema01 (task log, user, start/end, status), kept in its PostgreSQL |
 | "Which credential did that run log in with?" | **sshd** on the Spark: `Accepted publickey for svc-ansible … ED25519-CERT ID vault-… serial N CA …`, matched by time to the `sign/ansible` entry in vault01's audit log |
-| "Who raised the `vc-llms` GPU quota, and what did the request body say?" | **Kubernetes API audit log** on dgx-spark-01, `/var/log/kubernetes/audit/audit.log` (written by the root kube-apiserver; §4.5) |
+| "Who raised the `vc-llms` GPU quota, and what did the request body say?" | **Kubernetes API audit log** on dgx-spark-1, `/var/log/kubernetes/audit/audit.log` (written by the root kube-apiserver; §4.5) |
 | "Who launched the remediation job and who approved it?" | **Semaphore** task history (this lab); **AWX** activity stream + job history if you run AWX (Volume 20) |
 
 ## 2. Architecture
@@ -33,10 +33,10 @@ flowchart LR
     AU["auditd<br/>/etc/audit/rules.d/60-spark.rules<br/>→ /var/log/audit/audit.log"] --> AL
     K["kernel (NVRM, mlx5)"] --> J
     SVC["sshd (incl. ED25519-CERT logins) · sudo · kubelet · containerd · slurmd · docker"] --> J
-    KA["kube-apiserver (static pod, dgx-spark-01)<br/>→ /var/log/kubernetes/audit/audit.log"] -.->|"not shipped by default (§4.5)"| AL
+    KA["kube-apiserver (static pod, dgx-spark-1)<br/>→ /var/log/kubernetes/audit/audit.log"] -.->|"not shipped by default (§4.5)"| AL
     J["journald<br/>(persistent, 4G cap)"] --> AL["Grafana Alloy<br/>loki.source.journal + loki.source.file"]
   end
-  subgraph MON["monitoring host (dgx-spark-01)"]
+  subgraph MON["monitoring host (dgx-spark-1)"]
     LOKI["Loki :3100<br/>tsdb v13, 30d retention"]
     ARA["ARA API :8000<br/>sqlite"]
     GRAF["Grafana :3000<br/>datasources: Prometheus + Loki"]
@@ -379,7 +379,7 @@ compactor:
 
 ### 4.1 Deploy
 
-Run the Semaphore template **`23 Logging audit`** (break-glass: `ansible-playbook playbooks/23-logging-audit.yml -l dgx-spark-01,localhost -K`), then:
+Run the Semaphore template **`23 Logging audit`** (break-glass: `ansible-playbook playbooks/23-logging-audit.yml -l dgx-spark-1,localhost -K`), then:
 
 ```bash
 curl -s http://192.168.0.100:3100/ready                        # ready
@@ -394,7 +394,7 @@ The ARA callback runs on the **controller**. The lab's Semaphore image doesn't i
 pip install "ara>=1.7"                                       # client side, on the controller (here: the MacBook)
 export ANSIBLE_CALLBACK_PLUGINS=$(python3 -m ara.setup.callback_plugins)
 export ARA_API_CLIENT=http ARA_API_SERVER=http://192.168.0.100:8000
-ansible-playbook playbooks/01-baseline.yml -l dgx-spark-01,localhost -K
+ansible-playbook playbooks/01-baseline.yml -l dgx-spark-1,localhost -K
 ara playbook list --limit 5
 ara result list --playbook <id> --changed      # every changed task, with the diff
 ```
@@ -410,7 +410,7 @@ One template run leaves three matching records. Run `00 Ping` in Semaphore, then
 cd ~/semaphore && docker compose exec semaphore ls /var/lib/spark-lab/cache   # ansible.log grows with every task
 # vault01: the AppRole login and the signature for that task
 sudo grep -E 'auth/approle/login|sign/ansible' /var/log/vault_audit.log | tail -2 | jq -c '{time, path: .request.path, type}'
-# dgx-spark-01: the login with that certificate, then the sudo commands
+# dgx-spark-1: the login with that certificate, then the sudo commands
 sudo journalctl -u ssh --since "10 minutes ago" | grep 'ED25519-CERT'
 sudo grep svc-ansible /var/log/auth.log | grep COMMAND | tail -3
 ```
@@ -423,7 +423,7 @@ Line the three up by time: the Semaphore task's start, the `sign/ansible` reques
 |---|---|
 | GPU Xid events, all nodes | `{job="systemd-journal", transport="kernel"} \|= "NVRM: Xid"` |
 | CX-7 link flaps | `{transport="kernel"} \|~ "mlx5_core.*(link down\|Link up\|module)"` |
-| sudo commands on dgx-spark-02 | `{host="dgx-spark-02", ident="sudo"}` |
+| sudo commands on dgx-spark-2 | `{host="dgx-spark-2", ident="sudo"}` |
 | Config file watches that fired (auditd log file) | `{job="auditd"} \|~ "key=\"(network\|sshd\|priv\|container-runtime)\""` |
 | SSH logins using vault01 certificates | `{unit="ssh.service"} \|= "ED25519-CERT"` |
 | kubelet / containerd errors | `{unit=~"kubelet.service\|containerd.service", level="err"}` |
@@ -437,8 +437,8 @@ ssh nvidia@192.168.0.101 'sudo sed -i "s/mtu: 9000/mtu: 1500/" /etc/netplan/40-c
 ssh nvidia@192.168.0.101 'sudo ausearch -k network -i --start recent | tail -20'
 # → type=SYSCALL ... comm="sed" ... auid=nvidia ... key="network"
 tools/drift-cycle.sh      # drift reports the fabric template (and doesn't auto-heal it)
-# a human puts it back: Semaphore template 02 Fabric with --limit dgx-spark-02,localhost
-#   (break-glass: ansible-playbook playbooks/02-fabric.yml -K -l dgx-spark-02,localhost)
+# a human puts it back: Semaphore template 02 Fabric with --limit dgx-spark-2,localhost
+#   (break-glass: ansible-playbook playbooks/02-fabric.yml -K -l dgx-spark-2,localhost)
 ```
 
 ### 4.5 The Kubernetes API audit log: root vs vCluster

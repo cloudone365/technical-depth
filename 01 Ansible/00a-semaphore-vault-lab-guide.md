@@ -1,6 +1,6 @@
 # Enterprise Ansible Lab: Semaphore UI + HashiCorp Vault + Automation Account
 
-> **01 Ansible · Step 0a — the management plane.** Build this first. `sema01` (Semaphore) and `vault01` (Vault) stay **outside** the DGX Spark: they run every playbook of the Spark lab, and they must survive when the Spark is rebuilt or reset. When §9 passes, continue with the [step-by-step guide](00-ansible-step-by-step-guide.md): Step 0 (MacBook toolchain), then Step 0b = [00b · Add dgx-spark-01 as a Semaphore target](00b-dgx-spark-semaphore-target.md). Overview: [README](README.md).
+> **01 Ansible · Step 0a — the management plane.** Build this first. `sema01` (Semaphore) and `vault01` (Vault) stay **outside** the DGX Spark: they run every playbook of the Spark lab, and they must survive when the Spark is rebuilt or reset. When §9 passes, continue with the [step-by-step guide](00-ansible-step-by-step-guide.md): Step 0 (MacBook toolchain), then Step 0b = [00b · Add dgx-spark-1 as a Semaphore target](00b-dgx-spark-semaphore-target.md). Overview: [README](README.md).
 
 **Goal:** no human ever holds the automation credential. every Semaphore task starts by asking Vault for a 15-minute SSH certificate, and the targets trust Vault's CA instead of static keys.
 
@@ -849,7 +849,7 @@ Your management plane now works for the two Ubuntu targets. The DGX Spark become
 |---|---|
 | `vault01`: SSH CA, role `ansible`, AppRole `semaphore`, audit log | a KV engine and a read-only policy for lab secrets, attached to AppRole `semaphore` |
 | `sema01`: Semaphore + PostgreSQL, project `lab` | a lab image with `kubectl`/`helm`, a state volume, and a second project `spark-lab` for this repository |
-| targets 192.168.0.201 / .202 | `dgx-spark-01` (192.168.0.100) as a third target, prepared by `playbooks/00b-semaphore-target.yml` |
+| targets 192.168.0.201 / .202 | `dgx-spark-1` (192.168.0.100) as a third target, prepared by `playbooks/00b-semaphore-target.yml` |
 
-Continue with [00b · Add dgx-spark-01 as a Semaphore target](00b-dgx-spark-semaphore-target.md).
+Continue with [00b · Add dgx-spark-1 as a Semaphore target](00b-dgx-spark-semaphore-target.md).
 

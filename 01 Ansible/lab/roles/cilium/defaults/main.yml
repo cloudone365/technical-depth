@@ -20,7 +20,7 @@ cilium_values:
   cni:
     exclusive: false                         # leave room for Multus (playbooks/13-multus-rdma.yml)
   operator:
-    replicas: 1                              # one node (two with dgx-spark-02) — no HA needed
+    replicas: 1                              # one node (two with dgx-spark-2) — no HA needed
     prometheus:
       enabled: true
   prometheus:

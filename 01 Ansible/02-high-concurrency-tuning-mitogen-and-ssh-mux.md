@@ -39,7 +39,7 @@ flowchart LR
     W1[worker 1] & W2[worker 2] & Wn[worker F]
     CM[(ControlMaster sockets<br/>~/.ansible/cp/*)]
   end
-  subgraph Spark["dgx-spark-01 (Docker)"]
+  subgraph Spark["dgx-spark-1 (Docker)"]
     direction TB
     N1[fleet-001 :22001] & N2[fleet-002 :22002] & N3[... ] & N64[fleet-064 :22064]
   end
@@ -73,7 +73,7 @@ CMD ["/usr/sbin/sshd", "-D", "-e"]
 ```yaml
 # lab/playbooks/13-fleet-sim.yml
 ---
-# Spin up N fake nodes (sshd containers) on dgx-spark-01 to practise fleet-scale
+# Spin up N fake nodes (sshd containers) on dgx-spark-1 to practise fleet-scale
 # tuning — forks, pipelining, ControlPersist, strategies, Mitogen (Volume 02A).
 #
 #   ansible-playbook playbooks/13-fleet-sim.yml -e fleet_size=64 -K
