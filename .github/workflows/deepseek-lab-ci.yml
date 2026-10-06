@@ -6,7 +6,7 @@ on:
     paths: ["03 DeepSeek/lab/**", "02 Kubernetes/lab/**", ".github/workflows/deepseek-lab-ci.yml"]
   push:
     branches: [main]
-    paths: ["03 DeepSeek/lab/**"]
+    paths: ["03 DeepSeek/lab/**", ".github/workflows/deepseek-lab-ci.yml"]
   workflow_dispatch:
 
 defaults:
@@ -45,7 +45,14 @@ jobs:
           # surface the failing command and its stderr as an annotation
           exec 2> >(tee /tmp/step.err >&2)
           trap 'echo "::error title=platform step failed::${BASH_COMMAND} :: $(tail -c 1800 /tmp/step.err | tr "\n" " ")"' ERR
+          # The 03 lab runs inside the llms vCluster. Here one kind cluster plays both
+          # the root (fake GB10, StorageClasses) and llms; the real nesting is tested by
+          # k8s-lab CI. Contexts get the lab's names so 02's scripts work unchanged.
+          kubectl config rename-context kind-spark-sim spark-root
+          kubectl config set-context llms --cluster=kind-spark-sim --user=kind-spark-sim
+          kubectl config use-context llms
           tests/fake-gpu-node.sh
+          kubectl --context spark-root apply -f addons/local-path-nvme.yaml
           source versions.env
           kubectl apply --server-side -f "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml"
           # Kueue's webhook also mutates Deployments (incl. LWS's): it must be up first
@@ -59,7 +66,7 @@ jobs:
           done
           # webhooks must be serving before apply-lab.sh creates Kueue/LWS objects
           kubectl -n lws-system rollout status deploy/lws-controller-manager --timeout=5m
-          scripts/apply-lab.sh
+          scripts/apply-lab.sh llms
       - name: All 03 checks (incl. RAG on real Qdrant and server-side dry-run)
         run: QDRANT=/tmp/qdrant API=1 ../../02\ Kubernetes/lab/tests/ci-run.sh tests/run-local-checks.sh
       - name: Ansible one-click playbook — lint, check mode against the kind platform, preflight guards

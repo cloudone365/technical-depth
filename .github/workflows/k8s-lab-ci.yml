@@ -9,7 +9,7 @@ on:
     paths: ["02 Kubernetes/lab/**", "01 Ansible/lab/roles/**", ".github/workflows/k8s-lab-ci.yml"]
   push:
     branches: [main]
-    paths: ["02 Kubernetes/lab/**", "01 Ansible/lab/roles/**"]
+    paths: ["02 Kubernetes/lab/**", "01 Ansible/lab/roles/**", ".github/workflows/k8s-lab-ci.yml"]
   workflow_dispatch:
 
 defaults:
@@ -94,6 +94,14 @@ jobs:
           kubectl config get-contexts
       - name: CRDs/controllers inside llms (Kueue for real; Gateway API, Traefik, KEDA as CRDs only)
         run: |
+          # surface the failing command, its stderr and the pod state as annotations
+          exec 2> >(tee /tmp/step.err >&2)
+          diag() {
+            echo "::error title=llms step failed::${BASH_COMMAND} :: $(tail -c 1200 /tmp/step.err | tr '\n' ' ')"
+            echo "::error title=llms pods::$( (kubectl --context llms get pods -A -o wide; kubectl --context llms -n kueue-system describe pods | grep -A12 -E '^(Events|Conditions|    State|    Last State):') 2>&1 | tail -c 3000 | tr '\n' ' ')"
+            echo "::error title=root vc-llms::$( (kubectl --context spark-root -n vc-llms get pods,events --sort-by=.metadata.creationTimestamp; kubectl --context spark-root -n vc-llms describe quota) 2>&1 | tail -c 3000 | tr '\n' ' ')"
+          }
+          trap diag ERR
           source versions.env
           K="kubectl --context llms"
           $K apply --server-side -f "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml"
