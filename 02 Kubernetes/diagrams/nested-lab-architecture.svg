@@ -11,7 +11,7 @@
 <text x="48" y="128" font-size="10.5" fill="#57606a" text-anchor="start">home LAN 192.168.0.0/24 · the MacBook is only a client</text>
 <rect x="680" y="14" width="240" height="44" rx="5" fill="#fff3e6" stroke="#fb8500" stroke-width="1.4"/>
 <text x="800.0" y="32.85" font-size="11" fill="#1f2328" text-anchor="middle" font-weight="600">sema01 · Semaphore :3000</text>
-<text x="800.0" y="46.85" font-size="10" fill="#1f2328" text-anchor="middle">runs every playbook (01 Ansible 00b)</text>
+<text x="800.0" y="46.85" font-size="10" fill="#1f2328" text-anchor="middle">runs every playbook (01 Ansible Step 04)</text>
 <rect x="680" y="64" width="240" height="42" rx="5" fill="#ffebe9" stroke="#cf222e" stroke-width="1.4"/>
 <text x="800.0" y="81.85" font-size="11" fill="#1f2328" text-anchor="middle" font-weight="600">vault01 · SSH CA · lab secrets</text>
 <text x="800.0" y="95.85" font-size="10" fill="#1f2328" text-anchor="middle">15-min certificates for svc-ansible</text>

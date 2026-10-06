@@ -1,6 +1,6 @@
-# Volume 23 — Logging & Audit Trails: Who Changed What, When, and Through Which Automation
+# Step 27 · Logging & Audit Trails: Who Changed What, When, and Through Which Automation
 
-> **Module 01 · Part V — Production SRE** · Prev: [22 Drift](22-configuration-drift-detection-and-self-healing.md) · Next: [24 Emergency drain & remediation](24-cluster-wide-emergency-drain-and-remediation.md)
+> **01 Ansible · Part V — Production operations · Step 27 of 30** · ← [Step 26 · Drift & self-healing](26-drift-detection-and-self-healing.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 28 · Firmware & patching](28-firmware-lifecycle-and-vulnerability-patching.md) →
 
 | | |
 |---|---|
@@ -17,13 +17,13 @@
 | Question | Layer that answers it |
 |---|---|
 | "Which playbook run changed `/etc/sysctl.d/90-spark.conf` on dgx-spark-2 last Tuesday, and with what diff?" | **ARA** (+ `ansible.log`) |
-| "Did someone edit netplan by hand outside Ansible?" | **auditd** key `network` + drift (Volume 22) |
+| "Did someone edit netplan by hand outside Ansible?" | **auditd** key `network` + drift (Step 26) |
 | "What did the kernel say about the GPU right before the job died?" | **Loki**: `{host="dgx-spark-2"} \|= "NVRM: Xid"` |
-| "Who read the NGC key?" | **vault01's audit log**, `/var/log/vault_audit.log` on vault01 (00a §3.5): the `kv/data/spark-lab/ngc` read by the `semaphore` AppRole token, or by an admin |
+| "Who read the NGC key?" | **vault01's audit log**, `/var/log/vault_audit.log` on vault01 (Step 01 §3.5): the `kv/data/spark-lab/ngc` read by the `semaphore` AppRole token, or by an admin |
 | "Who ran `21 Emergency drain` on Saturday, with which extra variables, and did it succeed?" | **Semaphore task history** on sema01 (task log, user, start/end, status), kept in its PostgreSQL |
 | "Which credential did that run log in with?" | **sshd** on the Spark: `Accepted publickey for svc-ansible … ED25519-CERT ID vault-… serial N CA …`, matched by time to the `sign/ansible` entry in vault01's audit log |
 | "Who raised the `vc-llms` GPU quota, and what did the request body say?" | **Kubernetes API audit log** on dgx-spark-1, `/var/log/kubernetes/audit/audit.log` (written by the root kube-apiserver; §4.5) |
-| "Who launched the remediation job and who approved it?" | **Semaphore** task history (this lab); **AWX** activity stream + job history if you run AWX (Volume 20) |
+| "Who launched the remediation job and who approved it?" | **Semaphore** task history (this lab); **AWX** activity stream + job history if you run AWX (Step 24) |
 
 ## 2. Architecture
 
@@ -54,7 +54,7 @@ flowchart LR
   class CN,VA mgmt
 ```
 
-vault01's audit file and Semaphore's history stay on their own machines: the lab ships neither to Loki. That's deliberate for a lab (the management plane doesn't depend on the Spark it manages), and the first thing a production design would change: forward both to a SIEM (00a §11).
+vault01's audit file and Semaphore's history stay on their own machines: the lab ships neither to Loki. That's deliberate for a lab (the management plane doesn't depend on the Spark it manages), and the first thing a production design would change: forward both to a SIEM (Step 01 §11).
 
 | Component | Image / package | Config |
 |---|---|---|
@@ -185,7 +185,7 @@ compactor:
 # Audit & logging stack:
 #   * auditd rules on every Spark (who changed sudoers, sshd, netplan, docker, kubernetes, slurm, vault…)
 #   * Loki on the monitoring host + Grafana Alloy on every Spark shipping the journal
-#   * Loki datasource in the Volume 09 Grafana
+#   * Loki datasource in the Step 12 Grafana
 #   * ARA API server recording every ansible-playbook run
 - name: Short-lived SSH certificate from vault01 (Semaphore runs only)
   ansible.builtin.import_playbook: 00-vault-cert.yml
@@ -264,7 +264,7 @@ compactor:
       retries: 30
       delay: 3
 
-    - name: Loki datasource for Grafana (Volume 09 stack)
+    - name: Loki datasource for Grafana (Step 12 stack)
       ansible.builtin.copy:
         dest: /opt/spark-monitoring/grafana/provisioning/datasources/loki.yml
         mode: "0644"
@@ -399,7 +399,7 @@ ara playbook list --limit 5
 ara result list --playbook <id> --changed      # every changed task, with the diff
 ```
 
-To record the **Semaphore** runs too, add `ara` to [`semaphore/requirements-semaphore.txt`](lab/semaphore/requirements-semaphore.txt), rebuild the image (00b §4), and put the three variables in the variable group's environment. Semaphore's task history already answers "who ran what, when"; ARA adds per-task results and diffs you can query. For AWX, install `ara` into the EE (Volume 05) and set the variables in the job template environment (Volume 20).
+To record the **Semaphore** runs too, add `ara` to [`semaphore/requirements-semaphore.txt`](lab/semaphore/requirements-semaphore.txt), rebuild the image (Step 04 §4), and put the three variables in the variable group's environment. Semaphore's task history already answers "who ran what, when"; ARA adds per-task results and diffs you can query. For AWX, install `ara` into the EE (Step 08) and set the variables in the job template environment (Step 24).
 
 ### 4.2b The management-plane trail: Semaphore, vault01, sshd
 
@@ -482,12 +482,12 @@ The 4-layer stack above does **not** ship this file yet: Alloy tails `/var/log/a
 
 | System | Hook |
 |---|---|
-| Alerting (Volume 09) | Loki ruler or Grafana alert on the Xid-rate query, complementing the Prometheus `SparkGPUXid` alert |
-| Drift (Volume 22) | The auditd `key` explains *who/what* caused the drift the playbook found |
-| Drain (Volume 24) | The incident bundle captures local logs; Loki keeps them after the node is re-imaged |
+| Alerting (Step 12) | Loki ruler or Grafana alert on the Xid-rate query, complementing the Prometheus `SparkGPUXid` alert |
+| Drift (Step 26) | The auditd `key` explains *who/what* caused the drift the playbook found |
+| Drain (Step 29) | The incident bundle captures local logs; Loki keeps them after the node is re-imaged |
 | Semaphore (sema01) | Task history in its database; `ansible.log` on the state volume. Neither is shipped to Loki by default |
-| vault01 | `/var/log/vault_audit.log`; forward it to a SIEM in production (00a §11) |
-| AWX (Volume 20) | External logging → Loki (`Settings → Logging`), so job events sit next to host logs |
+| vault01 | `/var/log/vault_audit.log`; forward it to a SIEM in production (Step 01 §11) |
+| AWX (Step 24) | External logging → Loki (`Settings → Logging`), so job events sit next to host logs |
 
 ## 7. Troubleshooting & diagnostics
 

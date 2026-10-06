@@ -1,5 +1,5 @@
 ---
-# Root Kubernetes cluster (Volume 16): kubeadm on every node (control plane
+# Root Kubernetes cluster (Step 19): kubeadm on every node (control plane
 # first, then workers), then the pod network and LoadBalancer IPs.
 #
 #   ansible-playbook playbooks/05-kubernetes.yml

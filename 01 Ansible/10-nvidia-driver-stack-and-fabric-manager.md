@@ -1,6 +1,6 @@
-# Volume 07 — The NVIDIA Driver Stack on DGX Spark: Audit, Pin, Upgrade Safely (and Where Fabric Manager Fits)
+# Step 10 · The NVIDIA Driver Stack on DGX Spark: Audit, Pin, Upgrade Safely (and Where Fabric Manager Fits)
 
-> **Module 01 · Part II — Node Provisioning** · Prev: [06 Provisioning](06-bare-metal-os-provisioning-pxe-and-redfish.md) · Next: [08 CUDA, containers & CDI](08-cuda-toolkit-cudnn-and-container-runtime.md)
+> **01 Ansible · Part II — Node provisioning · Step 10 of 30** · ← [Step 09 · Performance at scale](09-performance-at-scale-ssh-mux-and-mitogen.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 11 · CUDA, NGC containers & CDI](11-cuda-ngc-containers-and-cdi.md) →
 
 | | |
 |---|---|
@@ -49,7 +49,7 @@ flowchart TB
 | HGX/DGX H100/H200/B200 (8 GPUs + NVSwitch) | NVLink through NVSwitch chips | **Required**. `nvidia-fabricmanager` must match the driver version exactly, or CUDA init fails |
 | GB200/GB300 NVL72 | NVLink Switch trays across the rack | Required, plus NVLink management (NMX) |
 | **DGX Spark (GB10)** | NVLink-C2C between CPU and GPU **inside one package**; no NVSwitch | **Not used**. Nothing to install or pin |
-| Multi-Spark | ConnectX-7 Ethernet/RoCE (Volumes 11–12) | Not applicable; NCCL uses the NIC |
+| Multi-Spark | ConnectX-7 Ethernet/RoCE (Steps 13–14) | Not applicable; NCCL uses the NIC |
 
 On a real HGX node, the rule you'd automate is "Fabric Manager version == driver version, installed together, held together, restarted together". The audit playbook's `nvswitch_present` field is where that check would go. The upgrade playbook's "unhold → upgrade → re-hold" flow is exactly what you'd use for `nvidia-fabricmanager-<branch>`.
 
@@ -64,7 +64,7 @@ On a real HGX node, the rule you'd automate is "Fabric Manager version == driver
 | Unhold → upgrade → re-hold | `17-dgxos-upgrade.yml` | Driver moves only inside a drained, validated window |
 | `serial: 1`, `max_fail_percentage: 0` | upgrade play | Never both Sparks at once; the first failure stops the rollout |
 
-> **The DGX Dashboard "Update" button** upgrades packages *and firmware* and then reboots. That's fine for a single personal box. Once the Spark is a shared node (Kubernetes/vCluster and Slurm workloads, a second Spark depending on it), use the playbook so drain, validation and holds wrap the same apt operation. Firmware is covered in Volume 10.
+> **The DGX Dashboard "Update" button** upgrades packages *and firmware* and then reboots. That's fine for a single personal box. Once the Spark is a shared node (Kubernetes/vCluster and Slurm workloads, a second Spark depending on it), use the playbook so drain, validation and holds wrap the same apt operation. Firmware is covered in Step 28.
 
 ---
 
@@ -154,7 +154,7 @@ On a real HGX node, the rule you'd automate is "Fabric Manager version == driver
           loaded={{ driver_audit.module_loaded }} disk={{ driver_audit.module_on_disk }}
           userland={{ driver_audit.nvml_userland }} smi={{ driver_audit.nvidia_smi }}.
           Loaded != disk → reboot pending after an upgrade. Userland != loaded → partial upgrade;
-          see Volume 07 troubleshooting.
+          see Step 10 troubleshooting.
         success_msg: "Driver {{ driver_audit.module_loaded }} ({{ driver_audit.module_flavor }}) consistent"
 ```
 
@@ -198,7 +198,7 @@ driver_audit:
   vars:
     upgrade_dry_run: false
     upgrade_reboot: true
-    upgrade_firmware: false          # fwupd capsules (UEFI/EC/SoC/PD/VBIOS) — see Volume 10
+    upgrade_firmware: false          # fwupd capsules (UEFI/EC/SoC/PD/VBIOS) — see Step 28
   pre_tasks:
     - name: What would be upgraded  # noqa: command-instead-of-module (apt module has no simulate-output mode)
       ansible.builtin.command: apt-get -s full-upgrade
@@ -315,11 +315,11 @@ free -g        # the real memory signal for GPU workloads
 
 | Downstream | Why it cares about the driver |
 |---|---|
-| CDI spec (Volume 08) | Hard-codes library paths and versions. **Regenerate after every driver change** (the upgrade playbook does) |
-| Kubernetes + GPU Operator (Volumes 16–17) | Operator validator pods check the host driver; a mismatch blocks the device plugin |
-| Slurm (Volume 18) | The health check drains a node when `nvidia-smi` fails, which is what a mismatch looks like |
-| NCCL (Volume 12) | Mixed driver or NCCL versions across Sparks: hangs or crashes at init |
-| Drift (Volume 22) | `module_loaded != module_on_disk` = "reboot pending", a first-class drift signal |
+| CDI spec (Step 11) | Hard-codes library paths and versions. **Regenerate after every driver change** (the upgrade playbook does) |
+| Kubernetes + GPU Operator (Steps 19–20) | Operator validator pods check the host driver; a mismatch blocks the device plugin |
+| Slurm (Step 22) | The health check drains a node when `nvidia-smi` fails, which is what a mismatch looks like |
+| NCCL (Step 14) | Mixed driver or NCCL versions across Sparks: hangs or crashes at init |
+| Drift (Step 26) | `module_loaded != module_on_disk` = "reboot pending", a first-class drift signal |
 
 ## 5. Troubleshooting & diagnostics
 
@@ -327,16 +327,16 @@ free -g        # the real memory signal for GPU workloads
 |---|---|---|---|
 | `Failed to initialize NVML: Driver/library version mismatch` | Userland upgraded, old module still loaded | Audit: `nvml_userland != module_loaded` | Reboot (or unload and reload the modules with the GPU idle: stop persistenced, `rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia`, `modprobe nvidia`) |
 | Audit: `module_loaded != module_on_disk` | Upgrade done, reboot pending | `cat /proc/driver/nvidia/version` vs `modinfo nvidia` | Schedule a reboot through the drain playbook |
-| `nvidia-smi` hangs | GPU/driver wedged | `timeout 10 nvidia-smi; echo $?` → 124; `dmesg \| grep -i xid` | Volume 24 Runbook A (drain → bug report → reboot) |
+| `nvidia-smi` hangs | GPU/driver wedged | `timeout 10 nvidia-smi; echo $?` → 124; `dmesg \| grep -i xid` | Step 29 Runbook A (drain → bug report → reboot) |
 | `NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver` | Module not loaded | `lsmod \| grep nvidia`; `journalctl -k -b \| grep -i nvidia` | A kernel updated without a matching module? `apt install --reinstall` the matching `linux-modules-nvidia-*`; check Secure Boot/MOK |
 | Apt wants to remove `nvidia-*` during an upgrade | Held packages conflict with a new kernel | `apt-get -s full-upgrade \| grep -E '^Remv'` | Don't force it. Let the playbook unhold everything together, or wait for a consistent DGX OS release |
-| Containers: `could not select device driver "" with capabilities: [[gpu]]` | Docker has no nvidia runtime/CDI | `docker info \| grep -i runtime` | Volume 08 (`03-containers.yml`) |
+| Containers: `could not select device driver "" with capabilities: [[gpu]]` | Docker has no nvidia runtime/CDI | `docker info \| grep -i runtime` | Step 11 (`03-containers.yml`) |
 | CUDA app: `no kernel image is available for execution on the device` | Binary not built for sm_121 | `cuobjdump --list-elf app \| grep sm_` | Rebuild with `-gencode arch=compute_121,code=sm_121` (or embed PTX); use NGC containers built for Blackwell |
 
 Evidence bundle for NVIDIA support:
 
 ```bash
-sudo nvidia-bug-report.sh          # → nvidia-bug-report.log.gz  (or node_drain_bug_report=true in Volume 24)
+sudo nvidia-bug-report.sh          # → nvidia-bug-report.log.gz  (or node_drain_bug_report=true in Step 29)
 ```
 
 ## 6. Validation

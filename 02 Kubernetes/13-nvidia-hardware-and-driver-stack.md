@@ -86,7 +86,7 @@ flowchart TB
 
 | Rule | Practical meaning on the Spark |
 |---|---|
-| The **driver** (kernel module + `libcuda`) comes from the host | DGX OS 7 ships driver 580.x. The GPU Operator runs with `driver.enabled=false` (01 Ansible Vol 17) |
+| The **driver** (kernel module + `libcuda`) comes from the host | DGX OS 7 ships driver 580.x. The GPU Operator runs with `driver.enabled=false` (01 Ansible Step 20) |
 | The **CUDA runtime/toolkit** comes from the container | `nvcr.io/nvidia/cuda:13.0.1-*`, NGC PyTorch 25.09 → CUDA 13 |
 | Container CUDA major ≤ what the driver supports | driver 580 supports CUDA 13.0 → CUDA 12.x and 13.0 containers run. A CUDA 13.1+ container needs a newer driver (or forward-compat packages) |
 | Kernels must include `sm_121` SASS or PTX for a lower arch | old wheels built only for sm_80/sm_90 without PTX fail with `no kernel image is available for execution on the device` |
@@ -235,7 +235,7 @@ Expected: `exec /bin/uname: exec format error`, with the pod in `Error`. Everyth
 | `exec format error` | amd64 image | `docker manifest inspect` | arm64/multi-arch tag |
 | Throughput half of baseline | thermal/power throttling or another tenant | `nvidia-smi -q -d PERFORMANCE`; GPU pods of *all* clusters: `kubectl --context spark-root get pods -A -o wide` (vCluster pods are in `vc-*`) | airflow. Vol 14 contention |
 | `Xid 13/31/43` in dmesg | app fault (bad kernel, illegal address) | `dmesg -T \| grep -i xid` | fix the workload. The node is fine |
-| `Xid 79` / `GPU has fallen off the bus` / `48` | hardware / severe | same | drain + reboot (01 Ansible `node_drain`, Vol 10 §5.5 — on one Spark that stops all three clusters). If it repeats, open an RMA |
+| `Xid 79` / `GPU has fallen off the bus` / `48` | hardware / severe | same | drain + reboot (01 Ansible `node_drain`, Step 28 §5.5 — on one Spark that stops all three clusters). If it repeats, open an RMA |
 
 ---
 

@@ -1,6 +1,6 @@
-# Volume 08 — CUDA 13, NGC Containers & the NVIDIA Container Toolkit (CDI) on DGX Spark
+# Step 11 · CUDA 13, NGC Containers & the NVIDIA Container Toolkit (CDI) on DGX Spark
 
-> **Module 01 · Part II — Node Provisioning** · Prev: [07 Driver stack](07-nvidia-driver-and-fabric-manager-automation.md) · Next: [09 Telemetry](09-dcgm-telemetry-and-exporter-orchestration.md)
+> **01 Ansible · Part II — Node provisioning · Step 11 of 30** · ← [Step 10 · NVIDIA driver stack](10-nvidia-driver-stack-and-fabric-manager.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 12 · GPU telemetry & alerting](12-gpu-telemetry-and-alerting.md) →
 
 | | |
 |---|---|
@@ -224,7 +224,7 @@ Design choices:
 
 ### 3.1 Converge the runtime
 
-Your NGC key lives in **vault01** at `kv/spark-lab/ngc` ([00b §6](00b-dgx-spark-semaphore-target.md): `08-vault.yml` from the MacBook, then `vault kv put kv/spark-lab/ngc api_key=nvapi-…`). The playbook never sees it in the repository or on a command line:
+Your NGC key lives in **vault01** at `kv/spark-lab/ngc` ([Step 04 §6](04-dgx-spark-as-semaphore-target.md): `08-vault.yml` from the MacBook, then `vault kv put kv/spark-lab/ngc api_key=nvapi-…`). The playbook never sees it in the repository or on a command line:
 
 - **Semaphore (normal):** run the template **`03 Containers`**. With `vault_lab_secrets_enabled: true` in the variable group, play 1 (`00-vault-cert.yml`) reads `kv/spark-lab/ngc` with its AppRole token (policy `spark-lab-read`) into `hostvars['localhost'].vault_lab_secrets`, and `03-containers.yml` passes it to `container_runtime_ngc_api_key` under `no_log`. The task log shows the NGC login task, never the key.
 - **Break-glass (MacBook):** there's no AppRole on the MacBook, so play 1 is skipped. Pass the key yourself, read with your own vault01 login:
@@ -236,7 +236,7 @@ ansible-playbook playbooks/03-containers.yml -l dgx-spark-1,localhost -K \
   -e ngc_api_key="$(vault kv get -field=api_key kv/spark-lab/ngc)"
 ```
 
-`ngc_api_key` wins when it's set; otherwise the playbook falls back to the vault01 value, and with neither (or the placeholder `REPLACE_ME`) it skips the NGC login. Volume 19 explains the play 1 pattern.
+`ngc_api_key` wins when it's set; otherwise the playbook falls back to the vault01 value, and with neither (or the placeholder `REPLACE_ME`) it skips the NGC login. Step 18 explains the play 1 pattern.
 
 Check the result:
 
@@ -401,11 +401,11 @@ What to look for in the output:
 | `cudaMemGetInfo total` | ≈ host MemTotal | There's no separate VRAM, so "GPU memory" means the unified pool |
 | saxpy `effective_bw` | a healthy fraction of the 273 GB/s LPDDR5x peak | Memory-bound kernels are bounded by that bandwidth |
 
-> **The same probe is how you debug `cudaErrorMemoryAllocation` at "only 60 GB used".** On UMA, the page cache, other containers and the CPU side of your own process all eat the same pool. Compare `cudaMemGetInfo free` with `MemAvailable`, then see Volume 24 Runbook C.
+> **The same probe is how you debug `cudaErrorMemoryAllocation` at "only 60 GB used".** On UMA, the page cache, other containers and the CPU side of your own process all eat the same pool. Compare `cudaMemGetInfo free` with `MemAvailable`, then see Step 29 Runbook C.
 
 ### 3.3 Container CUDA: PyTorch
 
-The last task runs a bf16 matmul in `nvcr.io/nvidia/pytorch:25.11-py3` and prints torch/CUDA versions, device name, compute capability (`12.1`) and achieved TFLOPS. Use it as a regression baseline: record the number, and re-run after every driver or DGX OS upgrade (Volume 07).
+The last task runs a bf16 matmul in `nvcr.io/nvidia/pytorch:25.11-py3` and prints torch/CUDA versions, device name, compute capability (`12.1`) and achieved TFLOPS. Use it as a regression baseline: record the number, and re-run after every driver or DGX OS upgrade (Step 10).
 
 ### 3.4 Arm64 image hygiene
 
@@ -432,11 +432,11 @@ Automate it with a weekly systemd timer from Ansible (exercise), but **never** p
 
 | System | Integration point |
 |---|---|
-| Vault (vault01, Volume 19) | `container_runtime_ngc_api_key` from `kv/spark-lab/ngc`, read by play 1 with Semaphore's AppRole token (or `-e ngc_api_key` on the break-glass path); `no_log` on login. The `community.hashi_vault` lookup in the defaults comment is the alternative for controllers without play 1 |
-| Kubernetes (Volume 16) | The `kubeadm_cluster` role reuses this containerd: it enables the CRI plugin (Docker's stock config disables it), sets `SystemdCgroup = true`, and runs `nvidia-ctk runtime configure --runtime=containerd --set-as-default`. `daemon.json` doesn't affect Kubernetes, but a `systemctl restart containerd` restarts the runtime under **both** Docker and every pod (root and vCluster) |
-| GPU Operator (Volume 17) | `toolkit.enabled=false`: the host toolkit from this volume is the one used |
-| Slurm (Volume 18) | Jobs run containers via `srun docker run --gpus …` or enroot/pyxis (a plugin that runs container images inside Slurm jobs) |
-| Drift (Volume 22) | `daemon.json` keys and CDI freshness are checked every run |
+| Vault (vault01, Step 18) | `container_runtime_ngc_api_key` from `kv/spark-lab/ngc`, read by play 1 with Semaphore's AppRole token (or `-e ngc_api_key` on the break-glass path); `no_log` on login. The `community.hashi_vault` lookup in the defaults comment is the alternative for controllers without play 1 |
+| Kubernetes (Step 19) | The `kubeadm_cluster` role reuses this containerd: it enables the CRI plugin (Docker's stock config disables it), sets `SystemdCgroup = true`, and runs `nvidia-ctk runtime configure --runtime=containerd --set-as-default`. `daemon.json` doesn't affect Kubernetes, but a `systemctl restart containerd` restarts the runtime under **both** Docker and every pod (root and vCluster) |
+| GPU Operator (Step 20) | `toolkit.enabled=false`: the host toolkit from this step is the one used |
+| Slurm (Step 22) | Jobs run containers via `srun docker run --gpus …` or enroot/pyxis (a plugin that runs container images inside Slurm jobs) |
+| Drift (Step 26) | `daemon.json` keys and CDI freshness are checked every run |
 
 ## 5. Troubleshooting & diagnostics
 
@@ -447,7 +447,7 @@ Automate it with a weekly systemd timer from Ansible (exercise), but **never** p
 | CDI works, then breaks after an upgrade: `failed to stat ... libcuda.so.580.xx` | `grep libcuda /etc/cdi/nvidia.yaml` vs `nvidia-smi` | Stale spec. Re-run the role (the freshness check regenerates it) |
 | `exec format error` | `docker image inspect IMG --format '{{.Architecture}}'` | amd64 image. Use an arm64 tag or rebuild |
 | `unauthorized: authentication required` from nvcr.io | `cat ~/.docker/config.json \| jq '.auths \| keys'` (as the user who pulls) | Username must be the literal `$oauthtoken`; the key must be valid. Note root's and the user's docker configs are separate |
-| Container OOM-killed / CUDA OOM while `nvidia-smi` shows nothing | `free -g`; `docker stats` | UMA: the host pool is exhausted. Add `--memory` limits, stop idle model servers, drop caches (Volume 24 Runbook C) |
+| Container OOM-killed / CUDA OOM while `nvidia-smi` shows nothing | `free -g`; `docker stats` | UMA: the host pool is exhausted. Add `--memory` limits, stop idle model servers, drop caches (Step 29 Runbook C) |
 | PyTorch: `no kernel image is available` | The container predates Blackwell support | Use a newer NGC tag built for Blackwell (`sm_120`/`sm_121`) |
 | `nvcc fatal: Unsupported gpu architecture 'compute_121'` | `nvcc --version` | The host toolkit is too old; use the CUDA 13.x shipped with DGX OS (`/usr/local/cuda`) |
 

@@ -1,6 +1,6 @@
 # {{ ansible_managed }}
-# kubeadm config for the root cluster (Volume 16; explained line by line in
-# "02 Kubernetes" Volume 01). kubeadm reads this once at 'kubeadm init'.
+# kubeadm config for the root cluster (Step 19; explained line by line in
+# 02 Kubernetes Vol 01). kubeadm reads this once at 'kubeadm init'.
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: InitConfiguration
 localAPIEndpoint:
@@ -96,7 +96,7 @@ evictionHard:
 ---
 apiVersion: kubeproxy.config.k8s.io/v1alpha1
 kind: KubeProxyConfiguration
-# iptables mode on purpose: "02 Kubernetes" Volume 07 reads the KUBE-SVC/KUBE-SEP chains.
+# iptables mode on purpose: 02 Kubernetes Vol 07 reads the KUBE-SVC/KUBE-SEP chains.
 # Cilium runs as the CNI only (kubeProxyReplacement=false).
 mode: iptables
 metricsBindAddress: 0.0.0.0:10249

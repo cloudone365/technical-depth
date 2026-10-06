@@ -100,4 +100,4 @@
         msg:
           - "Avg bus bandwidth: {{ nccl_busbw }} GB/s"
           - "Transport line   : {{ nccl_transport }}"
-          - "If this says NET/Socket, RDMA isn't in use — see Volume 12 troubleshooting."
+          - "If this says NET/Socket, RDMA isn't in use — see Step 14 troubleshooting."

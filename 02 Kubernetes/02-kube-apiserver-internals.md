@@ -131,7 +131,7 @@ Both are flags kubeadm put on the root API server from the 01 Ansible config:
 
 | Flag | File | What it does |
 |---|---|---|
-| `--encryption-provider-config` | `/etc/kubernetes/encryption/config.yaml` (key generated once, mode 0600) | Secrets are stored in etcd encrypted with AES-CBC (`k8s:enc:aescbc:v1:key1:` prefix). Back the key up in vault01's KV (01 Ansible Vol 19) — without it, an etcd backup's Secrets are unreadable |
+| `--encryption-provider-config` | `/etc/kubernetes/encryption/config.yaml` (key generated once, mode 0600) | Secrets are stored in etcd encrypted with AES-CBC (`k8s:enc:aescbc:v1:key1:` prefix). Back the key up in vault01's KV (01 Ansible Step 18) — without it, an etcd backup's Secrets are unreadable |
 | `--audit-policy-file`, `--audit-log-*` | [`audit-policy.yaml`](lab/kubeadm/audit-policy.yaml) → `/var/log/kubernetes/audit/audit.log`, rotated at 100 MB × 5 | Metadata for secrets/configmaps (never payloads), drops noisy reads, **RequestResponse** for every mutation in `vc-dev-lab`, `vc-llms`, `gpu-operator`, `platform-tools` |
 
 The root audit log sees what reached the root: a tenant's pod appears as a **create by the syncer** (`system:serviceaccount:vc-dev-lab:vc-dev-lab`), not by Alice. Alice's own request is in dev-lab's API server. For a per-tenant audit trail, give each vCluster its own audit policy (§5 Step 7, last part).
@@ -142,8 +142,8 @@ The root audit log sees what reached the root: a tenant's pod appears as a **cre
 
 | With | How |
 |---|---|
-| vault01 (01 Ansible 00a, Vol 19) | Store the tenant kubeconfigs `make-user.sh` produces in vault01's KV mount, e.g. `kv/k8s/<cluster>/<user>` — outside `kv/spark-lab/*`, which Semaphore's AppRole can read — and the encryption key `/etc/kubernetes/encryption/config.yaml`. For long-lived automation, prefer Vault's Kubernetes secrets engine, which mints short-lived SA tokens |
-| Loki / Alloy (01 Ansible Vol 23) | Ship `/var/log/kubernetes/audit/audit.log` with a `loki.source.file` block. Query `{job="k8s-audit"} \| json \| verb="delete"` |
+| vault01 (01 Ansible Step 01, Step 18) | Store the tenant kubeconfigs `make-user.sh` produces in vault01's KV mount, e.g. `kv/k8s/<cluster>/<user>` — outside `kv/spark-lab/*`, which Semaphore's AppRole can read — and the encryption key `/etc/kubernetes/encryption/config.yaml`. For long-lived automation, prefer Vault's Kubernetes secrets engine, which mints short-lived SA tokens |
+| Loki / Alloy (01 Ansible Step 27) | Ship `/var/log/kubernetes/audit/audit.log` with a `loki.source.file` block. Query `{job="k8s-audit"} \| json \| verb="delete"` |
 | Kueue (Vol 05) | Tenants get read-only access to `workloads`, so they can see *why* their job is queued |
 | CI (GitHub Actions) | `ci-deployer` token (llms) → `kubectl apply` into `llm-serving` only |
 

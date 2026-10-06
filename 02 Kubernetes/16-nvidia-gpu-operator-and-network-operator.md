@@ -163,8 +163,8 @@ The dashboard is *generated* by [`gen_dashboard.py`](lab/manifests/root/95-obser
 
 ## 4. Integrations
 
-- **01 Ansible Vol 09 (telemetry)**: provides `spark_gpu_*` and `spark_uma_*` metrics, and the `SparkGpuMetricsStale` rule for a textfile collector that stops updating.
-- **01 Ansible Vol 17**: owns the operator's Helm values and the time-slicing ConfigMap. Change replicas/profiles there, then re-run `06-gpu-operator.yml`. If you change the slice count, change the root quotas in `manifests/root/05-vclusters/quotas.yaml` too and run `python3 tests/budget_check.py` — it reads the slice count straight from the role's defaults.
+- **01 Ansible Step 12 (telemetry)**: provides `spark_gpu_*` and `spark_uma_*` metrics, and the `SparkGpuMetricsStale` rule for a textfile collector that stops updating.
+- **01 Ansible Step 20**: owns the operator's Helm values and the time-slicing ConfigMap. Change replicas/profiles there, then re-run `06-gpu-operator.yml`. If you change the slice count, change the root quotas in `manifests/root/05-vclusters/quotas.yaml` too and run `python3 tests/budget_check.py` — it reads the slice count straight from the role's defaults.
 - **01 Ansible `13-multus-rdma.yml`** is the lighter alternative to the Network Operator in §5.6 (Multus thick v4.3.0 + RDMA shared device plugin + NADs `cx7-a`/`cx7-b` in `platform-tools` and `vc-llms`). Use one of the two, not both.
 - **KEDA (Vol 21)** inside `llms` reads the root's Prometheus through `default/prometheus`. The same metrics drive autoscaling and alerts.
 - **Alertmanager → your pager**: add a receiver (Slack, e-mail, Webex webhook) in the kps values.

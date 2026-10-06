@@ -4,7 +4,7 @@
 #   tools/drift-cycle.sh                 # detect + report only (exit 0 clean, 2 drift, 3 failures)
 #   AUTO_HEAL=1 tools/drift-cycle.sh     # also re-apply safe tags on drifted hosts only
 #
-# Run from cron/systemd on the control node, or as an AWX job (Volume 20).
+# Run from cron/systemd on the control node, or as an AWX job (Step 24).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 export ANSIBLE_CONFIG=$PWD/ansible.cfg
@@ -23,7 +23,7 @@ run_check() {
 run_check "check-$TS"; rc=$?
 echo "drift check exit=$rc  report=$OUT/check-$TS.md"
 
-# Publish metrics to the monitoring host's textfile collector (Volume 09 dashboard shows it)
+# Publish metrics to the monitoring host's textfile collector (Step 12 dashboard shows it)
 ansible monitoring -b -m ansible.builtin.copy \
   -a "src=$OUT/spark_config_drift.prom dest=/var/lib/prometheus/node-exporter/spark_config_drift.prom mode=0644" \
   $BECOME_ARGS >/dev/null || echo "WARN: could not publish drift metrics"

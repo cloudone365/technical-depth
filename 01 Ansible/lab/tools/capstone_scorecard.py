@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-capstone_scorecard.py — grade the Module 01 capstone from EVIDENCE in lab/.cache/.
+capstone_scorecard.py — grade the 01 Ansible capstone (Step 30) from EVIDENCE in lab/.cache/.
 Each challenge passes only if the artifact produced by the real run exists and says so.
 
   python3 tools/capstone_scorecard.py            # table
@@ -50,26 +50,26 @@ def check(vol, title):
     return deco
 
 
-@check("01", "Runs are logged (ansible.log has >= 10 playbook runs)")
+@check("02", "Runs are logged (ansible.log has >= 10 playbook runs)")
 def _():
     n = len(re.findall(r"PLAY RECAP", read(p("ansible.log"))))
     return n >= 10, f"{n} runs logged"
 
 
-@check("01", "Fact cache populated with ansible_local.spark for every Spark")
+@check("02", "Fact cache populated with ansible_local.spark for every Spark")
 def _():
     files = [f for f in glob.glob(p("facts", "*")) if not f.endswith("localhost")]
     ok = [f for f in files if (jload(f) or {}).get("ansible_local", {}).get("spark", {}).get("gpu", {}).get("present")]
     return len(files) > 0 and len(ok) == len(files), f"{len(ok)}/{len(files)} hosts with GPU facts"
 
 
-@check("02", "Fleet benchmark recorded (>= 7 runs in bench.csv)")
+@check("09", "Fleet benchmark recorded (>= 7 runs in bench.csv)")
 def _():
     rows = [line for line in read(p("bench.csv")).splitlines() if "," in line]
     return len(rows) >= 7, f"{len(rows)} rows"
 
 
-@check("06-25", "End-to-end validation passes on every Spark")
+@check("03-30", "End-to-end validation passes on every Spark")
 def _():
     reports = glob.glob(p("validation", "*.json"))
     bad = [os.path.basename(r) for r in reports
@@ -77,7 +77,7 @@ def _():
     return len(reports) > 0 and not bad, f"{len(reports)} reports, failing: {bad or 'none'}"
 
 
-@check("10", "Firmware consistent across nodes (no mismatches)")
+@check("28", "Firmware consistent across nodes (no mismatches)")
 def _():
     inv = jload(p("firmware-inventory.json"))
     if inv is None:
@@ -85,7 +85,7 @@ def _():
     return inv.get("mismatch") == {}, f"mismatch={inv.get('mismatch')}"
 
 
-@check("22", "Latest drift check is clean")
+@check("26", "Latest drift check is clean")
 def _():
     f = latest("drift/check-*.md") or latest("drift/recheck-*.md")
     if not f:
@@ -95,26 +95,26 @@ def _():
     return bool(rows) and not dirty, f"{os.path.basename(f)} dirty={dirty or 'none'}"
 
 
-@check("22", "Self-heal proven (a recheck report exists)")
+@check("26", "Self-heal proven (a recheck report exists)")
 def _():
     f = latest("drift/recheck-*.md")
     return f is not None, os.path.basename(f) if f else "never healed"
 
 
-@check("24", "Incident drill produced an evidence bundle")
+@check("29", "Incident drill produced an evidence bundle")
 def _():
     b = glob.glob(p("incidents", "*.tgz"))
     return len(b) > 0, f"{len(b)} bundles"
 
 
-@check("16", "kubeconfig fetched from the kubeadm root cluster")
+@check("19", "kubeconfig fetched from the kubeadm root cluster")
 def _():
     k = glob.glob(p("kubeconfig-*.yaml"))
     ok = any("https://127.0.0.1" not in read(x) and "server: https://" in read(x) for x in k)
     return ok, ", ".join(os.path.basename(x) for x in k) or "none"
 
 
-@check("03B/19", "vault01 CA copied; no Vault token or AppRole secret left in the cache")
+@check("17/18", "vault01 CA copied; no Vault token or AppRole secret left in the cache")
 def _():
     ca = os.path.exists(p("vault-ca.crt"))
     leaks = [os.path.basename(x) for x in glob.glob(p("*")) if re.search(r"(vault-init|approle|token)", os.path.basename(x))]
@@ -137,7 +137,7 @@ def main():
         print(json.dumps({"score": score, "total": len(results), "results": results}, indent=2))
     else:
         for r in results:
-            print(f"[{'PASS' if r['pass'] else 'FAIL'}] Vol {r['volume']:<6} {r['challenge']}\n         evidence: {r['evidence']}")
+            print(f"[{'PASS' if r['pass'] else 'FAIL'}] Step {r['volume']:<6} {r['challenge']}\n         evidence: {r['evidence']}")
         print(f"\nScore: {score}/{len(results)}")
     raise SystemExit(0 if score == len(results) else 1)
 

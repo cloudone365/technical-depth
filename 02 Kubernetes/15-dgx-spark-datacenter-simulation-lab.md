@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | The whole "AI datacenter in a box" on one Spark: a kubeadm **root cluster** that owns the hardware, two **vClusters** with hard budgets (`dev-lab` for tenants, `llms` for serving and training), a serving tier behind an API gateway, a gang-scheduled batch tier, observability across all three clusters, backups and a scripted verification gate after every layer. Everything is designed to add dgx-spark-2 without rework |
-| **Hardware** | 1 DGX Spark (2 optional) · `sema01` (Semaphore, runs every playbook) and `vault01` (SSH CA, lab secrets) outside the Spark, from [01 Ansible 00a/00b](../01%20Ansible/00b-dgx-spark-semaphore-target.md) · your MacBook as a client (browser, git, kubectl) |
+| **Hardware** | 1 DGX Spark (2 optional) · `sema01` (Semaphore, runs every playbook) and `vault01` (SSH CA, lab secrets) outside the Spark, from 01 Ansible [Step 01](../01%20Ansible/01-management-plane-semaphore-and-vault.md) and [Step 04](../01%20Ansible/04-dgx-spark-as-semaphore-target.md) · your MacBook as a client (browser, git, kubectl) |
 | **Time** | 4–6 h the first time, ~45 min once practised |
 | **Risk** | Medium. Everything is rebuildable: Semaphore template `99 Reset Kubernetes` wipes Kubernetes, `05` → `06` → `06b` rebuild it; sema01 and vault01 are outside the Spark and untouched |
 | **Lab files** | the whole [`lab/`](lab/README.md) directory |
@@ -164,7 +164,7 @@ Inside llms, serving + batch can oversubscribe its 8 slices and 48 Gi by design:
 
 Each step ends with a **gate**: a command that must pass before you continue. When a gate fails, stop and fix it. Later layers hide earlier faults.
 
-The 01 Ansible stages run as **Semaphore templates** in project `spark-lab` on sema01 ([00b §7](../01%20Ansible/00b-dgx-spark-semaphore-target.md#7-build-the-lab-from-semaphore)); a gate there is the task log ending in `failed=0`. Everything from the 02 Kubernetes layer on runs with `kubectl` from your MacBook.
+The 01 Ansible stages run as **Semaphore templates** in project `spark-lab` on sema01 ([01 Ansible Step 04 §7](../01%20Ansible/04-dgx-spark-as-semaphore-target.md#7-build-the-lab-from-semaphore)); a gate there is the task log ending in `failed=0`. Everything from the 02 Kubernetes layer on runs with `kubectl` from your MacBook.
 
 ```mermaid
 flowchart LR
@@ -328,7 +328,7 @@ scripts/verify.sh
 | DGX OS / driver upgrade | per NVIDIA release | Semaphore template `17 DGX OS upgrade` (drain → upgrade → validate) → Vol 12 UMA experiment again |
 | Capacity review | weekly | Grafana *vCluster CPU/memory used / hard* panels. `VClusterQuotaNearlyExhausted`, `PodsPendingOnGPU` history; resize with one `kubectl patch` (Vol 27 §6.5) |
 | Drills | weekly | one `breakfix` scenario, timed |
-| Drift check · validation | nightly · weekly | scheduled Semaphore templates `20 Drift check` and `30 Validate`; a failed task is the alert (01 Ansible 00b §9) |
+| Drift check · validation | nightly · weekly | scheduled Semaphore templates `20 Drift check` and `30 Validate`; a failed task is the alert (01 Ansible Step 04 §9) |
 | Full rebuild | when needed | Semaphore `99 Reset Kubernetes` (`reset_confirm=RESET`) → `05` → `06` → `06b`, then `fetch-kubeconfig.sh sema01` and `scripts/install-addons.sh all` |
 
 ---
@@ -339,7 +339,7 @@ scripts/verify.sh
 |---|---|---|
 | 1 | `kubeadm init` preflight errors (swap, port 6443 busy) | an old k3s is still there → `99-reset-kubernetes.yml -e reset_remove_k3s=true`; swap → the role turns it off, check `/etc/fstab` |
 | 1 | node `NotReady` | Cilium not running: `kubectl --context spark-root -n kube-system logs ds/cilium`; leftover CNI files from an earlier cluster → reset playbook |
-| 1 | GPU Operator validator not Running | 01 Ansible Vol 17 troubleshooting. containerd must have the `nvidia` runtime (`grep nvidia /etc/containerd/config.toml`) |
+| 1 | GPU Operator validator not Running | 01 Ansible Step 20 troubleshooting. containerd must have the `nvidia` runtime (`grep nvidia /etc/containerd/config.toml`) |
 | 2 | no etcd snapshot | `systemctl status etcd-snapshot.service`; `etcdctl` version must match the etcd image (role downloads it) |
 | 3 | a vCluster never Ready | its PVC Pending → storage not installed first; `kubectl --context spark-root -n vc-<name> describe pod <name>-0` |
 | 3 | `context dev-lab` unreachable | MetalLB didn't assign `.111` (pool, `services.loadbalancers` quota) → Vol 27 §8 |

@@ -1,6 +1,6 @@
-# Volume 14 — GPUDirect Storage & cuFile on a Unified-Memory Machine: Detect, Configure, Measure
+# Step 16 · GPUDirect Storage & cuFile on a Unified-Memory Machine: Detect, Configure, Measure
 
-> **Module 01 · Part III — High-Speed Fabric & Storage** · Prev: [13 Multus & RDMA pods](13-multus-cni-and-secondary-rdma-networking.md) · Next: [15 Shared model cache over NFS/RDMA](15-parallel-file-system-client-orchestration.md)
+> **01 Ansible · Part III — Fabric & storage · Step 16 of 30** · ← [Step 15 · NFS over RDMA](15-nfs-rdma-and-parallel-file-systems.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 17 · Vault server deep dive](17-vault-server-deep-dive.md) →
 
 | | |
 |---|---|
@@ -187,7 +187,7 @@ Read the result:
 |---|---|
 | `nvidia_fs_loaded: false`, `compat_mode: true`, GPU-direct ≈ CPU-only | Expected on UMA. cuFile works, but there's no true P2P path. Your loader's efficiency is what matters |
 | GPU-direct noticeably slower than CPU-only | Compat-mode overhead. Use plain `O_DIRECT`/mmap loaders on the Spark |
-| Everything ≈ your NVMe's rated sequential read | You're storage-bound. Faster models-per-minute means fewer bytes (quantised weights) or a cache (Volume 15) |
+| Everything ≈ your NVMe's rated sequential read | You're storage-bound. Faster models-per-minute means fewer bytes (quantised weights) or a cache (Step 15) |
 | `gdscheck not found` and no package | This DGX OS image has no GDS tools. Skip; the cuFile API isn't needed on this box |
 
 ### 3.1 The comparison that actually matters: model load time
@@ -213,9 +213,9 @@ Run it cold (after dropping caches) and warm. On a UMA machine the warm run is f
 
 | System | Relevance |
 |---|---|
-| Telemetry (Volume 09) | `spark_uma_page_cache_bytes` shows how much of the unified pool the file cache holds after loads |
-| Emergency runbook (Volume 24) | "UMA pressure" remediation drops caches, which is safe but makes the next load cold |
-| NFS/RDMA cache (Volume 15) | For a second Spark, a shared model store avoids downloading twice; cuFile over NFS runs in compat mode too |
+| Telemetry (Step 12) | `spark_uma_page_cache_bytes` shows how much of the unified pool the file cache holds after loads |
+| Emergency runbook (Step 29) | "UMA pressure" remediation drops caches, which is safe but makes the next load cold |
+| NFS/RDMA cache (Step 15) | For a second Spark, a shared model store avoids downloading twice; cuFile over NFS runs in compat mode too |
 | Data-centre DGX | The same `14-gds-check.yml` on an H100/B200 node should show `nvidia_fs_loaded: true`, NVMe supported, and GPU-direct > bounce. Keep the playbook for that day |
 
 ## 5. Troubleshooting & diagnostics

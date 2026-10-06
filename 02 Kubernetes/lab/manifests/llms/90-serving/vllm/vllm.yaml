@@ -14,7 +14,7 @@ kind: Secret
 metadata: {name: hf-token, namespace: llm-serving}
 type: Opaque
 stringData:
-  token: "replace-me"                  # or sync from Vault (01 Ansible Vol 19)
+  token: "replace-me"                  # or sync from Vault (01 Ansible Step 18)
 ---
 apiVersion: apps/v1
 kind: Deployment

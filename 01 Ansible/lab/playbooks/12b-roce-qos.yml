@@ -100,4 +100,4 @@
       ansible.builtin.debug:
         msg: >-
           mlnx_qos / sysfs / configfs settings do not survive reboot. Re-run this play from a
-          systemd unit or AWX schedule at boot, or bake it into a oneshot service (exercise in Volume 12).
+          systemd unit or AWX schedule at boot, or bake it into a oneshot service (exercise in Step 14).

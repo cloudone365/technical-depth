@@ -157,7 +157,7 @@ rdma link show
 sudo lspci -d 15b3: -nn                    # Mellanox/NVIDIA devices and PCIe IDs
 ```
 
-Note that one physical QSFP cage shows up as **two** netdevs and two RDMA devices, one per PCIe root. You need both to reach 200 Gb/s (01 Ansible Vol 11 explains why).
+Note that one physical QSFP cage shows up as **two** netdevs and two RDMA devices, one per PCIe root. You need both to reach 200 Gb/s (01 Ansible Step 13 explains why).
 
 ### 5.2 Size real fabrics
 

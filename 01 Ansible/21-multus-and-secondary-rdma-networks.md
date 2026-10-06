@@ -1,6 +1,8 @@
-# Volume 13 — Multus & Secondary RDMA Networks for Pods (CX-7 Fabric Inside Kubernetes, Chained with Cilium, Reachable from a vCluster)
+# Step 21 · Multus & Secondary RDMA Networks for Pods (CX-7 Fabric Inside Kubernetes, Chained with Cilium, Reachable from a vCluster)
 
-> **Module 01 · Part III — High-Speed Fabric** · Prev: [12 RoCEv2 & NCCL](12-lossless-rocev2-and-pfc-switch-host-tuning.md) · Next: [14 GPUDirect Storage on a UMA system](14-gpudirect-storage-gds-and-cufile-provisioning.md) · Requires: [16 Kubernetes with kubeadm](16-kubernetes-bare-metal-bootstrap-kubeadm.md)
+> **01 Ansible · Part IV — Secrets & platforms · Step 21 of 30** · ← [Step 20 · GPU Operator](20-nvidia-gpu-operator-and-time-slicing.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 22 · Slurm](22-slurm-gres-and-cgroup-gpus.md) →
+>
+> Requires: [Step 19 · Kubernetes with kubeadm](19-kubernetes-kubeadm-root-cluster-and-vclusters.md).
 
 | | |
 |---|---|
@@ -15,7 +17,7 @@
 
 ## 1. Why pods need a second network
 
-Cilium gives every pod an overlay IP (VXLAN over the 10GbE mgmt link, Volume 16 §2.1). That's fine for APIs and Ray control traffic, but **it can't carry RDMA**: verbs need direct access to the NIC's RDMA device and a GID on the physical fabric. Distributed training and multi-node inference pods therefore need:
+Cilium gives every pod an overlay IP (VXLAN over the 10GbE mgmt link, Step 19 §2.1). That's fine for APIs and Ray control traffic, but **it can't carry RDMA**: verbs need direct access to the NIC's RDMA device and a GID on the physical fabric. Distributed training and multi-node inference pods therefore need:
 
 1. a **second interface** on the CX-7 fabric (Multus + macvlan/host-device/SR-IOV), and
 2. **access to the RDMA device** (`/dev/infiniband/*`), handed out as a schedulable resource by a device plugin, and
@@ -62,7 +64,7 @@ flowchart TB
 | Component | Choice in this lab | Production alternative |
 |---|---|---|
 | Multus | Upstream **thick plugin** v4.3.0: the release's `deployments/multus-daemonset-thick.yml`, applied unchanged. DaemonSet `kube-system/kube-multus-ds`, a small `multus-shim` binary in `/opt/cni/bin`, the real work in the per-node daemon | NVIDIA **Network Operator** (bundles Multus, IPAM, RDMA/SR-IOV device plugins). The 02 lab ships a `NicClusterPolicy` for it ([`root/85-network-operator`](../02%20Kubernetes/lab/manifests/root/85-network-operator/nicclusterpolicy.yaml)); use **one** of the two |
-| Chaining with Cilium | Multus auto-generates `00-multus.conf` from the first config it finds (`05-cilium.conflist`) and makes Cilium the default network. Works because Volume 16 installed Cilium with `cni.exclusive=false` | Same |
+| Chaining with Cilium | Multus auto-generates `00-multus.conf` from the first config it finds (`05-cilium.conflist`) and makes Cilium the default network. Works because Step 19 installed Cilium with `cni.exclusive=false` | Same |
 | Secondary CNI | `macvlan` bridge mode, master = CX-7 netdev, MTU 9000 | `host-device` (a whole netdev per pod), or SR-IOV VFs (one VF per pod, hardware isolation) |
 | IPAM | `static`, IP given per pod in the annotation (deterministic for a lab) | `whereabouts` (cluster-wide ranges), as in the Network Operator path |
 | RDMA exposure | `k8s-rdma-shared-dev-plugin`, selecting netdevs `enp1s0f1np1`, `enP2p1s0f1np1`, up to 64 pods per device (`rdmaHcaMax`) | SR-IOV network device plugin (exclusive VFs) |
@@ -349,7 +351,7 @@ sleep 3
 kubectl --context spark-root -n platform-tools exec rdma-test-dgx-spark-1 -- ib_write_bw -d rocep1s0f1 -q 4 -D 10 --report_gbits -F 192.168.100.202
 ```
 
-Inside the pods, `ibv_devices` shows the host's RDMA devices, because the shared plugin exposes them (not isolated). The traffic's source address is the pod's macvlan IP, `.201`/`.202`. Compare the number with the host-level perftest from Volume 11: it should be within a few percent. On a single Spark both pods sit on dgx-spark-1 and the test runs through the NIC's internal switch; the number says nothing about the cable.
+Inside the pods, `ibv_devices` shows the host's RDMA devices, because the shared plugin exposes them (not isolated). The traffic's source address is the pod's macvlan IP, `.201`/`.202`. Compare the number with the host-level perftest from Step 13: it should be within a few percent. On a single Spark both pods sit on dgx-spark-1 and the test runs through the NIC's internal switch; the number says nothing about the cable.
 
 Multus also records what it did, on the root object:
 
@@ -420,11 +422,11 @@ The ping shows the §2.3 gap. A pod in `llms` reaches a `platform-tools` pod on 
 
 | With | Note |
 |---|---|
-| Root cluster (Volume 16) | Cilium `cni.exclusive=false`; Multus uses the standard kubeadm CNI paths |
-| GPU Operator (Volume 17) | Independent: GPU via `nvidia.com/gpu`, RDMA via `rdma/*`. Both limits go on the same container |
-| Time-slicing (Volume 17) | Several pods can share the GPU **and** the shared RDMA device. Neither is isolated, and that's fine for a lab |
-| vClusters (Volume 16 §3.4) | NADs in `vc-llms` only; tenants consume them by name, never create them |
-| Slurm (Volume 18) | Bare-metal jobs don't need any of this; it's the Kubernetes equivalent |
+| Root cluster (Step 19) | Cilium `cni.exclusive=false`; Multus uses the standard kubeadm CNI paths |
+| GPU Operator (Step 20) | Independent: GPU via `nvidia.com/gpu`, RDMA via `rdma/*`. Both limits go on the same container |
+| Time-slicing (Step 20) | Several pods can share the GPU **and** the shared RDMA device. Neither is isolated, and that's fine for a lab |
+| vClusters (Step 19 §3.4) | NADs in `vc-llms` only; tenants consume them by name, never create them |
+| Slurm (Step 22) | Bare-metal jobs don't need any of this; it's the Kubernetes equivalent |
 | Network Operator | For production, one Helm chart replaces §3: `NicClusterPolicy` with `rdmaSharedDevicePlugin`, `secondaryNetwork.multus`, `ipamPlugin` (02 Kubernetes Vol 16 §5.6) |
 
 ## 5. Troubleshooting & diagnostics

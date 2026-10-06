@@ -240,20 +240,22 @@ The complete 25-volume curriculum is indexed in [**08 Storage/README.md**](08%20
 
 ---
 
-## 📚 [01] Ansible & Configuration Management (Deep Dives)
+## 📚 [01] Ansible & Configuration Management
 
-The complete curriculum is indexed in [**01Ansible/README.md**](01Ansible/README.md).
+One numbered path, Step 00 → Step 30: start with the [**step-by-step guide**](01%20Ansible/00-ansible-step-by-step-guide.md); the module overview is [**01 Ansible/README.md**](01%20Ansible/README.md).
 
-| # | Topic | File |
+| Part | Steps | Starts with |
 | :--- | :--- | :--- |
-| 01 | Ansible Core — Architecture, Modules, Playbooks, Roles, Variables, Templates | [01-ansible-core-deep-dive.md](01Ansible/01-ansible-core-deep-dive.md) |
-| 02 | Ansible Tower / AWX — Installation, RBAC, Credentials, Workflows, API | [02-ansible-tower-awx-deep-dive.md](01Ansible/02-ansible-tower-awx-deep-dive.md) |
-| 03 | HashiCorp Vault — Secrets Engines, Auth, Policies, AppRole, Integration | [03-hashicorp-vault-deep-dive.md](01Ansible/03-hashicorp-vault-deep-dive.md) |
+| I — Management plane & Ansible foundations | 01–09 | [Step 01 · Management plane: Semaphore UI + Vault](01%20Ansible/01-management-plane-semaphore-and-vault.md) |
+| II — Node provisioning | 10–12 | [Step 10 · NVIDIA driver stack](01%20Ansible/10-nvidia-driver-stack-and-fabric-manager.md) |
+| III — Fabric & storage | 13–16 | [Step 13 · ConnectX-7 fabric](01%20Ansible/13-connectx7-fabric-and-opensm.md) |
+| IV — Secrets & platforms | 17–24 | [Step 17 · Vault server](01%20Ansible/17-vault-server-deep-dive.md) |
+| V — Production operations | 25–30 | [Step 25 · Testing & CI](01%20Ansible/25-testing-linting-and-ci.md) |
 
 ## 🗺️ Roadmaps & Quick References
 
 - [Ansible Step-by-Step Beginner's Guide](01%20Ansible/00-ansible-step-by-step-guide.md)
-- [Ansible, Tower & HashiCorp Vault Roadmap](01Ansible/ansible-tower-vault-roadmap.md)
+- [Ansible, Tower & HashiCorp Vault learning roadmap](01%20Ansible/README.md#learning-roadmap)
 
 ## 🔧 Project Files
 

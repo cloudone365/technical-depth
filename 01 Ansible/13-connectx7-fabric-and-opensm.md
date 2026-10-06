@@ -1,6 +1,6 @@
-# Volume 11 — ConnectX-7 Fabric Automation on DGX Spark: RDMA over Converged Ethernet, Topologies & Verification (with the InfiniBand/OpenSM Mapping)
+# Step 13 · ConnectX-7 Fabric Automation on DGX Spark: RDMA over Converged Ethernet, Topologies & Verification (with the InfiniBand/OpenSM Mapping)
 
-> **Module 01 · Part III — High-Speed Fabric** · Prev: [10 Firmware](10-firmware-lifecycle-and-gpu-vulnerability-patch.md) · Next: [12 Lossless RoCEv2, MTU & NCCL tuning](12-lossless-rocev2-and-pfc-switch-host-tuning.md)
+> **01 Ansible · Part III — Fabric & storage · Step 13 of 30** · ← [Step 12 · GPU telemetry & alerting](12-gpu-telemetry-and-alerting.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 14 · RoCEv2, QoS & NCCL](14-rocev2-qos-and-nccl.md) →
 
 | | |
 |---|---|
@@ -449,11 +449,11 @@ show_gids | grep -E 'rocep1s0f1|v2'          # which index is RoCE v2 + IPv4
 | Addressing | IP → GID (RoCEv2 IPv4-mapped GID; pick the index) | LID (+ GID for routing across subnets) |
 | Isolation | VLAN / subnet | P_Key partitions (configured on the SM) |
 | IP over the fabric | Native IP | IPoIB (`ib0`, datagram vs connected mode) |
-| Congestion / loss | ECN/DCQCN; PFC on switches (Volume 12) | Credit-based link-level flow control (lossless by design) |
+| Congestion / loss | ECN/DCQCN; PFC on switches (Step 14) | Credit-based link-level flow control (lossless by design) |
 | Health tools | `ibv_devinfo`, `ethtool -S`, `rdma link` | `ibstat`, `iblinkinfo`, `ibdiagnet`, `perfquery` |
 | Ansible's job | netplan, MTU, verify, publish NCCL env | Install DOCA-OFED, configure the SM(s) (HA priority), P_Keys, IPoIB, verify `ibdiagnet` |
 
-What stays the same, and what this volume trains: **inventory-driven addressing, pre-flight existence checks, link assertions, peer reachability, and publishing derived facts for NCCL.**
+What stays the same, and what this step trains: **inventory-driven addressing, pre-flight existence checks, link assertions, peer reachability, and publishing derived facts for NCCL.**
 
 ---
 
@@ -468,8 +468,8 @@ What stays the same, and what this volume trains: **inventory-driven addressing,
 | Ping works on `.100`, not on `.101` | Second logical interface not addressed on one side | Both netdevs per cage need IPs; re-run `02-fabric.yml` |
 | `PORT_ACTIVE` but perftest `Couldn't connect` | Wrong GID index (a RoCE v1 or link-local GID) | `show_gids`; use the RoCE v2 IPv4 index; pass `-x` |
 | perftest reports roughly half the expected rate | Only one logical interface, or `-q 1` | Test both netdevs concurrently; raise `-q` to 4–8 |
-| Random loss under load (switch topology) | `ethtool -S enp1s0f1np1 \| grep -E 'discard\|pause\|ecn'` | Congestion: Volume 12 (ECN/PFC) |
-| Netplan apply cut the mgmt link | You put the mgmt NIC in `40-cx7.yaml` | Never. Mgmt lives in `30-mgmt.yaml` (Volume 06) |
+| Random loss under load (switch topology) | `ethtool -S enp1s0f1np1 \| grep -E 'discard\|pause\|ecn'` | Congestion: Step 14 (ECN/PFC) |
+| Netplan apply cut the mgmt link | You put the mgmt NIC in `40-cx7.yaml` | Never. Mgmt lives in `30-mgmt.yaml` (Step 03) |
 
 Fast triage bundle:
 

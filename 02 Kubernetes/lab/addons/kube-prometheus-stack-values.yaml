@@ -63,7 +63,7 @@ alertmanager:
     priorityClassName: spark-platform
     resources: {limits: {memory: 256Mi}}
 grafana:
-  adminPassword: change-me      # replace from Vault (01 Ansible Vol 19)
+  adminPassword: change-me      # replace from Vault (01 Ansible Step 18)
   sidecar:
     dashboards:
       enabled: true

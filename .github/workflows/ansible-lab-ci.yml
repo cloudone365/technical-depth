@@ -1,4 +1,4 @@
-# CI for "01 Ansible/lab" — see 01 Ansible/21-ansible-testing-linting-and-molecule.md
+# CI for "01 Ansible/lab" — see 01 Ansible/25-testing-linting-and-ci.md
 name: ansible-lab
 
 on:

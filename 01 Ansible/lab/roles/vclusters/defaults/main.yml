@@ -1,5 +1,5 @@
 ---
-# Two virtual clusters inside the root cluster (02 Kubernetes Volume 27).
+# Two virtual clusters inside the root cluster (02 Kubernetes Vol 27).
 # The definitions are NOT duplicated here: this role applies the files in the
 # 02 Kubernetes lab, so Ansible and the lab scripts can never drift apart.
 vclusters_lab_dir: "{{ playbook_dir }}/../../../02 Kubernetes/lab"

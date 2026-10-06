@@ -7,7 +7,7 @@ Everything the 27 volumes (plus the [step-by-step guide](../00-kubernetes-step-b
 
 This directory holds their definitions and everything that runs on them. Every code block in the volumes is taken from here.
 
-> **Convention:** `ansible-playbook playbooks/NN-….yml` in this module = run Semaphore template NN in project `spark-lab` ([01 Ansible 00b](../../01%20Ansible/00b-dgx-spark-semaphore-target.md#7-build-the-lab-from-semaphore)); the CLI form is break-glass from the MacBook (`-l dgx-spark-1,localhost -K`).
+> **Convention:** `ansible-playbook playbooks/NN-….yml` in this module = run Semaphore template NN in project `spark-lab` ([01 Ansible Step 04](../../01%20Ansible/04-dgx-spark-as-semaphore-target.md#7-build-the-lab-from-semaphore)); the CLI form is break-glass from the MacBook (`-l dgx-spark-1,localhost -K`).
 
 ```
 lab/
@@ -67,7 +67,7 @@ flowchart LR
   subgraph CTL["Your MacBook · client (browser · git · kubectl)"]
     K["kubectl · helm<br/>KUBECONFIG = 01 Ansible .cache/kubeconfig-spark-lab.yaml<br/>contexts: spark-root · dev-lab · llms"]
   end
-  subgraph MGMT["management plane · outside the Spark (01 Ansible 00a/00b)"]
+  subgraph MGMT["management plane · outside the Spark (01 Ansible Steps 01 and 04)"]
     SEMA["sema01 · 192.168.0.210<br/>Semaphore :3000 · runs every playbook<br/>state volume: kubeconfig"]
     VLT["vault01 · 192.168.0.211<br/>SSH CA · 15-min certs · lab secrets"]
   end

@@ -1,6 +1,6 @@
-# Volume 18 — Slurm on DGX Spark: MUNGE, GRES GPUs, cgroup v2 Confinement, Health Checks & Two-Node NCCL Jobs
+# Step 22 · Slurm on DGX Spark: MUNGE, GRES GPUs, cgroup v2 Confinement, Health Checks & Two-Node NCCL Jobs
 
-> **Module 01 · Part IV — Platforms** · Prev: [17 GPU Operator](17-nvidia-gpu-operator-helm-automation.md) · Next: [19 Vault ↔ Ansible](19-hashicorp-vault-approle-and-dynamic-secrets.md)
+> **01 Ansible · Part IV — Secrets & platforms · Step 22 of 30** · ← [Step 21 · Multus & RDMA pods](21-multus-and-secondary-rdma-networks.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 23 · AWX install](23-awx-install-and-configuration-as-code.md) →
 
 | | |
 |---|---|
@@ -83,7 +83,7 @@ SchedulerType=sched/backfill
 JobAcctGatherType=jobacct_gather/cgroup
 JobAcctGatherFrequency=30
 
-# Health check: drain a node whose GPU stops answering (Volume 24)
+# Health check: drain a node whose GPU stops answering (Step 29)
 HealthCheckProgram=/usr/local/sbin/spark-slurm-healthcheck.sh
 HealthCheckInterval=120
 HealthCheckNodeState=ANY
@@ -378,9 +378,9 @@ Does the job get OOM-killed at about 8 GiB, or does it sail past? The answer tel
 
 | System | How |
 |---|---|
-| Telemetry (Volume 09) | The health check uses the same signals as the alerts, so scheduler and monitoring agree |
-| Drain (Volume 24) | `node_drain` issues `scontrol … DRAIN reason="maint: …"`, and the Slurm role respects `maint:` |
-| NFS (Volume 15) | `/mnt/models` present on every compute node, so jobs are location-independent |
+| Telemetry (Step 12) | The health check uses the same signals as the alerts, so scheduler and monitoring agree |
+| Drain (Step 29) | `node_drain` issues `scontrol … DRAIN reason="maint: …"`, and the Slurm role respects `maint:` |
+| NFS (Step 15) | `/mnt/models` present on every compute node, so jobs are location-independent |
 | Semaphore (or AWX) | A template "Slurm: resume node" with a survey (node name) gives operators a safe button, with the task history as the record |
 | Accounting (stretch) | Add `slurmdbd` + MariaDB for `sacct` history and fair-share |
 
@@ -389,9 +389,9 @@ Does the job get OOM-killed at about 8 GiB, or does it sail past? The answer tel
 | Symptom | Diagnose | Fix |
 |---|---|---|
 | `sinfo` shows `down*` | `scontrol show node X \| grep Reason`; `journalctl -u slurmd` | slurmd not running / not reachable on 6818; firewall |
-| `Invalid credential` / `Munge decode failed` | `munge -n \| ssh other unmunge` | Keys differ, or clocks skew > 5 min (chrony! Volume 01A) |
+| `Invalid credential` / `Munge decode failed` | `munge -n \| ssh other unmunge` | Keys differ, or clocks skew > 5 min (chrony! Step 02) |
 | Node `INVAL` / `Low RealMemory` | `slurmd -C` on the node vs `slurm.conf` | RealMemory too high: raise `slurm_cluster_mem_reserve_mb` |
-| `gres/gpu count reported lower than configured` | `slurmd -G` / `slurmd -C` | `File=/dev/nvidia0` missing? The driver isn't loaded at boot → Volume 07 |
+| `gres/gpu count reported lower than configured` | `slurmd -G` / `slurmd -C` | `File=/dev/nvidia0` missing? The driver isn't loaded at boot → Step 10 |
 | Job runs without `--gres` and still sees the GPU | `cat /sys/fs/cgroup/system.slice/slurmstepd.scope/.../devices` | `ConstrainDevices=yes`, `TaskPlugin=task/cgroup`, cgroup v2 plugin present |
 | `srun: error: ... mpi/pmix` | `srun --mpi=list` | Use `mpirun` in the allocation, or install Slurm with PMIx |
 | Config change ignored | `scontrol show config \| grep -i <key>` | Some keys need `slurmctld` **and** `slurmd` restarts, not `scontrol reconfigure` (the handlers restart both) |

@@ -37,7 +37,7 @@
   when: spark_baseline_hold_nvidia | bool
 
 # `command` tasks are SKIPPED (not "changed") under --check, so without this a
-# missing hold would be invisible to drift detection (Volume 22).
+# missing hold would be invisible to drift detection (Step 26).
 - name: Report missing holds as drift in check mode
   ansible.builtin.debug:
     msg: "Would hold: {{ spark_baseline_nvidia_pkgs | difference(spark_baseline_holds.stdout_lines) }}"

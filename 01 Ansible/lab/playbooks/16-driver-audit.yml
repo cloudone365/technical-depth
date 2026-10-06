@@ -81,5 +81,5 @@
           loaded={{ driver_audit.module_loaded }} disk={{ driver_audit.module_on_disk }}
           userland={{ driver_audit.nvml_userland }} smi={{ driver_audit.nvidia_smi }}.
           Loaded != disk → reboot pending after an upgrade. Userland != loaded → partial upgrade;
-          see Volume 07 troubleshooting.
+          see Step 10 troubleshooting.
         success_msg: "Driver {{ driver_audit.module_loaded }} ({{ driver_audit.module_flavor }}) consistent"

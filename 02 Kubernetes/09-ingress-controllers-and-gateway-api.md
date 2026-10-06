@@ -108,7 +108,7 @@ Two clusters cooperate on every request. The **root** owns the address (MetalLB)
 - **NetworkPolicy (Vol 06)**: `llm-serving` admits the `ingress` namespace (inside llms; synced to the root and enforced by Cilium). Without that allow, you get 504s (drill 06). The root's `vcluster-boundary` keeps dev-lab pods off Traefik's pod IP; the LoadBalancer IP stays reachable for everyone (Vol 07 §5.7).
 - **Source IPs (Vol 07 §4)**: the LoadBalancer path is masqueraded with `externalTrafficPolicy: Cluster`, so Traefik sees the node, not the client. That matters for rate limits (§5.5) and access logs.
 - **KEDA (Vol 21)**: scales `mock-llm` on `traefik_service_open_connections`, queried through `default/prometheus` — the root's Prometheus replicated into llms.
-- **Vault (01 Ansible Vol 19)**: the `llm-api-users` htpasswd Secret and TLS keys belong in Vault KV, synced by Vault Agent or External Secrets into llms.
+- **Vault (01 Ansible Step 18)**: the `llm-api-users` htpasswd Secret and TLS keys belong in Vault KV, synced by Vault Agent or External Secrets into llms.
 - **Open WebUI / LiteLLM (modules 03, 04)**: point them at `http://llm.lab.local/v1`.
 
 ---

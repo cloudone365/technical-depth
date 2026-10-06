@@ -55,7 +55,7 @@ def c_gpu():
     rc, out, err = sh("nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader")
     if rc != 0:
         check("GPU answers nvidia-smi", "FAIL", err or f"rc={rc}",
-              "see Volume 24 Runbook A; check `dmesg | grep -i nvrm`")
+              "see Step 29 Runbook A; check `dmesg | grep -i nvrm`")
         return
     name, drv, cc = [x.strip() for x in out.splitlines()[0].split(",")]
     check("GPU is GB10", "PASS" if "GB10" in name else "FAIL", name)
@@ -67,7 +67,7 @@ def c_gpu():
     rc, out, _ = sh("journalctl -k --since '-24h' --no-pager | grep -c 'NVRM: Xid'")
     n = int(out or 0)
     check("no Xid in 24h", "PASS" if n == 0 else "WARN", f"{n} events",
-          "journalctl -k | grep Xid ; Volume 24 Runbook B")
+          "journalctl -k | grep Xid ; Step 29 Runbook B")
 
 
 def c_memory():

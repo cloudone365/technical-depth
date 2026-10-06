@@ -1,11 +1,13 @@
-# Volume 01A — Ansible Core on DGX Spark: Controllers, Inventory & First Contact
+# Step 02 · Ansible Core on DGX Spark: Controllers, Inventory & First Contact
 
-> **Module 01 · Part I — Foundations** · Lab code: [`lab/`](lab/) · Next: [01B Execution internals & debugging](01-ansible-core-engine-and-execution-internals.md)
+> **01 Ansible · Part I — Management plane & Ansible foundations · Step 02 of 30** · ← [Step 01 · Management plane](01-management-plane-semaphore-and-vault.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 03 · Bare-metal provisioning & bootstrap](03-bare-metal-provisioning-and-bootstrap.md) →
+>
+> Lab code: [`lab/`](lab/).
 
 | | |
 |---|---|
 | **You will build** | A reproducible Ansible toolchain on your MacBook (bootstrap and break-glass), an inventory that describes your Spark(s) and how the controller logs in, and the first three playbooks: connectivity, custom GPU facts, OS baseline, run as Semaphore templates |
-| **Hardware** | 1× DGX Spark (2× optional), the management plane from [00a](00a-semaphore-vault-lab-guide.md) (`sema01` + `vault01`, outside the Spark) and your MacBook |
+| **Hardware** | 1× DGX Spark (2× optional), the management plane from [Step 01](01-management-plane-semaphore-and-vault.md) (`sema01` + `vault01`, outside the Spark) and your MacBook |
 | **Time** | 60–90 min |
 | **Risk** | Low — read-only until `01-baseline.yml`, which only adds packages/config drop-ins |
 
@@ -13,11 +15,11 @@
 
 ## 1. Why Ansible on a single desktop box?
 
-A DGX Spark looks like a workstation, but you'll treat it like a data-centre node: it runs DGX OS (Ubuntu 24.04 based, aarch64), a GB10 Grace Blackwell superchip (20 Arm cores + Blackwell GPU sharing **128 GB of coherent unified LPDDR5x memory**), a ConnectX-7 NIC with two 200 Gb/s QSFP cages, and eventually a kubeadm Kubernetes cluster (with two vClusters inside it), Slurm and a monitoring stack. The automation itself lives outside the box: Semaphore on `sema01` runs the playbooks and Vault on `vault01` signs a 15-minute SSH certificate for each run ([00a](00a-semaphore-vault-lab-guide.md), [00b](00b-dgx-spark-semaphore-target.md)). Ansible gives you:
+A DGX Spark looks like a workstation, but you'll treat it like a data-centre node: it runs DGX OS (Ubuntu 24.04 based, aarch64), a GB10 Grace Blackwell superchip (20 Arm cores + Blackwell GPU sharing **128 GB of coherent unified LPDDR5x memory**), a ConnectX-7 NIC with two 200 Gb/s QSFP cages, and eventually a kubeadm Kubernetes cluster (with two vClusters inside it), Slurm and a monitoring stack. The automation itself lives outside the box: Semaphore on `sema01` runs the playbooks and Vault on `vault01` signs a 15-minute SSH certificate for each run ([Step 01](01-management-plane-semaphore-and-vault.md), [Step 04](04-dgx-spark-as-semaphore-target.md)). Ansible gives you:
 
 - **Rebuild in minutes after a re-image or a bad DGX OS update.** The playbooks describe the machine, so recovery doesn't depend on remembering what you changed.
 - **Moving from one Spark to two (or four) is a one-line inventory change.** You don't have to repeat every manual step on the new node.
-- **Drift detection:** `--check --diff` shows what changed behind your back (Volume 22).
+- **Drift detection:** `--check --diff` shows what changed behind your back (Step 26).
 - **The same muscle memory you'll use on DGX/HGX clusters.** Only the inventory gets bigger.
 
 ---
@@ -56,16 +58,16 @@ Ansible is **agentless**. Nothing runs on the Spark between plays. Each task is 
 
 | Item | Value in this lab | Why |
 |---|---|---|
-| Managed-node user | `svc-ansible` with a 15-minute vault01 certificate under Semaphore; `nvidia` (same on every Spark, your own key) for bootstrap and break-glass | `group_vars/spark.yml` switches on `vault_role_id` (Step 2b). NVIDIA's multi-Spark playbooks and MPI assume identical usernames, which both accounts are |
+| Managed-node user | `svc-ansible` with a 15-minute vault01 certificate under Semaphore; `nvidia` (same on every Spark, your own key) for bootstrap and break-glass | `group_vars/spark.yml` switches on `vault_role_id` (§3.3). NVIDIA's multi-Spark playbooks and MPI assume identical usernames, which both accounts are |
 | Privilege | `become: true` via `sudo` (group_vars/spark.yml); NOPASSWD for `svc-ansible`, `-K` for `nvidia` | Everything we configure is root-owned |
 | Python on target | `/usr/bin/python3` pinned in `ansible.cfg` | Avoids interpreter discovery warnings; DGX OS ships 3.12 |
 | Mgmt network | `enP7s7` 10GbE, `192.168.0.0/24` | Ansible/SSH traffic never rides the CX-7 fabric |
 | Fabric | CX-7 `enp1s0f1np1` / `enP2p1s0f1np1`, `192.168.100/101.0/24` | Workload traffic only (NCCL, NFS/RDMA, Multus `net1` for RDMA pods); the Kubernetes API and Cilium VXLAN stay on mgmt |
 | Fact cache | `jsonfile` in the state folder `facts/`, 2 h | Ad-hoc runs and drift reports reuse facts |
-| Run log | `ansible.log` in the state folder | Free audit trail (Volume 23), next to Semaphore's task history |
-| State folder (`lab_cache_dir`) | `/opt/spark-lab/cache` on sema01 (`SPARK_LAB_CACHE`), `lab/.cache` on the MacBook | Semaphore's checkout is temporary; kubeconfigs and reports must survive it (00b §4) |
+| Run log | `ansible.log` in the state folder | Free audit trail (Step 27), next to Semaphore's task history |
+| State folder (`lab_cache_dir`) | `/opt/spark-lab/cache` on sema01 (`SPARK_LAB_CACHE`), `lab/.cache` on the MacBook | Semaphore's checkout is temporary; kubeconfigs and reports must survive it (Step 04 §4) |
 
-**Inventory model:** one *hardware* group (`spark`) plus *functional* groups (`k8s_control_plane`, `k8s_workers`, `slurm_compute`, `monitoring`…). A host can belong to several. Roles target functional groups, so moving the monitoring stack to another box is an inventory edit, not a code change. `sema01` and `vault01` are deliberately **not** in the inventory: they are the management plane, built by hand (00a), and no lab playbook configures them.
+**Inventory model:** one *hardware* group (`spark`) plus *functional* groups (`k8s_control_plane`, `k8s_workers`, `slurm_compute`, `monitoring`…). A host can belong to several. Roles target functional groups, so moving the monitoring stack to another box is an inventory edit, not a code change. `sema01` and `vault01` are deliberately **not** in the inventory: they are the management plane, built by hand (Step 01), and no lab playbook configures them.
 
 ```mermaid
 flowchart TB
@@ -89,9 +91,9 @@ Rule of thumb: **hardware facts in `group_vars/spark.yml`, per-box addressing in
 
 ## 3. Hands-on lab
 
-### Step 1 — Build the MacBook toolchain
+### 3.1 Build the MacBook toolchain
 
-The lab has two controllers that run the same repository. **Semaphore** on `sema01` runs every playbook from 00b on; its container image (kubectl, helm, Python libraries, collections) comes from [`lab/semaphore/`](lab/semaphore/) and is built in [00b §4](00b-dgx-spark-semaphore-target.md). Your **MacBook** needs its own toolchain for the bootstrap playbooks (`00-bootstrap.yml`, `00b-semaphore-target.yml`), `08-vault.yml`, and break-glass runs:
+The lab has two controllers that run the same repository. **Semaphore** on `sema01` runs every playbook once [Step 04](04-dgx-spark-as-semaphore-target.md) is done; its container image (kubectl, helm, Python libraries, collections) comes from [`lab/semaphore/`](lab/semaphore/) and is built in [Step 04 §4](04-dgx-spark-as-semaphore-target.md). Your **MacBook** needs its own toolchain for the bootstrap playbooks (`00-bootstrap.yml`, `00b-semaphore-target.yml`), `08-vault.yml`, and break-glass runs:
 
 ```bash
 # macOS (or any Linux/WSL box) with Python ≥ 3.11
@@ -104,14 +106,14 @@ ansible-galaxy collection install -r requirements.yml -p ./collections
 ansible --version        # expect: core 2.18.x, config file = .../lab/ansible.cfg
 ```
 
-> **Why not use the Spark as its own controller?** `99-reset-kubernetes.yml` and a DGX OS re-image delete everything on the box, including a controller running there. Keeping Semaphore and Vault outside, like out-of-band management in a data centre, is what lets the Spark break freely ([00b §1](00b-dgx-spark-semaphore-target.md)).
+> **Why not use the Spark as its own controller?** `99-reset-kubernetes.yml` and a DGX OS re-image delete everything on the box, including a controller running there. Keeping Semaphore and Vault outside, like out-of-band management in a data centre, is what lets the Spark break freely ([Step 04 §1](04-dgx-spark-as-semaphore-target.md)).
 
 In Semaphore, `ANSIBLE_CONFIG="01 Ansible/lab/ansible.cfg"` points at the same file, and the environment variables of the Semaphore container (`SPARK_LAB_CACHE`, `ANSIBLE_LOG_PATH`, `ANSIBLE_CACHE_PLUGIN_CONNECTION`) move the run log and fact cache from `./.cache` to the state volume.
 
 ```ini
 # lab/ansible.cfg
 # ansible.cfg — DGX Spark lab control-node configuration
-# Every setting here is explained in Volume 01 (core) and Volume 02 (performance).
+# Every setting here is explained in Step 02 (core) and Step 09 (performance).
 [defaults]
 inventory               = ./inventory
 inventory_plugins       = ./inventory_plugins
@@ -130,9 +132,9 @@ gathering               = smart
 fact_caching            = jsonfile
 fact_caching_connection = ./.cache/facts
 fact_caching_timeout    = 7200
-# Log every run to a file — the cheapest audit trail you will ever build (Volume 23)
+# Log every run to a file — the cheapest audit trail you will ever build (Step 27)
 log_path                = ./.cache/ansible.log
-# Vault password comes from a script so it never sits in plain text (Volume 19)
+# Vault password comes from a script so it never sits in plain text (Step 18)
 # vault_password_file   = ./tools/vault-pass.sh
 nocows                  = True
 
@@ -156,7 +158,7 @@ always                  = False
 context                 = 3
 ```
 
-### Step 2 — SSH trust
+### 3.2 SSH trust
 
 ```bash
 ssh-keygen -t ed25519 -C "ansible@control"          # if you don't have a key
@@ -169,9 +171,9 @@ Expected: `aarch64` and a `DGX_*` release line. If `/etc/dgx-release` is missing
 
 This key is **your** key, for the `nvidia` admin user. It is what the MacBook uses for the bootstrap and break-glass paths. Semaphore never sees it: it logs in as `svc-ansible` with a certificate, after `00b-semaphore-target.yml` has made the Spark trust vault01's CA.
 
-### Step 2b — How the login switches between Semaphore and the MacBook
+### 3.3 How the login switches between Semaphore and the MacBook
 
-One variable decides who Ansible logs in as. The Semaphore variable group `vault-approle` defines `vault_role_id`; your MacBook doesn't. `group_vars/spark.yml` (full file in Step 3) turns that into three connection variables:
+One variable decides who Ansible logs in as. The Semaphore variable group `vault-approle` defines `vault_role_id`; your MacBook doesn't. `group_vars/spark.yml` (full file in §3.4) turns that into three connection variables:
 
 | Variable | Semaphore (`vault_role_id` defined) | MacBook (not defined) |
 |---|---|---|
@@ -180,7 +182,7 @@ One variable decides who Ansible logs in as. The Semaphore variable group `vault
 | `ansible_ssh_common_args` | `-o StrictHostKeyChecking=accept-new` (the container starts with an empty `known_hosts`; a *changed* key is still refused) | empty: your `known_hosts` |
 | sudo | NOPASSWD (`/etc/sudoers.d/90-svc-ansible`) | `-K` |
 
-The key and certificate in `/tmp/lab_ssh` come from **play 1**, `playbooks/00-vault-cert.yml`, which every playbook that SSHes to the Sparks imports first. On the MacBook play 1 is skipped (`when: vault_role_id is defined`), so the same playbook runs as `nvidia`. That is the break-glass path ([00b §10](00b-dgx-spark-semaphore-target.md)). `remote_user = nvidia` in `ansible.cfg` is only the fallback; the inventory variable wins.
+The key and certificate in `/tmp/lab_ssh` come from **play 1**, `playbooks/00-vault-cert.yml`, which every playbook that SSHes to the Sparks imports first. On the MacBook play 1 is skipped (`when: vault_role_id is defined`), so the same playbook runs as `nvidia`. That is the break-glass path ([Step 04 §10](04-dgx-spark-as-semaphore-target.md)). `remote_user = nvidia` in `ansible.cfg` is only the fallback; the inventory variable wins.
 
 **ControlPersist and the 15-minute certificate.** sshd checks a certificate's validity window only when a connection **authenticates**. With `ControlPersist=600s`, Ansible opens one master connection per host and runs every later task through it, so a task that is still running at minute 20 keeps working: its master connection authenticated at minute 1. What fails is a **new** connection after the certificate has expired, for example a master that closed because the host rebooted (`reboot` module in `17-dgxos-upgrade.yml`, `21-emergency-drain.yml -e node_drain_reboot=true`) or because it sat idle for more than 600 s. Two more details:
 
@@ -189,7 +191,7 @@ The key and certificate in `/tmp/lab_ssh` come from **play 1**, `playbooks/00-va
 
 So keep long or rebooting Semaphore tasks to one host per task (`--limit`), and if a reconnect after a reboot fails with `Permission denied (publickey)`, simply run the template again: play 1 issues a new certificate. On the MacBook path none of this applies, because your key doesn't expire.
 
-### Step 3 — Describe your hardware (inventory)
+### 3.4 Describe your hardware (inventory)
 
 Find the real CX-7 interface names **on each Spark** before editing host_vars:
 
@@ -230,7 +232,7 @@ all:
           ansible_host: 192.168.0.101
 
     # ---- functional groups (a host can be in several) -------------------
-    # Kubernetes (Volume 16): kubeadm control plane on dgx-spark-1. It also runs
+    # Kubernetes (Step 19): kubeadm control plane on dgx-spark-1. It also runs
     # workloads (no control-plane taint), so a single Spark is a complete cluster.
     k8s_control_plane:
       hosts:
@@ -245,7 +247,7 @@ all:
       children:
         spark:
     # vault01 (192.168.0.211) and sema01 (192.168.0.210) are deliberately NOT
-    # here: they are the management plane, built by hand with the 00a guide and
+    # here: they are the management plane, built by hand in Step 01 and
     # never configured by these playbooks. Their addresses live in group_vars/all.yml.
     monitoring:
       hosts:
@@ -268,7 +270,7 @@ all:
 ansible_become: true
 
 # ------------------------------------------------------------------------
-# How the controller logs in (00b guide §1).
+# How the controller logs in (Step 04 §1).
 #   From Semaphore (sema01): the variable group defines vault_role_id, play 1
 #     (00-vault-cert.yml) gets a 15-minute certificate from vault01, and every
 #     task runs as svc-ansible with NOPASSWD sudo.
@@ -292,7 +294,7 @@ spark_expected:
   os_family: Debian
   os_major: "24"                 # DGX OS 7 is Ubuntu 24.04 based
 
-# Packages every node gets (Volume 06/07)
+# Packages every node gets (Steps 03/10)
 spark_base_packages:
   - chrony
   - jq
@@ -309,11 +311,11 @@ spark_base_packages:
   - python3-venv
   - acl                      # needed for become_user to unprivileged users
 
-# NVIDIA packages we never let a random 'apt upgrade' move (Volume 07)
+# NVIDIA packages we never let a random 'apt upgrade' move (Step 10)
 spark_hold_nvidia_packages: true
 spark_nvidia_hold_regex: '^(nvidia-driver-|nvidia-dkms-|nvidia-kernel-|libnvidia-|nvidia-firmware-|cuda-drivers)'
 
-# Kernel / sysctl tuning (Volume 06, 12)
+# Kernel / sysctl tuning (Steps 03, 14)
 spark_sysctls:
   vm.swappiness: 10
   vm.max_map_count: 1048576          # large mmap'ed model weights
@@ -354,9 +356,9 @@ ansible-inventory --host dgx-spark-1 --yaml | head -40     # merged vars for one
 ansible -m debug -a "var=cx7_interfaces" spark           # per-host value
 ```
 
-### Step 4 — First contact
+### 3.5 First contact
 
-> **Order:** Steps 1–3 are the [step-by-step guide's](00-ansible-step-by-step-guide.md) Step 0. Before this step, do its **Step 0b**, the [00b guide](00b-dgx-spark-semaphore-target.md): the Spark trusts vault01 and Semaphore has the project `spark-lab` with the template `00 Ping`. Haven't done 00b yet? The MacBook form below works already, because it logs in as `nvidia` with your own key.
+> **Order:** §3.1–3.4 come before Steps 03 and 04; this section comes after them. Before running it, complete [Step 04 · Add dgx-spark-1 as a Semaphore target](04-dgx-spark-as-semaphore-target.md): the Spark trusts vault01 and Semaphore has the project `spark-lab` with the template `00 Ping`. Haven't done Step 04 yet? The MacBook form below works already, because it logs in as `nvidia` with your own key.
 
 ```yaml
 # lab/playbooks/00-ping.yml
@@ -383,7 +385,7 @@ ansible -m debug -a "var=cx7_interfaces" spark           # per-host value
           kernel {{ ansible_facts.kernel }}
 ```
 
-In Semaphore this is the template **`00 Ping`** ([00b §5.6](00b-dgx-spark-semaphore-target.md)): the log shows play 1, *Get an SSH certificate from Vault*, then this play. From the MacBook (bootstrap or break-glass):
+In Semaphore this is the template **`00 Ping`** ([Step 04 §5.6](04-dgx-spark-as-semaphore-target.md)): the log shows play 1, *Get an SSH certificate from Vault*, then this play. From the MacBook (bootstrap or break-glass):
 
 ```bash
 ansible-playbook playbooks/00-ping.yml -l dgx-spark-1,localhost -K     # -K prompts for nvidia's sudo password
@@ -406,7 +408,7 @@ ansible dgx-spark-1 -m setup   -a "filter=ansible_processor*"
 ansible dgx-spark-1 -b -K -m apt -a "name=nvtop state=present"   # -b = become, -K = nvidia's sudo password
 ```
 
-### Step 5 — Teach Ansible about the GPU: custom facts
+### 3.6 Teach Ansible about the GPU: custom facts
 
 Built-in facts know the CPU and OS but nothing about the GB10, CUDA or the CX-7. A **local fact** is an executable in `/etc/ansible/facts.d/*.fact` that prints JSON. Ansible runs it during fact gathering and exposes the result as `ansible_local.<name>`.
 
@@ -617,9 +619,9 @@ Every later role reads these instead of re-running `nvidia-smi`. A typical use i
   when: ansible_local.spark.cx7.up | length > 0
 ```
 
-### Step 6 — OS baseline
+### 3.7 OS baseline
 
-The `spark_baseline` role installs the tooling you'll need in every later volume, pins the NVIDIA driver stack against accidental upgrades, and applies sysctl, SSH and time settings.
+The `spark_baseline` role installs the tooling you'll need in every later step, pins the NVIDIA driver stack against accidental upgrades, and applies sysctl, SSH and time settings.
 
 ```yaml
 # lab/roles/spark_baseline/tasks/main.yml
@@ -690,7 +692,7 @@ The `spark_baseline` role installs the tooling you'll need in every later volume
   when: spark_baseline_hold_nvidia | bool
 
 # `command` tasks are SKIPPED (not "changed") under --check, so without this a
-# missing hold would be invisible to drift detection (Volume 22).
+# missing hold would be invisible to drift detection (Step 26).
 - name: Report missing holds as drift in check mode
   ansible.builtin.debug:
     msg: "Would hold: {{ spark_baseline_nvidia_pkgs | difference(spark_baseline_holds.stdout_lines) }}"
@@ -709,7 +711,7 @@ ansible-playbook playbooks/01-baseline.yml -l dgx-spark-1,localhost -K          
 ansible-playbook playbooks/01-baseline.yml -l dgx-spark-1,localhost -K                  # again → changed=0
 ```
 
-**The second run must report `changed=0`.** If it doesn't, a task isn't idempotent. Fix it before moving on, or drift detection (Volume 22) will cry wolf forever.
+**The second run must report `changed=0`.** If it doesn't, a task isn't idempotent. Fix it before moving on, or drift detection (Step 26) will cry wolf forever.
 
 ---
 
@@ -731,7 +733,7 @@ ansible-playbook playbooks/01-baseline.yml -l dgx-spark-1,localhost -K          
 - [ ] Keys only: flip `spark_baseline_ssh_disable_passwords: true` **after** you've confirmed key login works from two places.
 - [ ] Put the lab directory in git and never commit `.cache/` (it holds the kubeconfig and the munge key). On sema01 the same applies to the state volume `/opt/spark-lab/cache`: back it up, keep it `0700`.
 - [ ] Pin `ansible-core` and collection versions (`requirements.*`). An unpinned `community.general` bump is the most common source of "it worked yesterday".
-- [x] Use a dedicated automation user with `NOPASSWD` sudo **only** once Vault-signed SSH certificates are in place: `svc-ansible` + vault01's CA, from `00b-semaphore-target.yml` (Volume 19).
+- [x] Use a dedicated automation user with `NOPASSWD` sudo **only** once Vault-signed SSH certificates are in place: `svc-ansible` + vault01's CA, from `00b-semaphore-target.yml` (Step 18).
 
 ---
 
@@ -741,12 +743,12 @@ ansible-playbook playbooks/01-baseline.yml -l dgx-spark-1,localhost -K          
 |---|---|---|---|
 | `UNREACHABLE! ... Permission denied (publickey)` | Key not on the Spark, or the wrong user | `ssh -v nvidia@192.168.0.100` | `ssh-copy-id`; check `remote_user` in `ansible.cfg` |
 | `Missing sudo password` | MacBook run (`nvidia`) without `-K` | — | Add `-K`; Semaphore runs as `svc-ansible` with NOPASSWD |
-| Semaphore: `Permission denied (publickey)` for `svc-ansible` | Spark doesn't trust vault01's CA yet, or the certificate expired before a reconnect (Step 2b) | `sudo journalctl -u ssh \| grep svc-ansible` on the Spark | Run `00b-semaphore-target.yml`; run the template again for a fresh certificate |
-| Semaphore run tries to log in as `nvidia` | Template has no variable group, so `vault_role_id` is undefined | Task log: play 1 tasks *skipped* | Attach `vault-approle` to the template (00b §12) |
+| Semaphore: `Permission denied (publickey)` for `svc-ansible` | Spark doesn't trust vault01's CA yet, or the certificate expired before a reconnect (§3.3) | `sudo journalctl -u ssh \| grep svc-ansible` on the Spark | Run `00b-semaphore-target.yml`; run the template again for a fresh certificate |
+| Semaphore run tries to log in as `nvidia` | Template has no variable group, so `vault_role_id` is undefined | Task log: play 1 tasks *skipped* | Attach `vault-approle` to the template (Step 04 §12) |
 | `Timeout (12s) waiting for privilege escalation prompt` | sudo is slow because of a DNS lookup of the hostname | `time sudo true` on the Spark | Add the hostname to `/etc/hosts` |
 | `/usr/bin/python3: not found` | Minimal image, or a container target | `ansible host -m raw -a 'which python3'` | Bootstrap with the `raw` module (see the Molecule `prepare.yml`) |
 | `ansible_local` is empty | Fact file not executable, or it printed non-JSON | `sudo /etc/ansible/facts.d/spark.fact \| jq .` | `chmod 755`; the script must print a single JSON object |
-| Fact gathering hangs for ~10 s | `nvidia-smi` blocked on a wedged GPU | `timeout 5 nvidia-smi; echo $?` | The fact script time-boxes itself; go to Volume 24, Runbook A |
+| Fact gathering hangs for ~10 s | `nvidia-smi` blocked on a wedged GPU | `timeout 5 nvidia-smi; echo $?` | The fact script time-boxes itself; go to Step 29, Runbook A |
 | `E: Could not get lock /var/lib/dpkg/lock-frontend` | unattended-upgrades or the DGX Dashboard updater is running | `ps aux \| grep -E 'apt\|dpkg'` | The role retries 3× with a 10 s delay. Otherwise wait for it to finish |
 | Second run is not `changed=0` | Non-idempotent task (`command`/`shell` without `changed_when`) | `ansible-playbook ... --diff -v` | Add `creates:`, `changed_when:` or a real module |
 
@@ -779,5 +781,5 @@ ansible spark -m command -a "sshd -T" -b | grep -E 'permitrootlogin|allowtcpforw
 ## 8. Break-it exercises
 
 1. Make the fact script print `hello` before the JSON. What error do you get, and at which task?
-2. Remove `pipelining = True` and time `01-baseline.yml` with `profile_tasks`. How many seconds does it add? (Volume 02 explains why.)
+2. Remove `pipelining = True` and time `01-baseline.yml` with `profile_tasks`. How many seconds does it add? (Step 09 explains why.)
 3. Hold a non-NVIDIA package by hand (`apt-mark hold jq`). Does the role release it? Should it?

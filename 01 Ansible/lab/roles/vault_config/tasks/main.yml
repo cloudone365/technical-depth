@@ -4,7 +4,7 @@
 - name: An admin token is required for this run
   ansible.builtin.assert:
     that: vault_config_token | length > 0
-    fail_msg: "export VAULT_TOKEN=<admin token from vault01> and run again (00b guide §6)"
+    fail_msg: "export VAULT_TOKEN=<admin token from vault01> and run again (Step 04 §6)"
     quiet: true
 
 - name: Vault API headers
@@ -13,7 +13,7 @@
       X-Vault-Token: "{{ vault_config_token }}"
   no_log: true
 
-# ------------------------------------------------ what the 00a guide built: check, don't touch
+# ------------------------------------------------ what Step 01 built: check, don't touch
 - name: Read the SSH signing role
   ansible.builtin.uri:
     url: "{{ vault_config_addr }}/v1/{{ vault_config_ssh_mount }}/roles/{{ vault_config_ssh_role }}"
@@ -29,7 +29,7 @@
       - vault_config_ssh_principal in (vault_config_sshrole.json.data.allowed_users | split(','))
     fail_msg: >-
       {{ vault_config_ssh_mount }}/roles/{{ vault_config_ssh_role }} is missing or does not allow
-      {{ vault_config_ssh_principal }} — build it with the 00a guide §4 first.
+      {{ vault_config_ssh_principal }} — build it in Step 01 §4 first.
     quiet: true
 
 - name: Read the Semaphore AppRole
@@ -43,7 +43,7 @@
 - name: The AppRole must exist
   ansible.builtin.assert:
     that: vault_config_role.status == 200
-    fail_msg: "auth/approle/role/{{ vault_config_approle }} not found — 00a guide §4"
+    fail_msg: "auth/approle/role/{{ vault_config_approle }} not found — Step 01 §4"
     quiet: true
 
 # ------------------------------------------------ what the Spark lab adds

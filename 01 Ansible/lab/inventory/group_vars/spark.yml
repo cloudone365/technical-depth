@@ -6,7 +6,7 @@
 ansible_become: true
 
 # ------------------------------------------------------------------------
-# How the controller logs in (00b guide §1).
+# How the controller logs in (Step 04 §1).
 #   From Semaphore (sema01): the variable group defines vault_role_id, play 1
 #     (00-vault-cert.yml) gets a 15-minute certificate from vault01, and every
 #     task runs as svc-ansible with NOPASSWD sudo.
@@ -30,7 +30,7 @@ spark_expected:
   os_family: Debian
   os_major: "24"                 # DGX OS 7 is Ubuntu 24.04 based
 
-# Packages every node gets (Volume 06/07)
+# Packages every node gets (Steps 03/10)
 spark_base_packages:
   - chrony
   - jq
@@ -47,11 +47,11 @@ spark_base_packages:
   - python3-venv
   - acl                      # needed for become_user to unprivileged users
 
-# NVIDIA packages we never let a random 'apt upgrade' move (Volume 07)
+# NVIDIA packages we never let a random 'apt upgrade' move (Step 10)
 spark_hold_nvidia_packages: true
 spark_nvidia_hold_regex: '^(nvidia-driver-|nvidia-dkms-|nvidia-kernel-|libnvidia-|nvidia-firmware-|cuda-drivers)'
 
-# Kernel / sysctl tuning (Volume 06, 12)
+# Kernel / sysctl tuning (Steps 03, 14)
 spark_sysctls:
   vm.swappiness: 10
   vm.max_map_count: 1048576          # large mmap'ed model weights

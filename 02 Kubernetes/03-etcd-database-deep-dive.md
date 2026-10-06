@@ -149,7 +149,7 @@ What the syncer copies to the root (pods, Services, PVCs, and the Secrets/Config
 | Vol 02 Secret encryption | Proven in §5.3 by reading the raw key — and shown to stop at the root boundary |
 | Prometheus (Vol 16) | kube-prometheus-stack scrapes `kubeEtcd` on port 2381 over plain HTTP ([`addons/kube-prometheus-stack-values.yaml`](lab/addons/kube-prometheus-stack-values.yaml)); two alert rules in [`rules.yaml`](lab/manifests/root/95-observability/rules.yaml) |
 | 01 Ansible `kubeadm_cluster` role | installs `etcdctl`/`etcdutl` matching the etcd image, `/usr/local/sbin/etcd-snapshot`, and the timer. `playbooks/99-reset-kubernetes.yml -e reset_wipe_data=true` deletes `/var/lib/etcd` — your off-box copy (§5.7) is the only way back after that |
-| Off-box backup | §5.7 pulls snapshots + PKI + encryption config to your MacBook (not sema01: it already holds cluster-admin kubeconfigs, so keep the CA keys apart); vault01 KV (01 Ansible Vol 19) for the keys. In production, push to object storage (MinIO from module 08 works) from the same timer |
+| Off-box backup | §5.7 pulls snapshots + PKI + encryption config to your MacBook (not sema01: it already holds cluster-admin kubeconfigs, so keep the CA keys apart); vault01 KV (01 Ansible Step 18) for the keys. In production, push to object storage (MinIO from module 08 works) from the same timer |
 | vClusters (Vol 27) | their state is on PVCs, not in etcd (§3.4, §5.8; Vol 27 §6.7) |
 | Storage (Vol 11) | fsync latency is a storage QoS problem. The checkpoint-write patterns in Vol 11 are what hurt etcd |
 | Controllers (Vol 04) | an informer that watches from a compacted revision gets `410 Gone` and must re-list — compaction (§5.5) and restores (§5.6) are where that comes from |
@@ -380,7 +380,7 @@ tar tzf ~/spark-backups/spark-root-$(date +%F).tgz | head
 | `etc/kubernetes/encryption/config.yaml` | the AES key: without it every Secret in the snapshot is unreadable ciphertext |
 | `etc/kubernetes/kubeadm-config.yaml` | the exact config 01 Ansible ran `kubeadm init` with |
 
-Treat that tarball like a password: it holds the key that decrypts every Secret **and** the CA keys that can mint cluster-admin certificates. Encrypt it at rest (`age`/`gpg`), or store the keys in vault01's KV (01 Ansible Vol 19) and only the snapshots on the NAS. Automate it daily (Vol 15's operations table) — a `cron`/`launchd` job on the MacBook (or a timer on the NAS) running this `ssh … | …` line is enough.
+Treat that tarball like a password: it holds the key that decrypts every Secret **and** the CA keys that can mint cluster-admin certificates. Encrypt it at rest (`age`/`gpg`), or store the keys in vault01's KV (01 Ansible Step 18) and only the snapshots on the NAS. Automate it daily (Vol 15's operations table) — a `cron`/`launchd` job on the MacBook (or a timer on the NAS) running this `ssh … | …` line is enough.
 
 ### 5.8 Back up a vCluster's own state
 

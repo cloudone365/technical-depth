@@ -1,5 +1,5 @@
 ---
-# Root Kubernetes cluster built with kubeadm (Volume 16).
+# Root Kubernetes cluster built with kubeadm (Step 19).
 # dgx-spark-1 is the control plane AND a worker (no control-plane taint), so one
 # Spark is a complete cluster; dgx-spark-2 (optional) joins as a worker.
 kubeadm_cluster_version: "1.36.5"            # pin! check https://kubernetes.io/releases/
@@ -46,12 +46,12 @@ kubeadm_cluster_node_labels:
 kubeadm_cluster_containerd_config: /etc/containerd/config.toml
 kubeadm_cluster_default_runtime_nvidia: true  # set false + use runtimeClassName: nvidia for strict multi-tenancy
 
-# API server hardening (Volume 02 of 02 Kubernetes): audit log + Secret encryption at rest.
+# API server hardening (02 Kubernetes Vol 02): audit log + Secret encryption at rest.
 kubeadm_cluster_audit_dir: /etc/kubernetes/audit
 kubeadm_cluster_audit_log_dir: /var/log/kubernetes/audit
 kubeadm_cluster_encryption_dir: /etc/kubernetes/encryption
 
-# etcd: stacked static pod. Snapshots every 6 h, newest 20 kept (Volume 03 of 02 Kubernetes).
+# etcd: stacked static pod. Snapshots every 6 h, newest 20 kept (02 Kubernetes Vol 03).
 kubeadm_cluster_etcd_snapshot_dir: /var/lib/etcd-snapshots
 kubeadm_cluster_etcd_snapshot_calendar: "*-*-* 00/6:00:00"
 kubeadm_cluster_etcd_snapshot_keep: 20

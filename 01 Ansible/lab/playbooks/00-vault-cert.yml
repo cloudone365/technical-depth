@@ -1,5 +1,5 @@
 ---
-# Play 1 of every Semaphore task (00a guide §8.3, 00b guide §5): log in to
+# Play 1 of every Semaphore task (Step 01 §8.3, Step 04 §5): log in to
 # vault01 with the Semaphore AppRole and get a 15-minute SSH certificate for
 # svc-ansible. The playbooks that SSH to the Sparks import this file first.
 #

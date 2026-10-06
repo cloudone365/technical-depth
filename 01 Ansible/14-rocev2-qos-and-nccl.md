@@ -1,6 +1,6 @@
-# Volume 12 — RoCEv2 Done Right: MTU, QoS (DSCP/PFC/ECN), and Proving NCCL Uses RDMA Across Sparks
+# Step 14 · RoCEv2 Done Right: MTU, QoS (DSCP/PFC/ECN), and Proving NCCL Uses RDMA Across Sparks
 
-> **Module 01 · Part III — High-Speed Fabric** · Prev: [11 CX-7 fabric](11-infiniband-fabric-automation-and-opensm.md) · Next: [13 Multus & secondary networks in Kubernetes](13-multus-cni-and-secondary-rdma-networking.md)
+> **01 Ansible · Part III — Fabric & storage · Step 14 of 30** · ← [Step 13 · ConnectX-7 fabric](13-connectx7-fabric-and-opensm.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 15 · NFS over RDMA](15-nfs-rdma-and-parallel-file-systems.md) →
 
 | | |
 |---|---|
@@ -147,7 +147,7 @@ flowchart LR
       ansible.builtin.debug:
         msg: >-
           mlnx_qos / sysfs / configfs settings do not survive reboot. Re-run this play from a
-          systemd unit or AWX schedule at boot, or bake it into a oneshot service (exercise in Volume 12).
+          systemd unit or AWX schedule at boot, or bake it into a oneshot service (exercise in Step 14).
 ```
 
 ```bash
@@ -156,7 +156,7 @@ ansible-playbook playbooks/12b-roce-qos.yml -K
 ssh nvidia@192.168.0.100 'sudo mlnx_qos -i enp1s0f1np1 | sed -n "1,20p"'
 ```
 
-Persist it: create a oneshot systemd unit that runs the same commands at boot. Templating that unit is the exercise at the end of this volume. Or have AWX run the play on a boot-triggered webhook.
+Persist it: create a oneshot systemd unit that runs the same commands at boot. Templating that unit is the exercise at the end of this step. Or have AWX run the play on a boot-triggered webhook.
 
 ---
 
@@ -279,7 +279,7 @@ NVIDIA's Spark NCCL guide bootstraps over the **management** interface (`NCCL_SO
         msg:
           - "Avg bus bandwidth: {{ nccl_busbw }} GB/s"
           - "Transport line   : {{ nccl_transport }}"
-          - "If this says NET/Socket, RDMA isn't in use — see Volume 12 troubleshooting."
+          - "If this says NET/Socket, RDMA isn't in use — see Step 14 troubleshooting."
 ```
 
 ```bash
@@ -318,12 +318,12 @@ The same variables go into vLLM or TRT-LLM multi-node launches. NVIDIA's vLLM Sp
 
 ## 4. Integrations
 
-| Consumer | Uses from this volume |
+| Consumer | Uses from this step |
 |---|---|
 | vLLM / TRT-LLM tensor-parallel across 2 Sparks | NCCL env from fabric facts; `--tensor-parallel-size 2` |
-| Slurm (Volume 18) | `srun --mpi=pmix` or `mpirun` jobs inherit the same NCCL env via `/etc/profile.d/nccl.sh` (template it) |
-| Kubernetes + Multus (Volume 13) | Pods need the RDMA device, plus the same GID/HCA choices |
-| NFS over RDMA (Volume 15) | Uses RDMA-CM, so it inherits the ToS set by `12b-roce-qos.yml` |
+| Slurm (Step 22) | `srun --mpi=pmix` or `mpirun` jobs inherit the same NCCL env via `/etc/profile.d/nccl.sh` (template it) |
+| Kubernetes + Multus (Step 21) | Pods need the RDMA device, plus the same GID/HCA choices |
+| NFS over RDMA (Step 15) | Uses RDMA-CM, so it inherits the ToS set by `12b-roce-qos.yml` |
 
 ## 5. Troubleshooting & diagnostics
 

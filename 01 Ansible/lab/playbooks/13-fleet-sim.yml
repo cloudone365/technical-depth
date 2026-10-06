@@ -1,6 +1,6 @@
 ---
 # Spin up N fake nodes (sshd containers) on dgx-spark-1 to practise fleet-scale
-# tuning — forks, pipelining, ControlPersist, strategies, Mitogen (Volume 02A).
+# tuning — forks, pipelining, ControlPersist, strategies, Mitogen (Step 09).
 #
 #   ansible-playbook playbooks/13-fleet-sim.yml -e fleet_size=64 -K
 #   ansible-playbook -i .cache/fleet.ini playbooks/14-fleet-bench.yml -f 50

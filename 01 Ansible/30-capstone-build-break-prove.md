@@ -1,6 +1,8 @@
-# Volume 25 — Capstone: Build, Break, Prove. The DGX Spark Automation Mastery Lab & Evidence-Based Test Harness
+# Step 30 · Capstone: Build, Break, Prove. The DGX Spark Automation Mastery Lab & Evidence-Based Test Harness
 
-> **Module 01 · Part V — Production SRE** · Prev: [24 Incident response](24-cluster-wide-emergency-drain-and-remediation.md) · Back to [Module index](README.md)
+> **01 Ansible · Part V — Production operations · Step 30 of 30** · ← [Step 29 · Incident response](29-incident-response-and-emergency-drain.md) · [All steps](00-ansible-step-by-step-guide.md)
+>
+> The last step. Back to the [module overview](README.md).
 
 | | |
 |---|---|
@@ -192,7 +194,7 @@ def c_gpu():
     rc, out, err = sh("nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader")
     if rc != 0:
         check("GPU answers nvidia-smi", "FAIL", err or f"rc={rc}",
-              "see Volume 24 Runbook A; check `dmesg | grep -i nvrm`")
+              "see Step 29 Runbook A; check `dmesg | grep -i nvrm`")
         return
     name, drv, cc = [x.strip() for x in out.splitlines()[0].split(",")]
     check("GPU is GB10", "PASS" if "GB10" in name else "FAIL", name)
@@ -204,7 +206,7 @@ def c_gpu():
     rc, out, _ = sh("journalctl -k --since '-24h' --no-pager | grep -c 'NVRM: Xid'")
     n = int(out or 0)
     check("no Xid in 24h", "PASS" if n == 0 else "WARN", f"{n} events",
-          "journalctl -k | grep Xid ; Volume 24 Runbook B")
+          "journalctl -k | grep Xid ; Step 29 Runbook B")
 
 
 def c_memory():
@@ -299,25 +301,25 @@ The scorecard reads one state folder: `$SPARK_LAB_CACHE` if set, else `lab/.cach
 | Where | Evidence |
 |---|---|
 | sema01, `/opt/spark-lab/cache` (Semaphore's state volume) | `ansible.log`, `facts/`, `validation/`, `drift/` (if you run `drift-cycle.sh` there), `incidents/`, `firmware-inventory.json`, `kubeconfig-*.yaml` |
-| MacBook, `01 Ansible/lab/.cache` | `vault-ca.crt` (00b §2), `bench.csv` (Volume 02A runs from the MacBook), `drift/` from `drift-cycle.sh`, the fetched kubeconfig |
+| MacBook, `01 Ansible/lab/.cache` | `vault-ca.crt` (Step 04 §2), `bench.csv` (Step 09 runs from the MacBook), `drift/` from `drift-cycle.sh`, the fetched kubeconfig |
 
 So grade on sema01 against the state volume, after copying in the two MacBook-only files:
 
 ```bash
 # MacBook
 scp .cache/bench.csv sema01:/tmp/ && ssh sema01 'sudo install -o 1001 -m 0600 /tmp/bench.csv /opt/spark-lab/cache/ && rm /tmp/bench.csv'
-# sema01 (vault-ca.crt is the copy next to the 00a compose file; the repository clone is from 00b §4)
+# sema01 (vault-ca.crt is the copy next to the Step 01 compose file; the repository clone is from Step 04 §4)
 sudo install -o 1001 -m 0644 ~/semaphore/vault-ca.crt /opt/spark-lab/cache/vault-ca.crt
 sudo SPARK_LAB_CACHE=/opt/spark-lab/cache python3 ~/technical-depth/"01 Ansible/lab/tools/capstone_scorecard.py"
 ```
 
-Check `03B/19` passes only when vault01's CA certificate is present **and** no file that looks like Vault init output, an AppRole secret or a token sits in the folder: the lab never writes a Vault token or an AppRole secret to disk, and the check keeps it that way.
+Scorecard check `17/18` passes only when vault01's CA certificate is present **and** no file that looks like Vault init output, an AppRole secret or a token sits in the folder: the lab never writes a Vault token or an AppRole secret to disk, and the check keeps it that way.
 
 ```python
 # lab/tools/capstone_scorecard.py
 #!/usr/bin/env python3
 """
-capstone_scorecard.py — grade the Module 01 capstone from EVIDENCE in lab/.cache/.
+capstone_scorecard.py — grade the 01 Ansible capstone (Step 30) from EVIDENCE in lab/.cache/.
 Each challenge passes only if the artifact produced by the real run exists and says so.
 
   python3 tools/capstone_scorecard.py            # table
@@ -367,26 +369,26 @@ def check(vol, title):
     return deco
 
 
-@check("01", "Runs are logged (ansible.log has >= 10 playbook runs)")
+@check("02", "Runs are logged (ansible.log has >= 10 playbook runs)")
 def _():
     n = len(re.findall(r"PLAY RECAP", read(p("ansible.log"))))
     return n >= 10, f"{n} runs logged"
 
 
-@check("01", "Fact cache populated with ansible_local.spark for every Spark")
+@check("02", "Fact cache populated with ansible_local.spark for every Spark")
 def _():
     files = [f for f in glob.glob(p("facts", "*")) if not f.endswith("localhost")]
     ok = [f for f in files if (jload(f) or {}).get("ansible_local", {}).get("spark", {}).get("gpu", {}).get("present")]
     return len(files) > 0 and len(ok) == len(files), f"{len(ok)}/{len(files)} hosts with GPU facts"
 
 
-@check("02", "Fleet benchmark recorded (>= 7 runs in bench.csv)")
+@check("09", "Fleet benchmark recorded (>= 7 runs in bench.csv)")
 def _():
     rows = [line for line in read(p("bench.csv")).splitlines() if "," in line]
     return len(rows) >= 7, f"{len(rows)} rows"
 
 
-@check("06-25", "End-to-end validation passes on every Spark")
+@check("03-30", "End-to-end validation passes on every Spark")
 def _():
     reports = glob.glob(p("validation", "*.json"))
     bad = [os.path.basename(r) for r in reports
@@ -394,7 +396,7 @@ def _():
     return len(reports) > 0 and not bad, f"{len(reports)} reports, failing: {bad or 'none'}"
 
 
-@check("10", "Firmware consistent across nodes (no mismatches)")
+@check("28", "Firmware consistent across nodes (no mismatches)")
 def _():
     inv = jload(p("firmware-inventory.json"))
     if inv is None:
@@ -402,7 +404,7 @@ def _():
     return inv.get("mismatch") == {}, f"mismatch={inv.get('mismatch')}"
 
 
-@check("22", "Latest drift check is clean")
+@check("26", "Latest drift check is clean")
 def _():
     f = latest("drift/check-*.md") or latest("drift/recheck-*.md")
     if not f:
@@ -412,26 +414,26 @@ def _():
     return bool(rows) and not dirty, f"{os.path.basename(f)} dirty={dirty or 'none'}"
 
 
-@check("22", "Self-heal proven (a recheck report exists)")
+@check("26", "Self-heal proven (a recheck report exists)")
 def _():
     f = latest("drift/recheck-*.md")
     return f is not None, os.path.basename(f) if f else "never healed"
 
 
-@check("24", "Incident drill produced an evidence bundle")
+@check("29", "Incident drill produced an evidence bundle")
 def _():
     b = glob.glob(p("incidents", "*.tgz"))
     return len(b) > 0, f"{len(b)} bundles"
 
 
-@check("16", "kubeconfig fetched from the kubeadm root cluster")
+@check("19", "kubeconfig fetched from the kubeadm root cluster")
 def _():
     k = glob.glob(p("kubeconfig-*.yaml"))
     ok = any("https://127.0.0.1" not in read(x) and "server: https://" in read(x) for x in k)
     return ok, ", ".join(os.path.basename(x) for x in k) or "none"
 
 
-@check("03B/19", "vault01 CA copied; no Vault token or AppRole secret left in the cache")
+@check("17/18", "vault01 CA copied; no Vault token or AppRole secret left in the cache")
 def _():
     ca = os.path.exists(p("vault-ca.crt"))
     leaks = [os.path.basename(x) for x in glob.glob(p("*")) if re.search(r"(vault-init|approle|token)", os.path.basename(x))]
@@ -454,7 +456,7 @@ def main():
         print(json.dumps({"score": score, "total": len(results), "results": results}, indent=2))
     else:
         for r in results:
-            print(f"[{'PASS' if r['pass'] else 'FAIL'}] Vol {r['volume']:<6} {r['challenge']}\n         evidence: {r['evidence']}")
+            print(f"[{'PASS' if r['pass'] else 'FAIL'}] Step {r['volume']:<6} {r['challenge']}\n         evidence: {r['evidence']}")
         print(f"\nScore: {score}/{len(results)}")
     raise SystemExit(0 if score == len(results) else 1)
 
@@ -469,33 +471,33 @@ if __name__ == "__main__":
 
 Complete them in order. "Evidence" is what the scorecard or a reviewer checks.
 
-| # | Vol | Challenge | Evidence |
+| # | Step | Challenge | Evidence |
 |---|---|---|---|
-| 1 | 00a/00b, 01A | Management plane outside the Spark, MacBook toolchain from scratch, Spark onboarded as a target; template `00 Ping` shows aarch64/20 cores/GB10 facts | `facts/*` with `ansible_local.spark` on the state volume; play 1 ok in the task log |
-| 2 | 01B | Explode and execute an AnsiballZ payload on the Spark | Screenshot / notes |
-| 3 | 02A | 64-node fleet benchmark matrix (from the MacBook) | `bench.csv` ≥ 7 rows |
-| 4 | 02B | (Optional, the alternative controller) AWX running on the root cluster `spark-root` (or hybrid), configured as code, with read-only templates only | `awx-config.yml` applied; job history |
-| 5 | 03A | Target by state from the MacBook: `-l 'gpu_ready:&k8s_workers:!uma_pressure'` | `--list-hosts` output |
-| 6 | 03B | vault01 operations: restart vault01 → sealed → a Semaphore task fails cleanly at play 1 → unseal by hand (00a) → the same task passes | `vault status` on vault01 before/after; the failed and the passing task in Semaphore's history |
-| 7 | 04 | 7/7 Jinja katas + one kata on live data | CI green |
-| 8 | 05 | Collection built; arm64 EE built on the Spark | `cloudone-spark-*.tar.gz`, `docker image inspect` arm64 |
-| 9 | 06 | Wizard → bootstrap with dead-man switch (drill the rollback) | `journalctl -t bootstrap` |
-| 10 | 07 | Driver audit green; one rolling upgrade | `16-driver-audit` output |
-| 11 | 08 | sm_121 probe + PyTorch bf16 baseline | `18-cuda-smoke` output |
-| 12 | 09 | Dashboard live; three alerts fired and resolved | Alertmanager history |
-| 13 | 10 | Firmware inventory with no mismatches | `.cache/firmware-inventory.json` `mismatch == {}` |
-| 14 | 11 | CX-7 verified at 200G; perftest recorded | `02-fabric` asserts + perftest numbers |
-| 15 | 12 | NCCL `via NET/IB` across two Sparks | NCCL log |
-| 16 | 13 | Pod-to-pod RDMA over Multus | `ib_write_bw` from pods |
-| 17 | 14 | GDS assessment + cold/warm load comparison | `gds_summary` |
+| 1 | 01, 02, 04 | Management plane outside the Spark, MacBook toolchain from scratch, Spark onboarded as a target; template `00 Ping` shows aarch64/20 cores/GB10 facts | `facts/*` with `ansible_local.spark` on the state volume; play 1 ok in the task log |
+| 2 | 05 | Explode and execute an AnsiballZ payload on the Spark | Screenshot / notes |
+| 3 | 09 | 64-node fleet benchmark matrix (from the MacBook) | `bench.csv` ≥ 7 rows |
+| 4 | 23 | (Optional, the alternative controller) AWX running on the root cluster `spark-root` (or hybrid), configured as code, with read-only templates only | `awx-config.yml` applied; job history |
+| 5 | 06 | Target by state from the MacBook: `-l 'gpu_ready:&k8s_workers:!uma_pressure'` | `--list-hosts` output |
+| 6 | 17 | vault01 operations: restart vault01 → sealed → a Semaphore task fails cleanly at play 1 → unseal by hand (Step 01) → the same task passes | `vault status` on vault01 before/after; the failed and the passing task in Semaphore's history |
+| 7 | 07 | 7/7 Jinja katas + one kata on live data | CI green |
+| 8 | 08 | Collection built; arm64 EE built on the Spark | `cloudone-spark-*.tar.gz`, `docker image inspect` arm64 |
+| 9 | 03 | Wizard → bootstrap with dead-man switch (drill the rollback) | `journalctl -t bootstrap` |
+| 10 | 10 | Driver audit green; one rolling upgrade | `16-driver-audit` output |
+| 11 | 11 | sm_121 probe + PyTorch bf16 baseline | `18-cuda-smoke` output |
+| 12 | 12 | Dashboard live; three alerts fired and resolved | Alertmanager history |
+| 13 | 28 | Firmware inventory with no mismatches | `.cache/firmware-inventory.json` `mismatch == {}` |
+| 14 | 13 | CX-7 verified at 200G; perftest recorded | `02-fabric` asserts + perftest numbers |
+| 15 | 14 | NCCL `via NET/IB` across two Sparks | NCCL log |
+| 16 | 21 | Pod-to-pod RDMA over Multus | `ib_write_bw` from pods |
+| 17 | 16 | GDS assessment + cold/warm load comparison | `gds_summary` |
 | 18 | 15 | NFS over RDMA model cache | `/proc/mounts` `proto=rdma` |
-| 19 | 16 | kubeadm root cluster with Cilium (VXLAN) and MetalLB; both vClusters answer on `.111` / `.112`; reset and rebuild once with `99-reset-kubernetes.yml` | `ip -d link show cilium_vxlan`; `kubectl --context dev-lab get ns` and `kubectl --context llms get ns` |
-| 20 | 17 | 15 time-slices on one GB10, and the vCluster budget holds: with two 1-slice pods running in `dev-lab`, a third is accepted by the vCluster API but stays `Pending`, because the root quota in `vc-dev-lab` refuses the synced pod | `kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}'` = 15; `kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget` |
-| 21 | 18 | Slurm: confinement proven; 2-node NCCL job | job output |
-| 22 | 19 | Every build template runs with only the AppRole in Semaphore's variable group; SSH as `svc-ansible` via a 15-minute vault01 certificate; `19 Vault integration` reads `kv/spark-lab/ngc` without printing it | vault01 audit log (`auth/approle/login`, `sign/ansible`, the KV read) per task; `ED25519-CERT` lines in the Spark's sshd log; scorecard `03B/19` |
-| 23 | 21 | CI green; Molecule green on the Spark runner | Actions run |
-| 24 | 22–23 | Drift found (with auditd showing who), safe-healed, recheck clean; `20 Drift check` scheduled nightly | `drift/recheck-*.md`, `ausearch -k`, the schedule's task history |
-| 25 | 24–25 | Chaos drill solved (below) + incident bundle; one drain done break-glass from the MacBook | `incidents/*.tgz`, sealed-fault reveal |
+| 19 | 19 | kubeadm root cluster with Cilium (VXLAN) and MetalLB; both vClusters answer on `.111` / `.112`; reset and rebuild once with `99-reset-kubernetes.yml` | `ip -d link show cilium_vxlan`; `kubectl --context dev-lab get ns` and `kubectl --context llms get ns` |
+| 20 | 20 | 15 time-slices on one GB10, and the vCluster budget holds: with two 1-slice pods running in `dev-lab`, a third is accepted by the vCluster API but stays `Pending`, because the root quota in `vc-dev-lab` refuses the synced pod | `kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}'` = 15; `kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget` |
+| 21 | 22 | Slurm: confinement proven; 2-node NCCL job | job output |
+| 22 | 18 | Every build template runs with only the AppRole in Semaphore's variable group; SSH as `svc-ansible` via a 15-minute vault01 certificate; `19 Vault integration` reads `kv/spark-lab/ngc` without printing it | vault01 audit log (`auth/approle/login`, `sign/ansible`, the KV read) per task; `ED25519-CERT` lines in the Spark's sshd log; scorecard check `17/18` |
+| 23 | 25 | CI green; Molecule green on the Spark runner | Actions run |
+| 24 | 26–27 | Drift found (with auditd showing who), safe-healed, recheck clean; `20 Drift check` scheduled nightly | `drift/recheck-*.md`, `ausearch -k`, the schedule's task history |
+| 25 | 29–30 | Chaos drill solved (below) + incident bundle; one drain done break-glass from the MacBook | `incidents/*.tgz`, sealed-fault reveal |
 
 ---
 
@@ -554,10 +556,10 @@ ansible-playbook playbooks/05-kubernetes.yml -l dgx-spark-1,localhost -K && ansi
 
 ## 5. Mastery criteria
 
-- [ ] **Rebuild:** a re-imaged Spark returns to validated state using only playbooks (00-bootstrap + 00b from the MacBook, then Semaphore templates), in under an hour (Volume 06 drill), while Semaphore, vault01 and their history are untouched.
+- [ ] **Rebuild:** a re-imaged Spark returns to validated state using only playbooks (`00-bootstrap` and `00b-semaphore-target` from the MacBook as in Step 04, then Semaphore templates), in under an hour (Step 03 drill), while Semaphore, vault01 and their history are untouched.
 - [ ] **Idempotence:** `site.yml` second run is `changed=0`.
 - [ ] **Three-angle proof:** validate + invariants + drift all green.
-- [ ] **No long-lived secrets on the automation path:** Semaphore holds only the AppRole (its secret_id encrypted in the variable group); every task logs in with a 15-minute vault01 certificate; no Vault token or AppRole secret in any state folder (scorecard `03B/19`); vault01's unseal keys and root token kept off sema01 and the Sparks (00a §11).
+- [ ] **No long-lived secrets on the automation path:** Semaphore holds only the AppRole (its secret_id encrypted in the variable group); every task logs in with a 15-minute vault01 certificate; no Vault token or AppRole secret in any state folder (scorecard check `17/18`); vault01's unseal keys and root token kept off sema01 and the Sparks (Step 01 §11).
 - [ ] **Chaos:** at least 5 of 7 faults found without the reveal.
 - [ ] **Scorecard:** 10/10.
 
@@ -565,7 +567,7 @@ ansible-playbook playbooks/05-kubernetes.yml -l dgx-spark-1,localhost -K && ansi
 
 | Direction | Start with |
 |---|---|
-| More Sparks (3-ring or 4+ with a switch) | Volume 11 §2.3, Volume 12 QoS; NVIDIA's multi-Spark playbooks |
-| Real DGX/HGX cluster | Grow the single kubeadm control plane into three (stacked etcd behind a VIP), or use Kubespray / Base Command Manager; keep vClusters for tenant isolation; Redfish modules for real BMCs (Volume 06 §4); Fabric Manager in the driver flow (Volume 07); InfiniBand + UFM (Volume 11 §4) |
-| Inference platform on the Spark pair | vLLM/TRT-LLM multi-node with the NCCL env from Volume 12, models from Volume 15, secrets from Volume 19 |
+| More Sparks (3-ring or 4+ with a switch) | Step 13 §2.3, Step 14 QoS; NVIDIA's multi-Spark playbooks |
+| Real DGX/HGX cluster | Grow the single kubeadm control plane into three (stacked etcd behind a VIP), or use Kubespray / Base Command Manager; keep vClusters for tenant isolation; Redfish modules for real BMCs (Step 03 §4); Fabric Manager in the driver flow (Step 10); InfiniBand + UFM (Step 13 §4) |
+| Inference platform on the Spark pair | vLLM/TRT-LLM multi-node with the NCCL env from Step 14, models from Step 15, secrets from Step 18 |
 | The rest of this repo | [`02 Kubernetes`](../02%20Kubernetes/README.md), [`07 Nvidia`](../07%20Nvidia/), [`08 Storage`](../08%20Storage/README.md) |

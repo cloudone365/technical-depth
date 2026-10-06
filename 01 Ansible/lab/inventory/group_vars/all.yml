@@ -22,13 +22,13 @@ ntp_servers: [time.cloudflare.com, pool.ntp.org]
 # Where the lab keeps its state on the controller: kubeconfigs, join files,
 # reports, incident bundles. On your MacBook that is lab/.cache (git-ignored).
 # Semaphore sets SPARK_LAB_CACHE to a persistent volume, because its checkout of
-# the repository is temporary (00b guide §4).
+# the repository is temporary (Step 04 §4).
 lab_cache_dir: "{{ lookup('ansible.builtin.env', 'SPARK_LAB_CACHE') | default(inventory_dir ~ '/../.cache', true) }}"
 lab_artifacts_dir: "{{ lab_cache_dir }}/artifacts"
 
 # ------------------------------------------------------------------------
-# Management plane — OUTSIDE the Sparks, built by the 00a guide
-# (00a-semaphore-vault-lab-guide.md). Not in this inventory on purpose:
+# Management plane — OUTSIDE the Sparks, built by hand in Step 01
+# (01-management-plane-semaphore-and-vault.md). Not in this inventory on purpose:
 # no lab playbook ever configures them over SSH.
 #   sema01   192.168.0.210   Semaphore UI (Docker), runs every playbook
 #   vault01  192.168.0.211   HashiCorp Vault: SSH CA + lab secrets
@@ -36,7 +36,7 @@ lab_artifacts_dir: "{{ lab_cache_dir }}/artifacts"
 semaphore_url: http://192.168.0.210:3000
 vault_addr: https://192.168.0.211:8200
 # Vault's TLS certificate as the controller sees it: the copy mounted into the
-# Semaphore container (00a §7.3), or the one you copied to the MacBook (00b §2).
+# Semaphore container (Step 01 §7.3), or the one you copied to the MacBook (Step 04 §2).
 vault_cacert: "{{ '/etc/semaphore/vault-ca.crt' if vault_role_id is defined else lab_cache_dir ~ '/vault-ca.crt' }}"
 vault_ssh_mount: ssh-client-signer       # SSH secrets engine path on vault01
 vault_ssh_role: ansible                  # signing role: principal svc-ansible, 15-minute certificates

@@ -56,7 +56,7 @@ flowchart LR
 | Ordering | sync waves (-10 → 10): root platform → vCluster budgets → in-vCluster platform → policy → workloads. CRD-dependent layers last | annotations |
 | Drift | `selfHeal: true`: a manual `kubectl edit` in any of the three clusters is reverted within minutes | Argo CD |
 | Safety | `prune: false` on namespaces, budgets and storage layers; the vClusters themselves (Helm releases) are **not** Argo CD apps | `applications.yaml` |
-| Secrets | never in Git. Vault (01 Ansible Vol 19) → Kubernetes Secrets (Vault Agent / External Secrets) | `hf-token`, `llm-api-users`, TLS |
+| Secrets | never in Git. Vault (01 Ansible Step 18) → Kubernetes Secrets (Vault Agent / External Secrets) | `hf-token`, `llm-api-users`, TLS |
 | Versions | one file | `versions.env` |
 | Progressive delivery | HTTPRoute weights (90/10 → 50/50 → 0/100) on Traefik inside llms | Vol 09 §5.7 |
 | Rollback | `git revert` → auto-sync | Argo CD |

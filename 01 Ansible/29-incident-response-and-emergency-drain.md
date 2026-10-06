@@ -1,6 +1,6 @@
-# Volume 24 — Incident Response for DGX Spark: Drain, Capture Evidence, Remediate, Prove, Return to Service
+# Step 29 · Incident Response for DGX Spark: Drain, Capture Evidence, Remediate, Prove, Return to Service
 
-> **Module 01 · Part V — Production SRE** · Prev: [23 Logging & audit](23-high-cardinality-logging-and-audit-compliance.md) · Next: [25 Capstone & test harness](25-hands-on-ansible-mastery-lab-and-test-harness.md)
+> **01 Ansible · Part V — Production operations · Step 29 of 30** · ← [Step 28 · Firmware & patching](28-firmware-lifecycle-and-vulnerability-patching.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 30 · Capstone](30-capstone-build-break-prove.md) →
 
 | | |
 |---|---|
@@ -28,7 +28,7 @@ flowchart LR
 
 **`serial: 1`, and refuse to run without `-l`.** A drain that runs against every host at once is an outage you caused yourself.
 
-**Two ways to start it.** Normally from Semaphore: the template **`21 Emergency drain`** in project `spark-lab`, whose CLI args name the node (`["--limit", "dgx-spark-2,localhost"]`; keep `localhost` for play 1 and the `kubectl` steps) and whose extra variables pick the stages (`node_drain_reboot`, `node_drain_undrain_after`, `node_drain_bug_report`). The task history then records who drained which node, when, and what happened. **Break-glass** from your MacBook, when sema01 or vault01 is down (00b §10):
+**Two ways to start it.** Normally from Semaphore: the template **`21 Emergency drain`** in project `spark-lab`, whose CLI args name the node (`["--limit", "dgx-spark-2,localhost"]`; keep `localhost` for play 1 and the `kubectl` steps) and whose extra variables pick the stages (`node_drain_reboot`, `node_drain_undrain_after`, `node_drain_bug_report`). The task history then records who drained which node, when, and what happened. **Break-glass** from your MacBook, when sema01 or vault01 is down (Step 04 §10):
 
 ```bash
 cd "01 Ansible/lab"
@@ -236,7 +236,7 @@ ansible-playbook playbooks/21-emergency-drain.yml -l dgx-spark-2,localhost -K \
   -e node_drain_bug_report=true -e node_drain_reboot=true -e node_drain_undrain_after=true
 ```
 
-If it happens again after the reboot, keep the node drained and open a case with the bundle (`incidents/dgx-spark-2-*.tgz` in the state folder, `/opt/spark-lab/cache` on sema01; it includes `nvidia-bug-report.log.gz`), and check for a driver/firmware update (Volumes 07, 10).
+If it happens again after the reboot, keep the node drained and open a case with the bundle (`incidents/dgx-spark-2-*.tgz` in the state folder, `/opt/spark-lab/cache` on sema01; it includes `nvidia-bug-report.log.gz`), and check for a driver/firmware update (Steps 10, 28).
 
 ### Runbook B — Xid triage
 
@@ -257,7 +257,7 @@ ansible dgx-spark-2 -b -m shell -a "journalctl -k --since '-24h' --no-pager | gr
 | 79 GPU has fallen off the bus | Hardware / power / PCIe | **Drain + reboot**; if it recurs → RMA path |
 | 119 / 120 GSP RPC timeout / error | Driver / firmware | Drain + reboot; check the driver/firmware update level |
 
-The Slurm health check (Volume 18) auto-drains on the hardware-class codes; the kata in Volume 04 (K3) is the same classification in Jinja. Check NVIDIA's Xid documentation for the codes and fields your driver branch reports.
+The Slurm health check (Step 22) auto-drains on the hardware-class codes; the kata in Step 07 (K3) is the same classification in Jinja. Check NVIDIA's Xid documentation for the codes and fields your driver branch reports.
 
 ### Runbook C — Unified-memory pressure
 
@@ -344,7 +344,7 @@ ansible-playbook playbooks/24-uma-relief.yml -l dgx-spark-1,localhost -K        
 ansible-playbook playbooks/24-uma-relief.yml -l dgx-spark-1,localhost -K -e uma_drop_caches=true   # relieve
 ```
 
-Prevent it from recurring: set memory limits on model-server containers, keep the kubelet reserve (Volume 16), give idle services the `spark.lab/idle=true` label so this runbook can stop them, and don't run Kubernetes and Slurm GPU jobs on the same node at the same time.
+Prevent it from recurring: set memory limits on model-server containers, keep the kubelet reserve (Step 19), give idle services the `spark.lab/idle=true` label so this runbook can stop them, and don't run Kubernetes and Slurm GPU jobs on the same node at the same time.
 
 ### Runbook D — CX-7 link degraded / down
 
@@ -366,7 +366,7 @@ A Spark has **no out-of-band management**. When SSH and ping fail:
 1. Check from the other Spark over the fabric (`ping 192.168.100.12`). If that works, the problem is on the management network, not the node.
 2. Check the local console (monitor/keyboard), or the power LED.
 3. Power-cycle. For a desk lab, a **smart plug** with an API is the practical stand-in for a BMC power action. Ansible can drive it (e.g. a Home Assistant or Tasmota HTTP call from `delegate_to: localhost`).
-4. After it boots: the template `21 Emergency drain` (default `node_drain_collect=true`) still captures the *previous boot's* kernel log (`journalctl -k -b -1`) because journald is persistent (Volume 01A baseline).
+4. After it boots: the template `21 Emergency drain` (default `node_drain_collect=true`) still captures the *previous boot's* kernel log (`journalctl -k -b -1`) because journald is persistent (Step 02 baseline).
 
 ---
 
@@ -387,7 +387,7 @@ sequenceDiagram
   AWX->>S: reboot → validate → return to service
 ```
 
-Automate **steps 1–3** (safe and reversible). Gate **step 4** (reboot or reload) behind a human. Semaphore has no approval node: give the webhook-triggered run only the drain-and-evidence stages (`node_drain_reboot=false`), and keep the reboot as a separate run a person starts. AWX can express the whole flow with an approval node (Volume 20). On a single-user lab you can skip the approval, but keep the structure.
+Automate **steps 1–3** (safe and reversible). Gate **step 4** (reboot or reload) behind a human. Semaphore has no approval node: give the webhook-triggered run only the drain-and-evidence stages (`node_drain_reboot=false`), and keep the reboot as a separate run a person starts. AWX can express the whole flow with an approval node (Step 24). On a single-user lab you can skip the approval, but keep the structure.
 
 ---
 
@@ -400,7 +400,7 @@ Automate **steps 1–3** (safe and reversible). Gate **step 4** (reboot or reloa
 | Reconnect after the reboot: `Permission denied (publickey)` (Semaphore) | Task duration vs. the 15-minute certificate | Run the template again with `node_drain_reboot=false node_drain_undrain_after=true` (§1) |
 | Slurm DRAIN never reaches DRAINED | `squeue -w dgx-spark-2` | Running jobs finish first (by design); `scancel` only if agreed |
 | Evidence capture hangs | Which command? Everything is wrapped in `timeout` | A new command without `timeout` → add it |
-| Reboot task times out | Console | Capsule/firmware work on boot takes long (Volume 10), or the node didn't come back: Runbook E |
+| Reboot task times out | Console | Capsule/firmware work on boot takes long (Step 28), or the node didn't come back: Runbook E |
 | Returned to service but alerts fire again | Loki/Prometheus since the reboot | Root cause not fixed; re-drain with `node_drain_undrain_after=false` |
 
 ## 6. Validation (drills)

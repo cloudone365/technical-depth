@@ -1,5 +1,5 @@
 ---
-# Wipe Kubernetes from the Sparks so you can rebuild from scratch (Volume 16 §8).
+# Wipe Kubernetes from the Sparks so you can rebuild from scratch (Step 19 §8).
 # The DGX itself is your playground: break the cluster, learn, reset, rebuild.
 # Docker, the NVIDIA driver/toolkit, Slurm and everything outside Kubernetes
 # are left alone.

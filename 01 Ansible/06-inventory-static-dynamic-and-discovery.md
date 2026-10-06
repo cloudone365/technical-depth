@@ -1,6 +1,6 @@
-# Volume 03A — Inventory Architecture: Static, Constructed, mDNS Discovery & NetBox as Source of Truth
+# Step 06 · Inventory Architecture: Static, Constructed, mDNS Discovery & NetBox as Source of Truth
 
-> **Module 01 · Part I — Foundations** · Prev: [02B AWX](02-ansible-tower-awx-deep-dive.md) · Next: [03B Vault server](03-hashicorp-vault-deep-dive.md)
+> **01 Ansible · Part I — Management plane & Ansible foundations · Step 06 of 30** · ← [Step 05 · Execution internals & debugging](05-execution-internals-and-debugging.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 07 · Jinja2 & data transforms](07-jinja2-filters-and-data-transforms.md) →
 
 | | |
 |---|---|
@@ -48,7 +48,7 @@ flowchart LR
 
 | File | Plugin | Purpose |
 |---|---|---|
-| `inventory/hosts.yml` | `ansible.builtin.yaml` | Hardware + functional groups (Volume 01A) |
+| `inventory/hosts.yml` | `ansible.builtin.yaml` | Hardware + functional groups (Step 02) |
 | `inventory/group_vars/*.yml`, `host_vars/*.yml` | vars plugin | Golden values and per-node addressing |
 | `inventory/zz-constructed.yml` | `ansible.builtin.constructed` | Groups computed from facts in the cache. The `zz-` prefix makes it load last |
 | `inventory_plugins/spark_mdns.py` | custom | Discovers `_ssh._tcp` Sparks via Avahi |
@@ -91,7 +91,7 @@ keyed_groups:
     key: ansible_architecture | default('unknown')
 ```
 
-Do this from your MacBook. Semaphore's inventory (00b §5.5) is the **file** `01 Ansible/lab/inventory/hosts.yml`, not the directory, so `zz-constructed.yml` isn't loaded there and these fact-driven groups don't exist in Semaphore tasks; the static and functional groups do. On the MacBook, `ansible.cfg` loads the whole `inventory/` directory and the fact cache is your own `.cache/facts`:
+Do this from your MacBook. Semaphore's inventory (Step 04 §5.5) is the **file** `01 Ansible/lab/inventory/hosts.yml`, not the directory, so `zz-constructed.yml` isn't loaded there and these fact-driven groups don't exist in Semaphore tasks; the static and functional groups do. On the MacBook, `ansible.cfg` loads the whole `inventory/` directory and the fact cache is your own `.cache/facts`:
 
 ```bash
 cd "01 Ansible/lab"
@@ -375,10 +375,10 @@ NETBOX_TOKEN=... ansible-inventory -i inventory-examples/netbox.yml --graph
 
 | Consumer | Uses |
 |---|---|
-| Semaphore (00b) | Inventory type **File** → `01 Ansible/lab/inventory/hosts.yml` from the repository; its `group_vars/`, `host_vars/` come along, `zz-constructed.yml` does not |
-| AWX (Volume 02B/20) | Inventory source "Sourced from a Project" → `lab/inventory/`; NetBox has a native source type |
-| Drift (Volume 22) | `-l gpu_ready` keeps drift checks off nodes that are already known-bad |
-| Drain (Volume 24) | `-l uma_pressure` finds nodes to relieve first |
+| Semaphore (Step 04) | Inventory type **File** → `01 Ansible/lab/inventory/hosts.yml` from the repository; its `group_vars/`, `host_vars/` come along, `zz-constructed.yml` does not |
+| AWX (Steps 23/24) | Inventory source "Sourced from a Project" → `lab/inventory/`; NetBox has a native source type |
+| Drift (Step 26) | `-l gpu_ready` keeps drift checks off nodes that are already known-bad |
+| Drain (Step 29) | `-l uma_pressure` finds nodes to relieve first |
 | Slurm / `kubeadm_cluster` roles | functional groups decide who's controller / control plane vs worker (`k8s_control_plane` runs `kubeadm init`, `k8s_workers` run `kubeadm join`) |
 
 ## 5. Troubleshooting & diagnostics

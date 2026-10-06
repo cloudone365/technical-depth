@@ -17,7 +17,7 @@
   vars:
     upgrade_dry_run: false
     upgrade_reboot: true
-    upgrade_firmware: false          # fwupd capsules (UEFI/EC/SoC/PD/VBIOS) — see Volume 10
+    upgrade_firmware: false          # fwupd capsules (UEFI/EC/SoC/PD/VBIOS) — see Step 28
   pre_tasks:
     - name: What would be upgraded  # noqa: command-instead-of-module (apt module has no simulate-output mode)
       ansible.builtin.command: apt-get -s full-upgrade

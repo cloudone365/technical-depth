@@ -1,6 +1,6 @@
-# Volume 09 — Telemetry for DGX Spark: GPU, Unified Memory & Fabric Metrics, Prometheus, Grafana, Alerts (and Where DCGM Fits)
+# Step 12 · Telemetry for DGX Spark: GPU, Unified Memory & Fabric Metrics, Prometheus, Grafana, Alerts (and Where DCGM Fits)
 
-> **Module 01 · Part II — Node Provisioning** · Prev: [08 CUDA & containers](08-cuda-toolkit-cudnn-and-container-runtime.md) · Next: [10 Firmware lifecycle](10-firmware-lifecycle-and-gpu-vulnerability-patch.md)
+> **01 Ansible · Part II — Node provisioning · Step 12 of 30** · ← [Step 11 · CUDA, NGC containers & CDI](11-cuda-ngc-containers-and-cdi.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 13 · ConnectX-7 fabric](13-connectx7-fabric-and-opensm.md) →
 
 | | |
 |---|---|
@@ -17,10 +17,10 @@
 |---|---|---|
 | GPU up/answering | A wedged GPU makes `nvidia-smi` hang; everything downstream fails | `spark_gpu_up` (collector, 10 s timeout) |
 | **Unified memory available** | GPU allocations come from the **same** 128 GB pool as the OS, page cache and containers. `nvidia-smi memory.used` shows `[N/A]` | `spark_uma_available_bytes`, `spark_uma_page_cache_bytes` |
-| Xid events | Kernel-reported GPU errors → triage (Volume 24) | `spark_gpu_xid_events_24h` (from `journalctl -k`) |
+| Xid events | Kernel-reported GPU errors → triage (Step 29) | `spark_gpu_xid_events_24h` (from `journalctl -k`) |
 | Temperature / power / clocks / throttle reasons | A desk-side 240 W box can be thermally limited by placement | `spark_gpu_*` |
 | CX-7 link speed & throughput | A link that silently negotiated 100G halves NCCL bandwidth | `spark_cx7_link_speed_mbps`, `node_network_*` |
-| Config drift | Tasks that would change in check mode | `spark_config_drift_tasks` (Volume 22) |
+| Config drift | Tasks that would change in check mode | `spark_config_drift_tasks` (Step 26) |
 
 ## 2. Architecture
 
@@ -309,7 +309,7 @@ groups:
         labels: { severity: critical }
         annotations:
           summary: "nvidia-smi not answering on {{ '{{' }} $labels.host {{ '}}' }}"
-          runbook: "Volume 24 §Runbook A — GPU hang"
+          runbook: "Step 29 §Runbook A — GPU hang"
       - alert: SparkGPUMetricsStale
         # A textfile metric that stops updating looks exactly like a healthy one.
         expr: time() - node_textfile_mtime_seconds{file=~".*spark_gpu.prom"} > 120
@@ -323,7 +323,7 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: "New NVRM Xid on {{ '{{' }} $labels.host {{ '}}' }}"
-          runbook: "Volume 24 §Runbook B — Xid triage"
+          runbook: "Step 29 §Runbook B — Xid triage"
       - alert: SparkGPUHot
         expr: spark_gpu_temperature_celsius > 85
         for: 5m
@@ -336,7 +336,7 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: "<8 GiB unified memory available on {{ '{{' }} $labels.host {{ '}}' }}"
-          runbook: "Volume 24 §Runbook C — UMA pressure (drop caches, stop idle model servers)"
+          runbook: "Step 29 §Runbook C — UMA pressure (drop caches, stop idle model servers)"
   - name: spark-fabric
     rules:
       - alert: SparkCX7Degraded
@@ -411,10 +411,10 @@ Expect some fields (framebuffer memory in particular) to be absent or meaningles
 | System | How |
 |---|---|
 | Vault (vault01) | Add a scrape job for `https://192.168.0.211:8200/v1/sys/metrics?format=prometheus` with vault01's TLS certificate as CA and a `bearer_token` from a metrics-only policy; alert on `vault_core_unsealed == 0`: a sealed vault01 means no Semaphore task can get a certificate |
-| Semaphore (sema01) | Task failures are the alert for scheduled templates (`20 Drift check`, `30 Validate`): add a Slack, Telegram or e-mail alert in the project settings (00b §9). A node_exporter on sema01 and vault01 is a good next step, scraped by this Prometheus |
+| Semaphore (sema01) | Task failures are the alert for scheduled templates (`20 Drift check`, `30 Validate`): add a Slack, Telegram or e-mail alert in the project settings (Step 04 §9). A node_exporter on sema01 and vault01 is a good next step, scraped by this Prometheus |
 | Kubernetes / GPU Operator | The operator's DCGM exporter is off by default in the lab (`gpu_operator_dcgm_exporter: false` in `roles/gpu_operator`). Turn it on and the root's kube-prometheus-stack (namespace `observability`) scrapes it in-cluster. Pick one exporter path per node to avoid double counting. The GPU is the root's: pods in the `dev-lab` and `llms` vClusters run on the same GB10 and show up in the same per-node metrics |
-| Slurm | The same `spark_gpu_up`/Xid signals drive the Slurm health check (Volume 18). Alerts and scheduler agree |
-| Drift (Volume 22) | `spark_drift_report.py --prom` writes `spark_config_drift.prom` into the textfile dir, and it shows on the dashboard |
+| Slurm | The same `spark_gpu_up`/Xid signals drive the Slurm health check (Step 22). Alerts and scheduler agree |
+| Drift (Step 26) | `spark_drift_report.py --prom` writes `spark_config_drift.prom` into the textfile dir, and it shows on the dashboard |
 | DGX Dashboard | Stays as NVIDIA's local UI on `:11000` (reach it through an SSH tunnel). Prometheus is for history and alerting |
 
 ## 6. Troubleshooting & diagnostics

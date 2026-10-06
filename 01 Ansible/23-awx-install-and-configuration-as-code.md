@@ -1,22 +1,22 @@
-# Volume 02B — AWX on the DGX Spark: Install, Configure as Code, Run the Lab from a UI
+# Step 23 · AWX on the DGX Spark: Install, Configure as Code, Run the Lab from a UI
 
-> **Module 01 · Part I — Foundations** · Prev: [02A Performance](02-high-concurrency-tuning-mitogen-and-ssh-mux.md) · Next: [03A Dynamic inventory](03-dynamic-inventory-and-cloud-infrastructure.md) · Production ops: [Volume 20](20-awx-tower-production-cluster-and-receptor.md)
+> **01 Ansible · Part IV — Secrets & platforms · Step 23 of 30** · ← [Step 22 · Slurm](22-slurm-gres-and-cgroup-gpus.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 24 · AWX in production](24-awx-production-and-receptor.md) →
 
 | | |
 |---|---|
 | **You will build** | AWX running on the kubeadm root cluster (`spark-root`, namespace `awx`) on dgx-spark-1, configured *entirely from Ansible* (org, credentials, project, inventory, job templates, schedules), running the lab's own playbooks |
-| **Prerequisite** | Root cluster up ([Volume 16](16-kubernetes-bare-metal-bootstrap-kubeadm.md), `playbooks/05-kubernetes.yml`) and the `local-path` StorageClass (installed by `playbooks/06b-vclusters.yml`, or `"02 Kubernetes/lab/scripts/install-addons.sh" storage`) |
+| **Prerequisite** | Root cluster up ([Step 19](19-kubernetes-kubeadm-root-cluster-and-vclusters.md), `playbooks/05-kubernetes.yml`) and the `local-path` StorageClass (installed by `playbooks/06b-vclusters.yml`, or `"02 Kubernetes/lab/scripts/install-addons.sh" storage`) |
 | **Clusters** | `spark-root` only. AWX is platform tooling, so it lives on the root next to observability, not inside a tenant vCluster |
 | **Time** | 2 h |
 | **Risk** | Medium: AWX + Postgres use about 4–6 GiB of the unified memory pool. Budget it (§2.2) |
 
 AWX is the upstream of Red Hat Ansible Automation Platform's controller. It gives you RBAC, credentials that users can't read, job history, schedules, webhooks and an API. Those are the things a CLI-only lab lacks once more than one person (or a cron job) runs playbooks.
 
-> **This lab's controller is Semaphore, not AWX.** Every lab playbook runs as a Semaphore task on `sema01` (192.168.0.210), with a 15-minute SSH certificate from `vault01` (192.168.0.211); both stay **outside** the Spark ([00a](00a-semaphore-vault-lab-guide.md), [00b](00b-dgx-spark-semaphore-target.md)). This volume teaches AWX as the **alternative controller** you'll meet in Red Hat shops. Why the lab doesn't use it as its main controller:
+> **This lab's controller is Semaphore, not AWX.** Every lab playbook runs as a Semaphore task on `sema01` (192.168.0.210), with a 15-minute SSH certificate from `vault01` (192.168.0.211); both stay **outside** the Spark ([Step 01](01-management-plane-semaphore-and-vault.md), [Step 04](04-dgx-spark-as-semaphore-target.md)). This step teaches AWX as the **alternative controller** you'll meet in Red Hat shops. Why the lab doesn't use it as its main controller:
 >
-> - **It would live on the thing it manages.** AWX here runs on `spark-root`. `99-reset-kubernetes.yml` or a DGX OS re-image deletes it along with its job history, and it can't run `05-kubernetes.yml` to build the cluster it runs on. Semaphore on sema01 survives every reset (00b §1).
+> - **It would live on the thing it manages.** AWX here runs on `spark-root`. `99-reset-kubernetes.yml` or a DGX OS re-image deletes it along with its job history, and it can't run `05-kubernetes.yml` to build the cluster it runs on. Semaphore on sema01 survives every reset (Step 04 §1).
 > - **Memory.** AWX + PostgreSQL take 4–6 GiB from the Spark's unified pool (§1.3); Semaphore costs the Spark nothing.
-> - **Same ideas, smaller.** Semaphore has the parts this lab needs (projects, templates, variable groups with encrypted secrets, schedules, task history, roles). AWX adds execution nodes, workflows with approvals and credential plugins (Volume 20), which matter at fleet scale.
+> - **Same ideas, smaller.** Semaphore has the parts this lab needs (projects, templates, variable groups with encrypted secrets, schedules, task history, roles). AWX adds execution nodes, workflows with approvals and credential plugins (Step 24), which matter at fleet scale.
 >
 > If you install AWX, let it **observe** (validate, drift in check mode) rather than run the same build templates as Semaphore: two controllers changing the same hosts undo each other's work and split the audit trail.
 
@@ -45,7 +45,7 @@ flowchart TB
   TASK --> RCPT -->|launch| JOB
   JOB -->|SSH 22 over mgmt LAN| S1[dgx-spark-1] & S2[dgx-spark-2]
   JOB -->|git clone| GH[(GitHub: technical-depth)]
-  JOB -->|HTTPS 8200| V[("vault01 · 192.168.0.211<br/>Vol 19")]
+  JOB -->|HTTPS 8200| V[("vault01 · 192.168.0.211<br/>Step 18")]
   classDef mgmt fill:#fff3e6,stroke:#fb8500,color:#000
   class V mgmt
 ```
@@ -90,7 +90,7 @@ done
 ```
 
 - **All OK:** follow §3 as written.
-- **Any `NO-ARM64`:** don't fight it. Use the **hybrid pattern**: run the AWX control plane on an x86 box or VM and make the Spark a Receptor **execution node** (Volume 20 §3). Jobs still run *on* the Spark, and only the UI/DB live elsewhere. Production AAP deployments use this same split.
+- **Any `NO-ARM64`:** don't fight it. Use the **hybrid pattern**: run the AWX control plane on an x86 box or VM and make the Spark a Receptor **execution node** (Step 24 §2.1). Jobs still run *on* the Spark, and only the UI/DB live elsewhere. Production AAP deployments use this same split.
 
 ---
 
@@ -242,7 +242,7 @@ export CONTROLLER_PASSWORD=$(kubectl --context spark-root -n awx get secret awx-
         state: present
 ```
 
-This machine credential is the **simple** version: your own `nvidia` key, stored in AWX. It is exactly the long-lived key the Semaphore path avoids. The production version is a *HashiCorp Vault Signed SSH* credential against vault01 for `svc-ansible` (Volume 20 §2.2), AWX's counterpart of Semaphore's play 1. Two lab details when you switch:
+This machine credential is the **simple** version: your own `nvidia` key, stored in AWX. It is exactly the long-lived key the Semaphore path avoids. The production version is a *HashiCorp Vault Signed SSH* credential against vault01 for `svc-ansible` (Step 24 §2.2), AWX's counterpart of Semaphore's play 1. Two lab details when you switch:
 
 - `group_vars/spark.yml` sets `ansible_user` to `nvidia` whenever `vault_role_id` is undefined, which it is in AWX, and an inventory variable beats the credential's username. Give the job templates the extra variable `ansible_user: svc-ansible`.
 - Play 1 (`00-vault-cert.yml`) is skipped in AWX for the same reason, so it doesn't conflict with the credential plugin.
@@ -320,14 +320,14 @@ docker run --rm 192.168.0.100:5000/spark-ee:1.0 ansible-galaxy collection list |
 
 ## 4. Integrations
 
-| System | How AWX integrates | Volume |
+| System | How AWX integrates | Step |
 |---|---|---|
-| Git | Project SCM, update on launch; webhook from GitHub triggers job templates | 21 |
-| Vault (vault01) | "HashiCorp Vault Secret Lookup" / "Signed SSH" credential types, so no static keys live in AWX. Give AWX its own AppRole and policy on vault01; don't reuse Semaphore's `semaphore` AppRole | 19, 20 |
-| Semaphore (sema01) | none: it's the lab's main controller. Keep AWX to read-only templates (validate, drift) so the two never fight over the same hosts | 00b |
-| Kubernetes (`spark-root`) | Container Group runs job pods in `awx`; you can add a second group with a GPU `nodeSelector` for GPU-touching jobs (it comes out of the root's share of 5 time-slices). A job that must manage a vCluster uses a kubeconfig credential with the `dev-lab` / `llms` context | 16/17 |
-| Prometheus | `/api/v2/metrics/` (enable in settings). Scrape it from the Volume 09 stack | 09 |
-| ARA / logging | AWX external logging → Loki/Splunk; job events stay in Postgres | 23 |
+| Git | Project SCM, update on launch; webhook from GitHub triggers job templates | 25 |
+| Vault (vault01) | "HashiCorp Vault Secret Lookup" / "Signed SSH" credential types, so no static keys live in AWX. Give AWX its own AppRole and policy on vault01; don't reuse Semaphore's `semaphore` AppRole | 18, 24 |
+| Semaphore (sema01) | none: it's the lab's main controller. Keep AWX to read-only templates (validate, drift) so the two never fight over the same hosts | 04 |
+| Kubernetes (`spark-root`) | Container Group runs job pods in `awx`; you can add a second group with a GPU `nodeSelector` for GPU-touching jobs (it comes out of the root's share of 5 time-slices). A job that must manage a vCluster uses a kubeconfig credential with the `dev-lab` / `llms` context | 19, 20 |
+| Prometheus | `/api/v2/metrics/` (enable in settings). Scrape it from the Step 12 stack | 12 |
+| ARA / logging | AWX external logging → Loki/Splunk; job events stay in Postgres | 27 |
 
 ## 5. Production hardening (lab → real)
 
@@ -345,7 +345,7 @@ docker run --rm 192.168.0.100:5000/spark-ee:1.0 ansible-galaxy collection list |
 | Operator loops, AWX never appears | `kubectl --context spark-root -n awx logs deploy/awx-operator-controller-manager -c awx-manager` → look for `failed=1` | Usually a CR typo or a PVC that can't bind: `kubectl --context spark-root get pvc -n awx`. On kubeadm there is no StorageClass until `local-path` is installed (prerequisite above) |
 | `awx-postgres-15-0` CrashLoop: permission denied on data dir | `kubectl --context spark-root -n awx logs awx-postgres-15-0` | local-path volume permissions: delete the PVC (lab only) and let the operator recreate it |
 | Job stuck `pending` | `kubectl --context spark-root -n awx get pods \| grep automation-job`; `awx-task` logs | Capacity: the instance group shows 0 capacity; raise `task_resource_requirements` or wait for running jobs |
-| Job fails instantly: `ERROR! the role 'spark_facts' was not found` | Job output → working directory | AWX runs from the project root, so `lab/ansible.cfg` (and its `roles_path`) is **not** read. The lab ships `playbooks/roles → ../roles` so role lookup works relative to the playbook. Set other settings via the job template's env or `AWX_TASK_ENV` (Semaphore solves the same problem with `ANSIBLE_CONFIG="01 Ansible/lab/ansible.cfg"` in its container, 00b §4) |
+| Job fails instantly: `ERROR! the role 'spark_facts' was not found` | Job output → working directory | AWX runs from the project root, so `lab/ansible.cfg` (and its `roles_path`) is **not** read. The lab ships `playbooks/roles → ../roles` so role lookup works relative to the playbook. Set other settings via the job template's env or `AWX_TASK_ENV` (Semaphore solves the same problem with `ANSIBLE_CONFIG="01 Ansible/lab/ansible.cfg"` in its container, Step 04 §4) |
 | `couldn't resolve module/action 'community.docker...'` | EE collection list | Build and use the custom EE (§3.6), or add `collections/requirements.yml` to the project |
 | Job can't reach 192.168.0.x | `kubectl --context spark-root -n awx exec` into a job pod → `nc -vz 192.168.0.101 22` | Pod → mgmt LAN traffic leaves through Cilium and is masqueraded to the node IP; check host firewalls, then `kubectl --context spark-root -n kube-system exec ds/cilium -- cilium-dbg monitor --type drop` for policy drops |
 | Job succeeds in AWX but the handlers didn't restart services | Job output shows `changed` but no `RUNNING HANDLER` | The job type was **Check**. The drift template is intentionally check-only |

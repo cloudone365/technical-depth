@@ -1,5 +1,5 @@
 ---
-# MetalLB gives LoadBalancer Services a real IP on the mgmt LAN (Volume 16).
+# MetalLB gives LoadBalancer Services a real IP on the mgmt LAN (Step 19).
 # kubeadm has no built-in load balancer (k3s had servicelb). Layer 2 mode:
 # the node answers ARP for the Service IP — no router configuration needed.
 metallb_chart_version: "0.16.0"              # pin; check `helm search repo metallb/metallb -l`

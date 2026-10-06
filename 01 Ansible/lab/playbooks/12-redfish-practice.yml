@@ -1,7 +1,7 @@
 ---
 # DGX Spark has no BMC. To practise the Redfish automation you'll need on
 # DGX/HGX servers, run DMTF's Redfish Mockup Server on the Spark and point
-# community.general redfish modules at it (Volume 06).
+# community.general redfish modules at it (Step 03).
 - name: Short-lived SSH certificate from vault01 (Semaphore runs only)
   ansible.builtin.import_playbook: 00-vault-cert.yml
 
