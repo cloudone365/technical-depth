@@ -83,7 +83,7 @@ Your `nvidia` login is untouched, so you can't lock yourself out.
 ansible-playbook playbooks/00b-semaphore-target.yml -l dgx-spark-01,localhost -K   # localhost: fetches the CA key from vault01
 ```
 
-`-l dgx-spark-01,localhost` limits the run to the Spark you have (the inventory also lists the optional `dgx-spark-02`). `localhost` has to stay in the limit, because the CA key is fetched there. The same rule applies to every Semaphore template (§5.5).
+`-l dgx-spark-01,localhost` is optional while `dgx-spark-02` is commented out in [`inventory/hosts.yml`](lab/inventory/hosts.yml), as it is now. If you limit a run, keep `localhost` in the limit: the CA key is fetched there, and play 1 runs there in every Semaphore template (§5.5).
 
 ### 3.2 Verify on dgx-spark-01
 
@@ -183,7 +183,7 @@ Your 00a project `lab` keeps working: same database, same keys, and the new imag
 
 The inventory file comes with its `group_vars/` and `host_vars/`, so addresses, the automation user, the certificate path and `StrictHostKeyChecking=accept-new` are all already there; you don't retype them.
 
-**With one Spark**, every template gets the CLI argument `--limit dgx-spark-01,localhost`, otherwise Ansible tries to reach the optional `dgx-spark-02` at .101. Keep `localhost`: play 1 and all the Kubernetes plays run there. When spark-02 joins, drop the limit.
+**One Spark or two:** `dgx-spark-02` is commented out in the inventory, so the templates need no limit. When spark-02 joins, uncomment its lines in `hosts.yml` (groups `spark`, `k8s_workers`, `nfs_client`) and push. If you ever add a `--limit` to a template, include `localhost`: play 1 and all the Kubernetes plays run there.
 
 ### 5.6 First template: `00 Ping`
 
@@ -196,7 +196,7 @@ The inventory file comes with its `group_vars/` and `host_vars/`, so addresses, 
 | Inventory | `spark-lab` |
 | Repository | `technical-depth` |
 | Variable group (Environment) | `vault-approle` |
-| CLI args | `["--limit", "dgx-spark-01,localhost"]` |
+| CLI args | none needed with one Spark (if you add a limit: `["--limit", "dgx-spark-01,localhost"]`) |
 
 Save, then **Run**.
 
@@ -362,7 +362,7 @@ State then goes to the MacBook's `.cache/` instead of sema01's volume. After the
 | A long task fails after a reboot or a long pause: `Permission denied` / `UNREACHABLE` halfway | the 15-minute certificate expired; the open SSH connection kept working, the new one after the reboot is refused | template extra variable `vault_ssh_cert_ttl: 1h` (the vault01 role's `max_ttl`) |
 | Play 1 skipped and then `Permission denied` for **nvidia** | the template has no variable group, so the lab thinks it's a MacBook run | attach `vault-approle` to the template |
 | Play 1 never runs, hosts unreachable | `--limit` without `localhost` | `--limit dgx-spark-01,localhost` |
-| `UNREACHABLE … 192.168.0.101` | the optional dgx-spark-02 is in the inventory | add the limit (§5.5) |
+| `UNREACHABLE … 192.168.0.101` | dgx-spark-02 is uncommented in the inventory but not there yet | comment it out again, or add `--limit dgx-spark-01,localhost` (§5.5) |
 | `Host key verification failed` | dgx-spark-01 was reinstalled, so its host key changed | on sema01: `docker compose exec semaphore ssh-keygen -R 192.168.0.100` (only after you know why the key changed) |
 | `No module named 'kubernetes'` / `helm: not found` | the stock image is running | §4: `docker compose build semaphore && docker compose up -d`, check `docker compose ps` shows `semaphore-spark-lab:local` |
 | `Could not find … kubeconfig-spark-lab.yaml` in 06/06b/13/21 | state is not on the volume (SPARK_LAB_CACHE unset) or 05 never ran from Semaphore | §4 Verify; run `05 Kubernetes` from Semaphore |

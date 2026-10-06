@@ -183,7 +183,10 @@ ansible-playbook playbooks/15-jinja-lab.yml        # → "7/7 Jinja katas passed
              | map('join', ' ') | list }}
     - name: K6 check
       ansible.builtin.assert:
-        that: k6 == ['192.168.100.11 dgx-spark-01-fab', '192.168.100.12 dgx-spark-02-fab']
+        that: >-
+          k6 == (['192.168.100.11 dgx-spark-01-fab', '192.168.100.12 dgx-spark-02-fab']
+                 | select('search', ' (' ~ (groups['spark'] | join('|')) ~ ')-fab$') | list)
+      # one Spark in the inventory → one line, two → two (dgx-spark-02 is commented out until it joins)
 
     # 7 ─ safe defaults & type tests
     - name: K7 Defaults that don't hide bugs
