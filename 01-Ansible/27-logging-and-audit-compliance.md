@@ -394,7 +394,7 @@ The ARA callback runs on the **controller**. The lab's Semaphore image doesn't i
 pip install "ara>=1.7"                                       # client side, on the controller (here: the MacBook)
 export ANSIBLE_CALLBACK_PLUGINS=$(python3 -m ara.setup.callback_plugins)
 export ARA_API_CLIENT=http ARA_API_SERVER=http://192.168.0.100:8000
-ansible-playbook playbooks/02.2-baseline.yml -l dgx-spark-1,localhost -K
+ansible-playbook playbooks/04.3-baseline.yml -l dgx-spark-1,localhost -K
 ara playbook list --limit 5
 ara result list --playbook <id> --changed      # every changed task, with the diff
 ```
@@ -403,7 +403,7 @@ To record the **Semaphore** runs too, add `ara` to [`semaphore/requirements-sema
 
 ### 4.2b The management-plane trail: Semaphore, vault01, sshd
 
-One template run leaves three matching records. Run `02.1 Ping` in Semaphore, then:
+One template run leaves three matching records. Run `04.2 Ping` in Semaphore, then:
 
 ```bash
 # sema01: the task, who ran it, its status (also in the UI: project spark-lab → Task history)

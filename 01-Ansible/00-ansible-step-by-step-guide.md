@@ -16,7 +16,7 @@ This page is the build order for the whole module. Each section below is one cha
 
 `sema01` and `vault01` stay outside the Spark, so resetting or re-imaging the Spark never takes the tool that rebuilds it with it.
 
-**How to read a chapter section.** "**Semaphore:** `NN Name`" means run that template. The `ansible-playbook playbooks/NN-….yml -K` line under it is the break-glass form from the MacBook, in `01-Ansible/lab`: without the Semaphore variable group, play 1 (the certificate) is skipped and you log in as `dgxadmin` with your own key ([Chapter 04 §10](04-dgx-spark-as-semaphore-target.md)). A template's number is `<chapter>.<n>`, the chapter that explains it: **`19.1 Kubernetes`** is the first template of **Chapter 19**. The exceptions are `00-vault-cert.yml` (play 1, imported by every playbook that SSHes to the Sparks) and `site`.
+**How to read a chapter section.** "**Semaphore:** `NN Name`" means run that template. The `ansible-playbook playbooks/NN-….yml -K` line under it is the break-glass form from the MacBook, in `01-Ansible/lab`: without the Semaphore variable group, play 1 (the certificate) is skipped and you log in as `dgxadmin` with your own key ([Chapter 04 §11](04-dgx-spark-as-semaphore-target.md)). A template's number is `<chapter>.<n>`, the chapter that explains it: **`19.1 Kubernetes`** is the first template of **Chapter 19**. The exceptions are `00-vault-cert.yml` (play 1, imported by every playbook that SSHes to the Sparks) and `site`.
 
 **One Spark, no `--limit`.** With `dgx-spark-2` commented out, templates and break-glass runs need no `--limit`. If you do limit a run, always keep `localhost` in it (`-l dgx-spark-1,localhost`): play 1 and the Kubernetes plays run there.
 
@@ -30,9 +30,9 @@ Times are rough working times for one Spark, not counting reading.
 |---|---|---|---|---|
 | **Part I** | **Management plane & Ansible foundations** | | | |
 | 01 | [Management plane: Semaphore & Vault](01-management-plane-semaphore-and-vault.md) | Build `vault01` and `sema01` by hand | ½ day | A Semaphore task logs in to a test target as `svc-ansible` with a certificate |
-| 02 | [Control node & Ansible core](02-control-node-and-ansible-core.md) | MacBook toolchain, SSH trust, inventory; later first contact, facts, baseline | 30 min + 30 min | `ALL LOCAL CHECKS PASSED`; later `02.2 Baseline` twice, second run `changed=0` |
-| 03 | [Bare-metal provisioning & bootstrap](03-bare-metal-provisioning-and-bootstrap.md) | Fresh DGX OS only: bootstrap name, key, static IP | 30 min | `ssh dgxadmin@192.168.0.100 hostname` → `dgx-spark-1` |
-| 04 | [DGX Spark as a Semaphore target](04-dgx-spark-as-semaphore-target.md) | `svc-ansible` + CA trust, lab image on sema01, project `spark-lab`, lab secrets | 60–90 min | sshd log: `Accepted publickey for svc-ansible … ED25519-CERT` |
+| 02 | [Control node & Ansible core](02-control-node-and-ansible-core.md) | MacBook only: toolchain, local checks, inventory | 30–45 min | `ALL LOCAL CHECKS PASSED`; `ansible-inventory --graph` shows `dgx-spark-1` |
+| 03 | [Bare-metal provisioning & bootstrap](03-bare-metal-provisioning-and-bootstrap.md) | Fresh DGX OS: bootstrap name, key, static IP; already installed: `ssh-copy-id` | 10–30 min | `ssh dgxadmin@192.168.0.100 hostname` → `dgx-spark-1`, no password |
+| 04 | [DGX Spark as a Semaphore target](04-dgx-spark-as-semaphore-target.md) | `svc-ansible` + CA trust, lab image on sema01, project `spark-lab`; `04.2 Ping`, custom facts, `04.3 Baseline`; lab secrets | 90–120 min | sshd log: `… ED25519-CERT`; `compute_cap` `12.1`; second `04.3 Baseline` `changed=0` |
 | 05 | [Execution internals & debugging](05-execution-internals-and-debugging.md) | Study: watch a module run, explode an AnsiballZ payload | 45 min | You can name the failing layer from an error alone |
 | 06 | [Inventory: static, dynamic & discovery](06-inventory-static-dynamic-and-discovery.md) | Study: fact-driven groups, mDNS plugin | 45 min | `ansible-inventory --graph` shows `gpu_ready` |
 | 07 | [Jinja2 filters & data transforms](07-jinja2-filters-and-data-transforms.md) | Study: the 7 Jinja katas | 60 min | `7/7 Jinja katas passed` |
@@ -69,7 +69,7 @@ Times are rough working times for one Spark, not counting reading.
 ```mermaid
 flowchart LR
   subgraph P1["Part I · Management plane & Ansible foundations"]
-    S01[01 sema01 + vault01] --> S02a[02 toolchain, SSH, inventory] --> S03[03 bootstrap] --> S04[04 Spark as target] --> S02b[02 first contact, facts, baseline] --> S05[05–09 study]
+    S01[01 sema01 + vault01] --> S02[02 toolchain, inventory] --> S03[03 bootstrap / SSH trust] --> S04[04 Spark as target,<br/>first contact, baseline] --> S05[05–09 study]
   end
   subgraph P2["Part II · Node provisioning"]
     S10[10 driver audit] --> S11[11 containers + CUDA] --> S12[12 telemetry]
@@ -104,12 +104,7 @@ Build `vault01` (192.168.0.211: SSH CA `ssh-client-signer`, signing role `ansibl
 
 ## Chapter 02 · Control node & Ansible core → [document](02-control-node-and-ansible-core.md)
 
-Chapter 02 has two halves, and only the first can be done now:
-
-- **Now: Chapter 02 §3.1–3.4** — the MacBook toolchain, SSH trust to `dgxadmin@dgx-spark-1`, how the login switches between Semaphore and the MacBook, and the inventory.
-- **After Chapter 04: Chapter 02 §3.5–3.7** — first contact, custom facts and the OS baseline. They run from Semaphore, which can reach the Spark only once Chapter 04 is done.
-
-**Now (MacBook):**
+MacBook only: the toolchain, `ansible.cfg`, how the login switches between Semaphore and the MacBook, and the inventory (Chapter 02 §3). Nothing in this chapter touches the Spark.
 
 ```bash
 setopt interactivecomments; echo 'setopt interactivecomments' >> ~/.zshrc   # macOS zsh: let "# comments" in pasted commands be comments
@@ -118,37 +113,29 @@ python3 -m venv ~/.venvs/spark-ansible && source ~/.venvs/spark-ansible/bin/acti
 pip install -r requirements.txt
 ansible-galaxy collection install -r requirements.yml -p ./collections
 tests/run-local-checks.sh              # proves your toolchain before touching hardware
-ssh-copy-id dgxadmin@192.168.0.100       # SSH trust (Chapter 02 §3.2); fresh DGX OS? do Chapter 03 first
+ansible-inventory --graph              # the inventory as Ansible sees it (Chapter 02 §3.3)
 ```
 
 The MacBook needs this toolchain only for the bootstrap playbooks, `17.1-vault.yml` and break-glass runs; Semaphore brings its own (Chapter 04 §4).
 
-✅ **Done when (now)** `tests/run-local-checks.sh` prints `ALL LOCAL CHECKS PASSED` and `ssh dgxadmin@192.168.0.100 hostname` answers without a password. Continue with Chapter 03 and Chapter 04, then come back for the second half.
-
-**After Chapter 04 — first contact (Chapter 02 §3.5).** **Semaphore:** `02.1 Ping`. The log shows play 1 (*Get an SSH certificate from Vault*), then *Connectivity and identity check* on `dgx-spark-1`. Try the ad-hoc commands of §3.5 from the MacBook: Semaphore runs playbooks, not ad-hoc commands.
-
-```bash
-ansible-playbook playbooks/02.1-ping.yml -K      # break-glass (MacBook, as dgxadmin)
-```
-
-**After Chapter 04 — custom facts and baseline (Chapter 02 §3.6–3.7).** **Semaphore:** `02.2 Baseline`, twice.
-
-```bash
-ansible-playbook playbooks/02.2-baseline.yml -K  # break-glass
-```
-
-✅ **Done when** `02.1 Ping` reports `dgx-spark-1 aarch64 20 cores … Ubuntu 24.04` with `failed=0`, `ansible_local.spark.gpu.compute_cap == "12.1"`, and the second `02.2 Baseline` run reports `changed=0`.
+✅ **Done when** `tests/run-local-checks.sh` prints `ALL LOCAL CHECKS PASSED` and `ansible-inventory --graph` shows `dgx-spark-1` under `@spark`.
 
 ## Chapter 03 · Bare-metal provisioning & bootstrap → [document](03-bare-metal-provisioning-and-bootstrap.md)
 
-**Fresh DGX OS only.** Skip the bootstrap if the Spark is already named `dgx-spark-1`, sits on 192.168.0.100 and accepts your key as `dgxadmin`. Otherwise, after the first-boot wizard (Chapter 03 §3.1), from the MacBook (Chapter 03 §3.2, Chapter 04 §2.1):
+Give your MacBook key login to `dgxadmin` on the Spark. Two paths, the same end state (Chapter 03 §3):
 
-```bash
-ansible-playbook playbooks/03.1-bootstrap.yml -l dgx-spark-1 -k -K -e bootstrap_current_ip=<dhcp-ip>
-ansible-playbook playbooks/03.1-bootstrap.yml -l dgx-spark-1 -K -e bootstrap_current_ip=<dhcp-ip> -e bootstrap_static_ip=true
-```
+- **Fresh DGX OS.** After the first-boot wizard (Chapter 03 §3.1), from the MacBook (Chapter 03 §3.2). The bootstrap also installs your key (`~/.ssh/id_ed25519.pub`):
+  ```bash
+  ansible-playbook playbooks/03.1-bootstrap.yml -l dgx-spark-1 -k -K -e bootstrap_current_ip=<dhcp-ip>
+  ansible-playbook playbooks/03.1-bootstrap.yml -l dgx-spark-1 -K -e bootstrap_current_ip=<dhcp-ip> -e bootstrap_static_ip=true
+  ```
+  The second run moves the Spark to its static address behind a dead-man switch: if the new address doesn't answer, the change rolls back by itself.
+- **Already installed** (named `dgx-spark-1`, on 192.168.0.100, user `dgxadmin`). SSH trust only (Chapter 03 §3.3):
+  ```bash
+  ssh-copy-id dgxadmin@192.168.0.100
+  ```
 
-The second run moves the Spark to its static address behind a dead-man switch: if the new address doesn't answer, the change rolls back by itself. Redfish and PXE (Chapter 03 §4–5) are practice for data-centre nodes; the Redfish mockup runs later as template `03.2 Redfish practice`, once Chapter 04 is done.
+Redfish and PXE (Chapter 03 §4–5) are practice for data-centre nodes; the Redfish mockup runs as the template `03.2 Redfish practice` once the Spark is a Semaphore target (Chapter 04 §8.1).
 
 ✅ **Done when** `ssh dgxadmin@192.168.0.100 hostname` prints `dgx-spark-1` without a password.
 
@@ -162,8 +149,13 @@ Work through Chapter 04 from top to bottom (MacBook, sema01 and the Semaphore UI
    ansible-playbook playbooks/04.1-semaphore-target.yml -K         # svc-ansible, NOPASSWD sudo, trust vault01's CA
    ```
 2. **On sema01**, build the lab's Semaphore image and state volume from [`lab/semaphore/`](lab/semaphore/) (Chapter 04 §4).
-3. **In Semaphore**, create project `spark-lab`: repository, File inventory `01-Ansible/lab/inventory/hosts.yml`, variable group `vault-approle`, template `02.1 Ping` (Chapter 04 §5).
-4. **Lab secrets**: run `17.1-vault.yml` from the MacBook to add the KV engine, policy and NGC key to vault01, then set `vault_lab_secrets_enabled: true` in the variable group (Chapter 04 §6; explained in Chapters 17 and 18):
+3. **In Semaphore**, create project `spark-lab`: repository, File inventory `01-Ansible/lab/inventory/hosts.yml`, variable group `vault-approle`, template `04.2 Ping`. Its first run proves the certificate chain (Chapter 04 §5).
+4. **First contact, custom facts and OS baseline** (Chapter 04 §6). **Semaphore:** `04.2 Ping` again; the log shows play 1 (*Get an SSH certificate from Vault*), then *Connectivity and identity check* on `dgx-spark-1`. Try the ad-hoc commands of §6.1 from the MacBook: Semaphore runs playbooks, not ad-hoc commands. Then create the template `04.3 Baseline` and run it twice (Chapter 04 §6.2–6.3).
+   ```bash
+   ansible-playbook playbooks/04.2-ping.yml -K       # break-glass (MacBook, as dgxadmin)
+   ansible-playbook playbooks/04.3-baseline.yml -K   # break-glass
+   ```
+5. **Lab secrets**: run `17.1-vault.yml` from the MacBook to add the KV engine, policy and NGC key to vault01, then set `vault_lab_secrets_enabled: true` in the variable group (Chapter 04 §7; explained in Chapters 17 and 18):
    ```bash
    export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=$PWD/.cache/vault-ca.crt
    vault login                                       # admin token for vault01 (root token in the lab)
@@ -172,11 +164,11 @@ Work through Chapter 04 from top to bottom (MacBook, sema01 and the Semaphore UI
    vault kv put kv/spark-lab/ngc api_key=nvapi-...   # the real key replaces the placeholder
    unset VAULT_TOKEN
    ```
-5. **Create the remaining templates** from the table in Chapter 04 §7.1.
+6. **Create the remaining templates** from the table in Chapter 04 §8.1.
 
-These playbooks run from the MacBook as `dgxadmin` with your own key, because the Spark doesn't trust vault01 until item 1 is done ([`group_vars/spark.yml`](lab/inventory/group_vars/spark.yml) picks that login whenever no `vault_role_id` is set).
+`04.1-semaphore-target.yml` runs from the MacBook as `dgxadmin` with your own key, because the Spark doesn't trust vault01 until item 1 is done ([`group_vars/spark.yml`](lab/inventory/group_vars/spark.yml) picks that login whenever no `vault_role_id` is set).
 
-✅ **Done when** dgx-spark-1's sshd log shows `Accepted publickey for svc-ansible … ED25519-CERT` after a Semaphore run of `02.1 Ping`. **Now go back and finish Chapter 02** (first contact, facts, baseline), then continue with Chapter 05.
+✅ **Done when** dgx-spark-1's sshd log shows `Accepted publickey for svc-ansible … ED25519-CERT` after a Semaphore run of `04.2 Ping`, `04.2 Ping` reports `dgx-spark-1 aarch64 20 cores … Ubuntu 24.04` with `failed=0`, `ansible_local.spark.gpu.compute_cap == "12.1"`, and the second `04.3 Baseline` run reports `changed=0`.
 
 ## Chapter 05 · Execution internals & debugging → [document](05-execution-internals-and-debugging.md)
 
@@ -195,7 +187,7 @@ ANSIBLE_PIPELINING=0 ANSIBLE_KEEP_REMOTE_FILES=1 \
 Study chapter. **What to try** (MacBook, Chapter 06 §3.1): the fact-driven groups from `zz-constructed.yml` exist only where the whole `inventory/` directory is loaded, which is the MacBook, not Semaphore.
 
 ```bash
-ansible-playbook playbooks/02.2-baseline.yml -K --tags facts   # fills .cache/facts with ansible_local.spark
+ansible-playbook playbooks/04.3-baseline.yml -K --tags facts   # fills .cache/facts with ansible_local.spark
 ansible-inventory --graph
 ```
 
@@ -254,7 +246,7 @@ ansible-playbook playbooks/10.2-dgxos-upgrade.yml -K -e upgrade_dry_run=true
 
 ## Chapter 11 · CUDA, NGC containers & CDI → [document](11-cuda-ngc-containers-and-cdi.md)
 
-**Semaphore:** `11.1 Containers` (with `vault_lab_secrets_enabled: true` from Chapter 04 §6 it logs in to NGC with the key from vault01), then `11.2 CUDA smoke`.
+**Semaphore:** `11.1 Containers` (with `vault_lab_secrets_enabled: true` from Chapter 04 §7 it logs in to NGC with the key from vault01), then `11.2 CUDA smoke`.
 
 ```bash
 # break-glass (MacBook): no vault01 token here, so pass the NGC key yourself if you need it (Chapter 11 §3.1)
@@ -278,7 +270,7 @@ ansible-playbook playbooks/12.1-telemetry.yml -K   # break-glass
 
 # Part III · Fabric & storage
 
-Chapters 13–15 need `dgx-spark-2` and a QSFP cable. Uncomment `dgx-spark-2` in `inventory/hosts.yml` (and in the groups it belongs to), push, and run Chapters 02 (`02.1 Ping`, `02.2 Baseline`), 04 (`04.1-semaphore-target.yml`) and 10–12 for it first. With one Spark these playbooks skip themselves; read the chapters and continue with Chapter 16.
+Chapters 13–15 need `dgx-spark-2` and a QSFP cable. Uncomment `dgx-spark-2` in `inventory/hosts.yml` (and in the groups it belongs to), push, and run Chapters 03 (bootstrap), 04 (`04.1-semaphore-target.yml`, `04.2 Ping`, `04.3 Baseline`) and 10–12 for it first. With one Spark these playbooks skip themselves; read the chapters and continue with Chapter 16.
 
 ## Chapter 13 · ConnectX-7 fabric & OpenSM → [document](13-connectx7-fabric-and-opensm.md)
 
@@ -329,7 +321,7 @@ ansible-playbook playbooks/16.1-gds-check.yml -K   # break-glass
 
 ## Chapter 17 · Vault server deep dive → [document](17-vault-server-deep-dive.md)
 
-Study chapter: vault01 was built in Chapter 01 and extended in Chapter 04 §6. **What to try** (on vault01, Chapter 17 §3.1–3.5): inspect it, then prove the seal behaviour and take a snapshot.
+Study chapter: vault01 was built in Chapter 01 and extended in Chapter 04 §7. **What to try** (on vault01, Chapter 17 §3.1–3.5): inspect it, then prove the seal behaviour and take a snapshot.
 
 ```bash
 vault status                         # Initialized true, Sealed false, Storage Type raft
@@ -338,11 +330,11 @@ vault policy list                    # default, semaphore-ssh, spark-lab-read, r
 vault read ssh-client-signer/roles/ansible | grep -E 'allowed_users|ttl'   # svc-ansible, 15m
 ```
 
-✅ **Done when** you have sealed vault01, watched `02.1 Ping` fail in Semaphore, unsealed it, and restored a Raft snapshot (Chapter 17 §3.3, §3.5).
+✅ **Done when** you have sealed vault01, watched `04.2 Ping` fail in Semaphore, unsealed it, and restored a Raft snapshot (Chapter 17 §3.3, §3.5).
 
 ## Chapter 18 · Vault AppRole, secrets & SSH certificates → [document](18-vault-approle-secrets-and-ssh-certificates.md)
 
-The lab has no Vault of its own: vault01 holds the SSH CA **and** the lab's secrets. You already ran `17.1-vault.yml` in Chapter 04 §6 (KV v2 mount `kv`, policy `spark-lab-read` attached to AppRole `semaphore`, `kv/spark-lab/ngc`), because Chapter 11 reads the NGC key. Re-run it from the MacBook whenever you change the policy; it needs an admin token, which Semaphore must never hold.
+The lab has no Vault of its own: vault01 holds the SSH CA **and** the lab's secrets. You already ran `17.1-vault.yml` in Chapter 04 §7 (KV v2 mount `kv`, policy `spark-lab-read` attached to AppRole `semaphore`, `kv/spark-lab/ngc`), because Chapter 11 reads the NGC key. Re-run it from the MacBook whenever you change the policy; it needs an admin token, which Semaphore must never hold.
 
 **Semaphore:** `18.1 Vault integration` (variable group `vault-approle` has `"vault_lab_secrets_enabled": true`).
 
@@ -373,7 +365,7 @@ kubectl --context spark-root -n kube-system get pods     # static-pod control pl
 
 Break-glass: `ansible-playbook playbooks/19.1-kubernetes.yml -K` writes the kubeconfig straight to the MacBook's `.cache/`. The vClusters come in Chapter 20, after the GPU Operator, because their budgets count GPU slices (Chapter 19 §4.5).
 
-✅ **Done when** `dgx-spark-1` is `Ready`, `kubectl --context spark-root -n kube-system exec ds/cilium -- cilium-dbg status --brief` prints `OK`, and `ssh dgxadmin@192.168.0.100 sudo crictl ps` lists the control-plane containers. Broke it while learning? Run the template `19.2 Reset Kubernetes` (extra variable `reset_confirm: RESET`, Chapter 04 §7.3; break-glass: `ansible-playbook playbooks/19.2-reset-kubernetes.yml -K` and type `RESET`) and run Chapter 19 again.
+✅ **Done when** `dgx-spark-1` is `Ready`, `kubectl --context spark-root -n kube-system exec ds/cilium -- cilium-dbg status --brief` prints `OK`, and `ssh dgxadmin@192.168.0.100 sudo crictl ps` lists the control-plane containers. Broke it while learning? Run the template `19.2 Reset Kubernetes` (extra variable `reset_confirm: RESET`, Chapter 04 §8.3; break-glass: `ansible-playbook playbooks/19.2-reset-kubernetes.yml -K` and type `RESET`) and run Chapter 19 again.
 
 ## Chapter 20 · NVIDIA GPU Operator & time-slicing → [document](20-nvidia-gpu-operator-and-time-slicing.md)
 
@@ -472,7 +464,7 @@ ansible-playbook playbooks/27.1-logging-audit.yml -K   # break-glass
 
 ## Chapter 28 · Firmware lifecycle & vulnerability patching → [document](28-firmware-lifecycle-and-vulnerability-patching.md)
 
-Per maintenance window. **Semaphore:** `28.1 Firmware inventory`, then `10.2 DGX OS upgrade` with extra variable `upgrade_dry_run: true` (as in Chapter 10), then for real with `upgrade_firmware: true` and `vault_ssh_cert_ttl: 1h` (it reboots; Chapter 04 §12). With two Sparks, give it CLI args `--limit <one Spark>,localhost` and do one node at a time.
+Per maintenance window. **Semaphore:** `28.1 Firmware inventory`, then `10.2 DGX OS upgrade` with extra variable `upgrade_dry_run: true` (as in Chapter 10), then for real with `upgrade_firmware: true` and `vault_ssh_cert_ttl: 1h` (it reboots; Chapter 04 §13). With two Sparks, give it CLI args `--limit <one Spark>,localhost` and do one node at a time.
 
 ```bash
 # break-glass (MacBook)
@@ -514,11 +506,11 @@ python3 tools/capstone_scorecard.py
 | Playbook | Purpose | Where | Chapter |
 |---|---|---|---|
 | `00-vault-cert.yml` | Play 1: AppRole login, 15-minute certificate, optional lab secrets | imported by every playbook that SSHes to the Sparks | 01, 18 |
-| `02.1-ping.yml` | Connectivity + identity | Semaphore `02.1 Ping` | 02, 04 |
-| `02.2-baseline.yml` | Facts + OS baseline | Semaphore | 02 |
 | `03.1-bootstrap.yml` | Hostname, keys, static IP with dead-man rollback | MacBook (fresh DGX OS) | 03 |
 | `03.2-redfish-practice.yml` | Redfish mockup BMC | Semaphore | 03 |
 | `04.1-semaphore-target.yml` | `svc-ansible`, NOPASSWD sudo, trust vault01's SSH CA | MacBook (once) | 04 |
+| `04.2-ping.yml` | Connectivity + identity | Semaphore `04.2 Ping` | 04 |
+| `04.3-baseline.yml` | Custom facts + OS baseline | Semaphore `04.3 Baseline` | 04 |
 | `07.1-jinja-lab.yml` | Jinja katas | MacBook or Semaphore (localhost only) | 07 |
 | `09.1-fleet-sim.yml` · `09.2-fleet-bench.yml` | Performance lab | MacBook (it benchmarks your own controller) | 09 |
 | `10.1-driver-audit.yml` | Driver consistency | Semaphore | 10 |
@@ -530,7 +522,7 @@ python3 tools/capstone_scorecard.py
 | `13.2-rdma-perftest.yml` · `14.1-roce-qos.yml` · `14.2-nccl-test.yml` | Fabric performance and QoS | Semaphore (2 Sparks) | 13–14 |
 | `15.1-nfs-rdma.yml` | Shared model cache | Semaphore (2 Sparks) | 15 |
 | `16.1-gds-check.yml` | GDS / cuFile assessment | Semaphore | 16 |
-| `17.1-vault.yml` | Lab secrets in vault01: KV `kv`, policy `spark-lab-read`, AppRole attachment | MacBook (admin `VAULT_TOKEN`) | 04 §6, 17, 18 |
+| `17.1-vault.yml` | Lab secrets in vault01: KV `kv`, policy `spark-lab-read`, AppRole attachment | MacBook (admin `VAULT_TOKEN`) | 04 §7, 17, 18 |
 | `18.1-vault-integration.yml` | Demonstrates the Semaphore path: play 1 token reads `kv/spark-lab/ngc` | Semaphore | 18 |
 | `19.1-kubernetes.yml` | kubeadm root cluster (Cilium, MetalLB); then `tools/fetch-kubeconfig.sh sema01` | Semaphore | 19 |
 | `19.2-reset-kubernetes.yml` | Wipe Kubernetes and every vCluster for a clean rebuild (`RESET` prompt, or extra variable `reset_confirm: RESET` in Semaphore) | Semaphore, never scheduled | 19 §8 |

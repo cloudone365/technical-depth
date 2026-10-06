@@ -2,9 +2,9 @@
 # Full build, as one Semaphore task (template "site"). Each stage can also run
 # on its own. Not included, on purpose:
 #   03.1-bootstrap.yml, 04.1-semaphore-target.yml — run once from the MacBook, before Semaphore can log in
-#   17.1-vault.yml — needs an admin token for vault01; run from the MacBook (Chapter 04 §6)
+#   17.1-vault.yml — needs an admin token for vault01; run from the MacBook (Chapter 04 §7)
 - name: Baseline
-  ansible.builtin.import_playbook: 02.2-baseline.yml
+  ansible.builtin.import_playbook: 04.3-baseline.yml
 - name: Fabric
   ansible.builtin.import_playbook: 13.1-fabric.yml
 - name: Containers

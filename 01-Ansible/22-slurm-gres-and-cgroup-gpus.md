@@ -389,7 +389,7 @@ Does the job get OOM-killed at about 8 GiB, or does it sail past? The answer tel
 | Symptom | Diagnose | Fix |
 |---|---|---|
 | `sinfo` shows `down*` | `scontrol show node X \| grep Reason`; `journalctl -u slurmd` | slurmd not running / not reachable on 6818; firewall |
-| `Invalid credential` / `Munge decode failed` | `munge -n \| ssh other unmunge` | Keys differ, or clocks skew > 5 min (chrony! Chapter 02) |
+| `Invalid credential` / `Munge decode failed` | `munge -n \| ssh other unmunge` | Keys differ, or clocks skew > 5 min (chrony! Chapter 04 §6.3) |
 | Node `INVAL` / `Low RealMemory` | `slurmd -C` on the node vs `slurm.conf` | RealMemory too high: raise `slurm_cluster_mem_reserve_mb` |
 | `gres/gpu count reported lower than configured` | `slurmd -G` / `slurmd -C` | `File=/dev/nvidia0` missing? The driver isn't loaded at boot → Chapter 10 |
 | Job runs without `--gres` and still sees the GPU | `cat /sys/fs/cgroup/system.slice/slurmstepd.scope/.../devices` | `ConstrainDevices=yes`, `TaskPlugin=task/cgroup`, cgroup v2 plugin present |

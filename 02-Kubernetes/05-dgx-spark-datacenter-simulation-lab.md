@@ -165,7 +165,7 @@ Inside llms, serving (8 slices · 80 Gi) + batch (3 slices · 80 Gi) add up to m
 
 Each step ends with a **gate**: a command that must pass before you continue. When a gate fails, stop and fix it. Later layers hide earlier faults.
 
-The 01-Ansible stages run as **Semaphore templates** in project `spark-lab` on sema01 ([01-Ansible Chapter 04 §7](../01-Ansible/04-dgx-spark-as-semaphore-target.md#7-build-the-lab-from-semaphore)); a gate there is the task log ending in `failed=0`. Everything from the 02-Kubernetes layer on runs with `kubectl` from your MacBook.
+The 01-Ansible stages run as **Semaphore templates** in project `spark-lab` on sema01 ([01-Ansible Chapter 04 §8](../01-Ansible/04-dgx-spark-as-semaphore-target.md#8-build-the-lab-from-semaphore)); a gate there is the task log ending in `failed=0`. Everything from the 02-Kubernetes layer on runs with `kubectl` from your MacBook.
 
 ```mermaid
 flowchart LR
@@ -329,7 +329,7 @@ scripts/verify.sh
 | DGX OS / driver upgrade | per NVIDIA release | Semaphore template `10.2 DGX OS upgrade` (drain → upgrade → validate) → Chapter 14 UMA experiment again |
 | Capacity review | weekly | Grafana *vCluster CPU/memory used / hard* panels. `VClusterQuotaNearlyExhausted`, `PodsPendingOnGPU` history; resize with one `kubectl patch` (Chapter 04 §6.5) |
 | Drills | weekly | one `breakfix` scenario, timed |
-| Drift check · validation | nightly · weekly | scheduled Semaphore templates `26.1 Drift check` and `30.1 Validate`; a failed task is the alert (01-Ansible Chapter 04 §9) |
+| Drift check · validation | nightly · weekly | scheduled Semaphore templates `26.1 Drift check` and `30.1 Validate`; a failed task is the alert (01-Ansible Chapter 04 §10) |
 | Full rebuild | when needed | Semaphore `19.2 Reset Kubernetes` (`reset_confirm=RESET`) → `19.1 Kubernetes` → `20.1 GPU Operator` → `20.2 vClusters`, then `fetch-kubeconfig.sh sema01` and `scripts/install-addons.sh all` |
 
 ---

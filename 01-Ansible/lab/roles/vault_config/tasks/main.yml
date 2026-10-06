@@ -4,7 +4,7 @@
 - name: An admin token is required for this run
   ansible.builtin.assert:
     that: vault_config_token | length > 0
-    fail_msg: "export VAULT_TOKEN=<admin token from vault01> and run again (Chapter 04 §6)"
+    fail_msg: "export VAULT_TOKEN=<admin token from vault01> and run again (Chapter 04 §7)"
     quiet: true
 
 - name: Vault API headers

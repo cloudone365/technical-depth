@@ -473,7 +473,7 @@ Complete them in order. "Evidence" is what the scorecard or a reviewer checks.
 
 | # | Chapter | Challenge | Evidence |
 |---|---|---|---|
-| 1 | 01, 02, 04 | Management plane outside the Spark, MacBook toolchain from scratch, Spark onboarded as a target; template `02.1 Ping` shows aarch64/20 cores/GB10 facts | `facts/*` with `ansible_local.spark` on the state volume; play 1 ok in the task log |
+| 1 | 01, 02, 04 | Management plane outside the Spark, MacBook toolchain from scratch, Spark onboarded as a target; template `04.2 Ping` shows aarch64/20 cores/GB10 facts | `facts/*` with `ansible_local.spark` on the state volume; play 1 ok in the task log |
 | 2 | 05 | Explode and execute an AnsiballZ payload on the Spark | Screenshot / notes |
 | 3 | 09 | 64-node fleet benchmark matrix (from the MacBook) | `bench.csv` ≥ 7 rows |
 | 4 | 23 | (Optional, the alternative controller) AWX running on the root cluster `spark-root` (or hybrid), configured as code, with read-only templates only | `awx-config.yml` applied; job history |
@@ -520,9 +520,9 @@ sudo base64 -d /opt/spark-lab/cache/chaos-dgx-spark-2.sealed   # on sema01; reve
 | # | Fault injected | Detected by | Fix |
 |---|---|---|---|
 | 1 | Runtime `ip link set <cx7> mtu 1500` (netplan file untouched) | Jumbo ping / perftest / `spark_invariants.py` MTU check; drift reports "Runtime MTU drift" | `13.1-fabric.yml` (runtime reconciliation re-applies netplan) |
-| 2 | Three NVIDIA packages un-held | Drift: "Report missing holds as drift" | `02.2-baseline.yml --tags baseline` (safe auto-heal) |
+| 2 | Three NVIDIA packages un-held | Drift: "Report missing holds as drift" | `04.3-baseline.yml --tags baseline` (safe auto-heal) |
 | 3 | GPU metrics timer stopped + disabled | `SparkGPUMetricsStale` alert (node_exporter keeps serving the **old** file, a classic trap!); drift on "Enable collector timer" | `12.1-telemetry.yml` (safe auto-heal) |
-| 4 | `vm.swappiness=60` (file + runtime) | Drift on sysctl | `02.2-baseline.yml` (safe auto-heal) |
+| 4 | `vm.swappiness=60` (file + runtime) | Drift on sysctl | `04.3-baseline.yml` (safe auto-heal) |
 | 5 | Slurm node drained, reason `chaos` | `30.1-validate` `slurm_usable=false`; `sinfo -R` | `scontrol update … State=RESUME` (the role won't resume it for you, on purpose) |
 | 6 | `default-runtime` removed from `daemon.json` | Drift on daemon.json merge; `spark_invariants.py` warns on the default runtime | `11.1-containers.yml` |
 | 7 | CDI spec corrupted (bogus libcuda path) | CDI smoke fails; drift "stale CDI spec" (hostPath check) | `11.1-containers.yml` regenerates |

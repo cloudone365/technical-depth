@@ -411,7 +411,7 @@ Expect some fields (framebuffer memory in particular) to be absent or meaningles
 | System | How |
 |---|---|
 | Vault (vault01) | Add a scrape job for `https://192.168.0.211:8200/v1/sys/metrics?format=prometheus` with vault01's TLS certificate as CA and a `bearer_token` from a metrics-only policy; alert on `vault_core_unsealed == 0`: a sealed vault01 means no Semaphore task can get a certificate |
-| Semaphore (sema01) | Task failures are the alert for scheduled templates (`26.1 Drift check`, `30.1 Validate`): add a Slack, Telegram or e-mail alert in the project settings (Chapter 04 §9). A node_exporter on sema01 and vault01 is a good next step, scraped by this Prometheus |
+| Semaphore (sema01) | Task failures are the alert for scheduled templates (`26.1 Drift check`, `30.1 Validate`): add a Slack, Telegram or e-mail alert in the project settings (Chapter 04 §10). A node_exporter on sema01 and vault01 is a good next step, scraped by this Prometheus |
 | Kubernetes / GPU Operator | The operator's DCGM exporter is off by default in the lab (`gpu_operator_dcgm_exporter: false` in `roles/gpu_operator`). Turn it on and the root's kube-prometheus-stack (namespace `observability`) scrapes it in-cluster. Pick one exporter path per node to avoid double counting. The GPU is the root's: pods in the `dev-lab` and `llms` vClusters run on the same GB10 and show up in the same per-node metrics |
 | Slurm | The same `spark_gpu_up`/Xid signals drive the Slurm health check (Chapter 22). Alerts and scheduler agree |
 | Drift (Chapter 26) | `spark_drift_report.py --prom` writes `spark_config_drift.prom` into the textfile dir, and it shows on the dashboard |

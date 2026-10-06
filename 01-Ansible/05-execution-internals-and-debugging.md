@@ -28,7 +28,7 @@ sequenceDiagram
   C->>C: changed_when / failed_when / register / notify handlers
 ```
 
-Under Semaphore the SSH user is `svc-ansible` (15-minute certificate from play 1, NOPASSWD sudo, so `sudo -n` succeeds without a prompt); from the MacBook it is `dgxadmin` with your key and `-K` ([Chapter 02 §3.3](02-control-node-and-ansible-core.md)). Everything below is the same for both.
+Under Semaphore the SSH user is `svc-ansible` (15-minute certificate from play 1, NOPASSWD sudo, so `sudo -n` succeeds without a prompt); from the MacBook it is `dgxadmin` with your key and `-K` ([Chapter 02 §3.2](02-control-node-and-ansible-core.md)). Everything below is the same for both.
 
 With **pipelining** on (our `ansible.cfg`), steps 3–4 are a single SSH round-trip and nothing is written to `/tmp` on the Spark. Without it you get `mkdir` → `sftp put` → `chmod` → `exec` → `rm`, which is five round-trips per task.
 
@@ -218,11 +218,11 @@ spark (2)[f:10]# cd dgx-spark-1
 
 ## 6. Hands-on exercises
 
-1. **Measure the round-trip tax.** Run `playbooks/02.2-baseline.yml` three ways and record the `timer` line:
+1. **Measure the round-trip tax.** Run `playbooks/04.3-baseline.yml` three ways and record the `timer` line:
    `ANSIBLE_PIPELINING=0 ANSIBLE_SSH_ARGS=""` (no pipelining, no mux) → `ANSIBLE_PIPELINING=0` → default. Chart the three numbers in Chapter 09. Do it from the MacBook (`-l dgx-spark-1,localhost -K`): without the mux every task authenticates again, which under Semaphore would start failing once the 15-minute certificate expires.
 2. **Read a real module.** Use `KEEP_REMOTE_FILES` + `explode` on `ansible.builtin.apt` and find where it takes the dpkg lock.
 3. **Break a handler.** Add `failed_when: true` to the last task of `spark_baseline` after changing `chrony.conf`, run it, remove the failure and run again. Did chrony restart? Now repeat with `--force-handlers`.
-4. **Async join.** Download a 7B model to `/srv/models` with `poll: 0` while `02.2-baseline.yml` tasks continue, then join with `async_status`.
+4. **Async join.** Download a 7B model to `/srv/models` with `poll: 0` while `04.3-baseline.yml` tasks continue, then join with `async_status`.
 
 ---
 

@@ -151,7 +151,7 @@ rm -rf "$OUT" && mkdir -p "$OUT"/{roles,plugins/inventory,playbooks,meta}
 cp -r "$LAB"/roles/* "$OUT/roles/"
 find "$OUT/roles" -type d -name molecule -prune -exec rm -rf {} +
 cp "$LAB"/inventory_plugins/spark_mdns.py "$OUT/plugins/inventory/"
-cp "$LAB"/playbooks/{02.2-baseline,13.1-fabric,11.1-containers,26.1-drift-check,29.1-emergency-drain,30.1-validate}.yml "$OUT/playbooks/"
+cp "$LAB"/playbooks/{04.3-baseline,13.1-fabric,11.1-containers,26.1-drift-check,29.1-emergency-drain,30.1-validate}.yml "$OUT/playbooks/"
 # roles referenced by short name inside playbooks resolve inside the collection namespace
 sed -i 's/- role: \([a-z_]*\)/- role: cloudone.spark.\1/' "$OUT"/playbooks/*.yml
 cat > "$OUT/galaxy.yml" <<YML

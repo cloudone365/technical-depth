@@ -1,5 +1,5 @@
 ---
-# Lab secrets in vault01 (Chapter 04 §6). vault01 itself — install, TLS, unseal,
+# Lab secrets in vault01 (Chapter 04 §7). vault01 itself — install, TLS, unseal,
 # SSH CA, AppRole 'semaphore', audit — is built by hand in Chapter 01 and
 # stays outside the Spark lab. This playbook only adds the KV engine, a
 # read-only policy, and attaches it to the 'semaphore' AppRole.

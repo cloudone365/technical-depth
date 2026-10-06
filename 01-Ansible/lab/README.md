@@ -21,13 +21,13 @@ lab/
 │   ├── hosts.yml               # control (localhost) + spark + functional groups                   (Chapter 06)
 │   ├── zz-constructed.yml      # groups from facts: gpu_ready, driver_580, uma_pressure…         (Chapter 06)
 │   ├── group_vars/all.yml      # lab-wide: user, networks, NTP, lab_cache_dir, vault01/sema01 settings (vault_*, semaphore_url)
-│   ├── group_vars/spark.yml    # login switch (svc-ansible + cert under Semaphore, nvidia otherwise), GB10 golden values, packages, sysctls
+│   ├── group_vars/spark.yml    # login switch (svc-ansible + cert under Semaphore, dgxadmin otherwise), GB10 golden values, packages, sysctls
 │   └── host_vars/dgx-spark-N.yml  # per-node CX-7 addressing
 ├── inventory_plugins/spark_mdns.py   # discover Sparks via Avahi/mDNS                            (Chapter 06)
 ├── inventory-examples/         # opt-in sources (mDNS)
 ├── roles/
-│   ├── spark_facts             # /etc/ansible/facts.d/spark.fact (GPU, CUDA, CX-7, UMA)          (Chapters 02, 07)
-│   ├── spark_baseline          # packages, NVIDIA holds, sysctl, SSH, chrony, journald + Molecule (Chapters 02, 25)
+│   ├── spark_facts             # /etc/ansible/facts.d/spark.fact (GPU, CUDA, CX-7, UMA)          (Chapters 04, 07)
+│   ├── spark_baseline          # packages, NVIDIA holds, sysctl, SSH, chrony, journald + Molecule (Chapters 04, 25)
 │   ├── cx7_fabric              # netplan, MTU, 200G/RDMA verify, runtime reconcile, GID, argspec (Chapters 13, 08)
 │   ├── container_runtime       # docker + nvidia-ctk + CDI (freshness-checked) + NGC              (Chapter 11)
 │   ├── gpu_telemetry           # textfile collector, Prometheus/Grafana/Alertmanager, dashboard  (Chapter 12)
@@ -42,13 +42,15 @@ lab/
 │   ├── nfs_rdma                # NFSv4.2 over RDMA model cache                                   (Chapter 15)
 │   ├── node_drain              # cordon → capture → stop → reboot → validate → return            (Chapter 29)
 │   └── spark_validate          # end-to-end invariants + JSON report                             (Chapter 30)
-├── playbooks/                  # 02.1-ping … 30.2-chaos, site.yml (see ../00-ansible-step-by-step-guide.md)
+├── playbooks/                  # 03.1-bootstrap … 30.2-chaos, site.yml (see ../00-ansible-step-by-step-guide.md)
 │   │                           #   one Semaphore template per playbook, same number ("19.1 Kubernetes" = 19.1-kubernetes.yml)
 │   ├── 00-vault-cert.yml           # play 1: AppRole login → 15-min cert for svc-ansible (+ kv/spark-lab/*)              (Chapters 01, 18)
 │   │                               #   imported first by every playbook that SSHes to the Sparks; skipped off Semaphore
 │   ├── 03.1-bootstrap.yml          # MacBook only: hostname, key, static IP with dead-man switch                         (Chapter 03)
 │   ├── 04.1-semaphore-target.yml   # MacBook, once: svc-ansible + NOPASSWD sudo, trust vault01's CA                      (Chapter 04)
-│   ├── 17.1-vault.yml              # MacBook, admin VAULT_TOKEN: lab secrets in vault01                                  (Chapter 04 §6, Chapter 18)
+│   ├── 04.2-ping.yml               # first contact: SSH, sudo, Python, it IS a Spark                                     (Chapter 04 §6.1)
+│   ├── 04.3-baseline.yml           # custom facts (spark_facts) + OS baseline (spark_baseline)                           (Chapter 04 §6.2–6.3)
+│   ├── 17.1-vault.yml              # MacBook, admin VAULT_TOKEN: lab secrets in vault01                                  (Chapter 04 §7, Chapter 18)
 │   ├── 19.1-kubernetes.yml         # kubeadm, Cilium, MetalLB; then 20.1-gpu-operator → 20.2-vclusters                   (Chapters 19, 20)
 │   ├── 19.2-reset-kubernetes.yml   # wipes Kubernetes and every vCluster for a clean rebuild                             (Chapter 19)
 │   ├── files/uma_probe.cu          # sm_121 unified-memory probe                                                         (Chapter 11)
@@ -58,7 +60,7 @@ lab/
 │   ├── requirements-semaphore.txt
 │   └── docker-compose.override.yml   # /opt/spark-lab/cache → SPARK_LAB_CACHE, ANSIBLE_CONFIG
 ├── tools/
-│   ├── fetch-kubeconfig.sh     # sema01's state volume → MacBook .cache/kubeconfig-spark-lab.yaml  (Chapter 04 §7.4)
+│   ├── fetch-kubeconfig.sh     # sema01's state volume → MacBook .cache/kubeconfig-spark-lab.yaml  (Chapter 04 §8.4)
 │   ├── spark_invariants.py     # run ON a Spark, no Ansible needed                               (Chapter 30)
 │   ├── spark_drift_report.py   # check-mode JSON → markdown / Prometheus / exit code / hosts      (Chapter 26)
 │   ├── drift-cycle.sh          # detect → publish → guarded auto-heal → recheck                  (Chapter 26)
@@ -147,18 +149,18 @@ pip install -r requirements.txt
 ansible-galaxy collection install -r requirements.yml -p ./collections
 
 # 2. Edit inventory/hosts.yml (IPs) and host_vars/*.yml (CX-7 names from `ibdev2netdev`), push
-#    Fresh from the first-boot wizard? Use playbooks/03.1-bootstrap.yml (Chapter 03).
-ssh-copy-id dgxadmin@192.168.0.100     # and .101
+#    Key login for the MacBook (Chapter 03): fresh from the first-boot wizard? playbooks/03.1-bootstrap.yml (§3.2).
+ssh-copy-id dgxadmin@192.168.0.100     # already installed (Chapter 03 §3.3); and .101
 
 # 3. Make the Spark a Semaphore target (Chapter 04: ../04-dgx-spark-as-semaphore-target.md), from the MacBook
 scp vault01:~/vault-ca.crt .cache/vault-ca.crt
 ansible-playbook playbooks/04.1-semaphore-target.yml -l dgx-spark-1,localhost -K
 #    on sema01: build semaphore/ (Chapter 04 §4); in Semaphore: project spark-lab, variable group vault-approle (Chapter 04 §5)
-export VAULT_TOKEN=<admin token> && ansible-playbook playbooks/17.1-vault.yml && unset VAULT_TOKEN   # Chapter 04 §6
+export VAULT_TOKEN=<admin token> && ansible-playbook playbooks/17.1-vault.yml && unset VAULT_TOKEN   # Chapter 04 §7
 ```
 
 4. **In Semaphore**, walk the stages as templates (each is safe to re-run; no `--limit`
-   needed while `dgx-spark-2` is commented out, and any limit must keep `localhost`): `02.1 Ping` → `02.2 Baseline`
+   needed while `dgx-spark-2` is commented out, and any limit must keep `localhost`): `04.2 Ping` → `04.3 Baseline`
    → `13.1 Fabric` (two Sparks) → `11.1 Containers` → `19.1 Kubernetes` → `20.1 GPU Operator`
    → `20.2 vClusters` → `30.1 Validate`, or everything with `site`.
 5. **Day-2 in Semaphore:** `26.1 Drift check` scheduled nightly, `29.1 Emergency drain`

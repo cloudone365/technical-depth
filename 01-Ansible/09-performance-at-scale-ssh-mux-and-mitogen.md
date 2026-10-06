@@ -299,7 +299,7 @@ Add it as another row in your benchmark. **Adopt it only if** (a) it's a large w
 
 The same `ansible.cfg` runs inside the Semaphore container (`ANSIBLE_CONFIG="01-Ansible/lab/ansible.cfg"`), so pipelining, ControlPersist and the fact cache apply unchanged. Three things differ:
 
-- **The SSH user and credential.** Semaphore logs in as `svc-ansible` with the 15-minute certificate from play 1 (`group_vars/spark.yml`, [Chapter 02 §3.3](02-control-node-and-ansible-core.md)). Pipelining needs no TTY for that user either: its sudoers drop-in is plain `NOPASSWD`.
+- **The SSH user and credential.** Semaphore logs in as `svc-ansible` with the 15-minute certificate from play 1 (`group_vars/spark.yml`, [Chapter 02 §3.2](02-control-node-and-ansible-core.md)). Pipelining needs no TTY for that user either: its sudoers drop-in is plain `NOPASSWD`.
 - **ControlPersist vs. the certificate.** The certificate is checked only when a connection authenticates. The master opened in the first minute carries every later task, so a 30-minute run is fine *as long as the master lives*. A reconnect after the certificate expired (host reboot, idle > 600 s, `ControlMaster=no`) is refused. That's why the `baseline-f5` row (no mux) is a MacBook-only experiment: under Semaphore, a long run without the mux starts failing at minute 15.
 - **Where the sockets and the cache live.** `~/.ansible/cp` is inside the container (gone on restart, which is harmless). The fact cache goes to the state volume via `ANSIBLE_CACHE_PLUGIN_CONNECTION=/var/lib/spark-lab/cache/facts`, so `gathering = smart` still saves time between template runs.
 

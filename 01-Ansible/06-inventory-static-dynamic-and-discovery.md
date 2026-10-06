@@ -75,7 +75,7 @@ enable_plugins = ansible.builtin.yaml, ansible.builtin.ini, spark_mdns, ansible.
 ---
 # Loaded after hosts.yml (alphabetical). Builds groups from *facts* — including
 # the custom ansible_local.spark facts — read from the fact cache.
-# Run any play with facts once (e.g. 02.1-ping.yml) to populate the cache.
+# Run any play with facts once (e.g. 04.2-ping.yml) to populate the cache.
 plugin: ansible.builtin.constructed
 strict: false
 groups:
@@ -95,8 +95,8 @@ Do this from your MacBook. Semaphore's inventory (Chapter 04 §5.5) is the **fil
 
 ```bash
 cd "01-Ansible/lab"
-ansible-playbook playbooks/02.1-ping.yml -l dgx-spark-1,localhost -K                   # populates .cache/facts/*
-ansible-playbook playbooks/02.2-baseline.yml -l dgx-spark-1,localhost -K --tags facts  # adds ansible_local.spark
+ansible-playbook playbooks/04.2-ping.yml -l dgx-spark-1,localhost -K                   # populates .cache/facts/*
+ansible-playbook playbooks/04.3-baseline.yml -l dgx-spark-1,localhost -K --tags facts  # adds ansible_local.spark
 ansible-inventory --graph
 ```
 

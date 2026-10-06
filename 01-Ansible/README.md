@@ -64,7 +64,7 @@ One Spark is the default. `dgx-spark-2` is commented out in [`lab/inventory/host
 
 The Kubernetes end-state is one **kubeadm** root cluster (`spark-root`) with two **vClusters** inside it, `dev-lab` and `llms`. Ansible builds it in three stages: `19.1-kubernetes.yml` (kubeadm, Cilium, MetalLB) → `20.1-gpu-operator.yml` (15 GPU time-slices) → `20.2-vclusters.yml` (the two vClusters, applied from the [02-Kubernetes lab](../02-Kubernetes/lab/README.md)). All three contexts land in one file, `kubeconfig-spark-lab.yaml`, on sema01's state volume; `lab/tools/fetch-kubeconfig.sh sema01` copies it to `lab/.cache/` on your MacBook, where the 02-Kubernetes labs expect it.
 
-> **Convention used in every chapter.** "**Semaphore:** `NN Name`" means run that template in project `spark-lab`; template names follow the playbook names (`19.1 Kubernetes` ↔ `19.1-kubernetes.yml`). The same playbook from the MacBook, `ansible-playbook playbooks/NN-….yml -K` in `01-Ansible/lab`, is the **break-glass** path: without the Semaphore variable group, play 1 is skipped and you log in as `dgxadmin` with your own key ([Chapter 04 §10](04-dgx-spark-as-semaphore-target.md)). Only `03.1-bootstrap.yml`, `04.1-semaphore-target.yml` and `17.1-vault.yml` run from the MacBook as the normal path. A template's number is `<chapter>.<n>`, the chapter that explains it: **`19.1 Kubernetes`** is the first template of **Chapter 19**. The exceptions are `00-vault-cert.yml` and `site`.
+> **Convention used in every chapter.** "**Semaphore:** `NN Name`" means run that template in project `spark-lab`; template names follow the playbook names (`19.1 Kubernetes` ↔ `19.1-kubernetes.yml`). The same playbook from the MacBook, `ansible-playbook playbooks/NN-….yml -K` in `01-Ansible/lab`, is the **break-glass** path: without the Semaphore variable group, play 1 is skipped and you log in as `dgxadmin` with your own key ([Chapter 04 §11](04-dgx-spark-as-semaphore-target.md)). Only `03.1-bootstrap.yml`, `04.1-semaphore-target.yml` and `17.1-vault.yml` run from the MacBook as the normal path. A template's number is `<chapter>.<n>`, the chapter that explains it: **`19.1 Kubernetes`** is the first template of **Chapter 19**. The exceptions are `00-vault-cert.yml` and `site`.
 
 ## Start here
 
@@ -84,16 +84,16 @@ Once Chapter 04 is done, the Semaphore template `site` builds the whole lab in o
 
 ## Curriculum
 
-Every document is numbered as its chapter. Work through them in order with the [step-by-step guide](00-ansible-step-by-step-guide.md); the one exception to strict order is Chapter 02, whose first half (toolchain, SSH trust, inventory) comes before Chapters 03–04 and whose second half (first contact, facts, baseline) runs after Chapter 04.
+Every document is numbered as its chapter. Work through them in order with the [step-by-step guide](00-ansible-step-by-step-guide.md): Chapter 02 is MacBook-only (toolchain, inventory), Chapter 03 gives the MacBook key login to the Spark, and Chapter 04 makes it a Semaphore target and runs first contact, custom facts and the baseline.
 
 ### Part I — Management plane & Ansible foundations
 
 | Chapter | Document | Lab pieces |
 |---|---|---|
 | 01 | [Management plane: Semaphore & Vault](01-management-plane-semaphore-and-vault.md) | `sema01`, `vault01`, `00-vault-cert.yml` (play 1) |
-| 02 | [Control node & Ansible core](02-control-node-and-ansible-core.md) | `ansible.cfg`, inventory, `spark_facts`, `spark_baseline`, `02.1-ping`, `02.2-baseline` |
-| 03 | [Bare-metal provisioning & bootstrap](03-bare-metal-provisioning-and-bootstrap.md) | `03.1-bootstrap` (dead-man switch), `03.2-redfish-practice` |
-| 04 | [DGX Spark as a Semaphore target](04-dgx-spark-as-semaphore-target.md) | `04.1-semaphore-target.yml`, `semaphore/`, `tools/fetch-kubeconfig.sh`, `17.1-vault.yml` |
+| 02 | [Control node & Ansible core](02-control-node-and-ansible-core.md) | `ansible.cfg`, inventory, `tests/run-local-checks.sh` |
+| 03 | [Bare-metal provisioning & bootstrap](03-bare-metal-provisioning-and-bootstrap.md) | `03.1-bootstrap` (dead-man switch), SSH trust, `03.2-redfish-practice` |
+| 04 | [DGX Spark as a Semaphore target](04-dgx-spark-as-semaphore-target.md) | `04.1-semaphore-target`, `semaphore/`, `04.2-ping`, `04.3-baseline`, custom facts `spark_facts`, role `spark_baseline`, `17.1-vault`, `tools/fetch-kubeconfig.sh` |
 | 05 | [Execution internals & debugging](05-execution-internals-and-debugging.md) | AnsiballZ explode/execute, async, debugger |
 | 06 | [Inventory: static, dynamic & discovery](06-inventory-static-dynamic-and-discovery.md) | `inventory_plugins/spark_mdns.py`, `zz-constructed.yml` |
 | 07 | [Jinja2 filters & data transforms](07-jinja2-filters-and-data-transforms.md) | `07.1-jinja-lab.yml` (7 katas) |
@@ -149,7 +149,7 @@ The step-by-step guide is the *build order*; this is the *learning order*: five 
 
 ```mermaid
 flowchart TB
-  L1["Level 1 · Operator<br/>run templates & read playbooks<br/>Chapters 01–05"] --> L2["Level 2 · Author<br/>roles, facts, Jinja, inventory<br/>Chapters 02, 06–08, 25"]
+  L1["Level 1 · Operator<br/>run templates & read playbooks<br/>Chapters 01–05"] --> L2["Level 2 · Author<br/>roles, facts, Jinja, inventory<br/>Chapters 02, 04, 06–08, 25"]
   L2 --> L3["Level 3 · Secure<br/>Vault, AppRole, SSH certs, no_log<br/>Chapters 01, 04, 17–18"]
   L3 --> L4["Level 4 · Platform<br/>Semaphore image + state, AWX as code, EEs<br/>Chapters 04, 08, 23–24"]
   L4 --> L5["Level 5 · SRE<br/>CI, drift, audit, incidents, chaos<br/>Chapters 25–30"]
@@ -159,15 +159,15 @@ flowchart TB
 
 | Skill | Practise with | Checkpoint (you can…) |
 |---|---|---|
-| Inventory, ad-hoc, playbook runs | Semaphore templates `02.1 Ping`, `02.2 Baseline`; the same playbooks from the MacBook ([Chapter 02](02-control-node-and-ansible-core.md)) | explain every line of `ansible.cfg` and `hosts.yml`, and why `group_vars/spark.yml` logs in as `svc-ansible` in Semaphore but `dgxadmin` from the MacBook |
-| Check/diff, tags, limits | `02.2 Baseline` as a dry run: `--check --diff --tags sysctl` (if you add `--limit`, keep `localhost`) | predict what a run will change before it runs |
+| Inventory, ad-hoc, playbook runs | Semaphore templates `04.2 Ping`, `04.3 Baseline`; the same playbooks from the MacBook ([Chapter 02](02-control-node-and-ansible-core.md), [Chapter 04 §6](04-dgx-spark-as-semaphore-target.md)) | explain every line of `ansible.cfg` and `hosts.yml`, and why `group_vars/spark.yml` logs in as `svc-ansible` in Semaphore but `dgxadmin` from the MacBook |
+| Check/diff, tags, limits | `04.3 Baseline` as a dry run: `--check --diff --tags sysctl` (if you add `--limit`, keep `localhost`) | predict what a run will change before it runs |
 | Reading failures | [Chapter 05](05-execution-internals-and-debugging.md) | tell whether a failure is SSH, sudo, Python, module, or logic from the error alone |
 
 ### Level 2 · Author (weeks 2–3)
 
 | Skill | Practise with | Checkpoint |
 |---|---|---|
-| Custom facts | `spark.fact` ([Chapter 02 §3.6](02-control-node-and-ansible-core.md)) | add a field (e.g. NVMe model) and target a group by it |
+| Custom facts | `spark.fact` ([Chapter 04 §6.2](04-dgx-spark-as-semaphore-target.md)) | add a field (e.g. NVMe model) and target a group by it |
 | Jinja data transforms | `07.1-jinja-lab.yml` ([Chapter 07](07-jinja2-filters-and-data-transforms.md)) | parse any command output into a dict and assert on it |
 | Role design & argument specs | `cx7_fabric` ([Chapter 08](08-roles-collections-and-execution-environments.md)) | write a role with defaults, argument_specs, pre-flight → configure → verify |
 | Dynamic inventory | `spark_mdns`, `constructed` ([Chapter 06](06-inventory-static-dynamic-and-discovery.md)) | write an inventory plugin with a fixture test |
@@ -178,7 +178,7 @@ flowchart TB
 | Skill | Practise with | Checkpoint |
 |---|---|---|
 | Vault operations | vault01 ([Chapter 01](01-management-plane-semaphore-and-vault.md), [Chapter 17](17-vault-server-deep-dive.md)) | init/unseal/snapshot/restore from memory; explain seal vs unseal and what a sealed vault01 does to every Semaphore task |
-| Policies & KV v2 paths | `vault_config` role (`17.1-vault.yml` from the MacBook: `spark-lab-read`, [Chapter 04 §6](04-dgx-spark-as-semaphore-target.md)) | write a least-privilege policy first time (remember `kv/data/` vs `kv/metadata/`) |
+| Policies & KV v2 paths | `vault_config` role (`17.1-vault.yml` from the MacBook: `spark-lab-read`, [Chapter 04 §7](04-dgx-spark-as-semaphore-target.md)) | write a least-privilege policy first time (remember `kv/data/` vs `kv/metadata/`) |
 | AppRole + short-lived tokens | play 1 `00-vault-cert.yml`, `18.1-vault-integration.yml` ([Chapter 18](18-vault-approle-secrets-and-ssh-certificates.md)) | run automation with no static secrets on disk: Semaphore holds only the AppRole |
 | SSH certificates | `04.1-semaphore-target.yml`, `tools/vault-ssh-cert.sh` ([Chapter 04](04-dgx-spark-as-semaphore-target.md)) | retire static keys safely, with a break-glass path (`dgxadmin` + your key from the MacBook) |
 | Secret hygiene | `no_log`, `.gitignore`, audit log ([Chapter 18](18-vault-approle-secrets-and-ssh-certificates.md)) | prove a secret never reached `ansible.log`, a Semaphore task log, AWX output, or ARA |
@@ -218,7 +218,7 @@ flowchart LR
   end
   subgraph MAC["MacBook (bootstrap, break-glass)"]
     ADM["admin VAULT_TOKEN → 17.1-vault.yml<br/>(adds KV, policy)"]
-    BG["nvidia + your key<br/>(play 1 skipped)"]
+    BG["dgxadmin + your key<br/>(play 1 skipped)"]
   end
   subgraph AWX["AWX jobs (alternative, own AppRole)"]
     C1["Credential: HashiCorp Vault Secret Lookup"]

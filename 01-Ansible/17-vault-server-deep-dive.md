@@ -2,7 +2,7 @@
 
 > **01-Ansible · Part IV — Secrets & platforms · Chapter 17 of 30** · ← [Chapter 16 · GPUDirect Storage & cuFile](16-gpudirect-storage-and-cufile.md) · [All chapters](00-ansible-step-by-step-guide.md) · [Chapter 18 · Vault AppRole, secrets & SSH certificates](18-vault-approle-secrets-and-ssh-certificates.md) →
 >
-> Builds on: [Chapter 01 §3–4](01-management-plane-semaphore-and-vault.md) (vault01 built by hand) · Spark lab additions: [Chapter 04 §6](04-dgx-spark-as-semaphore-target.md) · Ansible integration: [Chapter 18](18-vault-approle-secrets-and-ssh-certificates.md)
+> Builds on: [Chapter 01 §3–4](01-management-plane-semaphore-and-vault.md) (vault01 built by hand) · Spark lab additions: [Chapter 04 §7](04-dgx-spark-as-semaphore-target.md) · Ansible integration: [Chapter 18](18-vault-approle-secrets-and-ssh-certificates.md)
 
 | | |
 |---|---|
@@ -62,7 +62,7 @@ Nobody configures vault01 over SSH from the lab: it isn't in [`inventory/hosts.y
 | Audit | `file` device → `/var/log/vault_audit.log` | Chapter 01 §3.5 |
 | SSH CA | engine `ssh-client-signer/`, role `ansible` (principal `svc-ansible`, ttl 15m, max 1h) | Chapter 01 §4 |
 | AppRole | `auth/approle/role/semaphore`: policy `semaphore-ssh`, token ttl 10m, max 30m | Chapter 01 §4 |
-| Lab secrets | KV v2 at `kv/`, policy `spark-lab-read` for `kv/spark-lab/*`, attached to AppRole `semaphore` | **`17.1-vault.yml`** (Chapter 04 §6) |
+| Lab secrets | KV v2 at `kv/`, policy `spark-lab-read` for `kv/spark-lab/*`, attached to AppRole `semaphore` | **`17.1-vault.yml`** (Chapter 04 §7) |
 | Firewall | 8200 from 192.168.0.0/24 only | Chapter 01 §2.1 |
 
 Where the controllers find the TLS certificate (`vault_cacert` in `group_vars/all.yml`): inside the Semaphore container it's `/etc/semaphore/vault-ca.crt` (mounted in Chapter 01 §7.3); on the MacBook it's `lab/.cache/vault-ca.crt` (copied in Chapter 04 §2).
@@ -187,7 +187,7 @@ The only playbook that writes to vault01 is [`17.1-vault.yml`](lab/playbooks/17.
 - name: An admin token is required for this run
   ansible.builtin.assert:
     that: vault_config_token | length > 0          # lookup('env', 'VAULT_TOKEN'): never stored
-    fail_msg: "export VAULT_TOKEN=<admin token from vault01> and run again (Chapter 04 §6)"
+    fail_msg: "export VAULT_TOKEN=<admin token from vault01> and run again (Chapter 04 §7)"
     quiet: true
 
 - name: The signing role must exist and allow the automation account
@@ -251,7 +251,7 @@ vault read ssh-client-signer/roles/ansible | grep -E 'allowed_users|ttl'   # svc
 
 ### 3.2 Add the Spark lab's KV engine and policy (on your MacBook)
 
-This is [Chapter 04 §6](04-dgx-spark-as-semaphore-target.md); skip the first run if you already did it there.
+This is [Chapter 04 §7](04-dgx-spark-as-semaphore-target.md); skip the first run if you already did it there.
 
 ```bash
 export VAULT_TOKEN=$(vault print token)          # the playbook reads the admin token from the environment
@@ -269,7 +269,7 @@ vault policy read spark-lab-read                                 # the two kv/�
 vault kv metadata get kv/spark-lab/ngc | grep current_version   # 2 (version 1 = the placeholder, 2 = your key)
 ```
 
-Then set `vault_lab_secrets_enabled` to `true` in the Semaphore variable group `vault-approle` (Chapter 04 §6), so play 1 reads the lab secrets.
+Then set `vault_lab_secrets_enabled` to `true` in the Semaphore variable group `vault-approle` (Chapter 04 §7), so play 1 reads the lab secrets.
 
 ### 3.3 Prove the seal behaviour (vault01 + Semaphore)
 
@@ -279,7 +279,7 @@ vault status | grep Sealed           # true
 curl -s --cacert $VAULT_CACERT $VAULT_ADDR/v1/sys/health -o /dev/null -w '%{http_code}\n'   # 503
 ```
 
-In Semaphore (project `spark-lab`) run **02.1 Ping**: play 1 fails at *Log in to Vault with AppRole* (status 503, details hidden by `no_log`), and no host play runs. That's the whole lab stopping on one sealed Vault.
+In Semaphore (project `spark-lab`) run **04.2 Ping**: play 1 fails at *Log in to Vault with AppRole* (status 503, details hidden by `no_log`), and no host play runs. That's the whole lab stopping on one sealed Vault.
 
 ```bash
 vault operator unseal                # on vault01: key share 1 of 2
@@ -287,7 +287,7 @@ vault operator unseal                # key share 2 → Sealed false
 vault status | grep -E 'Sealed|HA Mode'   # Sealed false, HA Mode active
 ```
 
-Run **02.1 Ping** again: `failed=0`. Lesson: the unseal keys are an operational dependency of every task, so who holds them and how fast they can respond is part of the design (§5).
+Run **04.2 Ping** again: `failed=0`. Lesson: the unseal keys are an operational dependency of every task, so who holds them and how fast they can respond is part of the design (§5).
 
 ### 3.4 Read the audit log (on vault01)
 
@@ -432,7 +432,7 @@ python3 tools/capstone_scorecard.py | grep Chapter 17                           
 ```
 
 - [ ] Sealed `false`, storage `raft`, one audit device writing `/var/log/vault_audit.log`.
-- [ ] A restart leaves vault01 sealed and **02.1 Ping** fails at play 1; two unseal shares bring both back.
+- [ ] A restart leaves vault01 sealed and **04.2 Ping** fails at play 1; two unseal shares bring both back.
 - [ ] `17.1-vault.yml` runs twice with `changed=0` the second time, and with the §3.7 token instead of root.
 - [ ] A snapshot restore drill succeeded on a throwaway secret; the snapshot and the unseal keys are stored together, offline.
 - [ ] Scorecard check **17/18** passes: `vault-ca.crt` is in the cache and no Vault init output, AppRole or token file is anywhere in it.

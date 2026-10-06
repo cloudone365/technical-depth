@@ -4,9 +4,9 @@
 
 | | |
 |---|---|
-| **You will build** | A repeatable path from *fresh out of the box* (or *just re-imaged*) to *managed by Ansible*: first-boot wizard → key trust → hostname → static mgmt IP with an automatic rollback → baseline. Then a Redfish practice target and a PXE design for when you graduate to DGX/HGX |
-| **Hardware** | 1× DGX Spark (recovery USB stick optional) |
-| **Time** | 2 h (+30 min if you do a full re-image drill) |
+| **You will build** | A repeatable path from *fresh out of the box* (or *just re-imaged*) to *reachable by Ansible*: first-boot wizard → key trust → hostname → static mgmt IP with an automatic rollback. For a Spark that is already installed, SSH trust only. Either way it ends with your MacBook logging in to `dgxadmin@192.168.0.100` by key. Then a Redfish practice target and a PXE design for when you graduate to DGX/HGX |
+| **Hardware** | 1× DGX Spark (recovery USB stick optional) and your MacBook |
+| **Time** | 2 h for a fresh DGX OS (+30 min if you do a full re-image drill); 10 min for SSH trust only |
 | **Risk** | **Medium.** Changing the management IP on a headless box can lock you out, which is exactly what the dead-man switch below prevents |
 
 ---
@@ -28,7 +28,7 @@ stateDiagram-v2
   OOBE --> DHCP_Ready: wizard (user, Wi-Fi/Ethernet, updates)
   DHCP_Ready --> Bootstrapped: 03.1-bootstrap.yml (-k -K, MacBook)
   Bootstrapped --> Target: 04.1-semaphore-target.yml (MacBook)
-  Target --> Baselined: Semaphore 02.2 Baseline
+  Target --> Baselined: Semaphore 04.3 Baseline
   Baselined --> Operational: templates 11.1 … 22.1 (runtime, fabric, kubeadm + vClusters, slurm…)
   Operational --> Operational: drift check / day-2
   Operational --> Recovery: disk failure · bad update · "start clean"
@@ -54,7 +54,7 @@ flowchart LR
   subgraph D1b["Day 1 (04.1-semaphore-target.yml)"]
     SA["svc-ansible + NOPASSWD sudo"] --> CA["trust vault01's SSH CA"]
   end
-  subgraph D2["Day 1½ (Semaphore: 02.2 Baseline)"]
+  subgraph D2["Day 1½ (Semaphore: 04.3 Baseline)"]
     F["spark.fact"] --> B["packages · NVIDIA holds ·<br/>sysctl · sshd · chrony · journald"]
   end
   D0 --> D1 --> D1b --> D2 --> Rest["Chapters 10–30"]
@@ -86,6 +86,19 @@ The same pattern protects **any** change that can cut your own access: sshd conf
 ---
 
 ## 3. Hands-on
+
+Two paths, one end state:
+
+- **Fresh DGX OS** (new or just re-imaged): §3.1 wizard, then §3.2 bootstrap. The bootstrap installs your MacBook key.
+- **Already installed** (named `dgx-spark-1`, on 192.168.0.100, user `dgxadmin`): §3.3, SSH trust only.
+
+Either way you need an SSH key on the MacBook first; `03.1-bootstrap.yml` installs `~/.ssh/id_ed25519.pub` (`spark_admin_pubkeys` in [`group_vars/all.yml`](lab/inventory/group_vars/all.yml)):
+
+```bash
+ls ~/.ssh/id_ed25519.pub || ssh-keygen -t ed25519 -C "ansible@control"   # create one if you don't have a key
+```
+
+Both paths end when `ssh dgxadmin@192.168.0.100 hostname` prints `dgx-spark-1` without asking for a password (§7).
 
 ### 3.1 Day 0: the first-boot wizard
 
@@ -227,6 +240,19 @@ This is one of the few playbooks that runs **from your MacBook**, not from Semap
             msg: "Review: {{ bootstrap_old_netplan.files | map(attribute='path') | list }}"
 ```
 
+**Your first Spark, `dgx-spark-1`.** On a Spark that has just finished the first-boot wizard (password login, DHCP address), `03.1-bootstrap.yml` sets the hostname, installs your key for `dgxadmin` (task *Install control-node SSH key(s)*) and, on the second run, moves it to the static IP. A dead-man timer rolls the network back if Ansible can't reconnect.
+
+```bash
+cd "01-Ansible/lab"
+ansible-playbook playbooks/03.1-bootstrap.yml -l dgx-spark-1 -k -K -e bootstrap_current_ip=<its DHCP IP>                              # -k: SSH password, still on
+ansible-playbook playbooks/03.1-bootstrap.yml -l dgx-spark-1 -K -e bootstrap_current_ip=<its DHCP IP> -e bootstrap_static_ip=true     # move to 192.168.0.100
+ssh dgxadmin@192.168.0.100 hostname                                   # dgx-spark-1, no password: your key is in
+```
+
+That is this chapter's end state for dgx-spark-1 (§7); Chapter 04 then makes it a Semaphore target. The rest of §3.2 explains the second run and its safety net.
+
+**A later Spark, `dgx-spark-2`** (once Chapter 04 is done for the first one), shows the full sequence including the Semaphore step:
+
 ```bash
 cd "01-Ansible/lab"
 # First run: password SSH (-k) and sudo (-K), on the DHCP address, no IP change yet
@@ -240,13 +266,29 @@ ansible-playbook playbooks/03.1-bootstrap.yml -l dgx-spark-2 -K \
 ansible-playbook playbooks/04.1-semaphore-target.yml -l dgx-spark-2,localhost -K
 ```
 
-From now on, plain inventory addressing works and the node belongs to Semaphore: run the templates `02.1 Ping` and `02.2 Baseline` with CLI args `--limit dgx-spark-2,localhost`. (When dgx-spark-2 is permanent, drop the `--limit dgx-spark-1,localhost` from all templates, Chapter 04 §5.5.)
+From now on, plain inventory addressing works and the node belongs to Semaphore: run the templates `04.2 Ping` and `04.3 Baseline` with CLI args `--limit dgx-spark-2,localhost`. (When dgx-spark-2 is permanent, drop the `--limit dgx-spark-1,localhost` from all templates, Chapter 04 §5.5.)
 
 **Test the rollback on purpose, once.** Point the node at an address your MacBook can't reach, e.g. `-e bootstrap_target_ip=10.99.99.99`. (`-e` beats the playbook's own `set_fact`, so this is a handy way to force a bad target.) The reconnect times out, and 180 s later the Spark is back on its old address. `journalctl -t bootstrap` on the Spark shows the rollback.
 
 > **Precedence trap (the reason for `bootstrap_current_ip`):** extra vars (`-e`) outrank everything, including `set_fact`. If you passed the DHCP address as `-e ansible_host=…`, the play could never switch its connection to the new IP, and the dead-man switch would roll back every time. Always carry "where it is now" in a separate variable.
 
-### 3.3 Managing kernel arguments (when you have a reason)
+### 3.3 Spark already installed? SSH trust only
+
+Skip this on a fresh DGX OS: `03.1-bootstrap.yml` in §3.2 already installed your MacBook key (task *Install control-node SSH key(s)*). For a Spark that is already installed, named `dgx-spark-1`, on 192.168.0.100, with the user `dgxadmin`, copy the key yourself (it asks for `dgxadmin`'s password once):
+
+```bash
+ssh-copy-id dgxadmin@192.168.0.100                        # your ~/.ssh/id_ed25519.pub (§3)
+ssh-copy-id dgxadmin@192.168.0.101                        # second Spark, if any
+ssh dgxadmin@192.168.0.100 'hostname; uname -m; cat /etc/dgx-release | head -3'
+```
+
+Expected: `aarch64` and a `DGX_*` release line. If `/etc/dgx-release` is missing, you're not on DGX OS. The lab still runs, but the version checks in `spark_validate` will warn.
+
+This key is **your** key, for the `dgxadmin` admin user. It is what the MacBook uses for the bootstrap and break-glass paths. Semaphore never sees it: it logs in as `svc-ansible` with a certificate, after `04.1-semaphore-target.yml` has made the Spark trust vault01's CA.
+
+> Installed, but a different hostname or address? Treat it as fresh: `03.1-bootstrap.yml` (§3.2) works on any DGX OS that still accepts the password, and puts it on its inventory name and IP.
+
+### 3.4 Managing kernel arguments (when you have a reason)
 
 DGX OS ships tuned kernel parameters, so don't change them casually. When you must (a vendor-advised setting, or a debugging flag), use a GRUB drop-in plus a controlled reboot, never a `sed` on `/etc/default/grub`:
 
@@ -282,14 +324,14 @@ DGX OS ships tuned kernel parameters, so don't change them casually. When you mu
       failed_when: spark_kernel_args | reject('in', cmdline.stdout) | list | length > 0
 ```
 
-### 3.4 Recovery drill: prove you can rebuild
+### 3.5 Recovery drill: prove you can rebuild
 
 The real test of provisioning automation is to wipe a node and rebuild it:
 
 1. Record the state: Semaphore template `30.1 Validate` with `--limit dgx-spark-2,localhost` (keep `validation/dgx-spark-2.json` from sema01's state volume, `/opt/spark-lab/cache`).
 2. Re-image dgx-spark-2 from the USB recovery media (the OEM/NVIDIA guide covers creating it with `dd`; verify the checksum first).
 3. Complete the wizard (§3.1).
-4. From the MacBook: `03.1-bootstrap.yml` (both runs), then `04.1-semaphore-target.yml -l dgx-spark-2,localhost -K`. The re-image gave the node a new SSH host key, so on sema01 remove the old one first (`docker compose exec semaphore ssh-keygen -R 192.168.0.101`, Chapter 04 §12). Then the Semaphore template `site` with `--limit dgx-spark-2,localhost`.
+4. From the MacBook: `03.1-bootstrap.yml` (both runs), then `04.1-semaphore-target.yml -l dgx-spark-2,localhost -K`. The re-image gave the node a new SSH host key, so on sema01 remove the old one first (`docker compose exec semaphore ssh-keygen -R 192.168.0.101`, Chapter 04 §13). Then the Semaphore template `site` with `--limit dgx-spark-2,localhost`.
 5. Validate again and `diff` the two JSON reports. **Anything that differs is something you did by hand and never automated.**
 
 Semaphore, vault01 and the task history of the first build are untouched by the re-image: that's why the controller lives outside the Spark.
@@ -398,9 +440,10 @@ Ansible owns every box in that diagram: it templates the dnsmasq reservations fr
 
 | Symptom | Diagnose | Fix |
 |---|---|---|
+| `UNREACHABLE! … Permission denied (publickey)` / password prompt for `dgxadmin` | Key not on the Spark, or the wrong user: `ssh -v dgxadmin@192.168.0.100` | Installed Spark: `ssh-copy-id` (§3.3). Fresh: re-run the bootstrap with `-k` (§3.2), with `~/.ssh/id_ed25519.pub` present. Check `remote_user` in `ansible.cfg` |
 | Can't find the Spark after the wizard | Router DHCP leases; `avahi-browse -rt _ssh._tcp`; `arp -a` | Use a wired connection; the Wi-Fi hotspot is setup-only |
 | `-k` fails: `to use the 'ssh' connection type with passwords, you must install the sshpass program` | — | `brew install hudochenkov/sshpass/sshpass` on the MacBook (`apt install sshpass` on Linux) |
-| Semaphore after a re-image: `Host key verification failed` | the node's host key changed | on sema01: `docker compose exec semaphore ssh-keygen -R <ip>`, only once you know why it changed (Chapter 04 §12) |
+| Semaphore after a re-image: `Host key verification failed` | the node's host key changed | on sema01: `docker compose exec semaphore ssh-keygen -R <ip>`, only once you know why it changed (Chapter 04 §13) |
 | Bootstrap: `wait_for_connection` times out and then the old IP answers again | The dead-man switch worked | Check the new IP/prefix/gateway; `journalctl -t bootstrap`; make sure you used `bootstrap_current_ip`, **not** `-e ansible_host`; fix and re-run |
 | Both the old DHCP and the new static address are present | Another netplan file (from the wizard/NetworkManager) still configures the NIC | Review the files the last task lists; `netplan get`; remove the duplicate; `netplan apply` |
 | `netplan apply` warns `Permissions for /etc/netplan/*.yaml are too open` | `ls -l /etc/netplan` | `mode: "0600"` (the roles already do this) |
@@ -409,7 +452,8 @@ Ansible owns every box in that diagram: it templates the dnsmasq reservations fr
 
 ## 7. Validation
 
-- [ ] A Spark goes from wizard-complete to `02.2-baseline.yml changed=0` using only playbooks.
-- [ ] You triggered the dead-man rollback deliberately and watched it recover.
-- [ ] (Drill) Re-image → rebuild → `diff` of the validation JSON is empty.
-- [ ] `redfish_info` returns system inventory from the mockup.
+- [ ] (Fresh DGX OS) A Spark goes from wizard-complete to its static IP and key login using only playbooks.
+- [ ] (Fresh DGX OS) You triggered the dead-man rollback deliberately and watched it recover.
+- [ ] (Drill, once the lab is built) Re-image → rebuild → `diff` of the validation JSON is empty.
+- [ ] (Once Chapter 04 is done) `redfish_info` returns system inventory from the mockup.
+- [ ] Both paths: `ssh dgxadmin@192.168.0.100 hostname` prints `dgx-spark-1` without asking for a password.

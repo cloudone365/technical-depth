@@ -305,7 +305,7 @@ The management-plane files live in the same `lab/` tree, so the same workflow co
 | `semaphore/Dockerfile` | not linted yet | it carries a `# hadolint ignore=DL3006` marker, so adding `hadolint` to the static job is a one-line exercise |
 | `tools/fetch-kubeconfig.sh`, `tools/vault-ssh-cert.sh` | `bash -n tools/*.sh` | they parse; their behaviour is proven by the Chapter 04 Verify steps |
 
-Neither login case of `group_vars/spark.yml` (svc-ansible with `vault_role_id`, nvidia without) is exercised by CI: the syntax check doesn't render inventory variables. The Semaphore case only runs for real on sema01. Its test is the template `02.1 Ping` (Chapter 04 §5.6): run it after every change to play 1, `group_vars/spark.yml` or the Semaphore image.
+Neither login case of `group_vars/spark.yml` (svc-ansible with `vault_role_id`, nvidia without) is exercised by CI: the syntax check doesn't render inventory variables. The Semaphore case only runs for real on sema01. Its test is the template `04.2 Ping` (Chapter 04 §5.6): run it after every change to play 1, `group_vars/spark.yml` or the Semaphore image.
 
 ## 5. Troubleshooting & diagnostics
 

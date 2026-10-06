@@ -31,7 +31,7 @@ ansible monitoring -b -m ansible.builtin.copy \
 if [[ $rc -eq 2 && "${AUTO_HEAL:-0}" == "1" ]]; then
   HOSTS=$(cat "$OUT/check-$TS.hosts")
   echo "auto-heal: tags=$SAFE_TAGS hosts=$HOSTS"
-  ansible-playbook playbooks/02.2-baseline.yml playbooks/12.1-telemetry.yml \
+  ansible-playbook playbooks/04.3-baseline.yml playbooks/12.1-telemetry.yml \
     --limit "$HOSTS" --tags "$SAFE_TAGS" $BECOME_ARGS > "$OUT/heal-$TS.log" 2>&1
   run_check "recheck-$TS"; rc=$?
   echo "post-heal exit=$rc  report=$OUT/recheck-$TS.md"

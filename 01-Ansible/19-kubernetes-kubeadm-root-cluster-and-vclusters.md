@@ -120,7 +120,7 @@ Two networks, two jobs. The **pod network** (Cilium VXLAN) and the API run on th
 | `20.1` · `gpu_operator` | controller | root API | 15 GPU time-slices per node (Chapter 20) |
 | `20.2` · `vclusters` | controller | root API, then each vCluster API | storage, budgets, `dev-lab` and `llms`, contexts merged |
 
-"Controller" is the Semaphore container on sema01: templates `19.1 Kubernetes`, `20.1 GPU Operator`, `20.2 vClusters`, each with CLI args `--limit dgx-spark-1,localhost` while there's one Spark (Chapter 04 §7). That's why the lab image has `kubectl`, `helm` and the `kubernetes.core` collection ([`lab/semaphore/Dockerfile`](lab/semaphore/Dockerfile)). The same playbooks run from your MacBook as break-glass; the state folder is then `lab/.cache`.
+"Controller" is the Semaphore container on sema01: templates `19.1 Kubernetes`, `20.1 GPU Operator`, `20.2 vClusters`, each with CLI args `--limit dgx-spark-1,localhost` while there's one Spark (Chapter 04 §8). That's why the lab image has `kubectl`, `helm` and the `kubernetes.core` collection ([`lab/semaphore/Dockerfile`](lab/semaphore/Dockerfile)). The same playbooks run from your MacBook as break-glass; the state folder is then `lab/.cache`.
 
 `serial` equal to the number of control planes (1) plus `order: sorted` makes dgx-spark-1 a batch of its own. dgx-spark-2 starts only after `kubeadm init` has finished. The ordering comes from the names: if you add a worker whose name sorts before the control plane's, list the groups explicitly or give the control plane its own play.
 
@@ -614,7 +614,7 @@ Then set `kubeadm_cluster_version` in `roles/kubeadm_cluster/defaults/main.yml` 
 
 ## 8. Reset and rebuild
 
-The Spark is a lab: breaking the cluster, wiping it and rebuilding it in under an hour is part of learning, not a failure. [`19.2-reset-kubernetes.yml`](lab/playbooks/19.2-reset-kubernetes.yml) asks you to type `RESET`. A Semaphore task can't answer a prompt, so the template `19.2 Reset Kubernetes` sets the extra variable `reset_confirm: RESET` instead (Chapter 04 §7.3: keep it in a project only you can open, never schedule it). Then:
+The Spark is a lab: breaking the cluster, wiping it and rebuilding it in under an hour is part of learning, not a failure. [`19.2-reset-kubernetes.yml`](lab/playbooks/19.2-reset-kubernetes.yml) asks you to type `RESET`. A Semaphore task can't answer a prompt, so the template `19.2 Reset Kubernetes` sets the extra variable `reset_confirm: RESET` instead (Chapter 04 §8.3: keep it in a project only you can open, never schedule it). Then:
 
 | Step | Removes | Leaves alone |
 |---|---|---|

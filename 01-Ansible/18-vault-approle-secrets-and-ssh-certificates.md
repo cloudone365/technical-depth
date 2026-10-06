@@ -2,7 +2,7 @@
 
 > **01-Ansible · Part IV — Secrets & platforms · Chapter 18 of 30** · ← [Chapter 17 · Vault server deep dive](17-vault-server-deep-dive.md) · [All chapters](00-ansible-step-by-step-guide.md) · [Chapter 19 · Kubernetes: kubeadm root cluster & vClusters](19-kubernetes-kubeadm-root-cluster-and-vclusters.md) →
 >
-> Builds on: [Chapter 17](17-vault-server-deep-dive.md) (the Vault server) · [Chapter 01 §4, §8](01-management-plane-semaphore-and-vault.md) · [Chapter 04 §5–6](04-dgx-spark-as-semaphore-target.md)
+> Builds on: [Chapter 17](17-vault-server-deep-dive.md) (the Vault server) · [Chapter 01 §4, §8](01-management-plane-semaphore-and-vault.md) · [Chapter 04 §5, §7](04-dgx-spark-as-semaphore-target.md)
 
 | | |
 |---|---|
@@ -220,7 +220,7 @@ Design choices worth copying:
           - vault_lab_secrets_enabled | bool
         fail_msg: >-
           Run it from Semaphore with the vault-approle variable group and
-          vault_lab_secrets_enabled=true (Chapter 04 §6). 17.1-vault.yml must have run once.
+          vault_lab_secrets_enabled=true (Chapter 04 §7). 17.1-vault.yml must have run once.
         quiet: true
 
     - name: What we got (no secret values)
@@ -242,9 +242,9 @@ Design choices worth copying:
     - role: container_runtime
 ```
 
-**Prerequisites:** Chapter 17 §3.2 / Chapter 04 §6 done (KV, policy, your real NGC key in `kv/spark-lab/ngc`), and `vault_lab_secrets_enabled` set to `true` in the variable group `vault-approle`.
+**Prerequisites:** Chapter 17 §3.2 / Chapter 04 §7 done (KV, policy, your real NGC key in `kv/spark-lab/ngc`), and `vault_lab_secrets_enabled` set to `true` in the variable group `vault-approle`.
 
-**Run:** in Semaphore, project `spark-lab`, create (Chapter 04 §6) and run the template **18.1 Vault integration**: playbook `01-Ansible/lab/playbooks/18.1-vault-integration.yml`, inventory `spark-lab`, variable group `vault-approle`, CLI args `["--limit", "dgx-spark-1,localhost"]`.
+**Run:** in Semaphore, project `spark-lab`, create (Chapter 04 §7) and run the template **18.1 Vault integration**: playbook `01-Ansible/lab/playbooks/18.1-vault-integration.yml`, inventory `spark-lab`, variable group `vault-approle`, CLI args `["--limit", "dgx-spark-1,localhost"]`.
 
 Expected in the task log:
 
@@ -365,14 +365,14 @@ vault write auth/approle/role/semaphore/secret-id-accessor/lookup \
   secret_id_accessor=<the new accessor>                             # cidr_list [192.168.0.210/32], metadata, creation_time
 ```
 
-In Semaphore, paste the new secret_id into the `vault_secret_id` secret of **both** variable groups that use AppRole `semaphore` (project `lab` from Chapter 01 §8.6 and project `spark-lab`), then run **02.1 Ping** in each: `failed=0`. Only then destroy the old one:
+In Semaphore, paste the new secret_id into the `vault_secret_id` secret of **both** variable groups that use AppRole `semaphore` (project `lab` from Chapter 01 §8.6 and project `spark-lab`), then run **04.2 Ping** in each: `failed=0`. Only then destroy the old one:
 
 ```bash
 vault write auth/approle/role/semaphore/secret-id-accessor/destroy secret_id_accessor=<the OLD accessor>
 vault list auth/approle/role/semaphore/secret-id                    # only the new accessor is left
 ```
 
-Run **02.1 Ping** once more. Next steps toward production (role-level, so they affect both projects; plan them): `secret_id_ttl` with a calendar reminder to rotate, `token_bound_cidrs=192.168.0.210/32`, and one AppRole per environment or template class (Chapter 01 §11, Chapter 04 §11).
+Run **04.2 Ping** once more. Next steps toward production (role-level, so they affect both projects; plan them): `secret_id_ttl` with a calendar reminder to rotate, `token_bound_cidrs=192.168.0.210/32`, and one AppRole per environment or template class (Chapter 01 §11, Chapter 04 §12).
 
 ### 3.6 SSH certificates: what's signed, what's refused, what can't be revoked
 
@@ -403,11 +403,11 @@ vault write ssh-client-signer/sign/ansible public_key=@$HOME/semaphore_lab.pub v
 # error as well: the admin account can't be reached with a Vault certificate, by design
 ```
 
-And the expiry test of Chapter 04 §8: 16 minutes after a task, `docker compose exec semaphore ssh -i /tmp/lab_ssh/id_ed25519 svc-ansible@192.168.0.100 true` is refused; the next task run works again. No cleanup, no revocation list.
+And the expiry test of Chapter 04 §9: 16 minutes after a task, `docker compose exec semaphore ssh -i /tmp/lab_ssh/id_ed25519 svc-ansible@192.168.0.100 true` is refused; the next task run works again. No cleanup, no revocation list.
 
 **Revocation.** A signed certificate can't be recalled by Vault. The controls are the short TTL, a `RevokedKeys` KRL in sshd for an emergency, and CA rotation (re-run `04.1-semaphore-target.yml` after `vault write ssh-client-signer/config/ca generate_signing_key=true`, which invalidates every outstanding certificate at once).
 
-**Static keys.** `svc-ansible` never had an `authorized_keys` file: certificate or nothing. The `dgxadmin` admin account keeps your own key; that's the break-glass path (Chapter 04 §10), so protect it (passphrase, MacBook only) rather than removing it. Keep console access too: if vault01 is sealed, certificate logins stop as soon as the current ones expire.
+**Static keys.** `svc-ansible` never had an `authorized_keys` file: certificate or nothing. The `dgxadmin` admin account keeps your own key; that's the break-glass path (Chapter 04 §11), so protect it (passphrase, MacBook only) rather than removing it. Keep console access too: if vault01 is sealed, certificate logins stop as soon as the current ones expire.
 
 ---
 
@@ -427,7 +427,7 @@ And the expiry test of Chapter 04 §8: 16 minutes after a task, `docker compose 
 | Symptom | Diagnose | Fix |
 |---|---|---|
 | Play 1: *Log in to Vault with AppRole* fails (details hidden) | on vault01: `sudo jq -c 'select(.request.path=="auth/approle/login") \| .error' /var/log/vault_audit.log \| tail -3` | `invalid role or secret ID`: the secret_id was destroyed, expired, or is bound to another CIDR (§3.5); 503: vault01 is sealed (Chapter 17 §3.3) |
-| Play 1 skipped, then `Permission denied` for **nvidia** | the template has no variable group | attach `vault-approle` (Chapter 04 §12) |
+| Play 1 skipped, then `Permission denied` for **dgxadmin** | the template has no variable group | attach `vault-approle` (Chapter 04 §13) |
 | `Lab secrets read from kv/spark-lab/: []` | `vault read -field=token_policies auth/approle/role/semaphore` | `spark-lab-read` missing: run `17.1-vault.yml`; or `vault_lab_secrets_enabled` still false |
 | 403 / `permission denied` reading a KV path | `vault token capabilities <token> kv/data/spark-lab/ngc`; audit log | policy written as `kv/spark-lab/*` instead of `kv/data/spark-lab/*` |
 | `NGC key present: False` | `vault kv get -field=api_key kv/spark-lab/ngc \| cut -c1-6` | still `REPLACE_ME`: `vault kv put kv/spark-lab/ngc api_key=…` |
@@ -445,6 +445,6 @@ And the expiry test of Chapter 04 §8: 16 minutes after a task, `docker compose 
 - [ ] `git grep -n "nvapi-"` in the repository finds nothing; `.cache/` is git-ignored.
 - [ ] Template **18.1 Vault integration** ends with `NGC key present: True` and `failed=0`, and vault01's audit log shows role `semaphore` reading `kv/data/spark-lab/ngc`.
 - [ ] The certificate in the Semaphore container shows principal `svc-ansible`, 15-minute validity; a manual request for `root` is refused.
-- [ ] The secret_id in use is bound to `192.168.0.210/32`, the old accessor is destroyed, and both Semaphore projects still pass **02.1 Ping**.
+- [ ] The secret_id in use is bound to `192.168.0.210/32`, the old accessor is destroyed, and both Semaphore projects still pass **04.2 Ping**.
 - [ ] `tools/vault-pass.sh` decrypts `.cache/ngc.vault.yml` on the MacBook; the Semaphore templates that need ansible-vault use a Key Store key, not the script.
 - [ ] `python3 tools/capstone_scorecard.py` check **17/18** passes: no AppRole, token or Vault init file in the cache.

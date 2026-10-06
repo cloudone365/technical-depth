@@ -31,7 +31,7 @@ flowchart LR
   R -->|"spark_config_drift.prom"| NE["node_exporter textfile<br/>on monitoring host"] --> G["Grafana 'Config drift' stat<br/>+ alert"]
   R -->|exit 0| OK((clean))
   R -->|exit 3| INC["failures/unreachable →<br/>incident (Chapter 29)"]
-  R -->|"exit 2 + AUTO_HEAL=1"| H["02.2-baseline + 12.1-telemetry<br/>--tags baseline,telemetry_node<br/>--limit drifted hosts"]
+  R -->|"exit 2 + AUTO_HEAL=1"| H["04.3-baseline + 12.1-telemetry<br/>--tags baseline,telemetry_node<br/>--limit drifted hosts"]
   H --> C2["re-check"] --> R2{"still drift?"}
   R2 -->|yes| TKT["notify: human needed"]
   R2 -->|no| OK
@@ -258,7 +258,7 @@ ansible monitoring -b -m ansible.builtin.copy \
 if [[ $rc -eq 2 && "${AUTO_HEAL:-0}" == "1" ]]; then
   HOSTS=$(cat "$OUT/check-$TS.hosts")
   echo "auto-heal: tags=$SAFE_TAGS hosts=$HOSTS"
-  ansible-playbook playbooks/02.2-baseline.yml playbooks/12.1-telemetry.yml \
+  ansible-playbook playbooks/04.3-baseline.yml playbooks/12.1-telemetry.yml \
     --limit "$HOSTS" --tags "$SAFE_TAGS" $BECOME_ARGS > "$OUT/heal-$TS.log" 2>&1
   run_check "recheck-$TS"; rc=$?
   echo "post-heal exit=$rc  report=$OUT/recheck-$TS.md"
@@ -312,7 +312,7 @@ AUTO_HEAL=1 tools/drift-cycle.sh; echo "exit=$?"     # → heal on dgx-spark-2 o
 
 ### 4.4 Schedule it
 
-**In Semaphore (this lab):** open the template `26.1 Drift check` → **Schedules** → add a cron expression such as `30 2 * * *` (nightly). It needs no extra permissions: it runs in check mode as `svc-ansible` with a fresh certificate each night. Semaphore marks the run **failed** only on task failures or unreachable hosts, so add a project alert (Chapter 04 §9) and read the recap's `changed=` count for drift. If you want drift itself to page you, keep the metric path: run `tools/drift-cycle.sh` and alert on `spark_config_drift_tasks > 0` (§5). Never schedule `02.2 Baseline` as an "auto-heal" template: healing stays the guarded, tag-limited step below, or a human click.
+**In Semaphore (this lab):** open the template `26.1 Drift check` → **Schedules** → add a cron expression such as `30 2 * * *` (nightly). It needs no extra permissions: it runs in check mode as `svc-ansible` with a fresh certificate each night. Semaphore marks the run **failed** only on task failures or unreachable hosts, so add a project alert (Chapter 04 §10) and read the recap's `changed=` count for drift. If you want drift itself to page you, keep the metric path: run `tools/drift-cycle.sh` and alert on `spark_config_drift_tasks > 0` (§5). Never schedule `04.3 Baseline` as an "auto-heal" template: healing stays the guarded, tag-limited step below, or a human click.
 
 **Alternative: a systemd timer** on a Linux machine with the repository and a login to the Sparks:
 
@@ -347,7 +347,7 @@ Or use AWX: the Chapter 24 workflow (drift → **approval** → remediate) adds 
 | System | Role |
 |---|---|
 | Prometheus/Grafana (Chapter 12) | `spark_config_drift_tasks`, `spark_config_drift_failures` per host; alert on `> 0 for 2h` |
-| Semaphore (Chapter 04 §9) | Nightly schedule on `26.1 Drift check`; task history is the audit trail of every check |
+| Semaphore (Chapter 04 §10) | Nightly schedule on `26.1 Drift check`; task history is the audit trail of every check |
 | AWX (Chapter 24) | Alternative: schedules plus an approval workflow; job history is the audit trail |
 | Logging (Chapter 27) | Reports and heal logs in `drift/` of the state folder; `ansible.log` records every run (on sema01: the state volume) |
 | Upgrades (Chapter 10) | Driver/kernel drift routes here rather than to self-heal |

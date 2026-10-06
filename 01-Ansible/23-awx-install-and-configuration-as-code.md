@@ -228,7 +228,7 @@ export CONTROLLER_PASSWORD=$(kubectl --context spark-root -n awx get secret awx-
         diff_mode: true
         job_type: "{{ item.type | default('run') }}"
       loop:
-        - { name: baseline,  pb: 02.2-baseline.yml }
+        - { name: baseline,  pb: 04.3-baseline.yml }
         - { name: fabric,    pb: 13.1-fabric.yml }
         - { name: validate,  pb: 30.1-validate.yml }
         - { name: drift,     pb: 26.1-drift-check.yml, type: check }
@@ -266,7 +266,7 @@ sequenceDiagram
   T->>R: submit work unit (kubernetes)
   R->>K: create Pod automation-job-42 (EE image)
   K-->>J: pod Running
-  J->>J: ansible-runner → ansible-playbook 02.2-baseline.yml
+  J->>J: ansible-runner → ansible-playbook 04.3-baseline.yml
   J-->>R: event stream (JSON lines)
   R-->>T: events → callback receiver → Postgres
   T-->>UI: websocket updates
