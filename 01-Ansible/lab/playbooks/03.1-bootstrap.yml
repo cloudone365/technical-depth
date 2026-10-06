@@ -1,24 +1,39 @@
 ---
-# Day-1 bootstrap for a Spark that just finished the first-boot wizard.
-# Password auth is still on, you have no key trust yet, and it's on DHCP.
+# Day-1 bootstrap for a Spark (Chapter 03 §3.2). Safe on a fresh DGX OS and on a
+# Spark that is already set up: every step checks first and changes only what differs.
 #
-#   ansible-playbook playbooks/03.1-bootstrap.yml -l dgx-spark-2 -k -K \
-#     -e bootstrap_current_ip=<current DHCP IP> [-e bootstrap_static_ip=true]
+#   ansible-playbook playbooks/03.1-bootstrap.yml -l dgx-spark-1 -k -K \
+#     -e bootstrap_current_ip=<current IP> [-e bootstrap_static_ip=true]
+#
+# What it does                         Already in place on your Spark?
+#   hostname = inventory name          `hostname` prints dgx-spark-1        → unchanged
+#   127.0.1.1 line in /etc/hosts       `grep dgx-spark-1 /etc/hosts`        → unchanged
+#   your MacBook key for dgxadmin      key login works                      → unchanged
+#   SSH server enabled                 you can SSH in                       → unchanged
+#   static management IP (opt-in)      already static on the inventory IP   → skipped, says so
 #
 # NOTE: don't pass -e ansible_host=… — extra vars outrank set_fact, so Ansible
 # could never switch to the new address and the rollback would always fire.
 #
-# The static-IP step uses a DEAD-MAN SWITCH: a systemd timer restores the old
-# netplan in 180 s unless Ansible reconnects on the new IP and cancels it.
+# Static IP: DGX OS (Ubuntu Desktop based) manages the network with
+# NetworkManager, so the address is set with nmcli as a new profile
+# "mgmt-static". Hosts without NetworkManager get a netplan file instead.
+# Either way a DEAD-MAN SWITCH (systemd timer) restores the previous setup in
+# 180 s unless Ansible reconnects on the new IP and cancels it.
+#   Already static on the inventory IP     → step skipped
+#   DHCP lease that already gives that IP  → skipped (router reservation);
+#                                            -e bootstrap_force_static=true converts it
 - name: Bootstrap a freshly installed DGX Spark
   hosts: spark
   become: true
   gather_facts: false          # we must redirect the connection before the first SSH
   vars:
     bootstrap_static_ip: false
+    bootstrap_force_static: false
     bootstrap_prefix: "{{ mgmt_cidr | default('192.168.0.0/24') | regex_replace('^.*/', '') }}"
     bootstrap_rollback_seconds: 180
     bootstrap_netplan: /etc/netplan/30-mgmt.yaml
+    bootstrap_nm_profile: mgmt-static
   tasks:
     - name: Remember the inventory (target) IP, connect via the current one
       ansible.builtin.set_fact:
@@ -52,8 +67,131 @@
         state: started
 
     # ------------------------------------------------------------ static mgmt IP with rollback
-    - name: Static management IP (dead-man switch)
+    - name: Static management IP (opt-in) — check first
       when: bootstrap_static_ip | bool
+      block:
+        - name: The management interface must exist
+          ansible.builtin.assert:
+            that: mgmt_interface in ansible_interfaces
+            fail_msg: >-
+              {{ mgmt_interface }} (mgmt_interface in group_vars/all.yml) is not on this host.
+              Interfaces found: {{ ansible_interfaces | sort | join(', ') }}
+            quiet: true
+
+        - name: Current IPv4 addresses on the management interface
+          ansible.builtin.command: ip -4 -o addr show dev {{ mgmt_interface }}
+          register: bootstrap_addr
+          changed_when: false
+
+        - name: Which services run here (is NetworkManager active?)
+          ansible.builtin.service_facts:
+
+        - name: Does NetworkManager manage the interface?
+          ansible.builtin.command: nmcli -g GENERAL.STATE device show {{ mgmt_interface }}
+          register: bootstrap_nm_state
+          changed_when: false
+          failed_when: false
+          when: ansible_facts.services['NetworkManager.service'].state | default('') == 'running'
+
+        - name: Decide what to do
+          ansible.builtin.set_fact:
+            bootstrap_has_target: "{{ (' ' ~ bootstrap_target_ip ~ '/') in bootstrap_addr.stdout }}"
+            bootstrap_is_dhcp: "{{ 'dynamic' in (bootstrap_addr.stdout_lines | select('search', ' ' ~ bootstrap_target_ip ~ '/') | join(' ')) }}"
+            bootstrap_use_nm: >-
+              {{ (bootstrap_nm_state.rc | default(1)) == 0 and
+                 bootstrap_nm_state.stdout | default('') | length > 0 and
+                 'unmanaged' not in bootstrap_nm_state.stdout }}
+
+        - name: Report the decision
+          ansible.builtin.debug:
+            msg: >-
+              {{ mgmt_interface }}:
+              {{ 'already static on ' ~ bootstrap_target_ip ~ ' — nothing to change'
+                 if (bootstrap_has_target and not bootstrap_is_dhcp) else
+                 ('DHCP lease that already gives ' ~ bootstrap_target_ip ~ ' (router reservation) — left as is; '
+                  ~ '-e bootstrap_force_static=true converts it to a static address'
+                  if (bootstrap_has_target and not bootstrap_force_static | bool) else
+                 ('setting ' ~ bootstrap_target_ip ~ '/' ~ bootstrap_prefix ~ ' via '
+                  ~ ('NetworkManager (nmcli)' if bootstrap_use_nm else 'netplan')
+                  ~ ', with a ' ~ bootstrap_rollback_seconds ~ ' s dead-man switch')) }}
+
+        - name: Change needed?
+          ansible.builtin.set_fact:
+            bootstrap_change_ip: "{{ not bootstrap_has_target or (bootstrap_is_dhcp and bootstrap_force_static | bool) }}"
+
+    # NetworkManager (DGX OS): a new profile "mgmt-static"; the old profile stays,
+    # with autoconnect off, so you can switch back by hand at any time.
+    - name: Static management IP via NetworkManager (dead-man switch)
+      when:
+        - bootstrap_static_ip | bool
+        - bootstrap_change_ip | default(false) | bool
+        - bootstrap_use_nm | bool
+      block:
+        - name: Which profile is active on the interface now
+          ansible.builtin.command: nmcli -g GENERAL.CONNECTION device show {{ mgmt_interface }}
+          register: bootstrap_nm_old
+          changed_when: false
+
+        - name: Write rollback script (back to the previous profile)
+          ansible.builtin.copy:
+            dest: /root/mgmt-ip-rollback.sh
+            mode: "0700"
+            content: |
+              #!/bin/sh
+              nmcli connection down {{ bootstrap_nm_profile }} 2>/dev/null
+              nmcli connection delete {{ bootstrap_nm_profile }} 2>/dev/null
+              {% if bootstrap_nm_old.stdout and bootstrap_nm_old.stdout != bootstrap_nm_profile %}
+              nmcli connection modify "{{ bootstrap_nm_old.stdout }}" connection.autoconnect yes
+              nmcli connection up "{{ bootstrap_nm_old.stdout }}"
+              {% endif %}
+              logger -t bootstrap "mgmt IP rolled back — Ansible did not confirm the new address"
+
+        - name: Create the static profile (not active yet)
+          ansible.builtin.shell: |
+            nmcli connection delete {{ bootstrap_nm_profile }} >/dev/null 2>&1 || true
+            nmcli connection add type ethernet ifname {{ mgmt_interface }} con-name {{ bootstrap_nm_profile }} \
+              ipv4.method manual ipv4.addresses {{ bootstrap_target_ip }}/{{ bootstrap_prefix }} \
+              ipv4.gateway {{ mgmt_gateway }} ipv4.dns "{{ dns_servers | join(',') }}" \
+              connection.autoconnect yes connection.autoconnect-priority 100
+          changed_when: true
+
+        - name: Arm the dead-man switch
+          ansible.builtin.command: >-
+            systemd-run --unit=mgmt-ip-rollback --on-active={{ bootstrap_rollback_seconds }}
+            /root/mgmt-ip-rollback.sh
+          changed_when: true
+
+        - name: Activate it in the background (our SSH session may drop)
+          ansible.builtin.shell: sleep 2 && nmcli connection up {{ bootstrap_nm_profile }}
+          async: 60
+          poll: 0
+          changed_when: true
+
+        - name: Switch Ansible to the new address
+          ansible.builtin.set_fact:
+            ansible_host: "{{ bootstrap_target_ip }}"
+
+        - name: Reconnect on the new IP
+          ansible.builtin.wait_for_connection:
+            delay: 5
+            timeout: 90
+
+        - name: Disarm the dead-man switch
+          ansible.builtin.systemd_service:
+            name: mgmt-ip-rollback.timer
+            state: stopped
+
+        - name: Keep the old profile, but stop it from taking the port back at boot
+          ansible.builtin.command: nmcli connection modify "{{ bootstrap_nm_old.stdout }}" connection.autoconnect no
+          when: bootstrap_nm_old.stdout not in ['', bootstrap_nm_profile]
+          changed_when: true
+
+    # No NetworkManager (plain Ubuntu Server): a netplan file.
+    - name: Static management IP via netplan (dead-man switch)
+      when:
+        - bootstrap_static_ip | bool
+        - bootstrap_change_ip | default(false) | bool
+        - not (bootstrap_use_nm | bool)
       block:
         - name: Back up current netplan directory
           ansible.builtin.command: cp -a /etc/netplan /root/netplan.pre-bootstrap
@@ -62,14 +200,14 @@
 
         - name: Write rollback script
           ansible.builtin.copy:
-            dest: /root/netplan-rollback.sh
+            dest: /root/mgmt-ip-rollback.sh
             mode: "0700"
             content: |
               #!/bin/sh
               rm -f {{ bootstrap_netplan }}
               cp -a /root/netplan.pre-bootstrap/. /etc/netplan/
               netplan apply
-              logger -t bootstrap "netplan rolled back — Ansible did not confirm new IP"
+              logger -t bootstrap "mgmt IP rolled back — Ansible did not confirm the new address"
 
         - name: Render static netplan for the mgmt NIC
           ansible.builtin.copy:
@@ -88,8 +226,8 @@
 
         - name: Arm the dead-man switch
           ansible.builtin.command: >-
-            systemd-run --unit=netplan-rollback --on-active={{ bootstrap_rollback_seconds }}
-            /root/netplan-rollback.sh
+            systemd-run --unit=mgmt-ip-rollback --on-active={{ bootstrap_rollback_seconds }}
+            /root/mgmt-ip-rollback.sh
           changed_when: true
 
         - name: Apply netplan in the background (our SSH session will drop)
@@ -109,16 +247,30 @@
 
         - name: Disarm the dead-man switch
           ansible.builtin.systemd_service:
-            name: netplan-rollback.timer
+            name: mgmt-ip-rollback.timer
             state: stopped
 
-        - name: Remove DHCP-era netplan files that would fight the static one
+        - name: Other netplan files (review by hand if one still configures the mgmt NIC)
           ansible.builtin.find:
             paths: /etc/netplan
             patterns: ["*.yaml"]
             excludes: ["30-mgmt.yaml", "40-cx7.yaml"]
           register: bootstrap_old_netplan
 
-        - name: Show what else configures the mgmt NIC (remove by hand if it duplicates)
+        - name: Show them
           ansible.builtin.debug:
             msg: "Review: {{ bootstrap_old_netplan.files | map(attribute='path') | list }}"
+
+    - name: Confirm the management address
+      when: bootstrap_static_ip | bool
+      block:
+        - name: Read it back
+          ansible.builtin.command: ip -4 -o addr show dev {{ mgmt_interface }}
+          register: bootstrap_addr_after
+          changed_when: false
+
+        - name: The inventory IP is on the interface
+          ansible.builtin.assert:
+            that: (' ' ~ bootstrap_target_ip ~ '/') in bootstrap_addr_after.stdout
+            fail_msg: "{{ bootstrap_target_ip }} is not on {{ mgmt_interface }}: {{ bootstrap_addr_after.stdout }}"
+            success_msg: "{{ mgmt_interface }} has {{ bootstrap_target_ip }}"

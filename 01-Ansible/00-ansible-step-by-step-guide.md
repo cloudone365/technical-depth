@@ -131,11 +131,13 @@ Give your MacBook key login to `dgxadmin` on the Spark. Two paths, the same end 
   ansible-playbook playbooks/03.1-bootstrap.yml -l dgx-spark-1 -k -K -e bootstrap_current_ip=<dhcp-ip>
   ansible-playbook playbooks/03.1-bootstrap.yml -l dgx-spark-1 -K -e bootstrap_current_ip=<dhcp-ip> -e bootstrap_static_ip=true
   ```
-  The second run moves the Spark to its static address behind a dead-man switch: if the new address doesn't answer, the change rolls back by itself.
-- **Already installed** (named `dgx-spark-1`, on 192.168.0.100, user `dgxadmin`). SSH trust only (Chapter 03 §3.3):
+  The second run moves the Spark to its static address (a NetworkManager profile on DGX OS) behind a dead-man switch: if the new address doesn't answer, the change rolls back by itself. A Spark that is already static on that address is left alone.
+- **Already installed** (named `dgx-spark-1`, on 192.168.0.100, user `dgxadmin`). No bootstrap: SSH trust only, then check name and address (Chapter 03 §3.3):
   ```bash
   ssh-copy-id dgxadmin@192.168.0.100
+  ssh dgxadmin@192.168.0.100 'hostname; grep -c "$(hostname)" /etc/hosts; ip -4 addr show enP7s7 | grep inet'
   ```
+  You want `dgx-spark-1`, a count of 1 or more, and `inet 192.168.0.100/24`. A static address set in NetworkManager (DGX OS doesn't keep it in `/etc/netplan`) and a DHCP reservation on your router (`dynamic` in the output) are both fine. Only the hostname wrong? Run the first bootstrap command with `-e bootstrap_current_ip=192.168.0.100`; it doesn't touch the network. What the bootstrap does and when you can skip it: Chapter 03 §3.
 
 Redfish and PXE (Chapter 03 §4–5) are practice for data-centre nodes; the Redfish mockup runs as the template `03.2 Redfish practice` once the Spark is a Semaphore target (Chapter 04 §8.1).
 
