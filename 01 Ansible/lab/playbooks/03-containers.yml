@@ -1,10 +1,15 @@
 ---
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: Docker + NVIDIA Container Toolkit + CDI + NGC
   hosts: spark
   become: true
   vars:
-    # Pull the NGC key from Vault when it's configured, else from ansible-vault var.
-    container_runtime_ngc_api_key: "{{ ngc_api_key | default('') }}"
-    container_runtime_ngc_login: "{{ (ngc_api_key | default('')) | length > 0 }}"
+    # The NGC key comes from vault01 (kv/spark-lab/ngc, read by play 1 when
+    # vault_lab_secrets_enabled=true), else from an ansible-vault variable ngc_api_key.
+    container_runtime_ngc_api_key: >-
+      {{ ngc_api_key | default(hostvars['localhost'].vault_lab_secrets.ngc.api_key | default(''), true) }}
+    container_runtime_ngc_login: "{{ container_runtime_ngc_api_key not in ['', 'REPLACE_ME'] }}"
   roles:
     - role: container_runtime

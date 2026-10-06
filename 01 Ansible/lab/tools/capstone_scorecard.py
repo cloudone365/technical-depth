@@ -12,7 +12,7 @@ import json
 import os
 import re
 
-CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".cache")
+CACHE = os.environ.get("SPARK_LAB_CACHE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".cache")
 
 
 def p(*parts):
@@ -114,12 +114,11 @@ def _():
     return ok, ", ".join(os.path.basename(x) for x in k) or "none"
 
 
-@check("03B/19", "Vault CA present; init material NOT world-readable")
+@check("03B/19", "vault01 CA copied; no Vault token or AppRole secret left in the cache")
 def _():
-    ca = os.path.exists(p("spark-lab-ca.crt"))
-    init = p("vault-init.json")
-    safe = (not os.path.exists(init)) or (os.stat(init).st_mode & 0o077) == 0
-    return ca and safe, f"ca={ca} init_safe={safe}"
+    ca = os.path.exists(p("vault-ca.crt"))
+    leaks = [os.path.basename(x) for x in glob.glob(p("*")) if re.search(r"(vault-init|approle|token)", os.path.basename(x))]
+    return ca and not leaks, f"ca={ca} leaks={leaks or 'none'}"
 
 
 def main():

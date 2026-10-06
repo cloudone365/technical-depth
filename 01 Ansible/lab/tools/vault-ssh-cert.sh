@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Get a short-lived SSH user certificate from Vault's SSH CA for the lab user.
-# OpenSSH (and therefore Ansible) automatically presents <key>-cert.pub next to <key>.
-#   tools/vault-ssh-cert.sh [~/.ssh/id_ed25519] [nvidia]
+# Manual test of vault01's SSH CA (00a guide §6, 00b guide §3.3): sign a public
+# key for the automation account and show the certificate. Run it ON vault01
+# (logged in with `vault login`); Semaphore does the same thing in play 1.
+#   tools/vault-ssh-cert.sh [~/semaphore_lab] [svc-ansible]
+#   ssh -i ~/semaphore_lab -o CertificateFile=~/semaphore_lab-cert.pub svc-ansible@192.168.0.100 'sudo -n whoami'
 set -euo pipefail
-KEY=${1:-$HOME/.ssh/id_ed25519}
-PRINCIPAL=${2:-nvidia}
-: "${VAULT_ADDR:?set VAULT_ADDR}"
+KEY=${1:-$HOME/semaphore_lab}
+PRINCIPAL=${2:-svc-ansible}
+: "${VAULT_ADDR:=https://192.168.0.211:8200}"
+export VAULT_ADDR
+[[ -f "$KEY" ]] || ssh-keygen -t ed25519 -N "" -f "$KEY" >/dev/null
 vault write -field=signed_key ssh-client-signer/sign/ansible \
   public_key=@"${KEY}.pub" valid_principals="$PRINCIPAL" > "${KEY}-cert.pub"
 chmod 0644 "${KEY}-cert.pub"

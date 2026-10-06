@@ -9,6 +9,9 @@
 #   ansible-playbook playbooks/99-reset-kubernetes.yml -e reset_wipe_data=true    # also delete PV data in /data/k8s
 #
 # Then rebuild: playbooks/05-kubernetes.yml → 06-gpu-operator.yml → 06b-vclusters.yml
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: Reset Kubernetes
   hosts: spark
   become: true
@@ -104,7 +107,7 @@
       ansible.builtin.file:
         path: "{{ item }}"
         state: absent
-      loop: "{{ query('ansible.builtin.fileglob', playbook_dir ~ '/../.cache/kubeconfig-*.yaml') }}"
+      loop: "{{ query('ansible.builtin.fileglob', lab_cache_dir ~ '/kubeconfig-*.yaml') }}"
       delegate_to: localhost
       become: false
       run_once: true

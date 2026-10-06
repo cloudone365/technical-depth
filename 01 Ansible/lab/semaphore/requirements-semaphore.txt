@@ -1,0 +1,6 @@
+# Python libraries the lab playbooks need on the controller (the Semaphore
+# container). A runtime subset of ../requirements.txt — no lint/test tools.
+jmespath>=1.0.1          # json_query filter
+netaddr>=1.3.0           # ipaddr filters
+hvac>=2.1.0              # community.hashi_vault
+kubernetes>=30.1.0       # kubernetes.core (k8s, helm, k8s_drain)

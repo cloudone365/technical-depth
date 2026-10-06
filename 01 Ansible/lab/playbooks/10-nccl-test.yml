@@ -2,6 +2,9 @@
 # Builds NCCL + nccl-tests for Blackwell (sm_121) on every Spark, then runs
 # all_gather_perf across the CX-7 link from the first node. Mirrors NVIDIA's
 # "NCCL for Multiple Sparks" playbook, but idempotent and inventory-driven.
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: Build NCCL and nccl-tests
   hosts: spark
   become: true

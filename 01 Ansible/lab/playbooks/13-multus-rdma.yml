@@ -10,7 +10,7 @@
   connection: local
   gather_facts: false
   vars:
-    kubeconfig: "{{ playbook_dir }}/../.cache/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
+    kubeconfig: "{{ lab_cache_dir }}/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
     kube_context: spark-root
     multus_version: v4.3.0                   # check https://github.com/k8snetworkplumbingwg/multus-cni/releases
     multus_rdma_resource: rdma_shared_cx7
@@ -33,12 +33,12 @@
     - name: Download the Multus thick-plugin manifest
       ansible.builtin.get_url:
         url: "https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/{{ multus_version }}/deployments/multus-daemonset-thick.yml"
-        dest: "{{ playbook_dir }}/../.cache/multus-{{ multus_version }}.yml"
+        dest: "{{ lab_cache_dir }}/multus-{{ multus_version }}.yml"
         mode: "0644"
 
     - name: Multus DaemonSet (standard kubeadm paths /etc/cni/net.d and /opt/cni/bin)
       kubernetes.core.k8s:
-        src: "{{ playbook_dir }}/../.cache/multus-{{ multus_version }}.yml"
+        src: "{{ lab_cache_dir }}/multus-{{ multus_version }}.yml"
         state: present
 
     - name: Wait for Multus DaemonSet

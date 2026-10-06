@@ -6,6 +6,9 @@
 #
 #   ansible-playbook playbooks/17-dgxos-upgrade.yml -l dgx-spark-02 -K
 #   ansible-playbook playbooks/17-dgxos-upgrade.yml -K -e upgrade_dry_run=true   # show what would change
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: Rolling DGX OS upgrade
   hosts: spark
   become: true

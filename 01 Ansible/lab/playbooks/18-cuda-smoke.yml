@@ -2,6 +2,9 @@
 # CUDA end-to-end on the host AND in a container:
 #   1. nvcc compiles for sm_121 and the binary runs (host toolkit OK)
 #   2. an NGC PyTorch container sees the GPU and runs a bf16 matmul (runtime + toolkit + CDI OK)
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: CUDA toolchain and container smoke tests
   hosts: spark
   become: true

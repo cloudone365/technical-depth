@@ -1,6 +1,9 @@
 ---
 # ansible-playbook playbooks/21-emergency-drain.yml -l dgx-spark-02 \
 #   -e node_drain_reboot=true -e node_drain_undrain_after=true -e node_drain_bug_report=true
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: Emergency drain / remediation
   hosts: spark
   become: true

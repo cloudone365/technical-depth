@@ -1,47 +1,17 @@
 ---
-- name: Vault server (install, TLS, init, unseal)
-  hosts: vault
-  become: true
-  roles:
-    - role: vault_server
-
-- name: Vault configuration (engines, auth, policies, SSH CA)
+# Lab secrets in vault01 (00b guide §6). vault01 itself — install, TLS, unseal,
+# SSH CA, AppRole 'semaphore', audit — is built by hand with the 00a guide and
+# stays outside the Spark lab. This playbook only adds the KV engine, a
+# read-only policy, and attaches it to the 'semaphore' AppRole.
+#
+# Needs an admin token, so run it from your MacBook (not from Semaphore):
+#   export VAULT_TOKEN=<admin token>          # on vault01: vault login, then copy the token
+#   ansible-playbook playbooks/08-vault.yml
+#   vault kv put kv/spark-lab/ngc api_key=<your NGC key>
+# Then set vault_lab_secrets_enabled=true in Semaphore's vault-approle variable group.
+- name: Lab secrets on vault01 (KV engine, policy, AppRole attachment)
   hosts: localhost
   connection: local
   gather_facts: false
   roles:
     - role: vault_config
-
-- name: Trust Vault's SSH CA on every Spark (short-lived SSH certs, Volume 19)
-  hosts: spark
-  become: true
-  tasks:
-    - name: Fetch SSH CA public key
-      ansible.builtin.uri:
-        url: "https://{{ hostvars[groups['vault'][0]].ansible_host }}:8200/v1/ssh-client-signer/public_key"
-        ca_path: "{{ playbook_dir }}/../.cache/spark-lab-ca.crt"
-        return_content: true
-      register: vault_ssh_ca
-      delegate_to: localhost
-      become: false
-      run_once: true
-
-    - name: Install trusted user CA
-      ansible.builtin.copy:
-        content: "{{ vault_ssh_ca.content }}"
-        dest: /etc/ssh/trusted-user-ca-keys.pem
-        mode: "0644"
-      notify: Reload sshd
-
-    - name: Configure sshd to trust it
-      ansible.builtin.copy:
-        dest: /etc/ssh/sshd_config.d/50-vault-ca.conf
-        content: "TrustedUserCAKeys /etc/ssh/trusted-user-ca-keys.pem\n"
-        mode: "0644"
-        validate: /usr/sbin/sshd -t -f %s
-      notify: Reload sshd
-  handlers:
-    - name: Reload sshd
-      ansible.builtin.service:
-        name: ssh
-        state: reloaded

@@ -6,6 +6,9 @@
 #
 #   ansible-playbook playbooks/25-chaos.yml -l dgx-spark-02 -K -e chaos_fault=random
 #   ansible-playbook playbooks/25-chaos.yml -l dgx-spark-02 -K -e chaos_fault=3
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: Chaos injection
   hosts: spark
   become: true
@@ -26,7 +29,7 @@
 
     - name: Record what was injected (sealed — read it only after you've solved it)
       ansible.builtin.copy:
-        dest: "{{ playbook_dir }}/../.cache/chaos-{{ inventory_hostname }}.sealed"
+        dest: "{{ lab_cache_dir }}/chaos-{{ inventory_hostname }}.sealed"
         content: "{{ chaos_id | string | b64encode }}\n"
         mode: "0600"
       delegate_to: localhost
@@ -88,4 +91,4 @@
 
     - name: Done
       ansible.builtin.debug:
-        msg: "A fault has been injected on {{ inventory_hostname }}. Find it. Reveal: base64 -d .cache/chaos-{{ inventory_hostname }}.sealed"
+        msg: "A fault has been injected on {{ inventory_hostname }}. Find it. Reveal: base64 -d {{ lab_cache_dir }}/chaos-{{ inventory_hostname }}.sealed"

@@ -4,4 +4,4 @@ spark_validate_fabric: "{{ cx7_interfaces | default([]) | length > 0 }}"
 spark_validate_k8s: "{{ inventory_hostname in (groups['k8s_control_plane'] | default([])) + (groups['k8s_workers'] | default([])) }}"
 spark_validate_slurm: "{{ inventory_hostname in groups['slurm_compute'] | default([]) }}"
 spark_validate_image: nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04
-spark_validate_report_dir: "{{ playbook_dir }}/../.cache/validation"
+spark_validate_report_dir: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') }}/validation"

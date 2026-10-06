@@ -1,4 +1,7 @@
 ---
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: Shared model cache over NFS/RDMA
   hosts: nfs_server:nfs_client
   become: true

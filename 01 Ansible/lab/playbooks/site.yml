@@ -1,5 +1,8 @@
 ---
-# Full build. Each stage can also run on its own.
+# Full build, as one Semaphore task (template "site"). Each stage can also run
+# on its own. Not included, on purpose:
+#   00-bootstrap.yml, 00b-semaphore-target.yml — run once from the MacBook, before Semaphore can log in
+#   08-vault.yml — needs an admin token for vault01; run from the MacBook (00b guide §6)
 - name: Baseline
   ansible.builtin.import_playbook: 01-baseline.yml
 - name: Fabric
@@ -8,8 +11,6 @@
   ansible.builtin.import_playbook: 03-containers.yml
 - name: Telemetry
   ansible.builtin.import_playbook: 04-telemetry.yml
-- name: Vault
-  ansible.builtin.import_playbook: 08-vault.yml
 - name: Kubernetes (kubeadm root cluster + Cilium + MetalLB)
   ansible.builtin.import_playbook: 05-kubernetes.yml
 - name: GPU Operator

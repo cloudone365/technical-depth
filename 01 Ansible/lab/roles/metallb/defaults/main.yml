@@ -4,7 +4,7 @@
 # the node answers ARP for the Service IP — no router configuration needed.
 metallb_chart_version: "0.16.0"              # pin; check `helm search repo metallb/metallb -l`
 metallb_namespace: metallb-system
-metallb_kubeconfig: "{{ playbook_dir }}/../.cache/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
+metallb_kubeconfig: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') }}/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
 metallb_context: spark-root
 
 # Reserve this range in your router's DHCP settings so nothing else takes it.

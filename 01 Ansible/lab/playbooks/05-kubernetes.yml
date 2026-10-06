@@ -8,6 +8,9 @@
 #
 # Start over at any time with playbooks/99-reset-kubernetes.yml — on a lab box
 # a clean rebuild is a normal part of learning, not a failure.
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: Kubeadm (control plane first, then workers)
   hosts: k8s_control_plane:k8s_workers
   become: true

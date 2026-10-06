@@ -1,0 +1,91 @@
+---
+# Play 1 of every Semaphore task (00a guide §8.3, 00b guide §5): log in to
+# vault01 with the Semaphore AppRole and get a 15-minute SSH certificate for
+# svc-ansible. The playbooks that SSH to the Sparks import this file first.
+#
+# It only does something when the Semaphore variable group is attached
+# (vault_role_id + vault_secret_id). Run from your MacBook it is skipped, and
+# the Sparks are reached with your own key as the admin user (break-glass).
+#
+# Optional: with vault_lab_secrets_enabled=true it also reads the lab secrets
+# from kv/spark-lab/* (08-vault.yml) into hostvars['localhost'].vault_lab_secrets.
+- name: Get an SSH certificate from Vault
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  check_mode: false                       # must really run, even for a --check dry run
+  tasks:
+    - name: Semaphore run (vault01 AppRole attached)
+      when: vault_role_id is defined
+      block:
+        - name: Create the key directory
+          ansible.builtin.file:
+            path: "{{ vault_ssh_key_dir }}"
+            state: directory
+            mode: "0700"
+
+        - name: Generate the SSH key pair once
+          ansible.builtin.command: ssh-keygen -t ed25519 -N "" -f {{ vault_ssh_key_dir }}/id_ed25519
+          args:
+            creates: "{{ vault_ssh_key_dir }}/id_ed25519"
+
+        - name: Read the public key
+          ansible.builtin.slurp:
+            src: "{{ vault_ssh_key_dir }}/id_ed25519.pub"
+          register: vault_cert_pubkey
+
+        - name: Log in to Vault with AppRole
+          ansible.builtin.uri:
+            url: "{{ vault_addr }}/v1/auth/approle/login"
+            method: POST
+            body_format: json
+            body:
+              role_id: "{{ vault_role_id }}"
+              secret_id: "{{ vault_secret_id }}"
+            ca_path: "{{ vault_cacert }}"
+          register: vault_cert_login
+          no_log: true
+
+        - name: Ask Vault to sign the public key
+          ansible.builtin.uri:
+            url: "{{ vault_addr }}/v1/{{ vault_ssh_mount }}/sign/{{ vault_ssh_role }}"
+            method: POST
+            headers:
+              X-Vault-Token: "{{ vault_cert_login.json.auth.client_token }}"
+            body_format: json
+            body:
+              public_key: "{{ vault_cert_pubkey.content | b64decode }}"
+              valid_principals: "{{ vault_ssh_principal }}"
+              ttl: "{{ vault_ssh_cert_ttl }}"
+            ca_path: "{{ vault_cacert }}"
+          register: vault_cert_signed
+          no_log: true
+
+        - name: Save the certificate next to the key (ssh uses <key>-cert.pub automatically)
+          ansible.builtin.copy:
+            content: "{{ vault_cert_signed.json.data.signed_key }}"
+            dest: "{{ vault_ssh_key_dir }}/id_ed25519-cert.pub"
+            mode: "0644"
+          no_log: true
+
+        - name: Read the lab secrets (kv/spark-lab/*), when enabled
+          ansible.builtin.uri:
+            url: "{{ vault_addr }}/v1/{{ vault_kv_mount }}/data/{{ vault_kv_prefix }}/{{ item }}"
+            headers:
+              X-Vault-Token: "{{ vault_cert_login.json.auth.client_token }}"
+            ca_path: "{{ vault_cacert }}"
+            status_code: [200, 404]
+          loop: [ngc]
+          register: vault_cert_kv
+          no_log: true
+          when: vault_lab_secrets_enabled | bool
+
+        - name: Keep the secrets as a fact for the plays that follow (never logged)
+          ansible.builtin.set_fact:
+            vault_lab_secrets: >-
+              {{ dict(vault_cert_kv.results | selectattr('status', 'equalto', 200)
+                      | map(attribute='item')
+                      | zip(vault_cert_kv.results | selectattr('status', 'equalto', 200)
+                            | map(attribute='json') | map(attribute='data') | map(attribute='data'))) }}
+          no_log: true
+          when: vault_lab_secrets_enabled | bool

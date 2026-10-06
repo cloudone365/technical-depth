@@ -5,6 +5,20 @@
 # ------------------------------------------------------------------------
 ansible_become: true
 
+# ------------------------------------------------------------------------
+# How the controller logs in (00b guide §1).
+#   From Semaphore (sema01): the variable group defines vault_role_id, play 1
+#     (00-vault-cert.yml) gets a 15-minute certificate from vault01, and every
+#     task runs as svc-ansible with NOPASSWD sudo.
+#   From your MacBook (bootstrap and break-glass only): no vault_role_id, so the
+#     login is your own key as the admin user (add -K for the sudo password).
+# ------------------------------------------------------------------------
+ansible_user: "{{ vault_ssh_principal if vault_role_id is defined else spark_admin_user }}"
+ansible_ssh_private_key_file: "{{ vault_ssh_key_dir ~ '/id_ed25519' if vault_role_id is defined else '' }}"
+# The Semaphore container starts with an empty known_hosts: accept a host key the
+# first time, refuse a CHANGED key afterwards.
+ansible_ssh_common_args: "{{ '-o StrictHostKeyChecking=accept-new' if vault_role_id is defined else '' }}"
+
 spark_expected:
   arch: aarch64
   cpu_cores: 20                  # 10x Cortex-X925 + 10x Cortex-A725

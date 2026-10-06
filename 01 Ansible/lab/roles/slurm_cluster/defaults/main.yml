@@ -15,4 +15,4 @@ slurm_cluster_gpu_devices: [/dev/nvidia0]
 slurm_cluster_partition: gpu
 slurm_cluster_default_time: "04:00:00"
 slurm_cluster_max_time: "2-00:00:00"
-slurm_cluster_munge_key_local: "{{ playbook_dir }}/../.cache/munge.key"
+slurm_cluster_munge_key_local: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') }}/munge.key"

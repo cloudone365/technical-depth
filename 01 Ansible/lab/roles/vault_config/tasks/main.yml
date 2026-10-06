@@ -1,13 +1,52 @@
 ---
-# Runs on localhost; talks to Vault's HTTP API with ansible.builtin.uri so every
-# call is visible and idempotent (GET → compare → POST only when different).
-- name: Vault API defaults
+# Runs on localhost against vault01's HTTP API (ansible.builtin.uri), so every
+# call is visible and idempotent: read → compare → write only when different.
+- name: An admin token is required for this run
+  ansible.builtin.assert:
+    that: vault_config_token | length > 0
+    fail_msg: "export VAULT_TOKEN=<admin token from vault01> and run again (00b guide §6)"
+    quiet: true
+
+- name: Vault API headers
   ansible.builtin.set_fact:
     vault_config_headers:
       X-Vault-Token: "{{ vault_config_token }}"
   no_log: true
 
-# ------------------------------------------------------------ secret engines
+# ------------------------------------------------ what the 00a guide built: check, don't touch
+- name: Read the SSH signing role
+  ansible.builtin.uri:
+    url: "{{ vault_config_addr }}/v1/{{ vault_config_ssh_mount }}/roles/{{ vault_config_ssh_role }}"
+    headers: "{{ vault_config_headers }}"
+    ca_path: "{{ vault_config_cacert }}"
+    status_code: [200, 404]
+  register: vault_config_sshrole
+
+- name: The signing role must exist and allow the automation account
+  ansible.builtin.assert:
+    that:
+      - vault_config_sshrole.status == 200
+      - vault_config_ssh_principal in (vault_config_sshrole.json.data.allowed_users | split(','))
+    fail_msg: >-
+      {{ vault_config_ssh_mount }}/roles/{{ vault_config_ssh_role }} is missing or does not allow
+      {{ vault_config_ssh_principal }} — build it with the 00a guide §4 first.
+    quiet: true
+
+- name: Read the Semaphore AppRole
+  ansible.builtin.uri:
+    url: "{{ vault_config_addr }}/v1/auth/approle/role/{{ vault_config_approle }}"
+    headers: "{{ vault_config_headers }}"
+    ca_path: "{{ vault_config_cacert }}"
+    status_code: [200, 404]
+  register: vault_config_role
+
+- name: The AppRole must exist
+  ansible.builtin.assert:
+    that: vault_config_role.status == 200
+    fail_msg: "auth/approle/role/{{ vault_config_approle }} not found — 00a guide §4"
+    quiet: true
+
+# ------------------------------------------------ what the Spark lab adds
 - name: List mounted secret engines
   ansible.builtin.uri:
     url: "{{ vault_config_addr }}/v1/sys/mounts"
@@ -15,149 +54,63 @@
     ca_path: "{{ vault_config_cacert }}"
   register: vault_config_mounts
 
-- name: Enable secret engines
+- name: Mount KV v2 for lab secrets
   ansible.builtin.uri:
-    url: "{{ vault_config_addr }}/v1/sys/mounts/{{ item.path }}"
+    url: "{{ vault_config_addr }}/v1/sys/mounts/{{ vault_config_kv_mount }}"
     method: POST
     headers: "{{ vault_config_headers }}"
     ca_path: "{{ vault_config_cacert }}"
     body_format: json
-    body: { type: "{{ item.type }}", options: "{{ item.options | default({}) }}" }
+    body: { type: kv, options: { version: "2" } }
     status_code: [200, 204]
-  loop: "{{ vault_config_secret_engines }}"
-  when: (item.path ~ '/') not in vault_config_mounts.json.data
+  when: (vault_config_kv_mount ~ '/') not in vault_config_mounts.json.data
   changed_when: true
 
-# ------------------------------------------------------------ auth methods
-- name: List auth methods
+- name: Read the lab policy
   ansible.builtin.uri:
-    url: "{{ vault_config_addr }}/v1/sys/auth"
-    headers: "{{ vault_config_headers }}"
-    ca_path: "{{ vault_config_cacert }}"
-  register: vault_config_auths
-
-- name: Enable auth methods
-  ansible.builtin.uri:
-    url: "{{ vault_config_addr }}/v1/sys/auth/{{ item.path }}"
-    method: POST
-    headers: "{{ vault_config_headers }}"
-    ca_path: "{{ vault_config_cacert }}"
-    body_format: json
-    body: { type: "{{ item.type }}" }
-    status_code: [200, 204]
-  loop: "{{ vault_config_auth_methods }}"
-  when: (item.path ~ '/') not in vault_config_auths.json.data
-  changed_when: true
-
-# ------------------------------------------------------------ audit (who read which secret)
-- name: List audit devices
-  ansible.builtin.uri:
-    url: "{{ vault_config_addr }}/v1/sys/audit"
-    headers: "{{ vault_config_headers }}"
-    ca_path: "{{ vault_config_cacert }}"
-  register: vault_config_audit
-
-- name: Enable file audit device
-  ansible.builtin.uri:
-    url: "{{ vault_config_addr }}/v1/sys/audit/file"
-    method: PUT
-    headers: "{{ vault_config_headers }}"
-    ca_path: "{{ vault_config_cacert }}"
-    body_format: json
-    body: { type: file, options: { file_path: /var/log/vault/audit.log } }
-    status_code: [200, 204]
-  when: "'file/' not in vault_config_audit.json.data | default(vault_config_audit.json)"
-  changed_when: true
-
-# ------------------------------------------------------------ policies
-- name: Read current policies
-  ansible.builtin.uri:
-    url: "{{ vault_config_addr }}/v1/sys/policies/acl/{{ item.key }}"
+    url: "{{ vault_config_addr }}/v1/sys/policies/acl/{{ vault_config_policy_name }}"
     headers: "{{ vault_config_headers }}"
     ca_path: "{{ vault_config_cacert }}"
     status_code: [200, 404]
-  loop: "{{ vault_config_policies | dict2items }}"
-  loop_control:
-    label: "{{ item.key }}"
-  register: vault_config_pol_current
+  register: vault_config_pol
 
-- name: Write policies that differ
+- name: Write the lab policy when it differs
   ansible.builtin.uri:
-    url: "{{ vault_config_addr }}/v1/sys/policies/acl/{{ item.item.key }}"
+    url: "{{ vault_config_addr }}/v1/sys/policies/acl/{{ vault_config_policy_name }}"
     method: PUT
     headers: "{{ vault_config_headers }}"
     ca_path: "{{ vault_config_cacert }}"
     body_format: json
-    body: { policy: "{{ item.item.value }}" }
+    body: { policy: "{{ vault_config_policy }}" }
     status_code: [200, 204]
-  loop: "{{ vault_config_pol_current.results }}"
-  loop_control:
-    label: "{{ item.item.key }}"
-  when: item.status == 404 or (item.json.data.policy | trim) != (item.item.value | trim)
+  when: vault_config_pol.status == 404 or (vault_config_pol.json.data.policy | trim) != (vault_config_policy | trim)
   changed_when: true
 
-# ------------------------------------------------------------ AppRoles
-- name: Configure AppRoles (write is idempotent server-side; compare to report change)
+- name: Attach the lab policy to the Semaphore AppRole (keeps its existing policies)
   ansible.builtin.uri:
-    url: "{{ vault_config_addr }}/v1/auth/approle/role/{{ item.name }}"
-    method: POST
-    headers: "{{ vault_config_headers }}"
-    ca_path: "{{ vault_config_cacert }}"
-    body_format: json
-    body: "{{ item | dict2items | rejectattr('key', 'equalto', 'name') | items2dict }}"
-    status_code: [200, 204]
-  loop: "{{ vault_config_approles }}"
-  loop_control:
-    label: "{{ item.name }}"
-  changed_when: false
-
-# ------------------------------------------------------------ SSH CA
-- name: Check SSH CA
-  ansible.builtin.uri:
-    url: "{{ vault_config_addr }}/v1/ssh-client-signer/config/ca"
-    headers: "{{ vault_config_headers }}"
-    ca_path: "{{ vault_config_cacert }}"
-    status_code: [200, 400, 404]
-  register: vault_config_sshca
-
-- name: Generate SSH CA key pair inside Vault
-  ansible.builtin.uri:
-    url: "{{ vault_config_addr }}/v1/ssh-client-signer/config/ca"
-    method: POST
-    headers: "{{ vault_config_headers }}"
-    ca_path: "{{ vault_config_cacert }}"
-    body_format: json
-    body: { generate_signing_key: true, key_type: ed25519 }
-    status_code: [200, 204]
-  when: vault_config_sshca.status != 200
-  changed_when: true
-
-- name: SSH signing role
-  ansible.builtin.uri:
-    url: "{{ vault_config_addr }}/v1/ssh-client-signer/roles/{{ vault_config_ssh_role.name }}"
+    url: "{{ vault_config_addr }}/v1/auth/approle/role/{{ vault_config_approle }}"
     method: POST
     headers: "{{ vault_config_headers }}"
     ca_path: "{{ vault_config_cacert }}"
     body_format: json
     body:
-      key_type: ca
-      algorithm_signer: default
-      allow_user_certificates: true
-      allowed_users: "{{ vault_config_ssh_role.allowed_users }}"
-      default_user: "{{ vault_config_ssh_role.default_user }}"
-      default_extensions: { permit-pty: "" }
-      ttl: "{{ vault_config_ssh_role.ttl }}"
+      token_policies: "{{ vault_config_role.json.data.token_policies + [vault_config_policy_name] }}"
     status_code: [200, 204]
-  changed_when: false
+  when: vault_config_policy_name not in vault_config_role.json.data.token_policies
+  changed_when: true
 
-- name: Seed an example secret (NGC key placeholder)
+- name: Seed placeholder secrets (only if absent)
   ansible.builtin.uri:
-    url: "{{ vault_config_addr }}/v1/kv/data/spark-lab/ngc"
+    url: "{{ vault_config_addr }}/v1/{{ vault_config_kv_mount }}/data/{{ vault_config_kv_prefix }}/{{ item.key }}"
     method: POST
     headers: "{{ vault_config_headers }}"
     ca_path: "{{ vault_config_cacert }}"
     body_format: json
-    body: { data: { api_key: "REPLACE_ME" }, options: { cas: 0 } }   # cas=0: only if absent
+    body: { data: "{{ item.value }}", options: { cas: 0 } }   # cas=0: write only when the secret does not exist
     status_code: [200, 204, 400]
+  loop: "{{ vault_config_seed_secrets | dict2items }}"
+  loop_control:
+    label: "{{ vault_config_kv_prefix }}/{{ item.key }}"
   register: vault_config_seed
   changed_when: vault_config_seed.status == 200
+  no_log: true

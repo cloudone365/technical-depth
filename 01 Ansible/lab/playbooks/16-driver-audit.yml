@@ -2,6 +2,9 @@
 # Is the NVIDIA stack on each Spark internally consistent?
 #   kernel module (loaded) == kernel module (on disk) == userland libs == what nvidia-smi reports
 # A mismatch is THE classic post-upgrade failure: "Failed to initialize NVML: Driver/library version mismatch".
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: NVIDIA driver stack audit
   hosts: spark
   become: true

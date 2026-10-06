@@ -2,6 +2,9 @@
 # RDMA verbs bandwidth/latency between two Sparks over CX-7 (RoCEv2).
 # Server side runs on the 2nd Spark (async), client on the 1st.
 #   ansible-playbook playbooks/11-rdma-perftest.yml -K [-e perftest_port_idx=1] [-e perftest_qps=4]
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: RDMA perftest (ib_write_bw / ib_write_lat)
   hosts: spark
   become: true

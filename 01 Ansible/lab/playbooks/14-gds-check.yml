@@ -3,6 +3,9 @@
 # On GB10 the "GPU memory" IS system memory (coherent UMA), so the question is
 # not "can NVMe DMA into the GPU BAR" but "what path does cuFile take, and is it
 # faster than plain POSIX reads for your loader?" This play answers that with data.
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: GDS / cuFile assessment
   hosts: spark
   become: true

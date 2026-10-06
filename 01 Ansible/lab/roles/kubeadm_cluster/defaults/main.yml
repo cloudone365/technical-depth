@@ -56,5 +56,5 @@ kubeadm_cluster_etcd_snapshot_dir: /var/lib/etcd-snapshots
 kubeadm_cluster_etcd_snapshot_calendar: "*-*-* 00/6:00:00"
 kubeadm_cluster_etcd_snapshot_keep: 20
 
-kubeadm_cluster_kubeconfig_local: "{{ playbook_dir }}/../.cache/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
+kubeadm_cluster_kubeconfig_local: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') }}/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
 kubeadm_cluster_context: spark-root

@@ -4,6 +4,9 @@
 #   * Loki on the monitoring host + Grafana Alloy on every Spark shipping the journal
 #   * Loki datasource in the Volume 09 Grafana
 #   * ARA API server recording every ansible-playbook run
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: Auditd on every Spark
   hosts: spark
   become: true

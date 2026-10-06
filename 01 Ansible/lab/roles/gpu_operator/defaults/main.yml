@@ -1,7 +1,7 @@
 ---
 gpu_operator_chart_version: v26.7.1        # pin; check `helm search repo nvidia/gpu-operator -l`
 gpu_operator_namespace: gpu-operator
-gpu_operator_kubeconfig: "{{ playbook_dir }}/../.cache/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
+gpu_operator_kubeconfig: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') }}/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
 gpu_operator_context: spark-root
 
 # DGX OS already provides the driver and container toolkit — the operator must

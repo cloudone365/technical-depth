@@ -8,6 +8,9 @@
 #   ECN        : marked by the switch, reacted to by the NIC (DCQCN)
 #
 #   ansible-playbook playbooks/12b-roce-qos.yml -K [-e roce_qos_pfc=false]   # ECN-only ("lossy RoCE")
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: RoCEv2 QoS on CX-7 ports
   hosts: spark
   become: true

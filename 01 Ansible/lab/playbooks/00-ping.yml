@@ -1,5 +1,8 @@
 ---
 # Day-0 connectivity: SSH works, sudo works, Python works, it IS a Spark.
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: Connectivity and identity check
   hosts: spark
   gather_facts: true

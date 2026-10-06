@@ -2,7 +2,7 @@
 # Cilium as the CNI of the root cluster (Volume 16; packet path in 02 Kubernetes Volume 06).
 cilium_chart_version: "1.20.2"               # pin; check `helm search repo cilium/cilium -l`
 cilium_namespace: kube-system
-cilium_kubeconfig: "{{ playbook_dir }}/../.cache/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
+cilium_kubeconfig: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') }}/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
 cilium_context: spark-root
 cilium_api_host: "{{ hostvars[groups['k8s_control_plane'][0]].ansible_host }}"
 
