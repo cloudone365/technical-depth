@@ -72,7 +72,7 @@ Then, on your MacBook (the repository and Ansible come from [Chapter 02](02-cont
 
 ```bash
 cd ~/technical-depth/"01-Ansible/lab"                       # the lab folder; every relative path below starts here
-mkdir -p .cache && chmod 700 .cache                          # local state folder (git-ignored)
+(umask 077 && mkdir -p .cache)                              # local state folder, private to you (git-ignored); no chmod, which some Mac antivirus tools block
 scp vault01:~/vault-ca.crt .cache/vault-ca.crt               # vault01 TLS certificate (the copy you made in Chapter 01 §3.3)
 curl --cacert .cache/vault-ca.crt https://192.168.0.211:8200/v1/sys/health   # JSON = the MacBook trusts vault01's TLS
 ssh -t dgxadmin@192.168.0.100 'hostname; sudo -v && echo sudo-ok'   # admin login + sudo (-t: a terminal, so sudo can ask for the password)
