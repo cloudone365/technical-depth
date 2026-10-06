@@ -1,6 +1,6 @@
-# Step 03 · Provisioning Without a BMC: Day-0/Day-1 on DGX Spark, Safe Network Cut-over, and Practising Redfish & PXE
+# Step 03 · Bare-Metal Provisioning & Bootstrap: Day-0/Day-1 Without a BMC, Safe Network Cut-over, Redfish & PXE Practice
 
-> **01-Ansible · Part I — Management plane & Ansible foundations · Step 03 of 30** · ← [Step 02 · Control node & Ansible core](02-control-node-and-ansible-core.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 04 · dgx-spark-1 as Semaphore target](04-dgx-spark-as-semaphore-target.md) →
+> **01-Ansible · Part I — Management plane & Ansible foundations · Step 03 of 30** · ← [Step 02 · Control node & Ansible core](02-control-node-and-ansible-core.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 04 · DGX Spark as a Semaphore target](04-dgx-spark-as-semaphore-target.md) →
 
 | | |
 |---|---|

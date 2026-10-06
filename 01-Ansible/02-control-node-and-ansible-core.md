@@ -1,6 +1,6 @@
-# Step 02 · Ansible Core on DGX Spark: Controllers, Inventory & First Contact
+# Step 02 · Control Node & Ansible Core: Toolchain, SSH Trust, Inventory & First Contact
 
-> **01-Ansible · Part I — Management plane & Ansible foundations · Step 02 of 30** · ← [Step 01 · Management plane](01-management-plane-semaphore-and-vault.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 03 · Bare-metal provisioning & bootstrap](03-bare-metal-provisioning-and-bootstrap.md) →
+> **01-Ansible · Part I — Management plane & Ansible foundations · Step 02 of 30** · ← [Step 01 · Management plane: Semaphore & Vault](01-management-plane-semaphore-and-vault.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 03 · Bare-metal provisioning & bootstrap](03-bare-metal-provisioning-and-bootstrap.md) →
 >
 > Lab code: [`lab/`](lab/).
 
@@ -358,7 +358,7 @@ ansible -m debug -a "var=cx7_interfaces" spark           # per-host value
 
 ### 3.5 First contact
 
-> **Order:** §3.1–3.4 come before Steps 03 and 04; this section comes after them. Before running it, complete [Step 04 · Add dgx-spark-1 as a Semaphore target](04-dgx-spark-as-semaphore-target.md): the Spark trusts vault01 and Semaphore has the project `spark-lab` with the template `00 Ping`. Haven't done Step 04 yet? The MacBook form below works already, because it logs in as `dgxadmin` with your own key.
+> **Order:** §3.1–3.4 come before Steps 03 and 04; this section comes after them. Before running it, complete [Step 04 · DGX Spark as a Semaphore target](04-dgx-spark-as-semaphore-target.md): the Spark trusts vault01 and Semaphore has the project `spark-lab` with the template `00 Ping`. Haven't done Step 04 yet? The MacBook form below works already, because it logs in as `dgxadmin` with your own key.
 
 ```yaml
 # lab/playbooks/00-ping.yml

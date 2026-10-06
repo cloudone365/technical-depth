@@ -1,6 +1,6 @@
-# Step 28 · Production MLOps on the Spark Platform — GitOps, CI, Promotion, Rollback
+# Step 28 · Production MLOps & GitOps: CI, Promotion and Rollback on the Spark Platform
 
-> **02-Kubernetes · Part IX — Operations · Step 28 of 28** · ← [Step 27 · Hands-on workbook](27-hands-on-practice-exercises-workbook.md) · [All steps](00-kubernetes-step-by-step-guide.md)
+> **02-Kubernetes · Part IX — Operations · Step 28 of 28** · ← [Step 27 · Hands-on practice exercises workbook](27-hands-on-practice-exercises-workbook.md) · [All steps](00-kubernetes-step-by-step-guide.md)
 
 | | |
 |---|---|

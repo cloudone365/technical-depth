@@ -1,8 +1,8 @@
-# Step 19 · Kubernetes on DGX Spark with kubeadm: the Root Cluster, Cilium, MetalLB and Two vClusters (and When Kubespray)
+# Step 19 · Kubernetes: kubeadm Root Cluster & vClusters: Cilium, MetalLB and Two vClusters on DGX Spark (and When Kubespray)
 
-> **01-Ansible · Part IV — Secrets & platforms · Step 19 of 30** · ← [Step 18 · Vault AppRole & SSH certificates](18-vault-approle-secrets-and-ssh-certificates.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 20 · NVIDIA GPU Operator](20-nvidia-gpu-operator-and-time-slicing.md) →
+> **01-Ansible · Part IV — Secrets & platforms · Step 19 of 30** · ← [Step 18 · Vault AppRole, secrets & SSH certificates](18-vault-approle-secrets-and-ssh-certificates.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 20 · NVIDIA GPU Operator & time-slicing](20-nvidia-gpu-operator-and-time-slicing.md) →
 >
-> Deep dive on what you build here: [02-Kubernetes Step 01 · Core architecture](../02-Kubernetes/01-kubernetes-core-architecture.md) · [02-Kubernetes Step 04 · Nested clusters](../02-Kubernetes/04-nested-clusters-with-vcluster.md)
+> Deep dive on what you build here: [02-Kubernetes Step 01 · Kubernetes core architecture](../02-Kubernetes/01-kubernetes-core-architecture.md) · [02-Kubernetes Step 04 · Nested clusters with vCluster](../02-Kubernetes/04-nested-clusters-with-vcluster.md)
 
 | | |
 |---|---|

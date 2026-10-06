@@ -1,6 +1,6 @@
-# Step 14 · RoCEv2 Done Right: MTU, QoS (DSCP/PFC/ECN), and Proving NCCL Uses RDMA Across Sparks
+# Step 14 · RoCEv2, QoS & NCCL: MTU, DSCP/PFC/ECN, and Proving NCCL Uses RDMA Across Sparks
 
-> **01-Ansible · Part III — Fabric & storage · Step 14 of 30** · ← [Step 13 · ConnectX-7 fabric](13-connectx7-fabric-and-opensm.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 15 · NFS over RDMA](15-nfs-rdma-and-parallel-file-systems.md) →
+> **01-Ansible · Part III — Fabric & storage · Step 14 of 30** · ← [Step 13 · ConnectX-7 fabric & OpenSM](13-connectx7-fabric-and-opensm.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 15 · NFS over RDMA & parallel file systems](15-nfs-rdma-and-parallel-file-systems.md) →
 
 | | |
 |---|---|

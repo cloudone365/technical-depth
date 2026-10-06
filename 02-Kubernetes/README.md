@@ -6,8 +6,8 @@ Twenty-eight steps that turn one DGX Spark into a small but complete **AI datace
 
 ## Start here
 
-1. **[Step-by-step guide (Steps 01–28)](00-kubernetes-step-by-step-guide.md)**: the build order. One section per step, each linking its document, with the commands to run and a "Done when" check.
-2. **[Step 01 · Core architecture & pod lifecycle](01-kubernetes-core-architecture.md)**: the first step, preflight and one pod traced end to end. Then follow the guide.
+1. **[Step 00 · Step-by-step guide](00-kubernetes-step-by-step-guide.md)**: the build order. One section per step, each linking its document, with the commands to run and a "Done when" check.
+2. **[Step 01 · Kubernetes core architecture](01-kubernetes-core-architecture.md)**: the first step, preflight and one pod traced end to end. Then follow the guide.
 3. **[`lab/README.md`](lab/README.md)**: the lab layout, quick start and "which cluster am I talking to?".
 
 ---
@@ -101,74 +101,74 @@ Every document is numbered as its step. Work through them in order with the [ste
 
 | Step | Document | What you build |
 |---|---|---|
-| 01 | [Core architecture & pod lifecycle](01-kubernetes-core-architecture.md) | read the kubeadm control plane, trace one `kubectl apply` through API → scheduler → kubelet → containerd → nvidia runtime, and through a vCluster |
-| 02 | [etcd: Raft, MVCC, quotas, backup & restore](02-etcd-database-deep-dive.md) | kubeadm's stacked etcd, SQLite in the vClusters, 3-member sandbox (elections, quorum loss, NOSPACE), restore drill |
-| 03 | [API server: AuthN, RBAC, CEL admission, APF, audit](03-kube-apiserver-internals.md) | x509 users per cluster, 4 CEL policies with dry-run fixtures, fair-queuing lanes for tenants and syncers, audit queries |
-| 04 | [**Nested clusters: kubeadm root + two vClusters**](04-nested-clusters-with-vcluster.md) | the lab's shape: budgets, sync, names, the pod's path through three API servers, resize/add/back up a vCluster |
-| 05 | [**DGX Spark datacenter simulation (end-to-end)**](05-dgx-spark-datacenter-simulation-lab.md) | the whole platform: root, both vClusters, gates, capacity plan, day-2 ops, dgx-spark-2 plan |
+| 01 | [Kubernetes core architecture](01-kubernetes-core-architecture.md) | read the kubeadm control plane, trace one `kubectl apply` through API → scheduler → kubelet → containerd → nvidia runtime, and through a vCluster |
+| 02 | [etcd database deep dive](02-etcd-database-deep-dive.md) | kubeadm's stacked etcd, SQLite in the vClusters, 3-member sandbox (elections, quorum loss, NOSPACE), restore drill |
+| 03 | [kube-apiserver internals](03-kube-apiserver-internals.md) | x509 users per cluster, 4 CEL policies with dry-run fixtures, fair-queuing lanes for tenants and syncers, audit queries |
+| 04 | [Nested clusters with vCluster](04-nested-clusters-with-vcluster.md) | the lab's shape: budgets, sync, names, the pod's path through three API servers, resize/add/back up a vCluster |
+| 05 | [DGX Spark datacenter simulation lab](05-dgx-spark-datacenter-simulation-lab.md) | the whole platform: root, both vClusters, gates, capacity plan, day-2 ops, dgx-spark-2 plan |
 
 ### Part II — Controllers & scheduling
 
 | Step | Document | What you build |
 |---|---|---|
-| 06 | [Controllers & writing your own](06-kube-controller-manager-and-controllers.md) | reconciliation cascades, GC, a dependency-free GPU-slice ledger controller |
-| 07 | [Scheduler, priorities, Kueue gangs, DRA](07-kube-scheduler-and-ai-batch-scheduling.md) | preemption ladder, a reproduced partial-gang deadlock, Kueue fix |
+| 06 | [kube-controller-manager & controllers](06-kube-controller-manager-and-controllers.md) | reconciliation cascades, GC, a dependency-free GPU-slice ledger controller |
+| 07 | [kube-scheduler & AI batch scheduling](07-kube-scheduler-and-ai-batch-scheduling.md) | preemption ladder, a reproduced partial-gang deadlock, Kueue fix |
 
 ### Part III — Networking
 
 | Step | Document | What you build |
 |---|---|---|
-| 08 | [CNI with Cilium, VXLAN, NetworkPolicy, RDMA networks](08-kubernetes-networking-deep-dive.md) | packet path map, MTU proof, tenant isolation, the vCluster boundary, Hubble |
-| 09 | [kube-proxy, ClusterIP, conntrack, headless](09-kube-proxy-and-cluster-ip-mechanics.md) | iptables reading, keep-alive pinning, graceful stream draining |
-| 10 | [CoreDNS & the ndots tax](10-coredns-and-service-discovery.md) | measured query amplification, custom zones, outage drill |
-| 11 | [Ingress & Gateway API for LLM APIs](11-ingress-controllers-and-gateway-api.md) | unbuffered streaming, limits, auth, canary, TLS, gRPC |
+| 08 | [Kubernetes networking deep dive](08-kubernetes-networking-deep-dive.md) | packet path map, MTU proof, tenant isolation, the vCluster boundary, Hubble |
+| 09 | [kube-proxy & ClusterIP mechanics](09-kube-proxy-and-cluster-ip-mechanics.md) | iptables reading, keep-alive pinning, graceful stream draining |
+| 10 | [CoreDNS & service discovery](10-coredns-and-service-discovery.md) | measured query amplification, custom zones, outage drill |
+| 11 | [Ingress controllers & Gateway API](11-ingress-controllers-and-gateway-api.md) | unbuffered streaming, limits, auth, canary, TLS, gRPC |
 
 ### Part IV — Workloads, storage & tenancy
 
 | Step | Document | What you build |
 |---|---|---|
-| 12 | [StatefulSets, DaemonSets, Indexed Jobs, PDBs](12-advanced-workload-controllers.md) | Qdrant with durable data, GPU probe DaemonSet, sharded tokenizer, safe drains |
-| 13 | [Storage on NVMe, model caches, fio, page cache vs UMA](13-storage-csi-and-high-performance-volumes.md) | Retain/Delete classes, prefetch Job, AI-shaped fio baseline |
-| 14 | [Quotas, QoS, cgroups v2 & the UMA question](14-multi-tenancy-resource-quotas-and-cgroups.md) | two-layer budgets (root + tenant), throttling/OOM reproduced, *is CUDA memory charged to the pod?* |
+| 12 | [Advanced workload controllers](12-advanced-workload-controllers.md) | Qdrant with durable data, GPU probe DaemonSet, sharded tokenizer, safe drains |
+| 13 | [Storage, CSI & high-performance volumes](13-storage-csi-and-high-performance-volumes.md) | Retain/Delete classes, prefetch Job, AI-shaped fio baseline |
+| 14 | [Multi-tenancy, resource quotas & cgroups](14-multi-tenancy-resource-quotas-and-cgroups.md) | two-layer budgets (root + tenant), throttling/OOM reproduced, *is CUDA memory charged to the pod?* |
 
 ### Part V — GPU platform
 
 | Step | Document | What you build |
 |---|---|---|
-| 15 | [GB10 hardware & driver stack](15-nvidia-hardware-and-driver-stack.md) | host/pod inventory, GEMM baseline, arch/CUDA triage |
-| 16 | [Container Toolkit, CDI, time-slicing, the GPU leak](16-nvidia-container-toolkit-and-gpu-virtualization.md) | contention table, leak closed |
-| 17 | [GPU Operator, Network Operator & observability](17-nvidia-gpu-operator-and-network-operator.md) | per-node profiles, kps + host exporters, alerts, RDMA pod networking |
+| 15 | [NVIDIA hardware & driver stack](15-nvidia-hardware-and-driver-stack.md) | host/pod inventory, GEMM baseline, arch/CUDA triage |
+| 16 | [NVIDIA Container Toolkit & GPU virtualization](16-nvidia-container-toolkit-and-gpu-virtualization.md) | contention table, leak closed |
+| 17 | [NVIDIA GPU Operator & Network Operator](17-nvidia-gpu-operator-and-network-operator.md) | per-node profiles, kps + host exporters, alerts, RDMA pod networking |
 
 ### Part VI — Distributed training & fabrics
 
 | Step | Document | What you build |
 |---|---|---|
-| 18 | [Distributed training & NCCL](18-distributed-ai-training-and-nccl.md) | operator-free torchrun, gloo vs NCCL, straggler/hang triage, RoCE over CX-7 |
-| 19 | [From two Sparks to a SuperPOD](19-large-scale-superpod-and-network-fabrics.md) | NIC counters, degraded-link experiment, fat-tree calculator |
+| 18 | [Distributed AI training & NCCL](18-distributed-ai-training-and-nccl.md) | operator-free torchrun, gloo vs NCCL, straggler/hang triage, RoCE over CX-7 |
+| 19 | [Large-scale SuperPOD & network fabrics](19-large-scale-superpod-and-network-fabrics.md) | NIC counters, degraded-link experiment, fat-tree calculator |
 
 ### Part VII — LLM serving
 
 | Step | Document | What you build |
 |---|---|---|
-| 20 | [vLLM on Kubernetes](20-vllm-high-throughput-llm-serving.md) | KV-cache budgeting, probes, graceful rollouts, benchmarks, KEDA |
-| 21 | [Triton Inference Server](21-nvidia-triton-inference-server.md) | CPU→GPU ensemble, measured dynamic batching, perf_analyzer |
-| 22 | [SGLang, TensorRT-LLM, Ollama, KServe](22-llm-inference-alternatives-and-kserve.md) | prefix-cache probe on two engines, JSON-schema output, KServe RawDeployment |
-| 23 | [Disaggregated prefill/decode](23-disaggregated-prefill-and-decode-serving.md) | vLLM + NIXL P/D split, KV-transfer time model |
+| 20 | [vLLM high-throughput LLM serving](20-vllm-high-throughput-llm-serving.md) | KV-cache budgeting, probes, graceful rollouts, benchmarks, KEDA |
+| 21 | [NVIDIA Triton Inference Server](21-nvidia-triton-inference-server.md) | CPU→GPU ensemble, measured dynamic batching, perf_analyzer |
+| 22 | [LLM inference alternatives & KServe](22-llm-inference-alternatives-and-kserve.md) | prefix-cache probe on two engines, JSON-schema output, KServe RawDeployment |
+| 23 | [Disaggregated prefill & decode serving](23-disaggregated-prefill-and-decode-serving.md) | vLLM + NIXL P/D split, KV-transfer time model |
 
 ### Part VIII — Scale & resilience
 
 | Step | Document | What you build |
 |---|---|---|
-| 24 | [Accelerators & compilers (GPU, TPU, Trainium)](24-hyperscaler-silicon-and-compilers.md) | eager vs `torch.compile` on GB10, generated kernels, cross-cloud pod specs |
-| 25 | [Resilience at scale, practised small](25-ultra-scale-cluster-resilience-and-fault-tolerance.md) | MTBF/goodput calculator, async-checkpoint resume, SDC canary, quarantine |
+| 24 | [Hyperscaler silicon & compilers](24-hyperscaler-silicon-and-compilers.md) | eager vs `torch.compile` on GB10, generated kernels, cross-cloud pod specs |
+| 25 | [Ultra-scale cluster resilience & fault tolerance](25-ultra-scale-cluster-resilience-and-fault-tolerance.md) | MTBF/goodput calculator, async-checkpoint resume, SDC canary, quarantine |
 
 ### Part IX — Operations
 
 | Step | Document | What you build |
 |---|---|---|
-| 26 | [Diagnostics & failure playbook](26-cluster-diagnostics-and-failure-scenarios.md) | triage tree, runbooks, Xid matrix, 15 drills |
-| 27 | [Hands-on workbook (20 challenges + capstone)](27-hands-on-practice-exercises-workbook.md) | timed challenges, 60-minute rebuild |
-| 28 | [Production MLOps: GitOps, CI, promotion, rollback](28-production-mlops-and-gitops.md) | Argo CD app-of-apps, drift correction, model promotion |
+| 26 | [Cluster diagnostics & failure scenarios](26-cluster-diagnostics-and-failure-scenarios.md) | triage tree, runbooks, Xid matrix, 15 drills |
+| 27 | [Hands-on practice exercises workbook](27-hands-on-practice-exercises-workbook.md) | timed challenges, 60-minute rebuild |
+| 28 | [Production MLOps & GitOps](28-production-mlops-and-gitops.md) | Argo CD app-of-apps, drift correction, model promotion |
 
 ---
 

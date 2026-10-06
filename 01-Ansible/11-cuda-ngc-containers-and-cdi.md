@@ -1,6 +1,6 @@
-# Step 11 · CUDA 13, NGC Containers & the NVIDIA Container Toolkit (CDI) on DGX Spark
+# Step 11 · CUDA, NGC Containers & CDI: CUDA 13 and the NVIDIA Container Toolkit on DGX Spark
 
-> **01-Ansible · Part II — Node provisioning · Step 11 of 30** · ← [Step 10 · NVIDIA driver stack](10-nvidia-driver-stack-and-fabric-manager.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 12 · GPU telemetry & alerting](12-gpu-telemetry-and-alerting.md) →
+> **01-Ansible · Part II — Node provisioning · Step 11 of 30** · ← [Step 10 · NVIDIA driver stack & Fabric Manager](10-nvidia-driver-stack-and-fabric-manager.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 12 · GPU telemetry & alerting](12-gpu-telemetry-and-alerting.md) →
 
 | | |
 |---|---|

@@ -1,6 +1,6 @@
 # Step 16 · GPUDirect Storage & cuFile on a Unified-Memory Machine: Detect, Configure, Measure
 
-> **01-Ansible · Part III — Fabric & storage · Step 16 of 30** · ← [Step 15 · NFS over RDMA](15-nfs-rdma-and-parallel-file-systems.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 17 · Vault server deep dive](17-vault-server-deep-dive.md) →
+> **01-Ansible · Part III — Fabric & storage · Step 16 of 30** · ← [Step 15 · NFS over RDMA & parallel file systems](15-nfs-rdma-and-parallel-file-systems.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 17 · Vault server deep dive](17-vault-server-deep-dive.md) →
 
 | | |
 |---|---|

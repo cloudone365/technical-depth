@@ -1,4 +1,4 @@
-# Step 13 · ConnectX-7 Fabric Automation on DGX Spark: RDMA over Converged Ethernet, Topologies & Verification (with the InfiniBand/OpenSM Mapping)
+# Step 13 · ConnectX-7 Fabric & OpenSM: RDMA over Converged Ethernet, Topologies & Verification (with the InfiniBand Mapping)
 
 > **01-Ansible · Part III — Fabric & storage · Step 13 of 30** · ← [Step 12 · GPU telemetry & alerting](12-gpu-telemetry-and-alerting.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 14 · RoCEv2, QoS & NCCL](14-rocev2-qos-and-nccl.md) →
 

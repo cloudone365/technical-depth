@@ -1,6 +1,6 @@
 # Step 05 · Execution Internals & Debugging: What Actually Happens on the Spark
 
-> **01-Ansible · Part I — Management plane & Ansible foundations · Step 05 of 30** · ← [Step 04 · dgx-spark-1 as Semaphore target](04-dgx-spark-as-semaphore-target.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 06 · Inventory: static, dynamic & discovery](06-inventory-static-dynamic-and-discovery.md) →
+> **01-Ansible · Part I — Management plane & Ansible foundations · Step 05 of 30** · ← [Step 04 · DGX Spark as a Semaphore target](04-dgx-spark-as-semaphore-target.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 06 · Inventory: static, dynamic & discovery](06-inventory-static-dynamic-and-discovery.md) →
 
 | | |
 |---|---|

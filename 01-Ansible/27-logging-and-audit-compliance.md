@@ -1,6 +1,6 @@
-# Step 27 · Logging & Audit Trails: Who Changed What, When, and Through Which Automation
+# Step 27 · Logging & Audit Compliance: Who Changed What, When, and Through Which Automation
 
-> **01-Ansible · Part V — Production operations · Step 27 of 30** · ← [Step 26 · Drift & self-healing](26-drift-detection-and-self-healing.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 28 · Firmware & patching](28-firmware-lifecycle-and-vulnerability-patching.md) →
+> **01-Ansible · Part V — Production operations · Step 27 of 30** · ← [Step 26 · Drift detection & self-healing](26-drift-detection-and-self-healing.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 28 · Firmware lifecycle & vulnerability patching](28-firmware-lifecycle-and-vulnerability-patching.md) →
 
 | | |
 |---|---|

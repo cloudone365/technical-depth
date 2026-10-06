@@ -1,6 +1,6 @@
 # Step 03 · kube-apiserver Internals: AuthN, RBAC, Admission (CEL), API Priority & Fairness, Audit
 
-> **02-Kubernetes · Part I — Control plane & the nested lab · Step 03 of 28** · ← [Step 02 · etcd](02-etcd-database-deep-dive.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 04 · Nested clusters with vCluster](04-nested-clusters-with-vcluster.md) →
+> **02-Kubernetes · Part I — Control plane & the nested lab · Step 03 of 28** · ← [Step 02 · etcd database deep dive](02-etcd-database-deep-dive.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 04 · Nested clusters with vCluster](04-nested-clusters-with-vcluster.md) →
 
 | | |
 |---|---|

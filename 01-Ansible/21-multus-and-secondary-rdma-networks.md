@@ -1,8 +1,8 @@
-# Step 21 · Multus & Secondary RDMA Networks for Pods (CX-7 Fabric Inside Kubernetes, Chained with Cilium, Reachable from a vCluster)
+# Step 21 · Multus & Secondary RDMA Networks: the CX-7 Fabric Inside Kubernetes, Chained with Cilium, Reachable from a vCluster
 
-> **01-Ansible · Part IV — Secrets & platforms · Step 21 of 30** · ← [Step 20 · GPU Operator](20-nvidia-gpu-operator-and-time-slicing.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 22 · Slurm](22-slurm-gres-and-cgroup-gpus.md) →
+> **01-Ansible · Part IV — Secrets & platforms · Step 21 of 30** · ← [Step 20 · NVIDIA GPU Operator & time-slicing](20-nvidia-gpu-operator-and-time-slicing.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 22 · Slurm: GRES & cgroup GPUs](22-slurm-gres-and-cgroup-gpus.md) →
 >
-> Requires: [Step 19 · Kubernetes with kubeadm](19-kubernetes-kubeadm-root-cluster-and-vclusters.md).
+> Requires: [Step 19 · Kubernetes: kubeadm root cluster & vClusters](19-kubernetes-kubeadm-root-cluster-and-vclusters.md).
 
 | | |
 |---|---|

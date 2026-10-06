@@ -1,6 +1,6 @@
-# Step 20 · vLLM on Kubernetes on a DGX Spark: KV-Cache Budgeting, Probes, Autoscaling & Load Testing
+# Step 20 · vLLM High-Throughput LLM Serving: KV-Cache Budgeting, Probes, Autoscaling & Load Testing
 
-> **02-Kubernetes · Part VII — LLM serving · Step 20 of 28** · ← [Step 19 · Two Sparks to a SuperPOD](19-large-scale-superpod-and-network-fabrics.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 21 · Triton](21-nvidia-triton-inference-server.md) →
+> **02-Kubernetes · Part VII — LLM serving · Step 20 of 28** · ← [Step 19 · Large-scale SuperPOD & network fabrics](19-large-scale-superpod-and-network-fabrics.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 21 · NVIDIA Triton Inference Server](21-nvidia-triton-inference-server.md) →
 
 | | |
 |---|---|

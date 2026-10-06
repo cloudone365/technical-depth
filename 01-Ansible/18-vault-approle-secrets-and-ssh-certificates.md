@@ -1,6 +1,6 @@
-# Step 18 · Vault ↔ Ansible in Production Style: AppRole for Semaphore, Short-Lived Tokens, KV Secrets, SSH Certificates, ansible-vault Keys
+# Step 18 · Vault AppRole, Secrets & SSH Certificates: Semaphore's AppRole, Short-Lived Tokens, KV Secrets, ansible-vault Keys
 
-> **01-Ansible · Part IV — Secrets & platforms · Step 18 of 30** · ← [Step 17 · Vault server deep dive](17-vault-server-deep-dive.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 19 · Kubernetes with kubeadm](19-kubernetes-kubeadm-root-cluster-and-vclusters.md) →
+> **01-Ansible · Part IV — Secrets & platforms · Step 18 of 30** · ← [Step 17 · Vault server deep dive](17-vault-server-deep-dive.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 19 · Kubernetes: kubeadm root cluster & vClusters](19-kubernetes-kubeadm-root-cluster-and-vclusters.md) →
 >
 > Builds on: [Step 17](17-vault-server-deep-dive.md) (the Vault server) · [Step 01 §4, §8](01-management-plane-semaphore-and-vault.md) · [Step 04 §5–6](04-dgx-spark-as-semaphore-target.md)
 

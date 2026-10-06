@@ -1,6 +1,6 @@
 # Step 09 · kube-proxy & ClusterIP Mechanics: iptables, EndpointSlices, conntrack, Headless Services
 
-> **02-Kubernetes · Part III — Networking · Step 09 of 28** · ← [Step 08 · Pod networking & Cilium](08-kubernetes-networking-deep-dive.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 10 · CoreDNS](10-coredns-and-service-discovery.md) →
+> **02-Kubernetes · Part III — Networking · Step 09 of 28** · ← [Step 08 · Kubernetes networking deep dive](08-kubernetes-networking-deep-dive.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 10 · CoreDNS & service discovery](10-coredns-and-service-discovery.md) →
 
 | | |
 |---|---|

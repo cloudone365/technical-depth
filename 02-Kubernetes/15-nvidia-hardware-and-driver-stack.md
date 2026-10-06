@@ -1,6 +1,6 @@
 # Step 15 · NVIDIA Hardware & Driver Stack as Kubernetes Sees It: GB10, NVLink-C2C, Unified Memory, Drivers, CUDA Compatibility
 
-> **02-Kubernetes · Part V — GPU platform · Step 15 of 28** · ← [Step 14 · Multi-tenancy & cgroups](14-multi-tenancy-resource-quotas-and-cgroups.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 16 · Container Toolkit & GPU sharing](16-nvidia-container-toolkit-and-gpu-virtualization.md) →
+> **02-Kubernetes · Part V — GPU platform · Step 15 of 28** · ← [Step 14 · Multi-tenancy, resource quotas & cgroups](14-multi-tenancy-resource-quotas-and-cgroups.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 16 · NVIDIA Container Toolkit & GPU virtualization](16-nvidia-container-toolkit-and-gpu-virtualization.md) →
 
 | | |
 |---|---|

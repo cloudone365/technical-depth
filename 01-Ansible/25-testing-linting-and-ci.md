@@ -1,6 +1,6 @@
-# Step 25 · Testing the Lab Like Production: Lint, Syntax, Fixture Tests, Molecule on arm64, and CI with a Spark Runner
+# Step 25 · Testing, Linting & CI: Syntax, Fixture Tests, Molecule on arm64, and CI with a Spark Runner
 
-> **01-Ansible · Part V — Production operations · Step 25 of 30** · ← [Step 24 · AWX in production](24-awx-production-and-receptor.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 26 · Drift & self-healing](26-drift-detection-and-self-healing.md) →
+> **01-Ansible · Part V — Production operations · Step 25 of 30** · ← [Step 24 · AWX production & Receptor](24-awx-production-and-receptor.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 26 · Drift detection & self-healing](26-drift-detection-and-self-healing.md) →
 
 | | |
 |---|---|

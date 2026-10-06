@@ -1,6 +1,6 @@
 # Step 10 · CoreDNS & Service Discovery: Records, the `ndots:5` Tax, Custom Zones, DNS Failures
 
-> **02-Kubernetes · Part III — Networking · Step 10 of 28** · ← [Step 09 · kube-proxy & ClusterIP](09-kube-proxy-and-cluster-ip-mechanics.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 11 · Ingress & Gateway API](11-ingress-controllers-and-gateway-api.md) →
+> **02-Kubernetes · Part III — Networking · Step 10 of 28** · ← [Step 09 · kube-proxy & ClusterIP mechanics](09-kube-proxy-and-cluster-ip-mechanics.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 11 · Ingress controllers & Gateway API](11-ingress-controllers-and-gateway-api.md) →
 
 | | |
 |---|---|

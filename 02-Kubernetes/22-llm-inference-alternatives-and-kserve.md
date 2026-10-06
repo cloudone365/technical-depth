@@ -1,6 +1,6 @@
-# Step 22 · Choosing an Inference Engine & Platform: SGLang, TensorRT-LLM, llama.cpp/Ollama, KServe
+# Step 22 · LLM Inference Alternatives & KServe: Choosing Between SGLang, TensorRT-LLM and llama.cpp/Ollama
 
-> **02-Kubernetes · Part VII — LLM serving · Step 22 of 28** · ← [Step 21 · Triton](21-nvidia-triton-inference-server.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 23 · Prefill/decode split](23-disaggregated-prefill-and-decode-serving.md) →
+> **02-Kubernetes · Part VII — LLM serving · Step 22 of 28** · ← [Step 21 · NVIDIA Triton Inference Server](21-nvidia-triton-inference-server.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 23 · Disaggregated prefill & decode serving](23-disaggregated-prefill-and-decode-serving.md) →
 
 | | |
 |---|---|

@@ -1,4 +1,4 @@
-# DGX Spark Kubernetes Lab — runnable companion to Module 02
+# 02-Kubernetes Lab · Runnable Companion to Steps 01–28
 
 Everything the 28 steps of the [step-by-step guide](../00-kubernetes-step-by-step-guide.md) teach, as manifests, scripts and drills. The [01-Ansible lab](../../01-Ansible/lab/README.md) builds the base on one DGX Spark (a second Spark is optional):
 

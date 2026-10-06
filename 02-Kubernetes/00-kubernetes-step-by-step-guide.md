@@ -1,6 +1,6 @@
-# 02-Kubernetes · Step-by-Step Guide (Steps 01–28)
+# Step 00 · Kubernetes Step-by-Step Guide
 
-> **02-Kubernetes · Step 00 of 28** · Start here · [Module overview](README.md) · [Step 01 · Core architecture](01-kubernetes-core-architecture.md) →
+> **02-Kubernetes · Step 00 of 28** · Start here · [Module overview](README.md) · [Step 01 · Kubernetes core architecture](01-kubernetes-core-architecture.md) →
 
 This page is the build order for the whole module. Each section below is one step, links the document that explains it, and says what to run and how you know the step is done. Work through them in order. The documents carry the same numbers as the steps: Step 13 is `13-….md`.
 
@@ -53,41 +53,41 @@ Times are rough working times on one Spark, not counting reading.
 | Step | Document | What you do | Time | Done when |
 |---|---|---|---|---|
 | **Part I** | **Control plane & the nested lab** | | | |
-| 01 | [Core architecture & pod lifecycle](01-kubernetes-core-architecture.md) | Preflight, static pods, trace one pod | 30 min | `scripts/preflight.sh` 0 failed |
-| 02 | [etcd](02-etcd-database-deep-dive.md) | Member status, snapshot, Raft sandbox | 45 min | A snapshot in `/var/lib/etcd-snapshots`; sandbox quorum loss seen |
-| 03 | [API server](03-kube-apiserver-internals.md) | Encryption + audit proof, tenancy, users, CEL, APF | 60 min | `verify.sh tenancy admission` → `21 passed, 0 failed` |
+| 01 | [Kubernetes core architecture](01-kubernetes-core-architecture.md) | Preflight, static pods, trace one pod | 30 min | `scripts/preflight.sh` 0 failed |
+| 02 | [etcd database deep dive](02-etcd-database-deep-dive.md) | Member status, snapshot, Raft sandbox | 45 min | A snapshot in `/var/lib/etcd-snapshots`; sandbox quorum loss seen |
+| 03 | [kube-apiserver internals](03-kube-apiserver-internals.md) | Encryption + audit proof, tenancy, users, CEL, APF | 60 min | `verify.sh tenancy admission` → `21 passed, 0 failed` |
 | 04 | [Nested clusters with vCluster](04-nested-clusters-with-vcluster.md) | Root add-ons, vClusters (re)installed, budgets | 40 min | Three contexts; both root budgets correct |
-| 05 | [Datacenter simulation](05-dgx-spark-datacenter-simulation-lab.md) | Build order and gates for the whole platform | 30 min | `verify.sh platform vclusters` 0 failed |
+| 05 | [DGX Spark datacenter simulation lab](05-dgx-spark-datacenter-simulation-lab.md) | Build order and gates for the whole platform | 30 min | `verify.sh platform vclusters` 0 failed |
 | **Part II** | **Controllers & scheduling** | | | |
-| 06 | [Controllers](06-kube-controller-manager-and-controllers.md) | Reconciliation chains, your own controller | 30 min | `gpu-slice-ledger` ConfigMap per vCluster |
-| 07 | [Scheduler & Kueue](07-kube-scheduler-and-ai-batch-scheduling.md) | Priorities, preemption, Kueue gangs in llms | 40 min | Gang test `PASS` |
+| 06 | [kube-controller-manager & controllers](06-kube-controller-manager-and-controllers.md) | Reconciliation chains, your own controller | 30 min | `gpu-slice-ledger` ConfigMap per vCluster |
+| 07 | [kube-scheduler & AI batch scheduling](07-kube-scheduler-and-ai-batch-scheduling.md) | Priorities, preemption, Kueue gangs in llms | 40 min | Gang test `PASS` |
 | **Part III** | **Networking** | | | |
-| 08 | [Pod networking & Cilium](08-kubernetes-networking-deep-dive.md) | Walk a pod's path, NetworkPolicy drill | 40 min | Drill 06 fixed |
-| 09 | [kube-proxy & ClusterIP](09-kube-proxy-and-cluster-ip-mechanics.md) | Read a dev-lab Service in the root's iptables | 30 min | KUBE-SEP probabilities explained |
-| 10 | [CoreDNS](10-coredns-and-service-discovery.md) | Query logging, `lab.local`, the ndots tax | 30 min | ≈10 vs 2 queries measured |
-| 11 | [Ingress & Gateway API](11-ingress-controllers-and-gateway-api.md) | Traefik in llms, streaming, canary | 40 min | Streaming PASS, canary ≈ 90/10 |
+| 08 | [Kubernetes networking deep dive](08-kubernetes-networking-deep-dive.md) | Walk a pod's path, NetworkPolicy drill | 40 min | Drill 06 fixed |
+| 09 | [kube-proxy & ClusterIP mechanics](09-kube-proxy-and-cluster-ip-mechanics.md) | Read a dev-lab Service in the root's iptables | 30 min | KUBE-SEP probabilities explained |
+| 10 | [CoreDNS & service discovery](10-coredns-and-service-discovery.md) | Query logging, `lab.local`, the ndots tax | 30 min | ≈10 vs 2 queries measured |
+| 11 | [Ingress controllers & Gateway API](11-ingress-controllers-and-gateway-api.md) | Traefik in llms, streaming, canary | 40 min | Streaming PASS, canary ≈ 90/10 |
 | **Part IV** | **Workloads, storage & tenancy** | | | |
-| 12 | [Workload controllers](12-advanced-workload-controllers.md) | Qdrant, node-probe DaemonSet, Indexed Job | 40 min | `completedIndexes: 0-7` |
-| 13 | [Storage & model cache](13-storage-csi-and-high-performance-volumes.md) | Model-cache PVC, prefetch, fio | 40 min | `model-cache` Bound on Retain |
-| 14 | [Multi-tenancy & cgroups](14-multi-tenancy-resource-quotas-and-cgroups.md) | Two budget layers, QoS, the UMA experiment | 45 min | UMA result recorded with driver version |
+| 12 | [Advanced workload controllers](12-advanced-workload-controllers.md) | Qdrant, node-probe DaemonSet, Indexed Job | 40 min | `completedIndexes: 0-7` |
+| 13 | [Storage, CSI & high-performance volumes](13-storage-csi-and-high-performance-volumes.md) | Model-cache PVC, prefetch, fio | 40 min | `model-cache` Bound on Retain |
+| 14 | [Multi-tenancy, resource quotas & cgroups](14-multi-tenancy-resource-quotas-and-cgroups.md) | Two budget layers, QoS, the UMA experiment | 45 min | UMA result recorded with driver version |
 | **Part V** | **GPU platform** | | | |
-| 15 | [GB10 hardware & drivers](15-nvidia-hardware-and-driver-stack.md) | Host and node inventory, GEMM baseline | 30 min | Baseline TFLOPS recorded |
-| 16 | [Container Toolkit & GPU sharing](16-nvidia-container-toolkit-and-gpu-virtualization.md) | CDI, 1 → 4 pod contention, the GPU leak | 45 min | Contention table; leak explained |
-| 17 | [GPU & Network Operators](17-nvidia-gpu-operator-and-network-operator.md) | Operator state, dashboards, alerts | 40 min | Every dashboard row has data |
+| 15 | [NVIDIA hardware & driver stack](15-nvidia-hardware-and-driver-stack.md) | Host and node inventory, GEMM baseline | 30 min | Baseline TFLOPS recorded |
+| 16 | [NVIDIA Container Toolkit & GPU virtualization](16-nvidia-container-toolkit-and-gpu-virtualization.md) | CDI, 1 → 4 pod contention, the GPU leak | 45 min | Contention table; leak explained |
+| 17 | [NVIDIA GPU Operator & Network Operator](17-nvidia-gpu-operator-and-network-operator.md) | Operator state, dashboards, alerts | 40 min | Every dashboard row has data |
 | **Part VI** | **Distributed training & fabrics** | | | |
-| 18 | [Distributed training & NCCL](18-distributed-ai-training-and-nccl.md) | Gang-admitted torchrun; (2×) NCCL over RoCE | 45 min | `correctness OK` |
-| 19 | [Two Sparks to a SuperPOD](19-large-scale-superpod-and-network-fabrics.md) | CX-7 inventory, fabric sizing; (2×) counters | 30 min | Your own fabric sizing |
+| 18 | [Distributed AI training & NCCL](18-distributed-ai-training-and-nccl.md) | Gang-admitted torchrun; (2×) NCCL over RoCE | 45 min | `correctness OK` |
+| 19 | [Large-scale SuperPOD & network fabrics](19-large-scale-superpod-and-network-fabrics.md) | CX-7 inventory, fabric sizing; (2×) counters | 30 min | Your own fabric sizing |
 | **Part VII** | **LLM serving** | | | |
-| 20 | [vLLM](20-vllm-high-throughput-llm-serving.md) | Deploy, benchmark, KEDA autoscaling | 60 min | Chat completion + benchmark table |
-| 21 | [Triton](21-nvidia-triton-inference-server.md) | Park vLLM, Triton ensemble, batching | 45 min | Batch size > 1 under load |
-| 22 | [SGLang, TensorRT-LLM & KServe](22-llm-inference-alternatives-and-kserve.md) | Prefix-cache probe, KServe in llms | 60 min | Prefix-cache speed-up on two engines |
-| 23 | [Prefill/decode split](23-disaggregated-prefill-and-decode-serving.md) | vLLM + NIXL P/D behind a proxy | 45 min | `X-Prefill-Ms` header |
+| 20 | [vLLM high-throughput LLM serving](20-vllm-high-throughput-llm-serving.md) | Deploy, benchmark, KEDA autoscaling | 60 min | Chat completion + benchmark table |
+| 21 | [NVIDIA Triton Inference Server](21-nvidia-triton-inference-server.md) | Park vLLM, Triton ensemble, batching | 45 min | Batch size > 1 under load |
+| 22 | [LLM inference alternatives & KServe](22-llm-inference-alternatives-and-kserve.md) | Prefix-cache probe, KServe in llms | 60 min | Prefix-cache speed-up on two engines |
+| 23 | [Disaggregated prefill & decode serving](23-disaggregated-prefill-and-decode-serving.md) | vLLM + NIXL P/D behind a proxy | 45 min | `X-Prefill-Ms` header |
 | **Part VIII** | **Scale & resilience** | | | |
-| 24 | [Accelerators & compilers](24-hyperscaler-silicon-and-compilers.md) | Eager vs `torch.compile` on GB10 | 30 min | Three timings recorded |
-| 25 | [Resilience at scale](25-ultra-scale-cluster-resilience-and-fault-tolerance.md) | Checkpoint resume, SDC canary, quarantine | 45 min | `RESUMED`; SDC fails fast |
+| 24 | [Hyperscaler silicon & compilers](24-hyperscaler-silicon-and-compilers.md) | Eager vs `torch.compile` on GB10 | 30 min | Three timings recorded |
+| 25 | [Ultra-scale cluster resilience & fault tolerance](25-ultra-scale-cluster-resilience-and-fault-tolerance.md) | Checkpoint resume, SDC canary, quarantine | 45 min | `RESUMED`; SDC fails fast |
 | **Part IX** | **Operations** | | | |
-| 26 | [Diagnostics & failure playbook](26-cluster-diagnostics-and-failure-scenarios.md) | Timed drills, diag bundle, vCluster failures | 2 h | 5 drills fixed unaided |
-| 27 | [Hands-on workbook](27-hands-on-practice-exercises-workbook.md) | 20 challenges, the 60-minute rebuild | a weekend | `verify.sh` `0 failed` after the rebuild |
+| 26 | [Cluster diagnostics & failure scenarios](26-cluster-diagnostics-and-failure-scenarios.md) | Timed drills, diag bundle, vCluster failures | 2 h | 5 drills fixed unaided |
+| 27 | [Hands-on practice exercises workbook](27-hands-on-practice-exercises-workbook.md) | 20 challenges, the 60-minute rebuild | a weekend | `verify.sh` `0 failed` after the rebuild |
 | 28 | [Production MLOps & GitOps](28-production-mlops-and-gitops.md) | Argo CD across all three clusters | 60 min | Apps Synced/Healthy |
 
 ## Overview
@@ -140,7 +140,7 @@ Blue: control plane. Purple: network. Green: GPU and serving. Orange: observabil
 
 # Part I · Control plane & the nested lab
 
-## Step 01 · Core architecture & pod lifecycle → [document](01-kubernetes-core-architecture.md)
+## Step 01 · Kubernetes core architecture → [document](01-kubernetes-core-architecture.md)
 
 **On the Spark**, from a checkout of this repo in `02-Kubernetes/lab` (Step 01 §5 Task 1–2):
 
@@ -154,7 +154,7 @@ Then follow one pod through the API server, scheduler, kubelet, containerd and t
 
 ✅ **Done when** preflight reports 0 failed: kubelet and containerd active, no control-plane taint, Cilium ready, `allocatable nvidia.com/gpu=15`, GB10 compute capability 12.1, and both vClusters answer (`06b vClusters` ran in 01-Ansible Step 20). You can name the four static pods and who restarts them.
 
-## Step 02 · etcd → [document](02-etcd-database-deep-dive.md)
+## Step 02 · etcd database deep dive → [document](02-etcd-database-deep-dive.md)
 
 **On the Spark.** The 01-Ansible `kubeadm_cluster` role installed an etcd snapshot timer. Prove it, then break Raft where it's safe: in the three-member Docker sandbox, never the root (Step 02 §5.1, §5.4, §5.6).
 
@@ -167,7 +167,7 @@ scripts/etcd-sandbox.sh kill-two
 
 ✅ **Done when** `etcd-drill.sh status` shows 1 member and no alarms, a fresh snapshot sits in `/var/lib/etcd-snapshots`, and the sandbox printed a new leader after `kill-leader` and `write failed: no quorum (expected)` after `kill-two`.
 
-## Step 03 · API server → [document](03-kube-apiserver-internals.md)
+## Step 03 · kube-apiserver internals → [document](03-kube-apiserver-internals.md)
 
 **On the Spark**, prove the audit policy and Secret encryption the `kubeadm_cluster` role switched on (Step 03 §5 Task 1):
 
@@ -209,7 +209,7 @@ Then look around, follow one pod through both clusters and spend a budget (Step 
 
 ✅ **Done when** the contexts are `spark-root`, `dev-lab` and `llms`, `verify.sh vclusters` prints `dev-lab root budget: 2 8Gi 2` and `llms root budget: 12 88Gi 11`, and Grafana answers on `http://192.168.0.100:32000`.
 
-## Step 05 · The DGX Spark datacenter simulation → [document](05-dgx-spark-datacenter-simulation-lab.md)
+## Step 05 · DGX Spark datacenter simulation lab → [document](05-dgx-spark-datacenter-simulation-lab.md)
 
 Study the whole platform before building it out: the master tables, the capacity plan and the build order with a gate after each stage (Step 05 §3–4). The rest of this guide follows that order. Run the gates you can already pass:
 
@@ -225,7 +225,7 @@ scripts/verify.sh platform vclusters
 
 # Part II · Controllers & scheduling
 
-## Step 06 · Controllers → [document](06-kube-controller-manager-and-controllers.md)
+## Step 06 · kube-controller-manager & controllers → [document](06-kube-controller-manager-and-controllers.md)
 
 Watch three controller-managers on one node, then run your own controller on the root (Step 06 §5):
 
@@ -253,7 +253,7 @@ tests/kueue-gang-test.sh
 
 # Part III · Networking
 
-## Step 08 · Pod networking & Cilium → [document](08-kubernetes-networking-deep-dive.md)
+## Step 08 · Kubernetes networking deep dive → [document](08-kubernetes-networking-deep-dive.md)
 
 ```bash
 pod=$(kubectl --context dev-lab -n lab-tools get pod -l app=echo -o jsonpath='{.items[0].metadata.name}')
@@ -265,7 +265,7 @@ scripts/breakfix.sh inject 06                         # fix it, then: scripts/br
 
 ✅ **Done when** you can name the `lxc*` veth, `cilium_host`, `cilium_vxlan` and the MTU, and the vCluster pod's name on the root, and drill 06 is fixed.
 
-## Step 09 · kube-proxy & ClusterIP → [document](09-kube-proxy-and-cluster-ip-mechanics.md)
+## Step 09 · kube-proxy & ClusterIP mechanics → [document](09-kube-proxy-and-cluster-ip-mechanics.md)
 
 A dev-lab Service is programmed by the **root's** kube-proxy (Step 09 §5.1):
 
@@ -285,7 +285,7 @@ kubectl --context spark-root apply -f manifests/root/30-networking/coredns-coref
 
 ✅ **Done when** you have measured the query counts for a short name vs a trailing-dot name (≈10 vs 2) and run the outage drill (Step 10 §5.5).
 
-## Step 11 · Ingress & Gateway API → [document](11-ingress-controllers-and-gateway-api.md)
+## Step 11 · Ingress controllers & Gateway API → [document](11-ingress-controllers-and-gateway-api.md)
 
 ```bash
 scripts/install-addons.sh traefik                     # inside llms → 192.168.0.115
@@ -300,7 +300,7 @@ scripts/verify.sh ingress
 
 # Part IV · Workloads, storage & tenancy
 
-## Step 12 · Workload controllers → [document](12-advanced-workload-controllers.md)
+## Step 12 · Advanced workload controllers → [document](12-advanced-workload-controllers.md)
 
 ```bash
 kubectl --context llms apply -k manifests/llms/50-workloads
@@ -310,7 +310,7 @@ kubectl --context spark-root apply -k manifests/root/50-workloads
 
 ✅ **Done when** Qdrant's data survives pod deletion, the Indexed Job reports `completedIndexes: 0-7`, and there is one node-probe pod per Spark.
 
-## Step 13 · Storage & model cache → [document](13-storage-csi-and-high-performance-volumes.md)
+## Step 13 · Storage, CSI & high-performance volumes → [document](13-storage-csi-and-high-performance-volumes.md)
 
 ```bash
 kubectl --context llms apply -k manifests/llms/60-storage
@@ -320,7 +320,7 @@ kubectl --context spark-root apply -f manifests/root/60-storage/fio-job.yaml
 
 ✅ **Done when** `model-cache` is Bound on a Retain class (a real PV under `/data/k8s/retain/vc-llms/…`) and your fio baseline is saved.
 
-## Step 14 · Multi-tenancy, quotas & cgroups → [document](14-multi-tenancy-resource-quotas-and-cgroups.md)
+## Step 14 · Multi-tenancy, resource quotas & cgroups → [document](14-multi-tenancy-resource-quotas-and-cgroups.md)
 
 The tenancy you applied in Step 03, now under load. Both budget layers first (Step 14 §5.1), then QoS, throttling and the UMA question:
 
@@ -339,7 +339,7 @@ scripts/breakfix.sh inject 02                         # a vCluster budget, spent
 
 # Part V · GPU platform
 
-## Step 15 · GB10 hardware & driver stack → [document](15-nvidia-hardware-and-driver-stack.md)
+## Step 15 · NVIDIA hardware & driver stack → [document](15-nvidia-hardware-and-driver-stack.md)
 
 **On the Spark** `nvidia-smi` and the host inventory (Step 15 §5.1), then the node as each cluster sees it and a single-slice baseline on the root (§5.2–5.4):
 
@@ -352,7 +352,7 @@ kubectl --context spark-root -n platform-tools logs -f job/gemm-solo
 
 ✅ **Done when** compute capability is `12.1`, allocatable `nvidia.com/gpu` is `15` on the root and in both vClusters, and the `gemm-solo` TFLOPS figure is recorded as your baseline.
 
-## Step 16 · Container Toolkit, CDI & GPU sharing → [document](16-nvidia-container-toolkit-and-gpu-virtualization.md)
+## Step 16 · NVIDIA Container Toolkit & GPU virtualization → [document](16-nvidia-container-toolkit-and-gpu-virtualization.md)
 
 ```bash
 kubectl --context spark-root -n platform-tools scale deploy gemm-contention --replicas=4      # Step 16 §5.3 table
@@ -364,7 +364,7 @@ Scale `gemm-contention` back to 0 when the table is done.
 
 ✅ **Done when** aggregate throughput under 4-way contention ≈ the Step 15 baseline, `gpu-smoke` passes through the vCluster, and you can explain the leak (hardening is optional, Step 16 §5.5).
 
-## Step 17 · GPU Operator, Network Operator & observability → [document](17-nvidia-gpu-operator-and-network-operator.md)
+## Step 17 · NVIDIA GPU Operator & Network Operator → [document](17-nvidia-gpu-operator-and-network-operator.md)
 
 Read the operator's state (Step 17 §5.1), then the observability stack (§5.4):
 
@@ -382,7 +382,7 @@ scripts/verify.sh observability      # Grafana http://192.168.0.100:32000 → "S
 
 # Part VI · Distributed training & fabrics
 
-## Step 18 · Distributed training & NCCL → [document](18-distributed-ai-training-and-nccl.md)
+## Step 18 · Distributed AI training & NCCL → [document](18-distributed-ai-training-and-nccl.md)
 
 ```bash
 kubectl --context llms apply -k manifests/llms/80-distributed/base
@@ -392,7 +392,7 @@ kubectl --context llms -n batch logs -f -l job-name=ddp --prefix
 
 ✅ **Done when** rank 0 prints `correctness OK`, you have seen NCCL refuse two ranks on one GPU (Step 18 §5.2), and (2×) the log says `Using network IB` with busbw near line rate.
 
-## Step 19 · From two Sparks to a SuperPOD → [document](19-large-scale-superpod-and-network-fabrics.md)
+## Step 19 · Large-scale SuperPOD & network fabrics → [document](19-large-scale-superpod-and-network-fabrics.md)
 
 **On the Spark**, inventory the CX-7 (`ibdev2netdev`, `rdma link show`, Step 19 §5.1). Then size real fabrics:
 
@@ -409,7 +409,7 @@ python3 scripts/fabric_calc.py --nodes 127 --gpus 8 --radix 64 --link-gbps 400
 
 # Part VII · LLM serving
 
-## Step 20 · vLLM → [document](20-vllm-high-throughput-llm-serving.md)
+## Step 20 · vLLM high-throughput LLM serving → [document](20-vllm-high-throughput-llm-serving.md)
 
 ```bash
 kubectl --context llms apply -k manifests/llms/90-serving/vllm
@@ -420,7 +420,7 @@ scripts/verify.sh serving
 
 ✅ **Done when** `vLLM answered a chat completion`, you have a benchmark table for c = 1/8/32, and KEDA reads the root's Prometheus.
 
-## Step 21 · Triton Inference Server → [document](21-nvidia-triton-inference-server.md)
+## Step 21 · NVIDIA Triton Inference Server → [document](21-nvidia-triton-inference-server.md)
 
 `serving-budget` (80 Gi) holds Triton's 12 Gi beside vLLM's 32 Gi, and Triton's small models add little to vLLM's 0.20 of the pool, so vLLM keeps running ([Step 20 §9](20-vllm-high-throughput-llm-serving.md)). Define the two helpers once anyway; you need them whenever a bigger model would push the sum of util values over ~0.70:
 
@@ -434,7 +434,7 @@ kubectl --context llms delete -k manifests/llms/90-serving/triton
 
 ✅ **Done when** Triton's batch size is > 1 under load, and its rollout ran beside vLLM in `serving-budget` (no `exceeded quota` event).
 
-## Step 22 · SGLang, TensorRT-LLM & KServe → [document](22-llm-inference-alternatives-and-kserve.md)
+## Step 22 · LLM inference alternatives & KServe → [document](22-llm-inference-alternatives-and-kserve.md)
 
 vLLM keeps running: SGLang (`--mem-fraction-static=0.20`) beside it is 0.40 of the pool and 64 Gi of the 80 Gi. Run SGLang and the KServe predictor one after the other, because three 32 Gi engines (96 Gi) don't fit `serving-budget`. Measure the prefix cache on a second engine, then KServe (Step 22 §5.1–5.4):
 
@@ -448,7 +448,7 @@ scripts/install-addons.sh kserve                        # cert-manager + KServe 
 
 ✅ **Done when** you have measured the prefix-cache speed-up on two engines, each ran beside vLLM inside `serving-budget` (80 Gi), and the root's `vcluster-budget` (88 Gi) never refused a pod.
 
-## Step 23 · Disaggregated prefill & decode → [document](23-disaggregated-prefill-and-decode-serving.md)
+## Step 23 · Disaggregated prefill & decode serving → [document](23-disaggregated-prefill-and-decode-serving.md)
 
 Prefill + decode need about 40 Gi of limits. Beside vLLM's 32 Gi and the always-on pods that is still inside `serving-budget`'s 80 Gi (with SGLang and KServe scaled down), so no quota changes. Their memory is 0.15 + 0.15 of the pool, 0.50 with vLLM's 0.20; `park` vLLM first only if you load bigger models and the sum would pass ~0.70.
 
@@ -467,7 +467,7 @@ unpark                                                                         #
 
 # Part VIII · Scale & resilience
 
-## Step 24 · Accelerators & compilers → [document](24-hyperscaler-silicon-and-compilers.md)
+## Step 24 · Hyperscaler silicon & compilers → [document](24-hyperscaler-silicon-and-compilers.md)
 
 ```bash
 kubectl --context spark-root apply -f manifests/root/70-gpu/compile-compare.yaml   # eager vs compiled
@@ -476,7 +476,7 @@ kubectl --context spark-root -n platform-tools logs -f job/compile-compare
 
 ✅ **Done when** you have recorded eager, `compile-default` and `compile-max` timings and the compile times, and can say when the compile cost pays off (Step 24 §5.3).
 
-## Step 25 · Resilience at scale → [document](25-ultra-scale-cluster-resilience-and-fault-tolerance.md)
+## Step 25 · Ultra-scale cluster resilience & fault tolerance → [document](25-ultra-scale-cluster-resilience-and-fault-tolerance.md)
 
 ```bash
 kubectl --context llms apply -k manifests/llms/80-distributed/resilient      # kill a pod mid-run → RESUMED
@@ -491,7 +491,7 @@ Then the SDC drill and quarantine on the root (Step 25 §5.4); lift the taint af
 
 # Part IX · Operations
 
-## Step 26 · Cluster diagnostics & failure playbook → [document](26-cluster-diagnostics-and-failure-scenarios.md)
+## Step 26 · Cluster diagnostics & failure scenarios → [document](26-cluster-diagnostics-and-failure-scenarios.md)
 
 ```bash
 scripts/breakfix.sh list                 # 15 drills across all three clusters; 15 only on purpose
@@ -503,7 +503,7 @@ Then rehearse the vCluster failures `breakfix.sh` doesn't script: syncer down, r
 
 ✅ **Done when** you have fixed at least 5 drills, timed and unaided, and the diag bundle records an unreachable vCluster.
 
-## Step 27 · Hands-on workbook → [document](27-hands-on-practice-exercises-workbook.md)
+## Step 27 · Hands-on practice exercises workbook → [document](27-hands-on-practice-exercises-workbook.md)
 
 Work the 20 challenges, then the capstone: delete and recreate dev-lab and the root's lab layers, and rebuild the 02 layer to green in under 60 minutes (Step 27 *Capstone*).
 

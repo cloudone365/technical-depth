@@ -1,6 +1,6 @@
-# Step 24 · AWX in Production: Receptor Mesh & Execution Nodes, Vault Credentials, Approval Workflows, Backup/Restore, Monitoring
+# Step 24 · AWX Production & Receptor: Execution Nodes, Vault Credentials, Approval Workflows, Backup/Restore, Monitoring
 
-> **01-Ansible · Part IV — Secrets & platforms · Step 24 of 30** · ← [Step 23 · AWX install](23-awx-install-and-configuration-as-code.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 25 · Testing & CI](25-testing-linting-and-ci.md) →
+> **01-Ansible · Part IV — Secrets & platforms · Step 24 of 30** · ← [Step 23 · AWX install & configuration as code](23-awx-install-and-configuration-as-code.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 25 · Testing, linting & CI](25-testing-linting-and-ci.md) →
 
 | | |
 |---|---|

@@ -1,6 +1,6 @@
 # Step 09 · Performance at Scale: SSH Multiplexing, Pipelining, Forks & Mitogen (Measured on a Spark)
 
-> **01-Ansible · Part I — Management plane & Ansible foundations · Step 09 of 30** · ← [Step 08 · Roles, collections & EEs](08-roles-collections-and-execution-environments.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 10 · NVIDIA driver stack](10-nvidia-driver-stack-and-fabric-manager.md) →
+> **01-Ansible · Part I — Management plane & Ansible foundations · Step 09 of 30** · ← [Step 08 · Roles, collections & execution environments](08-roles-collections-and-execution-environments.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 10 · NVIDIA driver stack & Fabric Manager](10-nvidia-driver-stack-and-fabric-manager.md) →
 
 | | |
 |---|---|

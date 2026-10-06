@@ -1,6 +1,6 @@
-# Step 23 · AWX on the DGX Spark: Install, Configure as Code, Run the Lab from a UI
+# Step 23 · AWX Install & Configuration as Code: Run the Lab from a UI
 
-> **01-Ansible · Part IV — Secrets & platforms · Step 23 of 30** · ← [Step 22 · Slurm](22-slurm-gres-and-cgroup-gpus.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 24 · AWX in production](24-awx-production-and-receptor.md) →
+> **01-Ansible · Part IV — Secrets & platforms · Step 23 of 30** · ← [Step 22 · Slurm: GRES & cgroup GPUs](22-slurm-gres-and-cgroup-gpus.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 24 · AWX production & Receptor](24-awx-production-and-receptor.md) →
 
 | | |
 |---|---|

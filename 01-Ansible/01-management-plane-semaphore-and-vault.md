@@ -2,7 +2,7 @@
 
 > **01-Ansible · Part I — Management plane & Ansible foundations · Step 01 of 30** · ← [All steps](00-ansible-step-by-step-guide.md) · [Step 02 · Control node & Ansible core](02-control-node-and-ansible-core.md) →
 >
-> Build this first. `sema01` (Semaphore) and `vault01` (Vault) stay **outside** the DGX Spark: they run every playbook of the Spark lab, and they must survive when the Spark is rebuilt or reset. When §9 passes, continue with [Step 02](02-control-node-and-ansible-core.md) (MacBook toolchain, SSH trust, inventory), [Step 03](03-bare-metal-provisioning-and-bootstrap.md) if the Spark runs a fresh DGX OS, then [Step 04 · Add dgx-spark-1 as a Semaphore target](04-dgx-spark-as-semaphore-target.md). Overview: [README](README.md).
+> Build this first. `sema01` (Semaphore) and `vault01` (Vault) stay **outside** the DGX Spark: they run every playbook of the Spark lab, and they must survive when the Spark is rebuilt or reset. When §9 passes, continue with [Step 02](02-control-node-and-ansible-core.md) (MacBook toolchain, SSH trust, inventory), [Step 03](03-bare-metal-provisioning-and-bootstrap.md) if the Spark runs a fresh DGX OS, then [Step 04 · DGX Spark as a Semaphore target](04-dgx-spark-as-semaphore-target.md). Overview: [README](README.md).
 
 **Goal:** no human ever holds the automation credential. Every Semaphore task starts by asking Vault for a 15-minute SSH certificate, and the targets trust Vault's CA instead of static keys.
 
@@ -853,5 +853,5 @@ Your management plane now works for the two Ubuntu targets. The DGX Spark become
 | `sema01`: Semaphore + PostgreSQL, project `lab` | a lab image with `kubectl`/`helm`, a state volume, and a second project `spark-lab` for this repository |
 | targets 192.168.0.201 / .202 | `dgx-spark-1` (192.168.0.100) as a third target, prepared by `playbooks/00b-semaphore-target.yml` |
 
-Continue with [Step 02](02-control-node-and-ansible-core.md) (MacBook toolchain, SSH trust, inventory), [Step 03](03-bare-metal-provisioning-and-bootstrap.md) for a fresh DGX OS, then [Step 04 · Add dgx-spark-1 as a Semaphore target](04-dgx-spark-as-semaphore-target.md).
+Continue with [Step 02](02-control-node-and-ansible-core.md) (MacBook toolchain, SSH trust, inventory), [Step 03](03-bare-metal-provisioning-and-bootstrap.md) for a fresh DGX OS, then [Step 04 · DGX Spark as a Semaphore target](04-dgx-spark-as-semaphore-target.md).
 

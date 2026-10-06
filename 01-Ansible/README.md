@@ -55,8 +55,8 @@ The Kubernetes end-state is one **kubeadm** root cluster (`spark-root`) with two
 
 ## Start here
 
-1. **[Step-by-step guide (Steps 01–30)](00-ansible-step-by-step-guide.md)**: the build order. One section per step, each linking its document, with the Semaphore template(s) or MacBook commands to run and a "Done when" check.
-2. **[Step 01 · Management plane: Semaphore UI + Vault](01-management-plane-semaphore-and-vault.md)**: the first step, `vault01` and `sema01` built by hand. Then follow the guide.
+1. **[Step 00 · Step-by-step guide](00-ansible-step-by-step-guide.md)**: the build order. One section per step, each linking its document, with the Semaphore template(s) or MacBook commands to run and a "Done when" check.
+2. **[Step 01 · Management plane: Semaphore & Vault](01-management-plane-semaphore-and-vault.md)**: the first step, `vault01` and `sema01` built by hand. Then follow the guide.
 3. **[`lab/README.md`](lab/README.md)**: the project layout and quick start.
 
 ```bash
@@ -77,55 +77,55 @@ Every document is numbered as its step. Work through them in order with the [ste
 
 | Step | Document | Lab pieces |
 |---|---|---|
-| 01 | [Management plane: Semaphore UI + Vault, automation account](01-management-plane-semaphore-and-vault.md) | `sema01`, `vault01`, `00-vault-cert.yml` (play 1) |
-| 02 | [Control node & Ansible core: toolchain, inventory, first contact, facts, baseline](02-control-node-and-ansible-core.md) | `ansible.cfg`, inventory, `spark_facts`, `spark_baseline`, `00-ping`, `01-baseline` |
-| 03 | [Bare-metal provisioning & bootstrap: no BMC; Redfish & PXE practice](03-bare-metal-provisioning-and-bootstrap.md) | `00-bootstrap` (dead-man switch), `12-redfish-practice` |
-| 04 | [The DGX Spark as a Semaphore target](04-dgx-spark-as-semaphore-target.md) | `00b-semaphore-target.yml`, `semaphore/`, `tools/fetch-kubeconfig.sh`, `08-vault.yml` |
+| 01 | [Management plane: Semaphore & Vault](01-management-plane-semaphore-and-vault.md) | `sema01`, `vault01`, `00-vault-cert.yml` (play 1) |
+| 02 | [Control node & Ansible core](02-control-node-and-ansible-core.md) | `ansible.cfg`, inventory, `spark_facts`, `spark_baseline`, `00-ping`, `01-baseline` |
+| 03 | [Bare-metal provisioning & bootstrap](03-bare-metal-provisioning-and-bootstrap.md) | `00-bootstrap` (dead-man switch), `12-redfish-practice` |
+| 04 | [DGX Spark as a Semaphore target](04-dgx-spark-as-semaphore-target.md) | `00b-semaphore-target.yml`, `semaphore/`, `tools/fetch-kubeconfig.sh`, `08-vault.yml` |
 | 05 | [Execution internals & debugging](05-execution-internals-and-debugging.md) | AnsiballZ explode/execute, async, debugger |
-| 06 | [Inventory: static, constructed, mDNS discovery, NetBox](06-inventory-static-dynamic-and-discovery.md) | `inventory_plugins/spark_mdns.py`, `zz-constructed.yml` |
-| 07 | [Jinja2 & data transforms on real Spark output](07-jinja2-filters-and-data-transforms.md) | `15-jinja-lab.yml` (7 katas) |
-| 08 | [Roles, collections & arm64 Execution Environments](08-roles-collections-and-execution-environments.md) | `argument_specs`, `build-collection.sh`, `ee/` |
-| 09 | [Performance at scale: SSH mux, pipelining, forks, Mitogen](09-performance-at-scale-ssh-mux-and-mitogen.md) | `13-fleet-sim`, `14-fleet-bench` |
+| 06 | [Inventory: static, dynamic & discovery](06-inventory-static-dynamic-and-discovery.md) | `inventory_plugins/spark_mdns.py`, `zz-constructed.yml` |
+| 07 | [Jinja2 filters & data transforms](07-jinja2-filters-and-data-transforms.md) | `15-jinja-lab.yml` (7 katas) |
+| 08 | [Roles, collections & execution environments](08-roles-collections-and-execution-environments.md) | `argument_specs`, `build-collection.sh`, `ee/` |
+| 09 | [Performance at scale: SSH mux & Mitogen](09-performance-at-scale-ssh-mux-and-mitogen.md) | `13-fleet-sim`, `14-fleet-bench` |
 
 ### Part II — Node provisioning
 
 | Step | Document | Lab pieces |
 |---|---|---|
-| 10 | [Driver stack: audit, pin, upgrade (and Fabric Manager)](10-nvidia-driver-stack-and-fabric-manager.md) | `16-driver-audit`, `17-dgxos-upgrade` (dry run) |
-| 11 | [CUDA 13, NGC containers & CDI](11-cuda-ngc-containers-and-cdi.md) | `container_runtime`, `03-containers`, `18-cuda-smoke`, `uma_probe.cu` |
-| 12 | [Telemetry: GPU, unified memory, fabric; alerts; DCGM](12-gpu-telemetry-and-alerting.md) | `gpu_telemetry`, `04-telemetry`, Grafana dashboard, 7 alert rules |
+| 10 | [NVIDIA driver stack & Fabric Manager](10-nvidia-driver-stack-and-fabric-manager.md) | `16-driver-audit`, `17-dgxos-upgrade` (dry run) |
+| 11 | [CUDA, NGC containers & CDI](11-cuda-ngc-containers-and-cdi.md) | `container_runtime`, `03-containers`, `18-cuda-smoke`, `uma_probe.cu` |
+| 12 | [GPU telemetry & alerting](12-gpu-telemetry-and-alerting.md) | `gpu_telemetry`, `04-telemetry`, Grafana dashboard, 7 alert rules |
 
 ### Part III — Fabric & storage
 
 | Step | Document | Lab pieces |
 |---|---|---|
-| 13 | [ConnectX-7 fabric automation (RoCE), IB/OpenSM mapping](13-connectx7-fabric-and-opensm.md) | `cx7_fabric`, `02-fabric`, `11-rdma-perftest` |
-| 14 | [RoCEv2 done right: MTU, QoS, proving NCCL uses RDMA](14-rocev2-qos-and-nccl.md) | `12b-roce-qos`, `10-nccl-test` |
-| 15 | [NFS over RDMA model cache (→ Lustre/Weka/VAST clients)](15-nfs-rdma-and-parallel-file-systems.md) | `nfs_rdma`, `09-nfs-rdma` |
-| 16 | [GPUDirect Storage on a unified-memory machine](16-gpudirect-storage-and-cufile.md) | `14-gds-check` |
+| 13 | [ConnectX-7 fabric & OpenSM](13-connectx7-fabric-and-opensm.md) | `cx7_fabric`, `02-fabric`, `11-rdma-perftest` |
+| 14 | [RoCEv2, QoS & NCCL](14-rocev2-qos-and-nccl.md) | `12b-roce-qos`, `10-nccl-test` |
+| 15 | [NFS over RDMA & parallel file systems](15-nfs-rdma-and-parallel-file-systems.md) | `nfs_rdma`, `09-nfs-rdma` |
+| 16 | [GPUDirect Storage & cuFile](16-gpudirect-storage-and-cufile.md) | `14-gds-check` |
 
 ### Part IV — Secrets & platforms
 
 | Step | Document | Lab pieces |
 |---|---|---|
-| 17 | [Vault server: raft, TLS, init/unseal, audit, backup](17-vault-server-deep-dive.md) | `vault01` (built in Step 01, outside the Spark) |
-| 18 | [Vault ↔ Ansible: AppRole, KV, SSH certificates](18-vault-approle-secrets-and-ssh-certificates.md) | `00-vault-cert`, `vault_config` (`08-vault`), `19-vault-integration` |
-| 19 | [Kubernetes with kubeadm: root cluster, Cilium, MetalLB, vClusters](19-kubernetes-kubeadm-root-cluster-and-vclusters.md) | `kubeadm_cluster`, `cilium`, `metallb`, `vclusters`, `05-kubernetes`, `06b-vclusters`, `99-reset-kubernetes` |
-| 20 | [GPU Operator: host-driver mode, time-slicing](20-nvidia-gpu-operator-and-time-slicing.md) | `gpu_operator`, `06-gpu-operator` |
-| 21 | [Multus & secondary RDMA networks on Kubernetes](21-multus-and-secondary-rdma-networks.md) | `13-multus-rdma` |
-| 22 | [Slurm: GRES, cgroup v2, health checks, 2-node NCCL](22-slurm-gres-and-cgroup-gpus.md) | `slurm_cluster`, `07-slurm` |
-| 23 | [AWX on the Spark: install & configure as code](23-awx-install-and-configuration-as-code.md) (optional; the alternative controller, this lab runs Semaphore) | awx-operator, `awx.awx` |
-| 24 | [AWX in production: execution nodes, Vault creds, workflows, backup](24-awx-production-and-receptor.md) (optional) | receptor, `AWXBackup` |
+| 17 | [Vault server deep dive](17-vault-server-deep-dive.md) | `vault01` (built in Step 01, outside the Spark) |
+| 18 | [Vault AppRole, secrets & SSH certificates](18-vault-approle-secrets-and-ssh-certificates.md) | `00-vault-cert`, `vault_config` (`08-vault`), `19-vault-integration` |
+| 19 | [Kubernetes: kubeadm root cluster & vClusters](19-kubernetes-kubeadm-root-cluster-and-vclusters.md) | `kubeadm_cluster`, `cilium`, `metallb`, `vclusters`, `05-kubernetes`, `06b-vclusters`, `99-reset-kubernetes` |
+| 20 | [NVIDIA GPU Operator & time-slicing](20-nvidia-gpu-operator-and-time-slicing.md) | `gpu_operator`, `06-gpu-operator` |
+| 21 | [Multus & secondary RDMA networks](21-multus-and-secondary-rdma-networks.md) | `13-multus-rdma` |
+| 22 | [Slurm: GRES & cgroup GPUs](22-slurm-gres-and-cgroup-gpus.md) | `slurm_cluster`, `07-slurm` |
+| 23 | [AWX install & configuration as code](23-awx-install-and-configuration-as-code.md) (optional; the alternative controller, this lab runs Semaphore) | awx-operator, `awx.awx` |
+| 24 | [AWX production & Receptor](24-awx-production-and-receptor.md) (optional) | receptor, `AWXBackup` |
 
 ### Part V — Production operations
 
 | Step | Document | Lab pieces |
 |---|---|---|
-| 25 | [Testing & CI: lint, fixtures, Molecule on arm64](25-testing-linting-and-ci.md) | `tests/`, `.github/workflows/ansible-lab-ci.yml` |
-| 26 | [Drift detection & guarded self-healing](26-drift-detection-and-self-healing.md) | `20-drift-check`, `drift-cycle.sh`, `spark_drift_report.py` |
-| 27 | [Logging & audit: auditd, Loki/Alloy, ARA](27-logging-and-audit-compliance.md) | `23-logging-audit` |
+| 25 | [Testing, linting & CI](25-testing-linting-and-ci.md) | `tests/`, `.github/workflows/ansible-lab-ci.yml` |
+| 26 | [Drift detection & self-healing](26-drift-detection-and-self-healing.md) | `20-drift-check`, `drift-cycle.sh`, `spark_drift_report.py` |
+| 27 | [Logging & audit compliance](27-logging-and-audit-compliance.md) | `23-logging-audit` |
 | 28 | [Firmware lifecycle & vulnerability patching](28-firmware-lifecycle-and-vulnerability-patching.md) | `19-firmware-inventory`, `17-dgxos-upgrade`, fwupd in the upgrade |
-| 29 | [Incident response: drain, evidence, runbooks A–E](29-incident-response-and-emergency-drain.md) | `node_drain`, `21-emergency-drain`, `24-uma-relief` |
+| 29 | [Incident response & emergency drain](29-incident-response-and-emergency-drain.md) | `node_drain`, `21-emergency-drain`, `24-uma-relief` |
 | 30 | [Capstone: build, break, prove](30-capstone-build-break-prove.md) | `spark_validate`, `spark_invariants.py`, `25-chaos`, `capstone_scorecard.py` |
 
 ---

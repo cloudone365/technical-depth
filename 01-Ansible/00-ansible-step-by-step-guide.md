@@ -1,6 +1,6 @@
-# 01-Ansible · Step-by-Step Guide (Steps 01–30)
+# Step 00 · Ansible Step-by-Step Guide
 
-> **01-Ansible · Step 00 of 30** · Start here · [Module overview](README.md) · [Step 01 · Management plane](01-management-plane-semaphore-and-vault.md) →
+> **01-Ansible · Step 00 of 30** · Start here · [Module overview](README.md) · [Step 01 · Management plane: Semaphore & Vault](01-management-plane-semaphore-and-vault.md) →
 
 This page is the build order for the whole module. Each section below is one step, links the document that explains it, and says what to run and how you know the step is done. Work through them in order. The documents carry the same numbers as the steps: Step 13 is `13-….md`.
 
@@ -29,17 +29,17 @@ Times are rough working times for one Spark, not counting reading.
 | Step | Document | What you do | Time | Done when |
 |---|---|---|---|---|
 | **Part I** | **Management plane & Ansible foundations** | | | |
-| 01 | [Management plane: Semaphore + Vault](01-management-plane-semaphore-and-vault.md) | Build `vault01` and `sema01` by hand | ½ day | A Semaphore task logs in to a test target as `svc-ansible` with a certificate |
+| 01 | [Management plane: Semaphore & Vault](01-management-plane-semaphore-and-vault.md) | Build `vault01` and `sema01` by hand | ½ day | A Semaphore task logs in to a test target as `svc-ansible` with a certificate |
 | 02 | [Control node & Ansible core](02-control-node-and-ansible-core.md) | MacBook toolchain, SSH trust, inventory; later first contact, facts, baseline | 30 min + 30 min | `ALL LOCAL CHECKS PASSED`; later `01 Baseline` twice, second run `changed=0` |
 | 03 | [Bare-metal provisioning & bootstrap](03-bare-metal-provisioning-and-bootstrap.md) | Fresh DGX OS only: bootstrap name, key, static IP | 30 min | `ssh dgxadmin@192.168.0.100 hostname` → `dgx-spark-1` |
-| 04 | [The Spark as a Semaphore target](04-dgx-spark-as-semaphore-target.md) | `svc-ansible` + CA trust, lab image on sema01, project `spark-lab`, lab secrets | 60–90 min | sshd log: `Accepted publickey for svc-ansible … ED25519-CERT` |
+| 04 | [DGX Spark as a Semaphore target](04-dgx-spark-as-semaphore-target.md) | `svc-ansible` + CA trust, lab image on sema01, project `spark-lab`, lab secrets | 60–90 min | sshd log: `Accepted publickey for svc-ansible … ED25519-CERT` |
 | 05 | [Execution internals & debugging](05-execution-internals-and-debugging.md) | Study: watch a module run, explode an AnsiballZ payload | 45 min | You can name the failing layer from an error alone |
-| 06 | [Inventory: static, dynamic, discovery](06-inventory-static-dynamic-and-discovery.md) | Study: fact-driven groups, mDNS plugin | 45 min | `ansible-inventory --graph` shows `gpu_ready` |
-| 07 | [Jinja2 & data transforms](07-jinja2-filters-and-data-transforms.md) | Study: the 7 Jinja katas | 60 min | `7/7 Jinja katas passed` |
-| 08 | [Roles, collections & EEs](08-roles-collections-and-execution-environments.md) | Study: package the roles as a collection | 45 min | `ansible-doc -t role -l cloudone.spark` lists the roles |
-| 09 | [Performance at scale](09-performance-at-scale-ssh-mux-and-mitogen.md) | Study: simulated fleet, tuning matrix | 60 min | Your own timing table for forks / pipelining / facts |
+| 06 | [Inventory: static, dynamic & discovery](06-inventory-static-dynamic-and-discovery.md) | Study: fact-driven groups, mDNS plugin | 45 min | `ansible-inventory --graph` shows `gpu_ready` |
+| 07 | [Jinja2 filters & data transforms](07-jinja2-filters-and-data-transforms.md) | Study: the 7 Jinja katas | 60 min | `7/7 Jinja katas passed` |
+| 08 | [Roles, collections & execution environments](08-roles-collections-and-execution-environments.md) | Study: package the roles as a collection | 45 min | `ansible-doc -t role -l cloudone.spark` lists the roles |
+| 09 | [Performance at scale: SSH mux & Mitogen](09-performance-at-scale-ssh-mux-and-mitogen.md) | Study: simulated fleet, tuning matrix | 60 min | Your own timing table for forks / pipelining / facts |
 | **Part II** | **Node provisioning** | | | |
-| 10 | [Driver stack & Fabric Manager](10-nvidia-driver-stack-and-fabric-manager.md) | `16 Driver audit`; upgrade dry run | 20 min | Driver audit green, NVIDIA packages held |
+| 10 | [NVIDIA driver stack & Fabric Manager](10-nvidia-driver-stack-and-fabric-manager.md) | `16 Driver audit`; upgrade dry run | 20 min | Driver audit green, NVIDIA packages held |
 | 11 | [CUDA, NGC containers & CDI](11-cuda-ngc-containers-and-cdi.md) | `03 Containers`, `18 CUDA smoke` | 40 min | `uma_probe … check=PASS` |
 | 12 | [GPU telemetry & alerting](12-gpu-telemetry-and-alerting.md) | `04 Telemetry` | 30 min | Grafana *Spark Lab / Overview* shows GPU, UMA, CX-7 |
 | **Part III** | **Fabric & storage** | | | |
@@ -51,16 +51,16 @@ Times are rough working times for one Spark, not counting reading.
 | 17 | [Vault server deep dive](17-vault-server-deep-dive.md) | Study: inspect vault01, seal drill, snapshot | 45 min | You can unseal and snapshot vault01 from memory |
 | 18 | [Vault AppRole, secrets & SSH certificates](18-vault-approle-secrets-and-ssh-certificates.md) | `19 Vault integration` | 20 min | `NGC key present: True` without the key in any log |
 | 19 | [Kubernetes: kubeadm root cluster & vClusters](19-kubernetes-kubeadm-root-cluster-and-vclusters.md) | `05 Kubernetes`, fetch kubeconfig | 45 min | `dgx-spark-1` `Ready`, Cilium `OK` |
-| 20 | [GPU Operator & time-slicing](20-nvidia-gpu-operator-and-time-slicing.md) | `06 GPU Operator`, then `06b vClusters` | 60 min | 15 `nvidia.com/gpu`; contexts `dev-lab` and `llms` answer |
+| 20 | [NVIDIA GPU Operator & time-slicing](20-nvidia-gpu-operator-and-time-slicing.md) | `06 GPU Operator`, then `06b vClusters` | 60 min | 15 `nvidia.com/gpu`; contexts `dev-lab` and `llms` answer |
 | 21 | [Multus & secondary RDMA networks](21-multus-and-secondary-rdma-networks.md) | `13 Multus RDMA` | 45 min | A pod has a second, RDMA-capable interface |
 | 22 | [Slurm: GRES & cgroup GPUs](22-slurm-gres-and-cgroup-gpus.md) | `07 Slurm` | 45 min | `srun --gres=gpu:1 nvidia-smi` runs |
 | 23 | [AWX install & configuration as code](23-awx-install-and-configuration-as-code.md) | Optional study: arm64 pre-flight, AWX as code | 2 h | You can choose on-Spark vs hybrid AWX |
-| 24 | [AWX in production & Receptor](24-awx-production-and-receptor.md) | Optional: execution node, Vault credentials | 2 h | An AWX job runs on the Spark with a Vault-signed certificate |
+| 24 | [AWX production & Receptor](24-awx-production-and-receptor.md) | Optional: execution node, Vault credentials | 2 h | An AWX job runs on the Spark with a Vault-signed certificate |
 | **Part V** | **Production operations** | | | |
 | 25 | [Testing, linting & CI](25-testing-linting-and-ci.md) | CI workflow, Molecule on the Spark | 45 min | A broken role can't merge |
 | 26 | [Drift detection & self-healing](26-drift-detection-and-self-healing.md) | `20 Drift check`, scheduled nightly | 30 min | Nightly task green; drift report exit codes understood |
 | 27 | [Logging & audit compliance](27-logging-and-audit-compliance.md) | `23 Logging audit` | 45 min | Four audit sources answer "who changed what" |
-| 28 | [Firmware lifecycle & patching](28-firmware-lifecycle-and-vulnerability-patching.md) | `19 Firmware inventory`, `17 DGX OS upgrade` | per window | Upgrade done, validation green afterwards |
+| 28 | [Firmware lifecycle & vulnerability patching](28-firmware-lifecycle-and-vulnerability-patching.md) | `19 Firmware inventory`, `17 DGX OS upgrade` | per window | Upgrade done, validation green afterwards |
 | 29 | [Incident response & emergency drain](29-incident-response-and-emergency-drain.md) | `21 Emergency drain`, `24 UMA relief`, break-glass drill | 90 min | Node drained, evidence captured, returned to service |
 | 30 | [Capstone: build, break, prove](30-capstone-build-break-prove.md) | `25 Chaos`, find and fix, grade | a weekend | Scorecard from the evidence on sema01 |
 
@@ -96,7 +96,7 @@ Orange: the management plane. Blue: needs `dgx-spark-2` and a QSFP cable; with o
 
 # Part I · Management plane & Ansible foundations
 
-## Step 01 · Management plane: sema01 + vault01 → [document](01-management-plane-semaphore-and-vault.md)
+## Step 01 · Management plane: Semaphore & Vault → [document](01-management-plane-semaphore-and-vault.md)
 
 Build `vault01` (192.168.0.211: SSH CA `ssh-client-signer`, signing role `ansible` for principal `svc-ansible` with 15-minute certificates, AppRole `semaphore`, audit log) and `sema01` (192.168.0.210: Semaphore UI + PostgreSQL in Docker) by hand, exactly as Step 01 describes, with your Ubuntu test targets. No lab playbook ever configures these two machines, and they survive every reset of the Spark.
 
@@ -152,7 +152,7 @@ The second run moves the Spark to its static address behind a dead-man switch: i
 
 ✅ **Done when** `ssh dgxadmin@192.168.0.100 hostname` prints `dgx-spark-1` without a password.
 
-## Step 04 · The Spark as a Semaphore target → [document](04-dgx-spark-as-semaphore-target.md)
+## Step 04 · DGX Spark as a Semaphore target → [document](04-dgx-spark-as-semaphore-target.md)
 
 Work through Step 04 from top to bottom (MacBook, sema01 and the Semaphore UI). In short:
 
@@ -201,7 +201,7 @@ ansible-inventory --graph
 
 ✅ **Done when** `dgx-spark-1` shows up under `gpu_ready` and `driver_580`, and you can explain why those groups don't exist in a Semaphore task.
 
-## Step 07 · Jinja2 & data transforms → [document](07-jinja2-filters-and-data-transforms.md)
+## Step 07 · Jinja2 filters & data transforms → [document](07-jinja2-filters-and-data-transforms.md)
 
 Study step. **What to try:** the kata playbook, localhost only. **Semaphore:** `15 Jinja lab`, or on the MacBook:
 
@@ -223,7 +223,7 @@ ANSIBLE_COLLECTIONS_PATH=/tmp/colltest ansible-doc -t role -l cloudone.spark
 
 ✅ **Done when** `ansible-doc` lists the roles with their `argument_specs`. Building the arm64 execution environment (Step 08 §3.2) can wait until Step 23.
 
-## Step 09 · Performance at scale → [document](09-performance-at-scale-ssh-mux-and-mitogen.md)
+## Step 09 · Performance at scale: SSH mux & Mitogen → [document](09-performance-at-scale-ssh-mux-and-mitogen.md)
 
 Study step. **What to try** (MacBook only: it benchmarks your own controller, Step 09 §2): start a fleet of fake sshd nodes, run the matrix, clean up.
 
@@ -240,7 +240,7 @@ ansible-playbook playbooks/13-fleet-sim.yml -e fleet_state=absent -e fleet_size=
 
 # Part II · Node provisioning
 
-## Step 10 · Driver stack & Fabric Manager → [document](10-nvidia-driver-stack-and-fabric-manager.md)
+## Step 10 · NVIDIA driver stack & Fabric Manager → [document](10-nvidia-driver-stack-and-fabric-manager.md)
 
 **Semaphore:** `16 Driver audit`. Then a dry run of the rolling upgrade, so you know what it would do before Step 28 does it for real: `17 DGX OS upgrade` with extra variable `upgrade_dry_run: true`.
 
@@ -375,7 +375,7 @@ Break-glass: `ansible-playbook playbooks/05-kubernetes.yml -K` writes the kubeco
 
 ✅ **Done when** `dgx-spark-1` is `Ready`, `kubectl --context spark-root -n kube-system exec ds/cilium -- cilium-dbg status --brief` prints `OK`, and `ssh dgxadmin@192.168.0.100 sudo crictl ps` lists the control-plane containers. Broke it while learning? Run the template `99 Reset Kubernetes` (extra variable `reset_confirm: RESET`, Step 04 §7.3; break-glass: `ansible-playbook playbooks/99-reset-kubernetes.yml -K` and type `RESET`) and run Step 19 again.
 
-## Step 20 · GPU Operator & time-slicing → [document](20-nvidia-gpu-operator-and-time-slicing.md)
+## Step 20 · NVIDIA GPU Operator & time-slicing → [document](20-nvidia-gpu-operator-and-time-slicing.md)
 
 **Semaphore:** `06 GPU Operator`, then `06b vClusters` (the two vClusters from Step 19 §3.4 and §4.5; adds the `dev-lab` and `llms` contexts on sema01's state volume). `06b vClusters` needs the [02-Kubernetes lab](../02-Kubernetes/lab/README.md) in the same repository checkout: the `vclusters` role applies its `vclusters/*.yaml` values and the kustomize directories `manifests/root/00-platform` and `manifests/root/05-vclusters` (namespaces, PriorityClasses, budgets) rather than keeping a copy. Then, on the MacBook:
 
@@ -429,7 +429,7 @@ Then, if you install it: `ansible-playbook playbooks/awx-config.yml -e @.cache/a
 
 ✅ **Done when** you can justify on-Spark vs hybrid from the pre-flight and, if installed, rebuild all AWX configuration from git.
 
-## Step 24 · AWX in production & Receptor → [document](24-awx-production-and-receptor.md)
+## Step 24 · AWX production & Receptor → [document](24-awx-production-and-receptor.md)
 
 Optional, builds on Step 23. Make the Spark a Receptor execution node, map Semaphore's play 1 to AWX's *HashiCorp Vault Signed SSH* credential (with its own AppRole, not `semaphore`), add an approval workflow and an `AWXBackup`.
 

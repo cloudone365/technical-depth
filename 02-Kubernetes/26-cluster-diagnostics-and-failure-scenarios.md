@@ -1,6 +1,6 @@
-# Step 26 · Cluster Diagnostics & Failure Playbook for a DGX Spark Kubernetes Platform
+# Step 26 · Cluster Diagnostics & Failure Scenarios: a Playbook for the DGX Spark Kubernetes Platform
 
-> **02-Kubernetes · Part IX — Operations · Step 26 of 28** · ← [Step 25 · Resilience at scale](25-ultra-scale-cluster-resilience-and-fault-tolerance.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 27 · Hands-on workbook](27-hands-on-practice-exercises-workbook.md) →
+> **02-Kubernetes · Part IX — Operations · Step 26 of 28** · ← [Step 25 · Ultra-scale cluster resilience & fault tolerance](25-ultra-scale-cluster-resilience-and-fault-tolerance.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 27 · Hands-on practice exercises workbook](27-hands-on-practice-exercises-workbook.md) →
 
 | | |
 |---|---|

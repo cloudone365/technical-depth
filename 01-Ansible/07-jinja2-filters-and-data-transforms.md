@@ -1,6 +1,6 @@
-# Step 07 · Jinja2 & Data Transforms: Turning Spark Command Output into Decisions
+# Step 07 · Jinja2 Filters & Data Transforms: Turning Spark Command Output into Decisions
 
-> **01-Ansible · Part I — Management plane & Ansible foundations · Step 07 of 30** · ← [Step 06 · Inventory: static, dynamic & discovery](06-inventory-static-dynamic-and-discovery.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 08 · Roles, collections & EEs](08-roles-collections-and-execution-environments.md) →
+> **01-Ansible · Part I — Management plane & Ansible foundations · Step 07 of 30** · ← [Step 06 · Inventory: static, dynamic & discovery](06-inventory-static-dynamic-and-discovery.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 08 · Roles, collections & execution environments](08-roles-collections-and-execution-environments.md) →
 
 | | |
 |---|---|

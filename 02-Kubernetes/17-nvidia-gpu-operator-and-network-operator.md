@@ -1,6 +1,6 @@
-# Step 17 · NVIDIA GPU Operator, Network Operator & GPU Observability
+# Step 17 · NVIDIA GPU Operator & Network Operator, with GPU Observability
 
-> **02-Kubernetes · Part V — GPU platform · Step 17 of 28** · ← [Step 16 · Container Toolkit & GPU sharing](16-nvidia-container-toolkit-and-gpu-virtualization.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 18 · Distributed training & NCCL](18-distributed-ai-training-and-nccl.md) →
+> **02-Kubernetes · Part V — GPU platform · Step 17 of 28** · ← [Step 16 · NVIDIA Container Toolkit & GPU virtualization](16-nvidia-container-toolkit-and-gpu-virtualization.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 18 · Distributed AI training & NCCL](18-distributed-ai-training-and-nccl.md) →
 
 | | |
 |---|---|

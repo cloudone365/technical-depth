@@ -1,4 +1,4 @@
-# DGX Spark Ansible Lab · runnable companion to 01-Ansible
+# 01-Ansible Lab · Runnable Companion to Steps 01–30
 
 Everything Steps 01–30 teach, as a working Ansible project you run against
 one or two NVIDIA DGX Spark systems. Every code block in the step documents is taken

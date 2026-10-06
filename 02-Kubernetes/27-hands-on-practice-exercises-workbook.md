@@ -1,6 +1,6 @@
-# Step 27 · Hands-On Workbook: 20 Production Challenges on the Spark Platform
+# Step 27 · Hands-On Practice Exercises Workbook: 20 Production Challenges on the Spark Platform
 
-> **02-Kubernetes · Part IX — Operations · Step 27 of 28** · ← [Step 26 · Diagnostics & failure playbook](26-cluster-diagnostics-and-failure-scenarios.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 28 · Production MLOps & GitOps](28-production-mlops-and-gitops.md) →
+> **02-Kubernetes · Part IX — Operations · Step 27 of 28** · ← [Step 26 · Cluster diagnostics & failure scenarios](26-cluster-diagnostics-and-failure-scenarios.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 28 · Production MLOps & GitOps](28-production-mlops-and-gitops.md) →
 
 | | |
 |---|---|

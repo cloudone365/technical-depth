@@ -1,6 +1,6 @@
-# Step 06 · Controllers: Reconciliation Loops, Informers, Leader Election & Writing Your Own
+# Step 06 · kube-controller-manager & Controllers: Reconciliation Loops, Informers, Leader Election & Writing Your Own
 
-> **02-Kubernetes · Part II — Controllers & scheduling · Step 06 of 28** · ← [Step 05 · Datacenter simulation](05-dgx-spark-datacenter-simulation-lab.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 07 · Scheduler & Kueue](07-kube-scheduler-and-ai-batch-scheduling.md) →
+> **02-Kubernetes · Part II — Controllers & scheduling · Step 06 of 28** · ← [Step 05 · DGX Spark datacenter simulation lab](05-dgx-spark-datacenter-simulation-lab.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 07 · kube-scheduler & AI batch scheduling](07-kube-scheduler-and-ai-batch-scheduling.md) →
 
 | | |
 |---|---|

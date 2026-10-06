@@ -1,6 +1,6 @@
-# Step 19 · From Two Sparks to a SuperPOD: Fabrics, Rails, RoCE vs InfiniBand, and Fabric Health
+# Step 19 · Large-Scale SuperPOD & Network Fabrics: From Two Sparks to a SuperPOD, Rails, RoCE vs InfiniBand, Fabric Health
 
-> **02-Kubernetes · Part VI — Distributed training & fabrics · Step 19 of 28** · ← [Step 18 · Distributed training & NCCL](18-distributed-ai-training-and-nccl.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 20 · vLLM](20-vllm-high-throughput-llm-serving.md) →
+> **02-Kubernetes · Part VI — Distributed training & fabrics · Step 19 of 28** · ← [Step 18 · Distributed AI training & NCCL](18-distributed-ai-training-and-nccl.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 20 · vLLM high-throughput LLM serving](20-vllm-high-throughput-llm-serving.md) →
 
 | | |
 |---|---|

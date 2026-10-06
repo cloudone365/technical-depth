@@ -1,6 +1,6 @@
-# Step 17 · HashiCorp Vault for the Lab: vault01's Raft Storage, TLS, Seal/Unseal, Policies, Audit & Backup
+# Step 17 · Vault Server Deep Dive: vault01's Raft Storage, TLS, Seal/Unseal, Policies, Audit & Backup
 
-> **01-Ansible · Part IV — Secrets & platforms · Step 17 of 30** · ← [Step 16 · GPUDirect Storage & cuFile](16-gpudirect-storage-and-cufile.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 18 · Vault AppRole & SSH certificates](18-vault-approle-secrets-and-ssh-certificates.md) →
+> **01-Ansible · Part IV — Secrets & platforms · Step 17 of 30** · ← [Step 16 · GPUDirect Storage & cuFile](16-gpudirect-storage-and-cufile.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 18 · Vault AppRole, secrets & SSH certificates](18-vault-approle-secrets-and-ssh-certificates.md) →
 >
 > Builds on: [Step 01 §3–4](01-management-plane-semaphore-and-vault.md) (vault01 built by hand) · Spark lab additions: [Step 04 §6](04-dgx-spark-as-semaphore-target.md) · Ansible integration: [Step 18](18-vault-approle-secrets-and-ssh-certificates.md)
 

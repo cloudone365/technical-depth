@@ -1,6 +1,6 @@
-# Step 10 · The NVIDIA Driver Stack on DGX Spark: Audit, Pin, Upgrade Safely (and Where Fabric Manager Fits)
+# Step 10 · NVIDIA Driver Stack & Fabric Manager: Audit, Pin and Upgrade Safely on DGX Spark
 
-> **01-Ansible · Part II — Node provisioning · Step 10 of 30** · ← [Step 09 · Performance at scale](09-performance-at-scale-ssh-mux-and-mitogen.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 11 · CUDA, NGC containers & CDI](11-cuda-ngc-containers-and-cdi.md) →
+> **01-Ansible · Part II — Node provisioning · Step 10 of 30** · ← [Step 09 · Performance at scale: SSH mux & Mitogen](09-performance-at-scale-ssh-mux-and-mitogen.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 11 · CUDA, NGC containers & CDI](11-cuda-ngc-containers-and-cdi.md) →
 
 | | |
 |---|---|

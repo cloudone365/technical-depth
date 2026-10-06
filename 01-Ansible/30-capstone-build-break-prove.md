@@ -1,6 +1,6 @@
-# Step 30 · Capstone: Build, Break, Prove. The DGX Spark Automation Mastery Lab & Evidence-Based Test Harness
+# Step 30 · Capstone: Build, Break, Prove: the DGX Spark Automation Mastery Lab & Evidence-Based Test Harness
 
-> **01-Ansible · Part V — Production operations · Step 30 of 30** · ← [Step 29 · Incident response](29-incident-response-and-emergency-drain.md) · [All steps](00-ansible-step-by-step-guide.md)
+> **01-Ansible · Part V — Production operations · Step 30 of 30** · ← [Step 29 · Incident response & emergency drain](29-incident-response-and-emergency-drain.md) · [All steps](00-ansible-step-by-step-guide.md)
 >
 > The last step. Back to the [module overview](README.md).
 

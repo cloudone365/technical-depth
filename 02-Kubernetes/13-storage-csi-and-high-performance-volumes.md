@@ -1,6 +1,6 @@
-# Step 13 · Storage for AI on Kubernetes: local-path on NVMe, WaitForFirstConsumer, Model Caches, fio, UMA & Page Cache
+# Step 13 · Storage, CSI & High-Performance Volumes: local-path on NVMe, WaitForFirstConsumer, Model Caches, fio, UMA & Page Cache
 
-> **02-Kubernetes · Part IV — Workloads, storage & tenancy · Step 13 of 28** · ← [Step 12 · Workload controllers](12-advanced-workload-controllers.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 14 · Multi-tenancy & cgroups](14-multi-tenancy-resource-quotas-and-cgroups.md) →
+> **02-Kubernetes · Part IV — Workloads, storage & tenancy · Step 13 of 28** · ← [Step 12 · Advanced workload controllers](12-advanced-workload-controllers.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 14 · Multi-tenancy, resource quotas & cgroups](14-multi-tenancy-resource-quotas-and-cgroups.md) →
 
 | | |
 |---|---|

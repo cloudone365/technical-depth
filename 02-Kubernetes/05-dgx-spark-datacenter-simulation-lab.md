@@ -1,6 +1,6 @@
-# Step 05 · The DGX Spark Datacenter Simulation: End-to-End Build, Gates & Day-2 Operations
+# Step 05 · DGX Spark Datacenter Simulation Lab: End-to-End Build, Gates & Day-2 Operations
 
-> **02-Kubernetes · Part I — Control plane & the nested lab · Step 05 of 28** · ← [Step 04 · Nested clusters with vCluster](04-nested-clusters-with-vcluster.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 06 · Controllers](06-kube-controller-manager-and-controllers.md) →
+> **02-Kubernetes · Part I — Control plane & the nested lab · Step 05 of 28** · ← [Step 04 · Nested clusters with vCluster](04-nested-clusters-with-vcluster.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 06 · kube-controller-manager & controllers](06-kube-controller-manager-and-controllers.md) →
 
 | | |
 |---|---|

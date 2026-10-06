@@ -1,6 +1,6 @@
-# Step 12 · Telemetry for DGX Spark: GPU, Unified Memory & Fabric Metrics, Prometheus, Grafana, Alerts (and Where DCGM Fits)
+# Step 12 · GPU Telemetry & Alerting: GPU, Unified Memory & Fabric Metrics, Prometheus, Grafana (and Where DCGM Fits)
 
-> **01-Ansible · Part II — Node provisioning · Step 12 of 30** · ← [Step 11 · CUDA, NGC containers & CDI](11-cuda-ngc-containers-and-cdi.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 13 · ConnectX-7 fabric](13-connectx7-fabric-and-opensm.md) →
+> **01-Ansible · Part II — Node provisioning · Step 12 of 30** · ← [Step 11 · CUDA, NGC containers & CDI](11-cuda-ngc-containers-and-cdi.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 13 · ConnectX-7 fabric & OpenSM](13-connectx7-fabric-and-opensm.md) →
 
 | | |
 |---|---|

@@ -1,8 +1,8 @@
-# Step 20 · NVIDIA GPU Operator on the kubeadm Root Cluster: Host-Driver Mode, 15 Time-Slices, Budgets per vCluster, Validation & Secrets for Pods
+# Step 20 · NVIDIA GPU Operator & Time-Slicing: Host-Driver Mode, 15 Slices, Budgets per vCluster, Validation & Secrets for Pods
 
-> **01-Ansible · Part IV — Secrets & platforms · Step 20 of 30** · ← [Step 19 · Kubernetes with kubeadm](19-kubernetes-kubeadm-root-cluster-and-vclusters.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 21 · Multus & RDMA networks](21-multus-and-secondary-rdma-networks.md) →
+> **01-Ansible · Part IV — Secrets & platforms · Step 20 of 30** · ← [Step 19 · Kubernetes: kubeadm root cluster & vClusters](19-kubernetes-kubeadm-root-cluster-and-vclusters.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 21 · Multus & secondary RDMA networks](21-multus-and-secondary-rdma-networks.md) →
 >
-> Deep dive: [02-Kubernetes Step 17 · GPU & Network Operator](../02-Kubernetes/17-nvidia-gpu-operator-and-network-operator.md)
+> Deep dive: [02-Kubernetes Step 17 · NVIDIA GPU Operator & Network Operator](../02-Kubernetes/17-nvidia-gpu-operator-and-network-operator.md)
 
 | | |
 |---|---|

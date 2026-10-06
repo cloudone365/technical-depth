@@ -1,4 +1,4 @@
-# Step 15 · Shared Storage for a Spark Pair: NFSv4.2 over RDMA as a Model Cache (and How It Maps to Lustre/Weka/VAST Clients)
+# Step 15 · NFS over RDMA & Parallel File Systems: NFSv4.2 over RDMA as a Model Cache (and How It Maps to Lustre/Weka/VAST)
 
 > **01-Ansible · Part III — Fabric & storage · Step 15 of 30** · ← [Step 14 · RoCEv2, QoS & NCCL](14-rocev2-qos-and-nccl.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 16 · GPUDirect Storage & cuFile](16-gpudirect-storage-and-cufile.md) →
 

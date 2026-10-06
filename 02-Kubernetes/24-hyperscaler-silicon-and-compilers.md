@@ -1,6 +1,6 @@
-# Step 24 · Accelerators & Compilers Beyond the GPU: TPU, Trainium, Blackwell, and What Compilers Buy You
+# Step 24 · Hyperscaler Silicon & Compilers: TPU, Trainium, Blackwell, and What Compilers Buy You
 
-> **02-Kubernetes · Part VIII — Scale & resilience · Step 24 of 28** · ← [Step 23 · Prefill/decode split](23-disaggregated-prefill-and-decode-serving.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 25 · Resilience at scale](25-ultra-scale-cluster-resilience-and-fault-tolerance.md) →
+> **02-Kubernetes · Part VIII — Scale & resilience · Step 24 of 28** · ← [Step 23 · Disaggregated prefill & decode serving](23-disaggregated-prefill-and-decode-serving.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 25 · Ultra-scale cluster resilience & fault tolerance](25-ultra-scale-cluster-resilience-and-fault-tolerance.md) →
 
 | | |
 |---|---|

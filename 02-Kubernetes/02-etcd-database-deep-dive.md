@@ -1,6 +1,6 @@
-# Step 02 · etcd Deep Dive: Raft, MVCC, Quotas, Backups & Disaster Recovery
+# Step 02 · etcd Database Deep Dive: Raft, MVCC, Quotas, Backups & Disaster Recovery
 
-> **02-Kubernetes · Part I — Control plane & the nested lab · Step 02 of 28** · ← [Step 01 · Core architecture](01-kubernetes-core-architecture.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 03 · API server](03-kube-apiserver-internals.md) →
+> **02-Kubernetes · Part I — Control plane & the nested lab · Step 02 of 28** · ← [Step 01 · Kubernetes core architecture](01-kubernetes-core-architecture.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 03 · kube-apiserver internals](03-kube-apiserver-internals.md) →
 
 | | |
 |---|---|

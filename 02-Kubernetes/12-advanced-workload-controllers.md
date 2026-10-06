@@ -1,6 +1,6 @@
-# Step 12 · Workload Controllers for AI: StatefulSets, DaemonSets, Indexed Jobs & Disruption Budgets
+# Step 12 · Advanced Workload Controllers: StatefulSets, DaemonSets, Indexed Jobs & Disruption Budgets for AI
 
-> **02-Kubernetes · Part IV — Workloads, storage & tenancy · Step 12 of 28** · ← [Step 11 · Ingress & Gateway API](11-ingress-controllers-and-gateway-api.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 13 · Storage & model cache](13-storage-csi-and-high-performance-volumes.md) →
+> **02-Kubernetes · Part IV — Workloads, storage & tenancy · Step 12 of 28** · ← [Step 11 · Ingress controllers & Gateway API](11-ingress-controllers-and-gateway-api.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 13 · Storage, CSI & high-performance volumes](13-storage-csi-and-high-performance-volumes.md) →
 
 | | |
 |---|---|

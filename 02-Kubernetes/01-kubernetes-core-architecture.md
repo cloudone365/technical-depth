@@ -1,6 +1,6 @@
 # Step 01 · Kubernetes Core Architecture & Pod Lifecycle on a DGX Spark
 
-> **02-Kubernetes · Part I — Control plane & the nested lab · Step 01 of 28** · ← [All steps](00-kubernetes-step-by-step-guide.md) · [Step 02 · etcd](02-etcd-database-deep-dive.md) →
+> **02-Kubernetes · Part I — Control plane & the nested lab · Step 01 of 28** · ← [All steps](00-kubernetes-step-by-step-guide.md) · [Step 02 · etcd database deep dive](02-etcd-database-deep-dive.md) →
 
 | | |
 |---|---|

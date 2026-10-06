@@ -1,6 +1,6 @@
-# Step 16 · NVIDIA Container Toolkit, CDI & GPU Sharing on GB10: Time-Slicing, MPS, (no) MIG
+# Step 16 · NVIDIA Container Toolkit & GPU Virtualization: CDI and GPU Sharing on GB10 (Time-Slicing, MPS, no MIG)
 
-> **02-Kubernetes · Part V — GPU platform · Step 16 of 28** · ← [Step 15 · GB10 hardware & drivers](15-nvidia-hardware-and-driver-stack.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 17 · GPU & Network Operators](17-nvidia-gpu-operator-and-network-operator.md) →
+> **02-Kubernetes · Part V — GPU platform · Step 16 of 28** · ← [Step 15 · NVIDIA hardware & driver stack](15-nvidia-hardware-and-driver-stack.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 17 · NVIDIA GPU Operator & Network Operator](17-nvidia-gpu-operator-and-network-operator.md) →
 
 | | |
 |---|---|

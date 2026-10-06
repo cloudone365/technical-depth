@@ -1,6 +1,6 @@
-# Step 14 · Multi-Tenancy on One Spark: Quotas at Two Layers, LimitRanges, QoS, cgroups v2 & the Unified-Memory Question
+# Step 14 · Multi-Tenancy, Resource Quotas & cgroups: Quotas at Two Layers, LimitRanges, QoS, cgroups v2 & the Unified-Memory Question
 
-> **02-Kubernetes · Part IV — Workloads, storage & tenancy · Step 14 of 28** · ← [Step 13 · Storage & model cache](13-storage-csi-and-high-performance-volumes.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 15 · GB10 hardware & drivers](15-nvidia-hardware-and-driver-stack.md) →
+> **02-Kubernetes · Part IV — Workloads, storage & tenancy · Step 14 of 28** · ← [Step 13 · Storage, CSI & high-performance volumes](13-storage-csi-and-high-performance-volumes.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 15 · NVIDIA hardware & driver stack](15-nvidia-hardware-and-driver-stack.md) →
 
 | | |
 |---|---|

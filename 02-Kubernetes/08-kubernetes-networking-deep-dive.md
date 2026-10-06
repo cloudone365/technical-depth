@@ -1,6 +1,6 @@
 # Step 08 · Kubernetes Networking Deep Dive: CNI, Cilium VXLAN & eBPF, NetworkPolicy & Secondary RDMA Networks
 
-> **02-Kubernetes · Part III — Networking · Step 08 of 28** · ← [Step 07 · Scheduler & Kueue](07-kube-scheduler-and-ai-batch-scheduling.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 09 · kube-proxy & ClusterIP](09-kube-proxy-and-cluster-ip-mechanics.md) →
+> **02-Kubernetes · Part III — Networking · Step 08 of 28** · ← [Step 07 · kube-scheduler & AI batch scheduling](07-kube-scheduler-and-ai-batch-scheduling.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 09 · kube-proxy & ClusterIP mechanics](09-kube-proxy-and-cluster-ip-mechanics.md) →
 
 | | |
 |---|---|

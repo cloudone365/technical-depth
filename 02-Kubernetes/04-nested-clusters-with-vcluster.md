@@ -1,6 +1,6 @@
-# Step 04 · Nested Clusters on One DGX Spark: a kubeadm Root and Two vClusters
+# Step 04 · Nested Clusters with vCluster: a kubeadm Root and Two vClusters on One DGX Spark
 
-> **02-Kubernetes · Part I — Control plane & the nested lab · Step 04 of 28** · ← [Step 03 · API server](03-kube-apiserver-internals.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 05 · Datacenter simulation](05-dgx-spark-datacenter-simulation-lab.md) →
+> **02-Kubernetes · Part I — Control plane & the nested lab · Step 04 of 28** · ← [Step 03 · kube-apiserver internals](03-kube-apiserver-internals.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 05 · DGX Spark datacenter simulation lab](05-dgx-spark-datacenter-simulation-lab.md) →
 
 | | |
 |---|---|

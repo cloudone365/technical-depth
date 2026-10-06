@@ -1,6 +1,6 @@
-# Step 29 · Incident Response for DGX Spark: Drain, Capture Evidence, Remediate, Prove, Return to Service
+# Step 29 · Incident Response & Emergency Drain: Capture Evidence, Remediate, Prove, Return to Service
 
-> **01-Ansible · Part V — Production operations · Step 29 of 30** · ← [Step 28 · Firmware & patching](28-firmware-lifecycle-and-vulnerability-patching.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 30 · Capstone](30-capstone-build-break-prove.md) →
+> **01-Ansible · Part V — Production operations · Step 29 of 30** · ← [Step 28 · Firmware lifecycle & vulnerability patching](28-firmware-lifecycle-and-vulnerability-patching.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 30 · Capstone: build, break, prove](30-capstone-build-break-prove.md) →
 
 | | |
 |---|---|

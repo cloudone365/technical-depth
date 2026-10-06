@@ -1,6 +1,6 @@
-# Step 25 · Resilience at Scale, Practised Small: Failure Math, Async Checkpoints, SDC Canaries, Quarantine
+# Step 25 · Ultra-Scale Cluster Resilience & Fault Tolerance: Failure Math, Async Checkpoints, SDC Canaries, Quarantine (Practised Small)
 
-> **02-Kubernetes · Part VIII — Scale & resilience · Step 25 of 28** · ← [Step 24 · Accelerators & compilers](24-hyperscaler-silicon-and-compilers.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 26 · Diagnostics & failure playbook](26-cluster-diagnostics-and-failure-scenarios.md) →
+> **02-Kubernetes · Part VIII — Scale & resilience · Step 25 of 28** · ← [Step 24 · Hyperscaler silicon & compilers](24-hyperscaler-silicon-and-compilers.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 26 · Cluster diagnostics & failure scenarios](26-cluster-diagnostics-and-failure-scenarios.md) →
 
 | | |
 |---|---|

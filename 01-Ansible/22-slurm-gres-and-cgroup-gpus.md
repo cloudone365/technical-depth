@@ -1,6 +1,6 @@
-# Step 22 · Slurm on DGX Spark: MUNGE, GRES GPUs, cgroup v2 Confinement, Health Checks & Two-Node NCCL Jobs
+# Step 22 · Slurm: GRES & cgroup GPUs: MUNGE, cgroup v2 Confinement, Health Checks & Two-Node NCCL Jobs
 
-> **01-Ansible · Part IV — Secrets & platforms · Step 22 of 30** · ← [Step 21 · Multus & RDMA pods](21-multus-and-secondary-rdma-networks.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 23 · AWX install](23-awx-install-and-configuration-as-code.md) →
+> **01-Ansible · Part IV — Secrets & platforms · Step 22 of 30** · ← [Step 21 · Multus & secondary RDMA networks](21-multus-and-secondary-rdma-networks.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 23 · AWX install & configuration as code](23-awx-install-and-configuration-as-code.md) →
 
 | | |
 |---|---|

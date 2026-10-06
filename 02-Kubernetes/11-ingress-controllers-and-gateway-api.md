@@ -1,6 +1,6 @@
-# Step 11 · Ingress & Gateway API for LLM APIs: Streaming, Limits, Auth, Canaries, TLS, gRPC
+# Step 11 · Ingress Controllers & Gateway API for LLM APIs: Streaming, Limits, Auth, Canaries, TLS, gRPC
 
-> **02-Kubernetes · Part III — Networking · Step 11 of 28** · ← [Step 10 · CoreDNS](10-coredns-and-service-discovery.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 12 · Workload controllers](12-advanced-workload-controllers.md) →
+> **02-Kubernetes · Part III — Networking · Step 11 of 28** · ← [Step 10 · CoreDNS & service discovery](10-coredns-and-service-discovery.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 12 · Advanced workload controllers](12-advanced-workload-controllers.md) →
 
 | | |
 |---|---|

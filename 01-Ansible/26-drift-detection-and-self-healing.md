@@ -1,6 +1,6 @@
-# Step 26 · Configuration Drift Detection & Guarded Self-Healing for DGX Spark
+# Step 26 · Drift Detection & Self-Healing: Guarded Remediation for DGX Spark
 
-> **01-Ansible · Part V — Production operations · Step 26 of 30** · ← [Step 25 · Testing & CI](25-testing-linting-and-ci.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 27 · Logging & audit](27-logging-and-audit-compliance.md) →
+> **01-Ansible · Part V — Production operations · Step 26 of 30** · ← [Step 25 · Testing, linting & CI](25-testing-linting-and-ci.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 27 · Logging & audit compliance](27-logging-and-audit-compliance.md) →
 
 | | |
 |---|---|

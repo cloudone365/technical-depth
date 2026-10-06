@@ -1,6 +1,6 @@
-# Step 18 · Distributed Training on Kubernetes: torchrun, NCCL, RoCE over CX-7 & Hang Diagnosis
+# Step 18 · Distributed AI Training & NCCL: torchrun, RoCE over CX-7 & Hang Diagnosis
 
-> **02-Kubernetes · Part VI — Distributed training & fabrics · Step 18 of 28** · ← [Step 17 · GPU & Network Operators](17-nvidia-gpu-operator-and-network-operator.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 19 · Two Sparks to a SuperPOD](19-large-scale-superpod-and-network-fabrics.md) →
+> **02-Kubernetes · Part VI — Distributed training & fabrics · Step 18 of 28** · ← [Step 17 · NVIDIA GPU Operator & Network Operator](17-nvidia-gpu-operator-and-network-operator.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 19 · Large-scale SuperPOD & network fabrics](19-large-scale-superpod-and-network-fabrics.md) →
 
 | | |
 |---|---|

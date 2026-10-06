@@ -1,6 +1,6 @@
 # Step 07 · kube-scheduler & AI Batch Scheduling: Priorities, Preemption, Taints, Kueue Gangs, DRA
 
-> **02-Kubernetes · Part II — Controllers & scheduling · Step 07 of 28** · ← [Step 06 · Controllers](06-kube-controller-manager-and-controllers.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 08 · Pod networking & Cilium](08-kubernetes-networking-deep-dive.md) →
+> **02-Kubernetes · Part II — Controllers & scheduling · Step 07 of 28** · ← [Step 06 · kube-controller-manager & controllers](06-kube-controller-manager-and-controllers.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 08 · Kubernetes networking deep dive](08-kubernetes-networking-deep-dive.md) →
 
 | | |
 |---|---|

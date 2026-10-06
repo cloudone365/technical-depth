@@ -1,6 +1,6 @@
-# Step 23 · Disaggregated Prefill & Decode: KV-Cache Transfer with vLLM + NIXL, Routing, and When It Pays Off
+# Step 23 · Disaggregated Prefill & Decode Serving: KV-Cache Transfer with vLLM + NIXL, Routing, and When It Pays Off
 
-> **02-Kubernetes · Part VII — LLM serving · Step 23 of 28** · ← [Step 22 · SGLang, TensorRT-LLM & KServe](22-llm-inference-alternatives-and-kserve.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 24 · Accelerators & compilers](24-hyperscaler-silicon-and-compilers.md) →
+> **02-Kubernetes · Part VII — LLM serving · Step 23 of 28** · ← [Step 22 · LLM inference alternatives & KServe](22-llm-inference-alternatives-and-kserve.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 24 · Hyperscaler silicon & compilers](24-hyperscaler-silicon-and-compilers.md) →
 
 | | |
 |---|---|

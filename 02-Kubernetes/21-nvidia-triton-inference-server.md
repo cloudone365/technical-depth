@@ -1,6 +1,6 @@
-# Step 21 · NVIDIA Triton Inference Server on the Spark: Model Repository, Ensembles, Dynamic Batching, perf_analyzer
+# Step 21 · NVIDIA Triton Inference Server: Model Repository, Ensembles, Dynamic Batching, perf_analyzer
 
-> **02-Kubernetes · Part VII — LLM serving · Step 21 of 28** · ← [Step 20 · vLLM](20-vllm-high-throughput-llm-serving.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 22 · SGLang, TensorRT-LLM & KServe](22-llm-inference-alternatives-and-kserve.md) →
+> **02-Kubernetes · Part VII — LLM serving · Step 21 of 28** · ← [Step 20 · vLLM high-throughput LLM serving](20-vllm-high-throughput-llm-serving.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 22 · LLM inference alternatives & KServe](22-llm-inference-alternatives-and-kserve.md) →
 
 | | |
 |---|---|

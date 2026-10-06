@@ -1,6 +1,6 @@
-# Step 08 · Role Architecture, Collections & Execution Environments for the Spark Lab
+# Step 08 · Roles, Collections & Execution Environments for the Spark Lab
 
-> **01-Ansible · Part I — Management plane & Ansible foundations · Step 08 of 30** · ← [Step 07 · Jinja2 & data transforms](07-jinja2-filters-and-data-transforms.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 09 · Performance at scale](09-performance-at-scale-ssh-mux-and-mitogen.md) →
+> **01-Ansible · Part I — Management plane & Ansible foundations · Step 08 of 30** · ← [Step 07 · Jinja2 filters & data transforms](07-jinja2-filters-and-data-transforms.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 09 · Performance at scale: SSH mux & Mitogen](09-performance-at-scale-ssh-mux-and-mitogen.md) →
 
 | | |
 |---|---|

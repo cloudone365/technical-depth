@@ -1,6 +1,6 @@
-# Step 06 · Inventory Architecture: Static, Constructed, mDNS Discovery & NetBox as Source of Truth
+# Step 06 · Inventory: Static, Dynamic & Discovery: Constructed Groups, mDNS and NetBox as Source of Truth
 
-> **01-Ansible · Part I — Management plane & Ansible foundations · Step 06 of 30** · ← [Step 05 · Execution internals & debugging](05-execution-internals-and-debugging.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 07 · Jinja2 & data transforms](07-jinja2-filters-and-data-transforms.md) →
+> **01-Ansible · Part I — Management plane & Ansible foundations · Step 06 of 30** · ← [Step 05 · Execution internals & debugging](05-execution-internals-and-debugging.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 07 · Jinja2 filters & data transforms](07-jinja2-filters-and-data-transforms.md) →
 
 | | |
 |---|---|
