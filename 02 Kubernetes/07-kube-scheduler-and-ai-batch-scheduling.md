@@ -1,6 +1,6 @@
-# Volume 05 — kube-scheduler & AI Batch Scheduling: Priorities, Preemption, Taints, Kueue Gangs, DRA
+# Step 07 · kube-scheduler & AI Batch Scheduling: Priorities, Preemption, Taints, Kueue Gangs, DRA
 
-> **Module 02 · Part I — Control plane** · Prev: [04 Controllers](04-kube-controller-manager-and-controllers.md) · Next: [06 Networking](06-kubernetes-networking-deep-dive.md)
+> **02 Kubernetes · Part II — Controllers & scheduling · Step 07 of 28** · ← [Step 06 · Controllers](06-kube-controller-manager-and-controllers.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 08 · Pod networking & Cilium](08-kubernetes-networking-deep-dive.md) →
 
 | | |
 |---|---|
@@ -21,7 +21,7 @@ One GB10 split into 15 time-slices is a **small, contended resource** shared by 
 - **Distributed jobs.** A 2-rank job that gets only 1 slice holds it forever waiting for its peer → *gang admission (Kueue)*.
 - **Shared capacity between teams.** "Batch may use 4 of llms's 8 slices, serving keeps the rest" → *ClusterQueues, cohorts, borrowing*.
 
-And one fact shapes everything in this volume: **only the root runs a scheduler.** The vClusters have API servers and controller-managers but no kube-scheduler (vCluster's default); their syncers copy pods to the root, and the root's kube-scheduler binds them to a node. So a pod's *placement* — priority, preemption, taints, affinity — is always decided at the root, using the PriorityClasses and node labels the vClusters sync. What a vCluster *can* decide is *whether a pod exists yet*: its own quotas, and in llms, Kueue.
+And one fact shapes everything in this step: **only the root runs a scheduler.** The vClusters have API servers and controller-managers but no kube-scheduler (vCluster's default); their syncers copy pods to the root, and the root's kube-scheduler binds them to a node. So a pod's *placement* — priority, preemption, taints, affinity — is always decided at the root, using the PriorityClasses and node labels the vClusters sync. What a vCluster *can* decide is *whether a pod exists yet*: its own quotas, and in llms, Kueue.
 
 ---
 
@@ -114,7 +114,7 @@ The vCluster control planes run at `spark-platform` (`controlPlane.statefulSet.s
 | LocalQueue | `batch/train` | → `spark-cq` |
 | WorkloadPriorityClass | `urgent` 1000, `routine` 100 | ordering *inside* Kueue, independent of the pod PriorityClass |
 
-Why only 4 slices in the ClusterQueue? llms has 8 in total (its root budget), and serving keeps the rest. `llm-serving`'s own quota is a ceiling of 6, so the two add up to more than 8 on purpose (Vol 12): the root quota, Kueue and PriorityClasses decide who waits. Kueue only knows about llms; it can't see what dev-lab or the platform use. Its numbers must therefore fit *inside* the root budget, not the node.
+Why only 4 slices in the ClusterQueue? llms has 8 in total (its root budget), and serving keeps the rest. `llm-serving`'s own quota is a ceiling of 6, so the two add up to more than 8 on purpose (Step 14): the root quota, Kueue and PriorityClasses decide who waits. Kueue only knows about llms; it can't see what dev-lab or the platform use. Its numbers must therefore fit *inside* the root budget, not the node.
 
 ### 3.3 Scheduler messages you must recognise
 
@@ -132,10 +132,10 @@ Why only 4 slices in the ClusterQueue? llms has 8 in total (its root budget), an
 
 ## 4. Integrations
 
-- **GPU Feature Discovery (Vol 16)** provides `nvidia.com/gpu.product` (`…-SHARED` under time-slicing), `nvidia.com/gpu.compute.major=12`, … on the root's node; the kubelet adds the lab-owned `spark.lab/gpu=gb10`. Node sync shows all of them inside both vClusters, so ResourceFlavors and tenant affinities can select on them — the lab uses `spark.lab/gpu` because GFD can rename its own labels — and the root scheduler evaluates the result.
-- **Distributed training (Vol 17)**: [`llms/80-distributed/base/ddp-job.yaml`](lab/manifests/llms/80-distributed/base/ddp-job.yaml) carries `kueue.x-k8s.io/queue-name: train` and `suspend: true`. Kueue gangs both ranks.
-- **Autoscaling (Vol 21)**: KEDA in llms scales serving on the root Prometheus's metrics. More serving replicas means fewer free slices for batch — the ladder decides who yields.
-- **Quotas (Vol 12) and vClusters (Vol 27 §5)**: quotas are the admission-time budget; this volume is the placement-time contest.
+- **GPU Feature Discovery (Step 17)** provides `nvidia.com/gpu.product` (`…-SHARED` under time-slicing), `nvidia.com/gpu.compute.major=12`, … on the root's node; the kubelet adds the lab-owned `spark.lab/gpu=gb10`. Node sync shows all of them inside both vClusters, so ResourceFlavors and tenant affinities can select on them — the lab uses `spark.lab/gpu` because GFD can rename its own labels — and the root scheduler evaluates the result.
+- **Distributed training (Step 18)**: [`llms/80-distributed/base/ddp-job.yaml`](lab/manifests/llms/80-distributed/base/ddp-job.yaml) carries `kueue.x-k8s.io/queue-name: train` and `suspend: true`. Kueue gangs both ranks.
+- **Autoscaling (Step 20)**: KEDA in llms scales serving on the root Prometheus's metrics. More serving replicas means fewer free slices for batch — the ladder decides who yields.
+- **Quotas (Step 14) and vClusters (Step 04 §5)**: quotas are the admission-time budget; this step is the placement-time contest.
 
 ---
 
@@ -346,12 +346,12 @@ PASS: one gang admitted whole, the other held whole (no partial start)
 | Job never starts, no pods, `suspend: true` | Kueue hasn't admitted it | `kubectl --context llms -n batch describe workload …` → `couldn't assign flavors … insufficient quota for nvidia.com/gpu in flavor gb10` | wait, lower the request, or raise `nominalQuota` (within the root budget) |
 | Workload `Inadmissible: LocalQueue train doesn't exist` | typo in `queue-name` label | `kubectl --context llms -n batch get localqueues` | fix the label |
 | Job runs **without** Kueue although labelled | Kueue webhook missed it (Kueue installed after the Job, or namespace excluded by `manageJobsWithoutQueueName`), or the Job was created in **dev-lab**, which has no Kueue | `kubectl --context llms -n kueue-system logs deploy/kueue-controller-manager` | recreate the Job in llms after Kueue is up |
-| Kueue admitted the job, some pods `Pending` in llms with no scheduler events | the **root** quota on `vc-llms` is spent (serving grew) — Kueue can't see it | sync error events on the pod; `kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget` | size `spark-cq` to fit beside serving inside the root budget (§5.5 exercise), or resize the vCluster (Vol 27 §6.5) |
-| Pods `Pending`, `Insufficient nvidia.com/gpu`, though the vCluster's own quota has room | the *node* is full: other clusters hold the slices | root view: §5.2 list, or `kubectl --context spark-root -n platform-tools get cm gpu-slice-ledger -o yaml` (Vol 04) | wait, preempt (priority), or free slices elsewhere |
-| Pods Pending, `didn't match Pod's node affinity` | GFD labels missing (GPU Operator not healthy) — so the synced node in the vCluster lacks them too | `kubectl --context spark-root get node dgx-spark-1 --show-labels \| tr , '\n' \| grep nvidia` | fix the GPU Operator (Vol 16) |
+| Kueue admitted the job, some pods `Pending` in llms with no scheduler events | the **root** quota on `vc-llms` is spent (serving grew) — Kueue can't see it | sync error events on the pod; `kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget` | size `spark-cq` to fit beside serving inside the root budget (§5.5 exercise), or resize the vCluster (Step 04 §6.5) |
+| Pods `Pending`, `Insufficient nvidia.com/gpu`, though the vCluster's own quota has room | the *node* is full: other clusters hold the slices | root view: §5.2 list, or `kubectl --context spark-root -n platform-tools get cm gpu-slice-ledger -o yaml` (Step 06) | wait, preempt (priority), or free slices elsewhere |
+| Pods Pending, `didn't match Pod's node affinity` | GFD labels missing (GPU Operator not healthy) — so the synced node in the vCluster lacks them too | `kubectl --context spark-root get node dgx-spark-1 --show-labels \| tr , '\n' \| grep nvidia` | fix the GPU Operator (Step 17) |
 | Preemption doesn't happen | victim has **equal/higher** priority, or a PDB protects it (preemption respects PDBs as best effort; PDBs are synced from the vClusters), or the preemptor was refused by a **quota** — quota never preempts | `kubectl --context spark-root get pod -n <ns> <p> -o jsonpath='{.spec.priority}'`; sync errors in the vCluster | adjust classes. Remember `preemptionPolicy: Never` on the *preemptor* blocks it |
 | Serving pod preempted by a notebook | notebook class ≥ serving class | `kubectl --context spark-root get pc` | serving must be the highest non-platform class |
-| **A tenant's pods preempt platform or other tenants' pods** | someone created a PriorityClass with a high value **inside a vCluster**; priority classes sync to the root with their value, and the root scheduler honours it | `kubectl --context <vc> get pc`; compare with the five lab classes; `.spec.priority` of the host copies in `vc-*` | tenants must not be able to create PriorityClasses: the tenant role (`spark-tenant-developer`, Vol 02 §3.2) has no access to them, and the vCluster admin kubeconfig stays with the platform team. In a real platform, add an admission policy in each vCluster that allows only the lab's five classes |
+| **A tenant's pods preempt platform or other tenants' pods** | someone created a PriorityClass with a high value **inside a vCluster**; priority classes sync to the root with their value, and the root scheduler honours it | `kubectl --context <vc> get pc`; compare with the five lab classes; `.spec.priority` of the host copies in `vc-*` | tenants must not be able to create PriorityClasses: the tenant role (`spark-tenant-developer`, Step 03 §3.2) has no access to them, and the vCluster admin kubeconfig stays with the platform team. In a real platform, add an admission policy in each vCluster that allows only the lab's five classes |
 
 Drill: `scripts/breakfix.sh inject 02` (a vCluster's GPU budget spent) and `inject 13` (NoSchedule taint on the only node — all three clusters stop placing pods).
 
@@ -368,7 +368,7 @@ flowchart LR
   class A,B,C,D ctrl
 ```
 
-- **A second Spark** adds 15 slices to the *root* immediately. The vClusters see the node through sync, but their budgets don't grow until the root admin raises `vcluster-budget` (Vol 27 §6.5) — and Kueue's `spark-cq` only after that. Capacity flows down through three layers, in that order.
+- **A second Spark** adds 15 slices to the *root* immediately. The vClusters see the node through sync, but their budgets don't grow until the root admin raises `vcluster-budget` (Step 04 §6.5) — and Kueue's `spark-cq` only after that. Capacity flows down through three layers, in that order.
 - **Dynamic Resource Allocation (DRA)** is GA in Kubernetes 1.34. It replaces "count of `nvidia.com/gpu`" with `ResourceClaim`s that can express *which* GPU, sharing modes and device attributes. NVIDIA's DRA driver (`k8s-dra-driver-gpu`) is the path for it: it would run at the root, next to (or instead of) the device plugin, and the vClusters would have to sync claims to the root. Check both support matrices — GB10 in the driver, ResourceClaims in your vCluster version — before moving the lab off the device plugin.
 - **Topology-aware scheduling (Kueue TAS)**: with 2 Sparks, label nodes `spark.lab/fabric=cx7-pair` so a 2-rank job lands on both ends of the same QSFP cable.
 - **MultiKueue** dispatches workloads from a manager cluster to worker clusters. The two vClusters are already separate clusters with their own APIs — a manager Kueue in one and workers in the others is a datacenter pattern you can rehearse here.

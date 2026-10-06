@@ -1,62 +1,62 @@
 # DGX Spark Kubernetes Lab — runnable companion to Module 02
 
-Everything the 27 volumes (plus the [step-by-step guide](../00-kubernetes-step-by-step-guide.md)) teach, as manifests, scripts and drills. The [01 Ansible lab](../../01%20Ansible/lab/README.md) builds the base on one DGX Spark (a second Spark is optional):
+Everything the 28 steps of the [step-by-step guide](../00-kubernetes-step-by-step-guide.md) teach, as manifests, scripts and drills. The [01 Ansible lab](../../01%20Ansible/lab/README.md) builds the base on one DGX Spark (a second Spark is optional):
 
 - a **root cluster** with kubeadm — dgx-spark-1 is control plane *and* worker — with Cilium, MetalLB and the GPU Operator (15 time-slices), and
-- two **vClusters** inside it ([Volume 27](../27-nested-clusters-with-vcluster.md)): `dev-lab` (2 CPU · 8 Gi · 2 slices) and `llms` (4 CPU · 48 Gi · 8 slices).
+- two **vClusters** inside it ([Step 04](../04-nested-clusters-with-vcluster.md)): `dev-lab` (2 CPU · 8 Gi · 2 slices) and `llms` (4 CPU · 48 Gi · 8 slices).
 
-This directory holds their definitions and everything that runs on them. Every code block in the volumes is taken from here.
+This directory holds their definitions and everything that runs on them. Every code block in the steps is taken from here.
 
 > **Convention:** `ansible-playbook playbooks/NN-….yml` in this module = run Semaphore template NN in project `spark-lab` ([01 Ansible Step 04](../../01%20Ansible/04-dgx-spark-as-semaphore-target.md#7-build-the-lab-from-semaphore)); the CLI form is break-glass from the MacBook (`-l dgx-spark-1,localhost -K`).
 
 ```
 lab/
 ├── versions.env                 # every pinned version, in one place
-├── kubeadm/                     # audit policy of the root API server (copy of 01 Ansible's)          (Vol 02)
-├── vclusters/                   # Helm values: dev-lab.yaml, llms.yaml (vCluster 0.37, k8s distro)    (Vol 27)
-├── addons/                      # Helm values (kps, metrics-server, Traefik) + StorageClasses         (Vol 09, 11, 16)
+├── kubeadm/                     # audit policy of the root API server (copy of 01 Ansible's)          (Step 03)
+├── vclusters/                   # Helm values: dev-lab.yaml, llms.yaml (vCluster 0.37, k8s distro)    (Step 04)
+├── addons/                      # Helm values (kps, metrics-server, Traefik) + StorageClasses         (Steps 04, 11, 13, 17)
 ├── manifests/
 │   ├── common/                  # shared: PriorityClasses, CEL admission policies, RuntimeClass nvidia
 │   ├── root/                    # → context spark-root (the platform)
-│   │   ├── 00-platform/         #   observability + platform-tools namespaces, PriorityClasses        (Vol 05, 15)
-│   │   ├── 05-vclusters/        #   vc-dev-lab / vc-llms: namespaces, root budgets, Cilium boundary   (Vol 27)
-│   │   ├── 12-cgroups/          #   QoS trio, CPU throttling, the UMA cgroup experiment               (Vol 12)
-│   │   ├── 16-apf/              #   API fairness lane for the vCluster syncers                        (Vol 02)
-│   │   ├── 20-scheduling/       #   preemption demo (needs the node full)                             (Vol 05)
-│   │   ├── 30-networking/       #   netshoot-host, CoreDNS Corefile                                   (Vol 06-08)
-│   │   ├── 45-controller/       #   slice-ledger: a dependency-free controller                        (Vol 04)
-│   │   ├── 50-workloads/        #   node-probe DaemonSet                                              (Vol 10)
-│   │   ├── 60-storage/          #   fio AI profiles                                                   (Vol 11)
-│   │   ├── 70-gpu/              #   GEMM benchmark, time-slice contention, torch.compile              (Vol 13-16, 25)
-│   │   ├── 85-network-operator/ #   NicClusterPolicy + macvlan RDMA network for 2 Sparks              (Vol 16)
-│   │   └── 95-observability/    #   host exporters, vCluster workload scraping, alerts, dashboard     (Vol 16, 19)
+│   │   ├── 00-platform/         #   observability + platform-tools namespaces, PriorityClasses        (Steps 05, 07)
+│   │   ├── 05-vclusters/        #   vc-dev-lab / vc-llms: namespaces, root budgets, Cilium boundary   (Step 04)
+│   │   ├── 12-cgroups/          #   QoS trio, CPU throttling, the UMA cgroup experiment               (Step 14)
+│   │   ├── 16-apf/              #   API fairness lane for the vCluster syncers                        (Step 03)
+│   │   ├── 20-scheduling/       #   preemption demo (needs the node full)                             (Step 07)
+│   │   ├── 30-networking/       #   netshoot-host, CoreDNS Corefile                                   (Steps 08–10)
+│   │   ├── 45-controller/       #   slice-ledger: a dependency-free controller                        (Step 06)
+│   │   ├── 50-workloads/        #   node-probe DaemonSet                                              (Step 12)
+│   │   ├── 60-storage/          #   fio AI profiles                                                   (Step 13)
+│   │   ├── 70-gpu/              #   GEMM benchmark, time-slice contention, torch.compile              (Steps 15–17, 24)
+│   │   ├── 85-network-operator/ #   NicClusterPolicy + macvlan RDMA network for 2 Sparks              (Step 17)
+│   │   └── 95-observability/    #   host exporters, vCluster workload scraping, alerts, dashboard     (Steps 17, 26)
 │   ├── dev-lab/                 # → context dev-lab (vCluster #1)
-│   │   ├── 00-platform/         #   tenant-alpha, tenant-beta, lab-tools                              (Vol 12)
-│   │   ├── 10-tenancy/          #   tenant quotas, LimitRanges, RBAC, NetworkPolicies                 (Vol 02, 06, 12)
-│   │   ├── 15-admission/        #   CEL policies (common)                                             (Vol 02)
-│   │   ├── 16-apf/              #   API fairness for tenant users                                     (Vol 02)
-│   │   ├── 20-scheduling/       #   the no-Kueue deadlock, taints & affinity                          (Vol 05)
-│   │   ├── 30-networking/       #   netshoot, echo + headless Service, ndots lab                      (Vol 06-08)
-│   │   ├── 50-workloads/        #   sharded tokenizer Indexed Job                                     (Vol 10)
-│   │   └── 70-gpu/              #   gpu-smoke: a tenant pod through the whole chain                   (Vol 14, 16)
+│   │   ├── 00-platform/         #   tenant-alpha, tenant-beta, lab-tools                              (Step 14)
+│   │   ├── 10-tenancy/          #   tenant quotas, LimitRanges, RBAC, NetworkPolicies                 (Steps 03, 08, 14)
+│   │   ├── 15-admission/        #   CEL policies (common)                                             (Step 03)
+│   │   ├── 16-apf/              #   API fairness for tenant users                                     (Step 03)
+│   │   ├── 20-scheduling/       #   the no-Kueue deadlock, taints & affinity                          (Step 07)
+│   │   ├── 30-networking/       #   netshoot, echo + headless Service, ndots lab                      (Steps 08–10)
+│   │   ├── 50-workloads/        #   sharded tokenizer Indexed Job                                     (Step 12)
+│   │   └── 70-gpu/              #   gpu-smoke: a tenant pod through the whole chain                   (Steps 16, 17)
 │   └── llms/                    # → context llms (vCluster #2)
-│       ├── 00-platform/         #   llm-serving, batch, ingress                                       (Vol 21)
-│       ├── 10-tenancy/          #   serving budget, LimitRanges, CI deployer, NetworkPolicy           (Vol 12)
-│       ├── 15-admission/        #   CEL policies (common)                                             (Vol 02)
-│       ├── 20-scheduling/       #   Kueue flavors/queues, gang demo                                   (Vol 05)
-│       ├── 40-ingress/          #   mock OpenAI API, Traefik middlewares, Ingress, HTTPRoute          (Vol 09)
-│       ├── 50-workloads/        #   Qdrant StatefulSet + PDBs                                         (Vol 10)
-│       ├── 60-storage/          #   model-cache PVC, prefetch Job                                     (Vol 11)
-│       ├── 80-distributed/      #   torchrun all-reduce (1 Spark gloo · 2 Sparks NCCL/RoCE), resilient/ (Vol 17, 26)
-│       ├── 85-network-operator/ #   RDMA test pod                                                     (Vol 16)
-│       └── 90-serving/          #   vLLM, Triton ensemble, SGLang, KServe, prefill/decode split, KEDA (Vol 21-24)
-├── etcd-sandbox/                # throw-away 3-member etcd (docker compose) for Raft drills           (Vol 03)
-├── gitops/                      # Argo CD app-of-apps across the three clusters                      (production-mlops)
+│       ├── 00-platform/         #   llm-serving, batch, ingress                                       (Step 20)
+│       ├── 10-tenancy/          #   serving budget, LimitRanges, CI deployer, NetworkPolicy           (Step 14)
+│       ├── 15-admission/        #   CEL policies (common)                                             (Step 03)
+│       ├── 20-scheduling/       #   Kueue flavors/queues, gang demo                                   (Step 07)
+│       ├── 40-ingress/          #   mock OpenAI API, Traefik middlewares, Ingress, HTTPRoute          (Step 11)
+│       ├── 50-workloads/        #   Qdrant StatefulSet + PDBs                                         (Step 12)
+│       ├── 60-storage/          #   model-cache PVC, prefetch Job                                     (Step 13)
+│       ├── 80-distributed/      #   torchrun all-reduce (1 Spark gloo · 2 Sparks NCCL/RoCE), resilient/ (Steps 18, 25)
+│       ├── 85-network-operator/ #   RDMA test pod                                                     (Step 17)
+│       └── 90-serving/          #   vLLM, Triton ensemble, SGLang, KServe, prefill/decode split, KEDA (Steps 20–23)
+├── etcd-sandbox/                # throw-away 3-member etcd (docker compose) for Raft drills           (Step 02)
+├── gitops/                      # Argo CD app-of-apps across the three clusters                      (Step 28)
 ├── scripts/                     # preflight, install-addons, apply-lab, verify, breakfix, diag, etcd drill/sandbox,
 │                                #   cgroup/netns/iptables inspectors (vCluster-aware), make-user, uma-watch,
 │                                #   merge-vcluster-kubeconfig, argocd-register-vclusters,
 │                                #   ttft_probe.py, fabric_calc.py, mtbf_calc.py
-├── breakfix/                    # 15 fault-injection scenarios across root, dev-lab and llms           (Vol 19, 20)
+├── breakfix/                    # 15 fault-injection scenarios across root, dev-lab and llms           (Steps 26, 27)
 └── tests/                       # local checks, budget check, admission fixtures, fake-GPU node, Kueue gang test (CI)
 ```
 
@@ -116,7 +116,7 @@ flowchart LR
   style VL fill:#ffffff,stroke:#57606a,stroke-dasharray:5 3
 ```
 
-**Diagram colour key (used in every volume):** blue = control plane · teal = node/host ·
+**Diagram colour key (used in every step):** blue = control plane · teal = node/host ·
 green = GPU · purple = network · amber = storage · orange = observability · red = security ·
 black = external/user · grey = tenant workload.
 
@@ -137,7 +137,7 @@ scripts/apply-lab.sh                        # root → dev-lab → llms, layer b
 scripts/verify.sh                           # PASS/WARN/FAIL for every layer of every cluster
 ```
 
-Then follow the volumes in order, or jump straight into the drills:
+Then follow the [step-by-step guide](../00-kubernetes-step-by-step-guide.md) from Step 01, or jump straight into the drills (Step 26):
 
 ```bash
 scripts/breakfix.sh list                    # each scenario names the cluster it breaks
@@ -146,7 +146,7 @@ scripts/breakfix.sh inject 02     # diagnose it, fix it, `scripts/breakfix.sh an
 
 ## Which cluster am I talking to?
 
-Every script and every command in the volumes names a context. The rule of thumb:
+Every script and every command in the steps names a context. The rule of thumb:
 
 | You are … | Context | Examples |
 |---|---|---|

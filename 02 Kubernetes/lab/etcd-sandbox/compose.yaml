@@ -1,5 +1,5 @@
 # Throw-away 3-member etcd cluster for Raft / quota / defrag experiments
-# (Volume 03). Never touches the root cluster's etcd. Runs on the Spark or a laptop.
+# (Step 02). Never touches the root cluster's etcd. Runs on the Spark or a laptop.
 #   docker compose up -d && ../scripts/etcd-sandbox.sh status
 x-etcd: &etcd
   image: quay.io/coreos/etcd:v3.5.21

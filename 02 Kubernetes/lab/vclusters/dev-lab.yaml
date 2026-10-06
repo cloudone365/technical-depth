@@ -1,4 +1,4 @@
-# vCluster #1 · dev-lab — Helm values for chart loft/vcluster 0.37.x (Volume 27).
+# vCluster #1 · dev-lab — Helm values for chart loft/vcluster 0.37.x (Step 04).
 # Installed into host namespace vc-dev-lab by 01 Ansible playbooks/06b-vclusters.yml
 # or scripts/install-addons.sh vclusters.
 #

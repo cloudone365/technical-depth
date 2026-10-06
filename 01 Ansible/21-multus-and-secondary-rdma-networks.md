@@ -427,7 +427,7 @@ The ping shows the §2.3 gap. A pod in `llms` reaches a `platform-tools` pod on 
 | Time-slicing (Step 20) | Several pods can share the GPU **and** the shared RDMA device. Neither is isolated, and that's fine for a lab |
 | vClusters (Step 19 §3.4) | NADs in `vc-llms` only; tenants consume them by name, never create them |
 | Slurm (Step 22) | Bare-metal jobs don't need any of this; it's the Kubernetes equivalent |
-| Network Operator | For production, one Helm chart replaces §3: `NicClusterPolicy` with `rdmaSharedDevicePlugin`, `secondaryNetwork.multus`, `ipamPlugin` (02 Kubernetes Vol 16 §5.6) |
+| Network Operator | For production, one Helm chart replaces §3: `NicClusterPolicy` with `rdmaSharedDevicePlugin`, `secondaryNetwork.multus`, `ipamPlugin` (02 Kubernetes Step 17 §5.6) |
 
 ## 5. Troubleshooting & diagnostics
 

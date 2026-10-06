@@ -1,4 +1,4 @@
-# The root cluster's CoreDNS config (Volume 08). kubeadm owns this ConfigMap:
+# The root cluster's CoreDNS config (Step 10). kubeadm owns this ConfigMap:
 # unlike k3s there is no "coredns-custom" import, you edit the Corefile itself.
 # This is kubeadm's default Corefile plus two lab additions:
 #   log            — log every query (turn OFF after the lab; it is chatty)
@@ -9,7 +9,7 @@
 #
 # Scope: this is the ROOT's resolver (platform pods, nodes). Each vCluster runs
 # its own CoreDNS for its tenants; to change that one, set
-# controlPlane.coredns.overwriteConfig in vclusters/<name>.yaml (Volume 27).
+# controlPlane.coredns.overwriteConfig in vclusters/<name>.yaml (Step 04).
 apiVersion: v1
 kind: ConfigMap
 metadata:

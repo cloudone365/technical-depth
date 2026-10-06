@@ -1,9 +1,9 @@
-{"question": "How do etcd compaction and defragmentation reclaim database space?", "expect": "02 Kubernetes/03-etcd-database-deep-dive.md"}
-{"question": "Why does a pod resolve external names slowly because of ndots and search domains in resolv.conf?", "expect": "02 Kubernetes/08-coredns-and-service-discovery.md"}
-{"question": "How does a Triton ensemble chain the preprocess model and the scorer model?", "expect": "02 Kubernetes/22-nvidia-triton-inference-server.md"}
-{"question": "How is the KV cache transferred from the prefill instance to the decode instance?", "expect": "02 Kubernetes/24-disaggregated-prefill-and-decode-serving.md"}
-{"question": "Why does vLLM use the Recreate strategy, a preStop sleep and a long termination grace period?", "expect": "02 Kubernetes/21-vllm-high-throughput-llm-serving.md"}
-{"question": "How do I measure NCCL all-reduce bus bandwidth between two Sparks over RoCE?", "expect": "02 Kubernetes/17-distributed-ai-training-and-nccl.md"}
+{"question": "How do etcd compaction and defragmentation reclaim database space?", "expect": "02 Kubernetes/02-etcd-database-deep-dive.md"}
+{"question": "Why does a pod resolve external names slowly because of ndots and search domains in resolv.conf?", "expect": "02 Kubernetes/10-coredns-and-service-discovery.md"}
+{"question": "How does a Triton ensemble chain the preprocess model and the scorer model?", "expect": "02 Kubernetes/21-nvidia-triton-inference-server.md"}
+{"question": "How is the KV cache transferred from the prefill instance to the decode instance?", "expect": "02 Kubernetes/23-disaggregated-prefill-and-decode-serving.md"}
+{"question": "Why does vLLM use the Recreate strategy, a preStop sleep and a long termination grace period?", "expect": "02 Kubernetes/20-vllm-high-throughput-llm-serving.md"}
+{"question": "How do I measure NCCL all-reduce bus bandwidth between two Sparks over RoCE?", "expect": "02 Kubernetes/18-distributed-ai-training-and-nccl.md"}
 {"question": "How much KV cache per token does multi-head latent attention need compared with multi-head attention?", "expect": "03 DeepSeek/01-multi-head-latent-attention-mla.md"}
 {"question": "How does the auxiliary-loss-free bias term balance load across routed experts?", "expect": "03 DeepSeek/02-deepseek-moe-fine-grained-routing.md"}
 {"question": "What speed-up does speculative decoding give for a given acceptance rate and number of draft tokens?", "expect": "03 DeepSeek/03-multi-token-prediction-mtp.md"}

@@ -1,4 +1,4 @@
-# StorageClasses on top of rancher/local-path-provisioner (Volume 11), which
+# StorageClasses on top of rancher/local-path-provisioner (Step 13), which
 # scripts/install-addons.sh storage installs on the ROOT (k3s bundled it,
 # kubeadm doesn't). Both vClusters see these classes (sync.fromHost.storageClasses)
 # and their PVCs become real PVs here.

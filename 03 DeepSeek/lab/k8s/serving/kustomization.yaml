@@ -1,4 +1,4 @@
-# THE serving pointer for GitOps (production-mlops.md): which catalog model runs on the
+# THE serving pointer for GitOps (28-production-mlops-and-gitops.md): which catalog model runs on the
 # Spark is decided by the one line under `resources` below. Changing it in a pull request,
 # merging, and letting Argo CD sync is the whole model-switch procedure. A PostSync hook
 # then runs the eval gate against the baseline in ConfigMap deepseek-eval-baseline.

@@ -1,6 +1,6 @@
-# Volume 11 — Storage for AI on Kubernetes: local-path on NVMe, WaitForFirstConsumer, Model Caches, fio, UMA & Page Cache
+# Step 13 · Storage for AI on Kubernetes: local-path on NVMe, WaitForFirstConsumer, Model Caches, fio, UMA & Page Cache
 
-> **Module 02 · Part III — Workloads, storage, tenancy** · Prev: [10 Workload controllers](10-advanced-workload-controllers.md) · Next: [12 Multi-tenancy & cgroups](12-multi-tenancy-resource-quotas-and-cgroups.md) · The lab's shape: [27 Nested clusters](27-nested-clusters-with-vcluster.md)
+> **02 Kubernetes · Part IV — Workloads, storage & tenancy · Step 13 of 28** · ← [Step 12 · Workload controllers](12-advanced-workload-controllers.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 14 · Multi-tenancy & cgroups](14-multi-tenancy-resource-quotas-and-cgroups.md) →
 
 | | |
 |---|---|
@@ -15,7 +15,7 @@
 
 ## 1. Why this matters on a Spark
 
-Every model server's start time is dominated by one number: **how fast can N gigabytes of weights get from disk into (unified) memory?** And every training job's resilience depends on how fast it can write a checkpoint without stalling etcd (Vol 03). On the Spark:
+Every model server's start time is dominated by one number: **how fast can N gigabytes of weights get from disk into (unified) memory?** And every training job's resilience depends on how fast it can write a checkpoint without stalling etcd (Step 02). On the Spark:
 
 - **One NVMe** holds DGX OS, container images (containerd for Kubernetes *and* Docker), the root's etcd data and WAL (`/var/lib/etcd`), both vClusters' SQLite databases, model weights and checkpoints. Isolation is by directory and I/O priority, not by device.
 - **Unified memory** means the page cache and the GPU compete for the same pool — about 119.7 GiB visible of the 128 GB installed. Reading a 60 GB checkpoint through the page cache can briefly need 60 GB of cache *plus* 60 GB of model. NVIDIA's Spark guidance is to drop caches before loading big models, and `scripts/uma-watch.sh` shows why.
@@ -89,7 +89,7 @@ kubeadm ships no storage at all (K3s used to bundle local-path). `scripts/instal
 
 **Why WaitForFirstConsumer?** A local volume lives on one node. Binding at PVC creation (Immediate) could pick a node where the pod can't run (e.g. no free GPU slice). WFFC waits for the scheduler to choose the node, then provisions the volume there. With vClusters, "the scheduler" is the **root's**: it sets `volume.kubernetes.io/selected-node` on the root copy of the PVC when it places the root copy of the pod. Tenants see the result, not the mechanism.
 
-**Capacity isn't enforced.** local-path creates a directory. `resources.requests.storage` counts against ResourceQuotas (Vol 12), but nothing stops the pod writing 2 TB. Use ext4/XFS project quotas or a real CSI driver for hard limits (§8).
+**Capacity isn't enforced.** local-path creates a directory. `resources.requests.storage` counts against ResourceQuotas (Step 14), but nothing stops the pod writing 2 TB. Use ext4/XFS project quotas or a real CSI driver for hard limits (§8).
 
 ### 3.2 AI I/O profiles (fio)
 
@@ -128,11 +128,11 @@ A PVC has to fit **both**. The inner refusal comes from the vCluster's API serve
 
 ## 4. Integrations
 
-- **Serving (Vol 21, 23, 24)** mounts `model-cache` at `/models` with `HF_HOME=/models/hf`. The prefetch Job fills it once. vLLM, SGLang and the P/D pair all read it — all inside llms, in `llm-serving`.
-- **Workloads (Vol 10)**: Qdrant's `volumeClaimTemplates` use `local-nvme-retain` the same way.
+- **Serving (Steps 20, 22, 23)** mounts `model-cache` at `/models` with `HF_HOME=/models/hf`. The prefetch Job fills it once. vLLM, SGLang and the P/D pair all read it — all inside llms, in `llm-serving`.
+- **Workloads (Step 12)**: Qdrant's `volumeClaimTemplates` use `local-nvme-retain` the same way.
 - **01 Ansible NFS-over-RDMA (`playbooks/09-nfs-rdma.yml`)** exports `/srv/models` from dgx-spark-1 to dgx-spark-2. For 2 Sparks, back the model cache with a static NFS PV (§8) so both nodes share one copy.
 - **Module 08 Storage** benchmarks the same NVMe with deeper tools (GDS, `gdsio`, MinIO, JuiceFS).
-- **etcd (Vol 03)**: run §5.4 while watching `etcd_disk_wal_fsync_duration_seconds` to see checkpoint-sized writes hurt the root control plane — and with it both vClusters, whose syncers write through it.
+- **etcd (Step 02)**: run §5.4 while watching `etcd_disk_wal_fsync_duration_seconds` to see checkpoint-sized writes hurt the root control plane — and with it both vClusters, whose syncers write through it.
 
 ---
 
@@ -264,7 +264,7 @@ Clean up: `kubectl --context spark-root delete -f manifests/root/60-storage/fio-
 `uma-watch.sh` takes the vCluster pod's name and context, finds its host copy, and prints the host pool next to that pod's cgroup:
 
 ```bash
-# terminal A (on the Spark): watch the pool while vLLM (Vol 21) loads
+# terminal A (on the Spark): watch the pool while vLLM (Step 20) loads
 POD=$(kubectl --context llms -n llm-serving get pod -l app=vllm -o jsonpath='{.items[0].metadata.name}')
 scripts/uma-watch.sh llm-serving "$POD" llms 2
 # terminal B: restart vLLM once with a warm cache, once after dropping it

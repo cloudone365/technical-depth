@@ -290,7 +290,7 @@ MAX_TOKENS=8192 scripts/compare-models.sh llama-3.1-8b r1-llama-8b r1-7b
 kubectl apply -k k8s/multi/qwen2.5-7b-tools
 ```
 
-## Step 31 · GitOps with an eval gate (90 min) → [production-mlops](production-mlops.md)
+## Step 31 · GitOps with an eval gate (90 min) → [production-mlops](28-production-mlops-and-gitops.md)
 
 ```bash
 kubectl apply -n argocd -f gitops/applications.yaml

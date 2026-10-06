@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Break/fix drills (Volume 19, 20, 27). Inject a fault, diagnose it from symptoms,
+# Break/fix drills (Steps 26, 27, 04). Inject a fault, diagnose it from symptoms,
 # fix it yourself, then check with `verify`. `hint` and `answer` are there when stuck.
 # Each scenario names the cluster it breaks: spark-root, dev-lab or llms.
 #   scripts/breakfix.sh list

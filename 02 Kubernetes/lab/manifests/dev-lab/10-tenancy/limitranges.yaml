@@ -1,4 +1,4 @@
-# Defaults so a pod without resources still lands inside the tenant quota (Volume 12).
+# Defaults so a pod without resources still lands inside the tenant quota (Step 14).
 apiVersion: v1
 kind: LimitRange
 metadata:

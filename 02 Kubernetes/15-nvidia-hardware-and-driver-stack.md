@@ -1,6 +1,6 @@
-# Volume 13 — NVIDIA Hardware & Driver Stack as Kubernetes Sees It: GB10, NVLink-C2C, Unified Memory, Drivers, CUDA Compatibility
+# Step 15 · NVIDIA Hardware & Driver Stack as Kubernetes Sees It: GB10, NVLink-C2C, Unified Memory, Drivers, CUDA Compatibility
 
-> **Module 02 · Part IV — NVIDIA platform** · Prev: [12 Multi-tenancy](12-multi-tenancy-resource-quotas-and-cgroups.md) · Next: [14 Container Toolkit & GPU sharing](14-nvidia-container-toolkit-and-gpu-virtualization.md) · The lab's shape: [27 Nested clusters](27-nested-clusters-with-vcluster.md)
+> **02 Kubernetes · Part V — GPU platform · Step 15 of 28** · ← [Step 14 · Multi-tenancy & cgroups](14-multi-tenancy-resource-quotas-and-cgroups.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 16 · Container Toolkit & GPU sharing](16-nvidia-container-toolkit-and-gpu-virtualization.md) →
 
 | | |
 |---|---|
@@ -21,13 +21,13 @@ Kubernetes treats a GPU as an opaque integer (`nvidia.com/gpu: 1`). Everything t
 
 | Property | DGX Spark (GB10 Grace Blackwell superchip) | Why you care in Kubernetes |
 |---|---|---|
-| CPU | 20 Arm cores: 10× Cortex-X925 + 10× Cortex-A725 | arm64 images only. CPU limits in whole-core terms (Vol 12) |
+| CPU | 20 Arm cores: 10× Cortex-X925 + 10× Cortex-A725 | arm64 images only. CPU limits in whole-core terms (Step 14) |
 | GPU | Blackwell, compute capability **12.1** (`sm_121`) | images and kernels must target sm_121 (or carry PTX) |
 | Memory | **128 GB LPDDR5x, unified** (≈119.7 GiB visible to DGX OS), ~273 GB/s | no separate framebuffer. `nvidia-smi` memory reads **N/A**; the node's `memory` capacity is the GPU's memory too |
 | CPU↔GPU link | NVLink-C2C (coherent, on package) | no PCIe copy between host RAM and "GPU RAM" |
 | Tensor-core peak | up to 1 PFLOP FP4 (sparse) | FP4/FP8 quantised models are first-class (modules 03–06) |
-| Network | ConnectX-7, 2× QSFP (200 GbE), 10 GbE RJ-45 | RDMA for 2-Spark NCCL (Vol 17) |
-| MIG | **not supported** | sharing = time-slicing / MPS (Vol 14) |
+| Network | ConnectX-7, 2× QSFP (200 GbE), 10 GbE RJ-45 | RDMA for 2-Spark NCCL (Step 18) |
+| MIG | **not supported** | sharing = time-slicing / MPS (Step 16) |
 | OS | DGX OS 7 (Ubuntu 24.04, arm64), open kernel modules | driver owned by DGX OS, not by the GPU Operator |
 
 ---
@@ -119,8 +119,8 @@ flowchart TB
 ## 4. Integrations
 
 - **01 Ansible `spark_facts`** writes the same facts to `/etc/ansible/facts.d/spark.fact` (`ansible_local.spark.gpu.compute_cap == "12.1"`), and `playbooks/16-driver-audit.yml` holds NVIDIA packages so an `apt upgrade` can't break the Kubernetes layer.
-- **Module 07 Nvidia** covers the silicon (SM, tensor cores, NVLink-C2C, UVM page faults) that this volume only inventories.
-- **Prometheus (Vol 16)**: `spark_gpu_*` textfile metrics from the host, plus DCGM when GB10 support is confirmed.
+- **Module 07 Nvidia** covers the silicon (SM, tensor cores, NVLink-C2C, UVM page faults) that this step only inventories.
+- **Prometheus (Step 17)**: `spark_gpu_*` textfile metrics from the host, plus DCGM when GB10 support is confirmed.
 
 ---
 
@@ -161,7 +161,7 @@ kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.capacity
 kubectl --context llms get node dgx-spark-1 -L spark.lab/gpu,nvidia.com/gpu.product,nvidia.com/gpu.replicas
 ```
 
-Capacity shows `nvidia.com/gpu: 15` and a `memory` figure that is the whole unified pool; allocatable is lower by the kubelet reservations (Vol 12 §3.1). Inside llms the node looks the same — 15 slices — although llms may only use 8: budgets are quotas, not node properties.
+Capacity shows `nvidia.com/gpu: 15` and a `memory` figure that is the whole unified pool; allocatable is lower by the kubelet reservations (Step 14 §3.1). Inside llms the node looks the same — 15 slices — although llms may only use 8: budgets are quotas, not node properties.
 
 ### 5.3 The same view from inside a pod
 
@@ -189,7 +189,7 @@ kubectl --context spark-root -n platform-tools logs -f job/gemm-solo
 {"pod": "gemm-solo-…", "device": "NVIDIA GB10", "cc": "12.1", "n": 8192, "tflops": 87.4, "mem_total_gib": 119.7, "mem_free_gib": 101.2}
 ```
 
-The TFLOPS figure is illustrative, so **record your own**. It's your "one tenant, no contention" baseline for Vol 14. `mem_total_gib` from CUDA equals the whole UMA pool, and `mem_free_gib` moves as the OS and other pods — in all three clusters — allocate.
+The TFLOPS figure is illustrative, so **record your own**. It's your "one tenant, no contention" baseline for Step 16. `mem_total_gib` from CUDA equals the whole UMA pool, and `mem_free_gib` moves as the OS and other pods — in all three clusters — allocate.
 
 ### 5.5 Watch clocks and power under load
 
@@ -229,13 +229,13 @@ Expected: `exec /bin/uname: exec format error`, with the pod in `Error`. Everyth
 | Symptom | Layer | Diagnose | Fix |
 |---|---|---|---|
 | `nvidia-smi: NVIDIA-SMI has failed…couldn't communicate with the driver` (host) | kernel module | `lsmod`, `dmesg`, `systemctl status nvidia-persistenced` | DGX OS update finished? Reboot. Re-install the DGX OS driver packages, not a runfile |
-| Pod: `Failed to initialize NVML: Unknown Error` | cgroup device access after a systemd reload | `kubectl --context <cluster> logs`. Toolkit version | upgrade nvidia-container-toolkit. Use CDI mode (Vol 14) |
+| Pod: `Failed to initialize NVML: Unknown Error` | cgroup device access after a systemd reload | `kubectl --context <cluster> logs`. Toolkit version | upgrade nvidia-container-toolkit. Use CDI mode (Step 16) |
 | `no kernel image is available for execution on the device` | wheel/kernel lacks sm_121 | `python -c "import torch;print(torch.cuda.get_arch_list())"` | use NGC images or wheels built for sm_120/121 (+PTX) |
 | `CUDA driver version is insufficient for CUDA runtime version` | container CUDA newer than the driver | compare `nvidia-smi` "CUDA Version" and the image's CUDA | older image tag, or upgrade DGX OS |
 | `exec format error` | amd64 image | `docker manifest inspect` | arm64/multi-arch tag |
-| Throughput half of baseline | thermal/power throttling or another tenant | `nvidia-smi -q -d PERFORMANCE`; GPU pods of *all* clusters: `kubectl --context spark-root get pods -A -o wide` (vCluster pods are in `vc-*`) | airflow. Vol 14 contention |
+| Throughput half of baseline | thermal/power throttling or another tenant | `nvidia-smi -q -d PERFORMANCE`; GPU pods of *all* clusters: `kubectl --context spark-root get pods -A -o wide` (vCluster pods are in `vc-*`) | airflow. Step 16 contention |
 | `Xid 13/31/43` in dmesg | app fault (bad kernel, illegal address) | `dmesg -T \| grep -i xid` | fix the workload. The node is fine |
-| `Xid 79` / `GPU has fallen off the bus` / `48` | hardware / severe | same | drain + reboot (01 Ansible `node_drain`, Step 28 §5.5 — on one Spark that stops all three clusters). If it repeats, open an RMA |
+| `Xid 79` / `GPU has fallen off the bus` / `48` | hardware / severe | same | drain + reboot (01 Ansible Step 29, role `node_drain` — on one Spark that stops all three clusters). If it repeats, open an RMA |
 
 ---
 

@@ -1,4 +1,4 @@
-# The hard budgets of the two vClusters (Volume 27). These are the real caps:
+# The hard budgets of the two vClusters (Step 04). These are the real caps:
 # quotas inside a vCluster are ceilings for its tenants, but only this root
 # quota stops the vCluster as a whole. Root keeps the rest of the Spark:
 #

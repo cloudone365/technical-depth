@@ -14,7 +14,7 @@ DGX Spark/
 │   └── docs/                  # Ansible-specific documentation
 │       └── README.md          # Ansible setup & operational guide
 ├── 01Ansible/                 # [01] Ansible Core, Tower/AWX & HashiCorp Vault (3 Volumes + Guides)
-├── 02 Kubernetes/             # [02] Kubernetes & Hyperscaler AI Infrastructure (26 Volumes)
+├── 02 Kubernetes/             # [02] Kubernetes & Hyperscaler AI Infrastructure (Steps 01–28)
 ├── 03 DeepSeek/               # [03] DeepSeek & Frontier AI Architecture Curriculum (41 Volumes)
 ├── 04 Qwen/                   # [04] Alibaba Qwen Ecosystem & ms-swift Mastery (25 Volumes)
 ├── 05 NeMo/                   # [05] NVIDIA NeMo & Nemotron Ecosystem Mastery (25 Volumes)
@@ -27,63 +27,73 @@ DGX Spark/
 
 ---
 
-## 🚀 [02] NVIDIA AI Infrastructure & Kubernetes Mastery (26 Volumes)
+## 🚀 [02] NVIDIA AI Infrastructure & Kubernetes Mastery (Steps 01–28)
 
-The complete curriculum is indexed in [**02 Kubernetes/README.md**](02%20Kubernetes/README.md).
+The module is indexed in [**02 Kubernetes/README.md**](02%20Kubernetes/README.md); the build order is the [**step-by-step guide**](02%20Kubernetes/00-kubernetes-step-by-step-guide.md).
 
-### Part I: Control Plane & Core Architecture Internals
-| # | Guide | File |
+### Part I: Control Plane & the Nested Lab
+| Step | Guide | File |
 | :--- | :--- | :--- |
 | 01 | **Core Architecture & Pod Lifecycle** | [01-kubernetes-core-architecture.md](02%20Kubernetes/01-kubernetes-core-architecture.md) |
-| 02 | **Kube-API Server Internals (Auth, RBAC, Webhooks, APF)** | [02-kube-apiserver-internals.md](02%20Kubernetes/02-kube-apiserver-internals.md) |
-| 03 | **ETCD Database Deep Dive (Raft, WAL, bbolt, Recovery)** | [03-etcd-database-deep-dive.md](02%20Kubernetes/03-etcd-database-deep-dive.md) |
-| 04 | **Controller Manager & Informers (Reconciliation Loops)** | [04-kube-controller-manager-and-controllers.md](02%20Kubernetes/04-kube-controller-manager-and-controllers.md) |
-| 05 | **Scheduler & AI Batch Scheduling (Taints, Kueue, Gang)** | [05-kube-scheduler-and-ai-batch-scheduling.md](02%20Kubernetes/05-kube-scheduler-and-ai-batch-scheduling.md) |
+| 02 | **etcd Deep Dive (Raft, MVCC, Quotas, Backup & Restore)** | [02-etcd-database-deep-dive.md](02%20Kubernetes/02-etcd-database-deep-dive.md) |
+| 03 | **kube-apiserver Internals (AuthN, RBAC, CEL Admission, APF, Audit)** | [03-kube-apiserver-internals.md](02%20Kubernetes/03-kube-apiserver-internals.md) |
+| 04 | **Nested Clusters: kubeadm Root + Two vClusters** | [04-nested-clusters-with-vcluster.md](02%20Kubernetes/04-nested-clusters-with-vcluster.md) |
+| 05 | **DGX Spark Datacenter Simulation (End-to-End Build & Gates)** | [05-dgx-spark-datacenter-simulation-lab.md](02%20Kubernetes/05-dgx-spark-datacenter-simulation-lab.md) |
 
-### Part II: Deep Networking, Ingress, DNS & Discovery
-| # | Guide | File |
+### Part II: Controllers & Scheduling
+| Step | Guide | File |
 | :--- | :--- | :--- |
-| 06 | **Networking Deep Dive & CNI (Flannel, Calico, Cilium, Multus)** | [06-kubernetes-networking-deep-dive.md](02%20Kubernetes/06-kubernetes-networking-deep-dive.md) |
-| 07 | **Kube-Proxy & ClusterIP (iptables, IPVS, Headless Services)** | [07-kube-proxy-and-cluster-ip-mechanics.md](02%20Kubernetes/07-kube-proxy-and-cluster-ip-mechanics.md) |
-| 08 | **CoreDNS & Service Discovery (ndots:5 Latency Bug)** | [08-coredns-and-service-discovery.md](02%20Kubernetes/08-coredns-and-service-discovery.md) |
-| 09 | **Ingress Controllers & Gateway API (LLM Streaming, gRPC)** | [09-ingress-controllers-and-gateway-api.md](02%20Kubernetes/09-ingress-controllers-and-gateway-api.md) |
+| 06 | **Controllers (Reconciliation Loops, Informers, Your Own Controller)** | [06-kube-controller-manager-and-controllers.md](02%20Kubernetes/06-kube-controller-manager-and-controllers.md) |
+| 07 | **kube-scheduler & AI Batch Scheduling (Priorities, Kueue Gangs, DRA)** | [07-kube-scheduler-and-ai-batch-scheduling.md](02%20Kubernetes/07-kube-scheduler-and-ai-batch-scheduling.md) |
 
-### Part III: Workloads, Storage & Multi-Tenancy
-| # | Guide | File |
+### Part III: Networking
+| Step | Guide | File |
 | :--- | :--- | :--- |
-| 10 | **Advanced Workloads (StatefulSets, DaemonSets, Indexed Jobs)** | [10-advanced-workload-controllers.md](02%20Kubernetes/10-advanced-workload-controllers.md) |
-| 11 | **Storage, CSI & High-IOPS Volumes (Local Path, NVMe, GDS)** | [11-storage-csi-and-high-performance-volumes.md](02%20Kubernetes/11-storage-csi-and-high-performance-volumes.md) |
-| 12 | **Multi-Tenancy & cgroups v2 (Strict 5% Resource Math)** | [12-multi-tenancy-resource-quotas-and-cgroups.md](02%20Kubernetes/12-multi-tenancy-resource-quotas-and-cgroups.md) |
+| 08 | **Networking Deep Dive (CNI, Cilium VXLAN & eBPF, NetworkPolicy, RDMA)** | [08-kubernetes-networking-deep-dive.md](02%20Kubernetes/08-kubernetes-networking-deep-dive.md) |
+| 09 | **kube-proxy & ClusterIP (iptables, EndpointSlices, conntrack, Headless)** | [09-kube-proxy-and-cluster-ip-mechanics.md](02%20Kubernetes/09-kube-proxy-and-cluster-ip-mechanics.md) |
+| 10 | **CoreDNS & Service Discovery (the ndots:5 Tax)** | [10-coredns-and-service-discovery.md](02%20Kubernetes/10-coredns-and-service-discovery.md) |
+| 11 | **Ingress & Gateway API for LLM APIs (Streaming, Canaries, gRPC)** | [11-ingress-controllers-and-gateway-api.md](02%20Kubernetes/11-ingress-controllers-and-gateway-api.md) |
 
-### Part IV: NVIDIA Hardware, Drivers & Hands-On Lab
-| # | Guide | File |
+### Part IV: Workloads, Storage & Tenancy
+| Step | Guide | File |
 | :--- | :--- | :--- |
-| 13 | **NVIDIA Hardware & Drivers (Grace Blackwell GB10, NVLink-C2C)** | [13-nvidia-hardware-and-driver-stack.md](02%20Kubernetes/13-nvidia-hardware-and-driver-stack.md) |
-| 14 | **Container Toolkit & Virtualization (CDI, Time-Slicing, MIG)** | [14-nvidia-container-toolkit-and-gpu-virtualization.md](02%20Kubernetes/14-nvidia-container-toolkit-and-gpu-virtualization.md) |
-| 15 | **DGX Spark Data Center Simulation Lab (Dual K3s, 5% Quotas)** | [15-dgx-spark-datacenter-simulation-lab.md](02%20Kubernetes/15-dgx-spark-datacenter-simulation-lab.md) |
-| 16 | **NVIDIA GPU Operator & Network Operator (Helm, GFD, DCGM)** | [16-nvidia-gpu-operator-and-network-operator.md](02%20Kubernetes/16-nvidia-gpu-operator-and-network-operator.md) |
+| 12 | **Workload Controllers (StatefulSets, DaemonSets, Indexed Jobs, PDBs)** | [12-advanced-workload-controllers.md](02%20Kubernetes/12-advanced-workload-controllers.md) |
+| 13 | **Storage for AI (local-path on NVMe, Model Caches, fio, UMA)** | [13-storage-csi-and-high-performance-volumes.md](02%20Kubernetes/13-storage-csi-and-high-performance-volumes.md) |
+| 14 | **Multi-Tenancy (Two-Layer Quotas, QoS, cgroups v2, Unified Memory)** | [14-multi-tenancy-resource-quotas-and-cgroups.md](02%20Kubernetes/14-multi-tenancy-resource-quotas-and-cgroups.md) |
 
-### Part V: Large-Scale Distributed AI & Production Diagnostics
-| # | Guide | File |
+### Part V: GPU Platform
+| Step | Guide | File |
 | :--- | :--- | :--- |
-| 17 | **Distributed AI Training & NCCL (DDP, FSDP, GPUDirect RDMA)** | [17-distributed-ai-training-and-nccl.md](02%20Kubernetes/17-distributed-ai-training-and-nccl.md) |
-| 18 | **Large-Scale SuperPOD & Network Fabrics (InfiniBand, Clos)** | [18-large-scale-superpod-and-network-fabrics.md](02%20Kubernetes/18-large-scale-superpod-and-network-fabrics.md) |
-| 19 | **Cluster Diagnostics & Failure Playbook (etcd, Xid Matrix)** | [19-cluster-diagnostics-and-failure-scenarios.md](02%20Kubernetes/19-cluster-diagnostics-and-failure-scenarios.md) |
-| 20 | **20 Hands-On Practice Exercises & Mastery Workbook** | [20-hands-on-practice-exercises-workbook.md](02%20Kubernetes/20-hands-on-practice-exercises-workbook.md) |
+| 15 | **NVIDIA Hardware & Driver Stack (GB10, NVLink-C2C, CUDA Compatibility)** | [15-nvidia-hardware-and-driver-stack.md](02%20Kubernetes/15-nvidia-hardware-and-driver-stack.md) |
+| 16 | **Container Toolkit, CDI & GPU Sharing (Time-Slicing, MPS, no MIG)** | [16-nvidia-container-toolkit-and-gpu-virtualization.md](02%20Kubernetes/16-nvidia-container-toolkit-and-gpu-virtualization.md) |
+| 17 | **GPU Operator, Network Operator & GPU Observability** | [17-nvidia-gpu-operator-and-network-operator.md](02%20Kubernetes/17-nvidia-gpu-operator-and-network-operator.md) |
 
-### Part VI: Production AI Inference, LLM Serving & Model Runtimes
-| # | Guide | File |
+### Part VI: Distributed Training & Fabrics
+| Step | Guide | File |
 | :--- | :--- | :--- |
-| 21 | **vLLM High-Throughput Serving (PagedAttention, KV Cache, HPA)** | [21-vllm-high-throughput-llm-serving.md](02%20Kubernetes/21-vllm-high-throughput-llm-serving.md) |
-| 22 | **NVIDIA Triton Inference Server (Dynamic Batching, Ensembles, gRPC)** | [22-nvidia-triton-inference-server.md](02%20Kubernetes/22-nvidia-triton-inference-server.md) |
-| 23 | **LLM Alternatives & KServe (TensorRT-LLM, TGI, SGLang, Ray Serve)** | [23-llm-inference-alternatives-and-kserve.md](02%20Kubernetes/23-llm-inference-alternatives-and-kserve.md) |
+| 18 | **Distributed Training & NCCL (torchrun, RoCE over CX-7, Hangs)** | [18-distributed-ai-training-and-nccl.md](02%20Kubernetes/18-distributed-ai-training-and-nccl.md) |
+| 19 | **From Two Sparks to a SuperPOD (Fabrics, Rails, RoCE vs InfiniBand)** | [19-large-scale-superpod-and-network-fabrics.md](02%20Kubernetes/19-large-scale-superpod-and-network-fabrics.md) |
 
-### Part VII: Hyperscaler Mega-Scale & Multi-Accelerator Infrastructure
-| # | Guide | File |
+### Part VII: LLM Serving
+| Step | Guide | File |
 | :--- | :--- | :--- |
-| 24 | **Disaggregated Prefill & Decode Serving (PD Separation, RDMA)** | [24-disaggregated-prefill-and-decode-serving.md](02%20Kubernetes/24-disaggregated-prefill-and-decode-serving.md) |
-| 25 | **Hyperscaler Silicon & Compilers (TPU, Trainium vs Blackwell)** | [25-hyperscaler-silicon-and-compilers.md](02%20Kubernetes/25-hyperscaler-silicon-and-compilers.md) |
-| 26 | **Ultra-Scale Cluster Resilience & SDC (10k-100k Accelerators)** | [26-ultra-scale-cluster-resilience-and-fault-tolerance.md](02%20Kubernetes/26-ultra-scale-cluster-resilience-and-fault-tolerance.md) |
+| 20 | **vLLM (KV-Cache Budgeting, Probes, Autoscaling, Load Testing)** | [20-vllm-high-throughput-llm-serving.md](02%20Kubernetes/20-vllm-high-throughput-llm-serving.md) |
+| 21 | **NVIDIA Triton Inference Server (Ensembles, Dynamic Batching)** | [21-nvidia-triton-inference-server.md](02%20Kubernetes/21-nvidia-triton-inference-server.md) |
+| 22 | **Inference Engines & KServe (SGLang, TensorRT-LLM, Ollama)** | [22-llm-inference-alternatives-and-kserve.md](02%20Kubernetes/22-llm-inference-alternatives-and-kserve.md) |
+| 23 | **Disaggregated Prefill & Decode (vLLM + NIXL)** | [23-disaggregated-prefill-and-decode-serving.md](02%20Kubernetes/23-disaggregated-prefill-and-decode-serving.md) |
+
+### Part VIII: Scale & Resilience
+| Step | Guide | File |
+| :--- | :--- | :--- |
+| 24 | **Accelerators & Compilers (TPU, Trainium, Blackwell, torch.compile)** | [24-hyperscaler-silicon-and-compilers.md](02%20Kubernetes/24-hyperscaler-silicon-and-compilers.md) |
+| 25 | **Resilience at Scale (Failure Math, Async Checkpoints, SDC Canaries)** | [25-ultra-scale-cluster-resilience-and-fault-tolerance.md](02%20Kubernetes/25-ultra-scale-cluster-resilience-and-fault-tolerance.md) |
+
+### Part IX: Operations
+| Step | Guide | File |
+| :--- | :--- | :--- |
+| 26 | **Cluster Diagnostics & Failure Playbook** | [26-cluster-diagnostics-and-failure-scenarios.md](02%20Kubernetes/26-cluster-diagnostics-and-failure-scenarios.md) |
+| 27 | **Hands-On Workbook (20 Challenges + 60-Minute Rebuild)** | [27-hands-on-practice-exercises-workbook.md](02%20Kubernetes/27-hands-on-practice-exercises-workbook.md) |
+| 28 | **Production MLOps (GitOps, CI, Promotion, Rollback)** | [28-production-mlops-and-gitops.md](02%20Kubernetes/28-production-mlops-and-gitops.md) |
 
 ---
 

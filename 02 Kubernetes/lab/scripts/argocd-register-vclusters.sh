@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Register the two vClusters as Argo CD destinations (production-mlops.md, Volume 27).
+# Register the two vClusters as Argo CD destinations (Steps 28, 04).
 # Argo CD runs on the root; it reaches each vCluster API on its MetalLB IP with
 # the admin credentials vCluster exported into Secret vc-<name>. The result is
 # a declarative "cluster" Secret in argocd — the same thing `argocd cluster add`

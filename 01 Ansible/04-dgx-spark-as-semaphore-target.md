@@ -302,7 +302,7 @@ Create these templates. The **Explained in** column names the step document (not
 | `04 Telemetry` | `04-telemetry.yml` | Step 12 | DCGM exporter, node exporter |
 | `05 Kubernetes` | `05-kubernetes.yml` | Step 19 | kubeadm root cluster, Cilium, MetalLB; writes the kubeconfig to the state volume |
 | `06 GPU Operator` | `06-gpu-operator.yml` | Step 20 | 15 time-slices |
-| `06b vClusters` | `06b-vclusters.yml` | Step 19 §3.4, 02 Kubernetes Vol 27 | `dev-lab` and `llms`; adds their contexts |
+| `06b vClusters` | `06b-vclusters.yml` | Step 19 §3.4, 02 Kubernetes Step 04 | `dev-lab` and `llms`; adds their contexts |
 | `13 Multus RDMA` | `13-multus-rdma.yml` | Step 21 | secondary CX-7 networks |
 | `07 Slurm`, `09 NFS RDMA`, `10 NCCL test`, `11 RDMA perftest`, `14 GDS check`, `16 Driver audit`, `18 CUDA smoke`, `19 Firmware inventory`, `23 Logging audit`, `24 UMA relief`, `25 Chaos` | the playbook of the same number | Steps 22, 15, 14, 13, 16, 10, 11, 28, 27, 29, 30 (in template order) | same pattern; `10`/`11` need dgx-spark-2 |
 | `17 DGX OS upgrade` | `17-dgxos-upgrade.yml` | Steps 10, 28 | reboots: extra variable `vault_ssh_cert_ttl: 1h` (§12) |
@@ -336,7 +336,7 @@ kubectl --context spark-root get nodes                               # expect: d
 kubectl --context dev-lab get ns && kubectl --context llms get ns    # both vClusters answer
 ```
 
-This kubeconfig holds cluster-admin certificates, the human side of the lab, and you need it for the Kubernetes labs. Keep it on the MacBook only (it's git-ignored). In an enterprise, people get short-lived OIDC logins instead (02 Kubernetes Vol 02).
+This kubeconfig holds cluster-admin certificates, the human side of the lab, and you need it for the Kubernetes labs. Keep it on the MacBook only (it's git-ignored). In an enterprise, people get short-lived OIDC logins instead (02 Kubernetes Step 03).
 
 ---
 
@@ -359,7 +359,7 @@ This kubeconfig holds cluster-admin certificates, the human side of the lab, and
 - **Schedules:** `20 Drift check` nightly (it only reports, it never changes anything), and `30 Validate` weekly. A failed scheduled task is your alert (add a Telegram, Slack or e-mail alert in project settings).
 - **Upgrades** (`17 DGX OS upgrade`, Steps 10/28) and **drains** (`21 Emergency drain`, Step 29): run them from Semaphore so every maintenance action has a record of who ran it, when and with what result.
 - **Rebuild:** `99 Reset Kubernetes`, then `05 Kubernetes` → `06 GPU Operator` → `06b vClusters`, then `tools/fetch-kubeconfig.sh`. Semaphore, Vault and their history are untouched by any of it.
-- **What Semaphore does *not* do:** workloads inside the vClusters (vLLM, tenant apps, quotas). Those are Git → Argo CD (02 Kubernetes `production-mlops.md`). One tool per object, or the two will undo each other's changes.
+- **What Semaphore does *not* do:** workloads inside the vClusters (vLLM, tenant apps, quotas). Those are Git → Argo CD (02 Kubernetes [Step 28](../02%20Kubernetes/28-production-mlops-and-gitops.md)). One tool per object, or the two will undo each other's changes.
 
 ---
 

@@ -1,10 +1,10 @@
-# Disaggregated prefill/decode (Volume 24) — ADVANCED / EXPERIMENTAL.
-# INSIDE vCluster #2 · llms. Park vLLM first (pause its KEDA ScaledObject, Vol 21 §9): prefill + decode
+# Disaggregated prefill/decode (Step 23) — ADVANCED / EXPERIMENTAL.
+# INSIDE vCluster #2 · llms. Park vLLM first (pause its KEDA ScaledObject, Step 20 §9): prefill + decode
 # take 2 slices and 40 Gi of the llms vCluster's 48 Gi memory budget.
 # One Spark: both roles share the GB10 via time-slicing (2 slices), so this
 # demonstrates the *mechanics* (KV handoff over NIXL/UCX, routing, metrics),
 # not a speed-up. On two Sparks, pin prefill to dgx-spark-1 and decode to
-# dgx-spark-2 and let UCX use the CX-7 RDMA link (see Volume 24 §8).
+# dgx-spark-2 and let UCX use the CX-7 RDMA link (see Step 23 §8).
 # Pre-flight: kubectl exec deploy/vllm-prefill -- python3 -c "import nixl"
 apiVersion: apps/v1
 kind: Deployment

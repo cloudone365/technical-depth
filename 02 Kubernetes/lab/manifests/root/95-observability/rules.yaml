@@ -1,4 +1,4 @@
-# Alerts that matter on a single DGX Spark running Kubernetes (Volume 16, 19, 27).
+# Alerts that matter on a single DGX Spark running Kubernetes (Steps 17, 26, 04).
 # Evaluated by the root's Prometheus: it sees the root quotas of the two vClusters
 # (vc-dev-lab, vc-llms) and the synced pods, labelled vcluster/vnamespace by
 # vcluster-workloads.yaml. Quotas INSIDE a vCluster are not visible here.
@@ -19,7 +19,7 @@ spec:
           labels: {severity: warning}
           annotations:
             summary: "{{ $labels.node }}: <10 % unified memory available"
-            runbook: "https://github.com/cloudone365/technical-depth/blob/main/02%20Kubernetes/19-cluster-diagnostics-and-failure-scenarios.md#37-unified-memory-pressure-the-spark-specific-one"
+            runbook: "https://github.com/cloudone365/technical-depth/blob/main/02%20Kubernetes/26-cluster-diagnostics-and-failure-scenarios.md#37-unified-memory-pressure-the-spark-specific-one"
         - alert: SparkNodeMemoryPressureCondition
           expr: kube_node_status_condition{condition="MemoryPressure",status="true"} == 1
           for: 1m

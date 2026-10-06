@@ -1,9 +1,9 @@
-# NVIDIA Network Operator for 2 Sparks (Volume 16 §5.6, Volume 17) — OPTIONAL.
+# NVIDIA Network Operator for 2 Sparks (Step 17 §5.6, Step 18) — OPTIONAL.
 # DGX OS already ships the DOCA/MLNX host driver, so the operator must NOT
 # install one (no ofedDriver section). It adds:
 #   - RDMA shared device plugin → resource rdma/rdma_shared_cx7 on each Spark
 #   - Multus + CNI plugins + whereabouts IPAM → a 2nd pod interface on the CX-7
-# Install the operator itself first (Helm chart network-operator, see volume).
+# Install the operator itself first (Helm chart network-operator, see Step 17).
 # The 01 Ansible lab (playbooks/13-multus-rdma.yml) is a lighter alternative:
 # use ONE of the two, not both.
 apiVersion: mellanox.com/v1alpha1

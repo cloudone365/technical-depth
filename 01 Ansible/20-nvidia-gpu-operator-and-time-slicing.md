@@ -2,7 +2,7 @@
 
 > **01 Ansible · Part IV — Secrets & platforms · Step 20 of 30** · ← [Step 19 · Kubernetes with kubeadm](19-kubernetes-kubeadm-root-cluster-and-vclusters.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 21 · Multus & RDMA networks](21-multus-and-secondary-rdma-networks.md) →
 >
-> Deep dive: [02 Kubernetes Vol 16 · GPU & Network Operator](../02%20Kubernetes/16-nvidia-gpu-operator-and-network-operator.md)
+> Deep dive: [02 Kubernetes Step 17 · GPU & Network Operator](../02%20Kubernetes/17-nvidia-gpu-operator-and-network-operator.md)
 
 | | |
 |---|---|
@@ -334,11 +334,11 @@ With option B the Secret exists twice. The original is in the vCluster's SQLite 
 | System | Note |
 |---|---|
 | Root cluster (Step 19) | Needs containerd's default runtime `nvidia`; the operator never edits containerd here (toolkit off) |
-| vClusters (Step 19 §3.4, 02 Kubernetes Vol 27) | Consume slices through the root scheduler; budgets in `manifests/root/05-vclusters/quotas.yaml` must sum with the root's 5 to `gpu_operator_timeslice_replicas` |
+| vClusters (Step 19 §3.4, 02 Kubernetes Step 04) | Consume slices through the root scheduler; budgets in `manifests/root/05-vclusters/quotas.yaml` must sum with the root's 5 to `gpu_operator_timeslice_replicas` |
 | DGX OS upgrades (Step 10) | After a driver update, restart the device-plugin and validator pods (or reboot); the upgrade playbook's drain/uncordon covers it |
 | Telemetry (Step 12) | Choose either host dcgm-exporter **or** the operator's, not both |
 | Multus/RDMA (Step 21) | Same pod requests `nvidia.com/gpu` + `rdma/rdma_shared_cx7` |
-| 02 Kubernetes Vol 16 | Switching a node between time-sliced and whole-GPU profiles, the Network Operator alternative |
+| 02 Kubernetes Step 17 | Switching a node between time-sliced and whole-GPU profiles, the Network Operator alternative |
 | Semaphore (Step 04) | The lab's controller: template `06 GPU Operator`, run from the lab image (`kubernetes.core` + helm) |
 | AWX | Alternative controller: can run the Helm role from a job template (the EE includes `kubernetes.core` + helm) |
 
@@ -351,7 +351,7 @@ With option B the Secret exists twice. The original is in the vCluster's SQLite 
 | Template fails: `Could not find … kubeconfig-spark-lab.yaml` | the state volume has no kubeconfig (`SPARK_LAB_CACHE` unset, or 05 ran from the MacBook) | Step 04 §4 Verify; run `05 Kubernetes` from Semaphore first |
 | Allocatable `nvidia.com/gpu` = 1, not 15 | `kubectl --context spark-root -n gpu-operator get cm time-slicing-config -o yaml`; device-plugin logs | ConfigMap name/key must match `devicePlugin.config.name/default`; restart the device-plugin DS |
 | Root pod `Pending: Insufficient nvidia.com/gpu` | `kubectl --context spark-root describe node dgx-spark-1 \| grep -A8 'Allocated resources'` | All 15 slices in use (count the `vc-*` pods too), or `failRequestsGreaterThanOne` rejected a request for > 1 |
-| vCluster pod `Pending`, no scheduler events | `kubectl --context <vc> describe pod …` events; `kubectl --context spark-root -n vc-<vc> describe quota vcluster-budget` | Root budget spent (§4.2). Free slices in that vCluster or raise its quota (02 Kubernetes Vol 27 §6.5) |
+| vCluster pod `Pending`, no scheduler events | `kubectl --context <vc> describe pod …` events; `kubectl --context spark-root -n vc-<vc> describe quota vcluster-budget` | Root budget spent (§4.2). Free slices in that vCluster or raise its quota (02 Kubernetes Step 04 §6.5) |
 | Tenant pod rejected: "at most 1 nvidia.com/gpu" | Message from the vCluster's API server | The 02 lab's CEL policy `spark-gpu-slice-limits`: a slice is not more GPU, request 1 |
 | `ImagePullBackOff` on operator pods | `kubectl --context spark-root -n gpu-operator describe pod <p>` | Check the chart version supports arm64 for every component; pin a release that does |
 | Helm upgrade rolled back (`atomic`) | `helm --kube-context spark-root -n gpu-operator history gpu-operator` | Read `helm status`; fix values; re-run |

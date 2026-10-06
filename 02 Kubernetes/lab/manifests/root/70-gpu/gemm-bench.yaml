@@ -1,4 +1,4 @@
-# Up to 4 replicas fighting for the same GB10 through time-slicing (Volume 14
+# Up to 4 replicas fighting for the same GB10 through time-slicing (Step 16
 # lab, Workbook ex. 19), on the ROOT in platform-tools: GPU benchmarking is a
 # platform job, and the root has no quota to stop you at 2 slices.
 # Starts at 0 replicas; scale it during the lab.

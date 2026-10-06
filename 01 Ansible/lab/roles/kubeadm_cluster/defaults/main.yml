@@ -46,12 +46,12 @@ kubeadm_cluster_node_labels:
 kubeadm_cluster_containerd_config: /etc/containerd/config.toml
 kubeadm_cluster_default_runtime_nvidia: true  # set false + use runtimeClassName: nvidia for strict multi-tenancy
 
-# API server hardening (02 Kubernetes Vol 02): audit log + Secret encryption at rest.
+# API server hardening (02 Kubernetes Step 03): audit log + Secret encryption at rest.
 kubeadm_cluster_audit_dir: /etc/kubernetes/audit
 kubeadm_cluster_audit_log_dir: /var/log/kubernetes/audit
 kubeadm_cluster_encryption_dir: /etc/kubernetes/encryption
 
-# etcd: stacked static pod. Snapshots every 6 h, newest 20 kept (02 Kubernetes Vol 03).
+# etcd: stacked static pod. Snapshots every 6 h, newest 20 kept (02 Kubernetes Step 02).
 kubeadm_cluster_etcd_snapshot_dir: /var/lib/etcd-snapshots
 kubeadm_cluster_etcd_snapshot_calendar: "*-*-* 00/6:00:00"
 kubeadm_cluster_etcd_snapshot_keep: 20

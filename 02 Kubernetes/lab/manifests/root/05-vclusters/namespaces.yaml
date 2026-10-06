@@ -1,4 +1,4 @@
-# Host namespaces that hold the two vClusters (Volume 27). Each vCluster's
+# Host namespaces that hold the two vClusters (Step 04). Each vCluster's
 # control plane AND every pod its tenants create really run here, renamed
 # <pod>-x-<namespace>-x-<vcluster> by the syncer.
 apiVersion: v1
@@ -21,6 +21,6 @@ metadata:
     spark.lab/tier: vcluster
     spark.lab/vcluster: llms
     # Multi-node NCCL in the llms 'batch' namespace needs hostNetwork/IPC_LOCK
-    # (Volume 17). Enforce privileged, warn at baseline so it stays visible.
+    # (Step 18). Enforce privileged, warn at baseline so it stays visible.
     pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/warn: baseline

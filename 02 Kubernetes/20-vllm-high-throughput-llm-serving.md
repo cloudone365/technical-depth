@@ -1,6 +1,6 @@
-# Volume 21 — vLLM on Kubernetes on a DGX Spark: KV-Cache Budgeting, Probes, Autoscaling & Load Testing
+# Step 20 · vLLM on Kubernetes on a DGX Spark: KV-Cache Budgeting, Probes, Autoscaling & Load Testing
 
-> **Module 02 · Part VI — Serving** · Prev: [20 Workbook](20-hands-on-practice-exercises-workbook.md) · Next: [22 Triton](22-nvidia-triton-inference-server.md) · The lab's shape: [27 Nested clusters](27-nested-clusters-with-vcluster.md)
+> **02 Kubernetes · Part VII — LLM serving · Step 20 of 28** · ← [Step 19 · Two Sparks to a SuperPOD](19-large-scale-superpod-and-network-fabrics.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 21 · Triton](21-nvidia-triton-inference-server.md) →
 
 | | |
 |---|---|
@@ -20,7 +20,7 @@ vLLM's throughput comes from **PagedAttention** (the KV cache is paged in fixed 
 And there are **two budgets**, both of which must hold:
 
 1. **vLLM's own**: weights + activations + KV cache ≤ fraction × 119.7 GiB. At 0.20 that's ≈ 24 GiB.
-2. **The cluster's**: the pod's memory limit (32 Gi) must fit `serving-budget` in `llm-serving` (36 Gi, inside llms) *and* the root's `vcluster-budget` on `vc-llms` (48 Gi for everything in llms). Whether CUDA allocations are charged to the pod's cgroup is something you measure (Vol 12 §5.5); the manifests are sized as if they are.
+2. **The cluster's**: the pod's memory limit (32 Gi) must fit `serving-budget` in `llm-serving` (36 Gi, inside llms) *and* the root's `vcluster-budget` on `vc-llms` (48 Gi for everything in llms). Whether CUDA allocations are charged to the pod's cgroup is something you measure (Step 14 §5.5); the manifests are sized as if they are.
 
 | Flag | What it controls | Lab value | Rule of thumb on a Spark |
 |---|---|---|---|
@@ -102,7 +102,7 @@ Per token, per sequence: `2 (K and V) × layers × kv_heads × head_dim × bytes
 | Llama-3.1-8B-Instruct | 32 | 8 | 128 | **128 KiB** | 1 GiB | 16 GiB |
 | Qwen2.5-32B-Instruct | 64 | 8 | 128 | **256 KiB** | 2 GiB | 32 GiB |
 
-Budget at `--gpu-memory-utilization 0.20` ≈ 24 GiB: the 0.5B model (≈1 GiB weights, a little more for activations and CUDA graphs) leaves ~21 GiB for KV — about 1.8 M tokens, far more than 64 × 8K. A 7B model in BF16 (~15 GiB weights) leaves ~7 GiB, ≈ 130 K tokens: it fits, at lower concurrency. A 32B model in BF16 (~64 GiB weights) doesn't fit the fraction *or* the llms budget at all; FP8 or AWQ-INT4 (~17–35 GiB) plus a resized vCluster (Vol 27 §6.5) is the path (modules 03/04). vLLM logs the exact figure at startup: `Available KV cache memory` / `GPU KV cache size: … tokens`.
+Budget at `--gpu-memory-utilization 0.20` ≈ 24 GiB: the 0.5B model (≈1 GiB weights, a little more for activations and CUDA graphs) leaves ~21 GiB for KV — about 1.8 M tokens, far more than 64 × 8K. A 7B model in BF16 (~15 GiB weights) leaves ~7 GiB, ≈ 130 K tokens: it fits, at lower concurrency. A 32B model in BF16 (~64 GiB weights) doesn't fit the fraction *or* the llms budget at all; FP8 or AWQ-INT4 (~17–35 GiB) plus a resized vCluster (Step 04 §6.5) is the path (modules 03/04). vLLM logs the exact figure at startup: `Available KV cache memory` / `GPU KV cache size: … tokens`.
 
 ### 3.2 Probes and lifecycle
 
@@ -111,11 +111,11 @@ Budget at `--gpu-memory-utilization 0.20` ≈ 24 GiB: the 0.5B model (≈1 GiB w
 | `startupProbe` | `/health`, 10 s × 180 = 30 min | killing a pod that's still downloading or compiling (breakfix 05) |
 | `readinessProbe` | `/health`, 5 s | routing to a loading or overloaded pod. Required in `llm-serving` by the CEL policy `spark-serving-needs-readiness` |
 | `livenessProbe` | `/health`, 15 s × 4 | a wedged engine |
-| `preStop: sleep 15` + `terminationGracePeriodSeconds: 120` | — | cutting in-flight streams on rollout (Vol 07 §5.6) |
+| `preStop: sleep 15` + `terminationGracePeriodSeconds: 120` | — | cutting in-flight streams on rollout (Step 09 §5.6) |
 | `strategy: Recreate` | — | two copies of the model in UMA (and 2 × 32 Gi in the quota) during a rollout |
 | `/dev/shm` 8 Gi | memory-backed emptyDir | tensor-parallel and worker IPC |
 
-The probes are executed by the **root's** kubelet against the real pod; their results come back to llms through the syncer's status copy. The `preStop` sleep covers the propagation that matters for traffic: the pod leaving the *root's* EndpointSlice, which is what the root's kube-proxy routes by (Vol 07).
+The probes are executed by the **root's** kubelet against the real pod; their results come back to llms through the syncer's status copy. The `preStop` sleep covers the propagation that matters for traffic: the pod leaving the *root's* EndpointSlice, which is what the root's kube-proxy routes by (Step 09).
 
 ### 3.3 Metrics you'll use
 
@@ -134,10 +134,10 @@ The root ServiceMonitor [`vcluster-workloads`](lab/manifests/root/95-observabili
 
 ## 4. Integrations
 
-- **Storage (Vol 11)**: the prefetch Job fills `model-cache` (`local-nvme-retain`, a root StorageClass synced into llms), and vLLM starts from local NVMe. On the Spark the weights are under `/data/k8s/retain/vc-llms/model-cache-x-llm-serving-x-llms` — root namespace, root PVC name.
-- **Ingress (Vol 09)**: Traefik runs *inside* llms (`ingress` namespace, `192.168.0.115`). Point an HTTPRoute at `vllm:8000` instead of `mock-llm` once you've proven the path with the mock.
+- **Storage (Step 13)**: the prefetch Job fills `model-cache` (`local-nvme-retain`, a root StorageClass synced into llms), and vLLM starts from local NVMe. On the Spark the weights are under `/data/k8s/retain/vc-llms/model-cache-x-llm-serving-x-llms` — root namespace, root PVC name.
+- **Ingress (Step 11)**: Traefik runs *inside* llms (`ingress` namespace, `192.168.0.115`). Point an HTTPRoute at `vllm:8000` instead of `mock-llm` once you've proven the path with the mock.
 - **Autoscaling**: KEDA reads the root's Prometheus. On one GB10, extra replicas mostly add *queueing* capacity, not compute — and a second 32 Gi replica doesn't fit the llms budget anyway (§9). `maxReplicaCount: 1` until dgx-spark-2 joins.
-- **Scheduling (Vol 05)**: `spark-serving` is synced to the root as a PriorityClass, so the root scheduler can preempt a `spark-preemptible` pod — in either vCluster — to start vLLM.
+- **Scheduling (Step 07)**: `spark-serving` is synced to the root as a PriorityClass, so the root scheduler can preempt a `spark-preemptible` pod — in either vCluster — to start vLLM.
 - **Modules 03–06**: each model family is a kustomize-style variation of this Deployment (model, quantisation, engine flags, chat template), sized against §9.
 
 ---
@@ -165,7 +165,7 @@ kubectl --context llms apply -k manifests/llms/90-serving/vllm
 kubectl --context llms -n llm-serving logs -f deploy/vllm | grep -E 'Loading|weights|KV cache|blocks|CUDA graph|Uvicorn|ERROR'
 ```
 
-`vllm.yaml` carries an `hf-token` Secret with a placeholder value, so applying it overwrites the token you just created. For the public Qwen smoke model that doesn't matter; for gated models, re-create the Secret after the apply (or remove it from the file and keep tokens in Vault — production-mlops).
+`vllm.yaml` carries an `hf-token` Secret with a placeholder value, so applying it overwrites the token you just created. For the public Qwen smoke model that doesn't matter; for gated models, re-create the Secret after the apply (or remove it from the file and keep tokens in Vault — Step 28).
 
 Expected log landmarks:
 
@@ -242,7 +242,7 @@ Record, per concurrency (1 / 8 / 32): **output token throughput**, **mean and P9
 | 8 | ~5–7× higher | slightly up | slightly up |
 | 32 | highest (continuous batching) | up (queueing, prefill contention) | up |
 
-Now repeat with `gemm-contention` at 2 replicas **on the root** (`kubectl --context spark-root -n platform-tools scale deploy gemm-contention --replicas=2`, Vol 14). Those pods don't appear in any llms quota — they come out of the root's 5 slices — but they share the same GB10. The drop is what a noisy GPU neighbour from another cluster costs your SLO. Scale it back to 0.
+Now repeat with `gemm-contention` at 2 replicas **on the root** (`kubectl --context spark-root -n platform-tools scale deploy gemm-contention --replicas=2`, Step 16). Those pods don't appear in any llms quota — they come out of the root's 5 slices — but they share the same GB10. The drop is what a noisy GPU neighbour from another cluster costs your SLO. Scale it back to 0.
 
 ### 5.6 Observability and alerts
 
@@ -272,7 +272,7 @@ seq 400 | xargs -P64 -I{} curl -sN -o /dev/null http://llm.lab.local/v1/chat/com
 kubectl --context llms -n llm-serving get deploy mock-llm -w        # 2 → up to 6, back after cooldown
 ```
 
-From now on, KEDA owns `deploy/vllm`'s replica count: `kubectl scale` alone is undone at the next poll. To swap engines (Vol 22–24), use the pause annotation in §9.
+From now on, KEDA owns `deploy/vllm`'s replica count: `kubectl scale` alone is undone at the next poll. To swap engines (Steps 21–23), use the pause annotation in §9.
 
 ---
 
@@ -301,13 +301,13 @@ scripts/verify.sh storage serving observability
 | `ValueError: … memory … is less than the model` / CUDA OOM at startup | fraction too small for weights + activations, **or** UMA already used by others (any cluster, or the page cache) | log line with requested vs available. `free -g` on the Spark | raise the fraction carefully, drop page cache, scale down neighbours (`kubectl --context spark-root get pods -A -o wide`), quantise |
 | `No available memory for the cache blocks` | weights fit, no room for KV | startup log | raise the fraction, or lower `--max-model-len` |
 | Deployment shows 0/1, `exceeded quota: serving-budget` in llms events | another engine still holds the slice or memory in `llm-serving` | `kubectl --context llms -n llm-serving describe resourcequota serving-budget` | swap engines (§9) |
-| Pod `Pending` in llms with **no scheduler events** | the root's `vcluster-budget` on `vc-llms` is spent (batch jobs, add-ons) | `kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget` | free capacity in llms, or resize the vCluster (Vol 27 §6.5) |
+| Pod `Pending` in llms with **no scheduler events** | the root's `vcluster-budget` on `vc-llms` is spent (batch jobs, add-ons) | `kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget` | free capacity in llms, or resize the vCluster (Step 04 §6.5) |
 | PVC `model-cache` refused: `exceeded quota … requests.storage` | the PVC asks for more than `serving-budget` (400 Gi), or more than the root's 500 Gi minus the llms control-plane PVC | `kubectl --context llms -n llm-serving describe resourcequota serving-budget` | request a size that fits both layers |
-| Pod `OOMKilled` (137) | pod memory limit < CPU-side peak (tokenizer, CUDA graphs, host buffers, CUDA memory if charged) | `kubectl --context llms -n llm-serving describe pod`, Vol 12 §5.5 result | raise the limit to measured peak + 20 % — and check §9 still adds up |
+| Pod `OOMKilled` (137) | pod memory limit < CPU-side peak (tokenizer, CUDA graphs, host buffers, CUDA memory if charged) | `kubectl --context llms -n llm-serving describe pod`, Step 14 §5.5 result | raise the limit to measured peak + 20 % — and check §9 still adds up |
 | Restarts during first start | liveness fires before load completes | events `Liveness probe failed` | startupProbe (as in the lab) |
 | `no kernel image is available` | wheel/image without sm_121 | image tag | NGC vLLM image for DGX Spark / arm64 |
 | High TTFT, low GPU use | queueing in front (ingress rate limit) or prefill-heavy prompts | `num_requests_waiting` vs running | raise `max-num-seqs`, chunked prefill (default in recent vLLM), prefix caching |
-| Tokens arrive in bursts | buffering proxy | TTFB ≈ total (Vol 09 §5.3) | remove response buffering |
+| Tokens arrive in bursts | buffering proxy | TTFB ≈ total (Step 11 §5.3) | remove response buffering |
 | `KV cache usage` ~1.0 and preemptions rising | too many long sequences | `vllm:num_preemptions` | lower `max-num-seqs`/`max-model-len`, or add capacity |
 | `kubectl scale deploy vllm --replicas=0` doesn't stick | KEDA's HPA scales it back to `minReplicaCount` | `kubectl --context llms -n llm-serving get scaledobject vllm` | pause the ScaledObject (§9) |
 | KEDA `ScaledObject` not Ready, `connection refused` | `default/prometheus` not replicated, or kps not installed on the root | `kubectl --context llms -n default get svc,endpoints prometheus` | `scripts/install-addons.sh kps`, then re-run `scripts/install-addons.sh vclusters` |
@@ -319,15 +319,15 @@ scripts/verify.sh storage serving observability
 | Lab | 2 Sparks | Datacenter |
 |---|---|---|
 | 1 replica, 1 slice | 2 replicas (one per Spark) behind Traefik, weights on NFS, KEDA `maxReplicaCount: 2` — after raising `serving-budget` and the root's `vcluster-budget` by one engine (§9). Both vClusters see dgx-spark-2 as soon as it joins the root | many replicas, prefix/KV-aware routing (Gateway API Inference Extension, llm-d) |
-| single-GPU model | tensor/pipeline parallel across the CX-7 (`--tensor-parallel-size 2` with Ray, or `--pipeline-parallel-size 2`) for models that don't fit one Spark | TP within NVLink domains, PP/EP across nodes, disaggregated prefill/decode (Vol 24) |
+| single-GPU model | tensor/pipeline parallel across the CX-7 (`--tensor-parallel-size 2` with Ray, or `--pipeline-parallel-size 2`) for models that don't fit one Spark | TP within NVLink domains, PP/EP across nodes, disaggregated prefill/decode (Step 23) |
 | KEDA on queue depth | same | + SLO-based scaling and admission control |
-| one serving vCluster | same | a serving cluster per environment or business unit; budgets per cluster, promoted by GitOps (production-mlops) |
+| one serving vCluster | same | a serving cluster per environment or business unit; budgets per cluster, promoted by GitOps (Step 28) |
 
 ---
 
 ## 9. The llms budget: which engines fit together
 
-Volumes 21–24 all deploy into `llm-serving`, which has one ceiling ([`manifests/llms/10-tenancy/quotas.yaml`](lab/manifests/llms/10-tenancy/quotas.yaml)) inside one vCluster budget ([`manifests/root/05-vclusters/quotas.yaml`](lab/manifests/root/05-vclusters/quotas.yaml)):
+Steps 20–23 all deploy into `llm-serving`, which has one ceiling ([`manifests/llms/10-tenancy/quotas.yaml`](lab/manifests/llms/10-tenancy/quotas.yaml)) inside one vCluster budget ([`manifests/root/05-vclusters/quotas.yaml`](lab/manifests/root/05-vclusters/quotas.yaml)):
 
 ```text
 root   vc-llms      4 CPU · 48 Gi · 8 slices · 500 Gi   ← the real cap (control plane, add-ons, serving, batch)
@@ -355,7 +355,7 @@ Serving and batch add up to more than the root allows on purpose: the inner numb
 | always-on + vLLM + Triton | 2.9 | 46.4 Gi | **no** → swap |
 | always-on + Triton + perf | 1.9 | 16.4 Gi | yes |
 | always-on + one of SGLang / KServe | 1.9 | 34.4 Gi | yes |
-| always-on + P/D | 2.0 | 42.6 Gi | **no** → Vol 24 lifts the ceiling for the experiment |
+| always-on + P/D | 2.0 | 42.6 Gi | **no** → Step 23 lifts the ceiling for the experiment |
 
 So the rule for 21–24 is **one 32 Gi engine at a time**. Swap engines like this:
 
@@ -369,7 +369,7 @@ kubectl --context llms -n llm-serving annotate scaledobject vllm autoscaling.ked
   || kubectl --context llms -n llm-serving scale deploy vllm --replicas=1
 ```
 
-Two things the inner table doesn't show. First, the **root** quota also carries the llms control plane (1.5 Gi limit), CoreDNS, Traefik, Kueue, KEDA and — after Vol 23 — cert-manager and KServe; read the real total with `kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget` before starting a batch job next to a running engine. Second, quotas count *limits*, the GB10 counts *bytes*: an engine's `--gpu-memory-utilization` share of 119.7 GiB is taken from the same pool as every other cluster's pods, and no quota sees the root's `platform-tools` benchmarks or a `docker run` on the host.
+Two things the inner table doesn't show. First, the **root** quota also carries the llms control plane (1.5 Gi limit), CoreDNS, Traefik, Kueue, KEDA and — after Step 22 — cert-manager and KServe; read the real total with `kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget` before starting a batch job next to a running engine. Second, quotas count *limits*, the GB10 counts *bytes*: an engine's `--gpu-memory-utilization` share of 119.7 GiB is taken from the same pool as every other cluster's pods, and no quota sees the root's `platform-tools` benchmarks or a `docker run` on the host.
 
 ---
 

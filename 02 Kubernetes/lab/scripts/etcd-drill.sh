@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# etcd backup / restore drill for the kubeadm ROOT cluster (Volume 03, Workbook ex. 20).
+# etcd backup / restore drill for the kubeadm ROOT cluster (Step 02, Workbook ex. 20).
 # Run ON the Spark (dgx-spark-1). etcd is a static pod; 01 Ansible installed
 # etcdctl/etcdutl matching its version and an etcd-snapshot timer (every 6 h).
 #   scripts/etcd-drill.sh status            # members, DB size, alarms, snapshots
@@ -8,7 +8,7 @@
 #
 # What a root etcd restore does NOT roll back: the contents of the two vClusters.
 # Each keeps its own SQLite database on its PVC (vc-dev-lab, vc-llms). Back
-# those up separately (Volume 27 §6.7: 'vcluster snapshot' or a copy of the PVC).
+# those up separately (Step 04 §6.7: 'vcluster snapshot' or a copy of the PVC).
 source "$(dirname "$0")/lib.sh"
 SNAPDIR=/var/lib/etcd-snapshots
 PKI=/etc/kubernetes/pki/etcd

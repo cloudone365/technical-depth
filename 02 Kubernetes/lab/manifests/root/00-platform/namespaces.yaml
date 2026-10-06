@@ -1,4 +1,4 @@
-# Root-cluster namespaces that belong to the platform team (Volume 15, 27).
+# Root-cluster namespaces that belong to the platform team (Steps 05, 04).
 # Tenant namespaces do NOT live here any more: they live inside the vClusters
 # (manifests/dev-lab, manifests/llms). The vCluster host namespaces are in
 # root/05-vclusters; gpu-operator, metallb-system and argocd are created by

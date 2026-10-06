@@ -1,6 +1,6 @@
-# Volume 27 — Nested Clusters on One DGX Spark: a kubeadm Root and Two vClusters
+# Step 04 · Nested Clusters on One DGX Spark: a kubeadm Root and Two vClusters
 
-> **Module 02 · Part III — Workloads, storage, tenancy** · Prev: [26 Resilience at scale](26-ultra-scale-cluster-resilience-and-fault-tolerance.md) · Next: [Production MLOps](production-mlops.md) · Short path: [00 step-by-step](00-kubernetes-step-by-step-guide.md) · Whole picture: [15 Datacenter simulation](15-dgx-spark-datacenter-simulation-lab.md)
+> **02 Kubernetes · Part I — Control plane & the nested lab · Step 04 of 28** · ← [Step 03 · API server](03-kube-apiserver-internals.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 05 · Datacenter simulation](05-dgx-spark-datacenter-simulation-lab.md) →
 
 | | |
 |---|---|
@@ -21,7 +21,7 @@ One Spark can only be one *node*. But a datacenter has *several clusters*: a pla
 | A team is cluster-admin of "its" cluster | no — CRDs, webhooks, ClusterRoles are global | yes, inside its vCluster |
 | Install an operator only for one team (KServe, Kueue, cert-manager) | clashes with everyone | install it in that vCluster |
 | Break the control plane and recover | breaks the whole lab | break `dev-lab`; `llms` and the root keep running |
-| Multi-cluster GitOps, promotion dev → prod | one destination | three destinations (production-mlops) |
+| Multi-cluster GitOps, promotion dev → prod | one destination | three destinations (Step 28) |
 | Hard per-team budgets | namespace quotas | a root quota per vCluster **plus** tenant quotas inside |
 | Real nodes, drains, node failure | yes | **only at the root** (a vCluster has no nodes of its own) |
 
@@ -135,7 +135,7 @@ Defined in [`manifests/root/05-vclusters/quotas.yaml`](lab/manifests/root/05-vcl
 
 - **CPU is capped on requests only.** A vCluster is guaranteed its share and may burst into idle CPU.
 - **Memory is capped on requests *and* limits.** On a unified-memory box, memory is GPU memory too, so overcommit here is how model servers die.
-- **GPU slices are time-slices, not GPUs.** All 15 share one GB10 and its memory (Volume 14). `llms` getting 8 slices means up to 8 GPU pods at once, not 8× the GPU.
+- **GPU slices are time-slices, not GPUs.** All 15 share one GB10 and its memory (Step 16). `llms` getting 8 slices means up to 8 GPU pods at once, not 8× the GPU.
 
 The root's 14 CPUs and ~64 GiB are not idle: about 3 CPU / 10 GiB are reserved for DGX OS and Kubernetes (`systemReserved` + `kubeReserved`), and ~2 CPU / 8 GiB run the platform. The rest is headroom for platform jobs (benchmarks in `platform-tools`) and for growing the vClusters.
 
@@ -145,7 +145,7 @@ The root's 14 CPUs and ~64 GiB are not idle: about 3 CPU / 10 GiB are reserved f
 |---|---|---|
 | vCluster → root | Pods, Services, Endpoints, PVCs, ConfigMaps, Secrets (default) | the workload really runs on the root |
 | vCluster → root | **NetworkPolicies** | tenant policies are enforced by Cilium on the node |
-| vCluster → root | **PriorityClasses** | the root scheduler can rank tenant pods (and preempt across vClusters — Volume 05) |
+| vCluster → root | **PriorityClasses** | the root scheduler can rank tenant pods (and preempt across vClusters — Step 07) |
 | vCluster → root | **PodDisruptionBudgets** | a root `kubectl drain` respects tenant PDBs (break/fix 11) |
 | root → vCluster | **Nodes** (real, all) | tenants see the GB10 labels, 15 allocatable slices, taints |
 | root → vCluster | **StorageClasses** | `local-path`, `local-nvme`, `local-nvme-retain` (read-only) |
@@ -347,7 +347,7 @@ scripts/verify.sh vclusters
 | `services.loadbalancers` quota exceeded | a tenant created a LoadBalancer Service | the root budget allows 1 (dev-lab) / 2 (llms) — by design |
 | `runtimeclass "nvidia" not found` inside a vCluster | `00-platform` not applied in that vCluster | `kubectl --context <v> apply -k manifests/<v>/00-platform` |
 | PVC `Pending` inside a vCluster | StorageClass name typo; root provisioner down | events are copied from the root PVC; `kubectl --context spark-root -n local-path-storage logs deploy/local-path-provisioner` |
-| A BestEffort pod is rejected | the root memory quota requires memory limits | by design — a vCluster can't run BestEffort pods (Volume 12) |
+| A BestEffort pod is rejected | the root memory quota requires memory limits | by design — a vCluster can't run BestEffort pods (Step 14) |
 | vCluster objects gone after an etcd restore? | they aren't — only root objects roll back | §6.7; restore the vCluster's PVC if you need its state rolled back too |
 
 ---
@@ -355,7 +355,7 @@ scripts/verify.sh vclusters
 ## 9. Scale-out and limits
 
 - **dgx-spark-2** joins the *root* as a worker (01 Ansible `k8s_workers`). Both vClusters see the new node immediately (node sync) and the root scheduler spreads their pods. Budgets don't grow by themselves — raise the root quotas.
-- **Control-plane HA**: each vCluster runs one control-plane replica with SQLite. For HA, vCluster supports several replicas with an embedded or external etcd; the root needs three control-plane nodes first (Volume 03 §8).
+- **Control-plane HA**: each vCluster runs one control-plane replica with SQLite. For HA, vCluster supports several replicas with an embedded or external etcd; the root needs three control-plane nodes first (Step 02 §8).
 - **Hard isolation**: vClusters share the node, the kernel and the GPU. For tenants you don't trust, use separate nodes (a vCluster can pin its pods with a node selector) or separate physical clusters.
 - **More clusters**: each extra vCluster costs ~0.3 CPU and ~0.5–1.5 Gi for its control plane, taken from its own budget.
 

@@ -120,7 +120,7 @@ if [[ -n "${QDRANT:-}" ]]; then
   (cd "$(mktemp -d)" && exec "$QDRANT") >/dev/null 2>&1 & pids+=($!)
   python3 tests/mock_embed_chat.py 18766 & pids+=($!); sleep 4
   python3 tools/rag_demo.py ingest --repo ../.. --dirs "02 Kubernetes" --qdrant http://127.0.0.1:6333 --embed-url http://127.0.0.1:18766 >/dev/null
-  expect "21-vllm-high-throughput-llm-serving.md" python3 tools/rag_demo.py ask "preStop sleep grace period streams rollout" \
+  expect "20-vllm-high-throughput-llm-serving.md" python3 tools/rag_demo.py ask "preStop sleep grace period streams rollout" \
     --qdrant http://127.0.0.1:6333 --embed-url http://127.0.0.1:18766 --chat-url http://127.0.0.1:18766
   expect "questions  hit@1" python3 tools/rag_demo.py eval --dirs "02 Kubernetes" --qdrant http://127.0.0.1:6333 --embed-url http://127.0.0.1:18766
   python3 tools/rag_demo.py ingest --repo ../.. --dirs "02 Kubernetes" --qdrant http://127.0.0.1:6333 --embed-url http://127.0.0.1:18766 >/dev/null

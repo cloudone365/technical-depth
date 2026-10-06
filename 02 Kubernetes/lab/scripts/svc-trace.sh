@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Show the kube-proxy iptables chain for a Service and its endpoints (Volume 07).
+# Show the kube-proxy iptables chain for a Service and its endpoints (Step 09).
 #   scripts/svc-trace.sh <namespace> <service> [context]     (run ON the Spark, needs sudo)
 # A Service in a vCluster is synced to the root and keeps the SAME ClusterIP,
 # so the root's kube-proxy rules are the ones that balance its traffic.

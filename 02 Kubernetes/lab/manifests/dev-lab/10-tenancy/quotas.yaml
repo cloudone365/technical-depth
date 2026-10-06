@@ -1,4 +1,4 @@
-# Tenant budgets INSIDE vCluster #1 · dev-lab (Volume 12, 27).
+# Tenant budgets INSIDE vCluster #1 · dev-lab (Steps 14, 04).
 #
 # Two layers of quota:
 #   root   vc-dev-lab  2 CPU · 8 Gi · 2 GPU slices · 300 Gi   ← the real cap (manifests/root/05-vclusters)
@@ -11,7 +11,7 @@
 #
 # Remember: on UMA, "memory" is CPU RAM *and* GPU memory. Whether a CUDA
 # allocation is charged to the pod's memory cgroup is something you measure
-# (root/12-cgroups/uma-cgroup-experiment.yaml, Volume 12 §5.5).
+# (root/12-cgroups/uma-cgroup-experiment.yaml, Step 14 §5.5).
 apiVersion: v1
 kind: ResourceQuota
 metadata:

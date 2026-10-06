@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the 'Spark · Kubernetes' Grafana dashboard (Volume 16).
+"""Generate the 'Spark · Kubernetes' Grafana dashboard (Step 17).
 
 python3 gen_dashboard.py > spark-k8s-dashboard.json
 Rows: UMA+GPU (host truth) · Tenancy · Serving SLOs · Control plane.

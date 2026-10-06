@@ -1,6 +1,6 @@
-# Volume 18 — From Two Sparks to a SuperPOD: Fabrics, Rails, RoCE vs InfiniBand, and Fabric Health
+# Step 19 · From Two Sparks to a SuperPOD: Fabrics, Rails, RoCE vs InfiniBand, and Fabric Health
 
-> **Module 02 · Part V — Distributed AI & diagnostics** · Prev: [17 Distributed training](17-distributed-ai-training-and-nccl.md) · Next: [19 Diagnostics playbook](19-cluster-diagnostics-and-failure-scenarios.md)
+> **02 Kubernetes · Part VI — Distributed training & fabrics · Step 19 of 28** · ← [Step 18 · Distributed training & NCCL](18-distributed-ai-training-and-nccl.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 20 · vLLM](20-vllm-high-throughput-llm-serving.md) →
 
 | | |
 |---|---|
@@ -25,7 +25,7 @@ You won't cable 1,000 GPUs at home. You *will* meet every concept in a SuperPOD 
 | Out-of-band management (BMC) | none on the Spark. The 01 Ansible Redfish lab simulates it |
 | Lossless Ethernet (PFC/ECN) or InfiniBand credit flow control | RoCE QoS settings from 01 Ansible `12b-roce-qos.yml` |
 | Link flaps, symbol errors, degraded lanes | `ethtool -S` counters, a downed logical port |
-| Frontend vs backend inside Kubernetes | pod network = Cilium VXLAN over `enP7s7`; a second pod interface `net1` on the CX-7 via Multus (Vol 16 §5.6) or `hostNetwork` |
+| Frontend vs backend inside Kubernetes | pod network = Cilium VXLAN over `enP7s7`; a second pod interface `net1` on the CX-7 via Multus (Step 17 §5.6) or `hostNetwork` |
 | Many tenants on one shared fabric | both vClusters' pods run on the root's nodes and share the same NICs and cable; the fabric is a **root** concern no tenant can see or configure |
 | Fabric-aware admission (health gates, topology) | a node condition or taint on the root, synced into both vClusters; the root scheduler enforces it for everyone |
 
@@ -140,7 +140,7 @@ A tenant can't tell a degraded rail from a slow job. The platform team's health 
 ## 4. Integrations
 
 - **01 Ansible** owns the link: `cx7_fabric` role (netplan, MTU, GIDs), `12b-roce-qos.yml` (PFC/ECN trust, DSCP), `11-rdma-perftest.yml` (the ≥ 180 Gb/s gate).
-- **Vol 17** puts NCCL on this link from inside the `llms` vCluster. **Vol 16 §5.6** can hand it to pods via the Network Operator (NAD in `vc-llms`).
+- **Step 18** puts NCCL on this link from inside the `llms` vCluster. **Step 17 §5.6** can hand it to pods via the Network Operator (NAD in `vc-llms`).
 - **Module 07 Nvidia** (NVLink/NVSwitch, Quantum/Spectrum, UFM) and **module 08 Storage** (RoCE for storage traffic) go deeper on the same fabric ideas.
 
 ---
@@ -178,7 +178,7 @@ Exercise: how many optical transceivers does the 127-node design need, if every 
 ssh nvidia@192.168.0.100 'ethtool -S enp1s0f1np1 | grep -E "crc|symbol|discard|pause|cnp|link_down" | grep -v ": 0$"'
 ```
 
-Then run the NCCL job (Vol 17 §5.5) and diff the counters before and after. PFC pause counters rising only during the run, and discards staying at 0, is healthy lossless behaviour.
+Then run the NCCL job (Step 18 §5.5) and diff the counters before and after. PFC pause counters rising only during the run, and discards staying at 0, is healthy lossless behaviour.
 
 ### 5.4 (2 Sparks) Degrade the fabric and watch NCCL
 
@@ -247,7 +247,7 @@ The tenant sees the reason in its own events (`1 node(s) had untolerated taint {
 | Link `Up` but ~100 Gb/s | only one logical half in use | NCCL log device list, `rdma link` | list both HCAs. Both IPs configured |
 | CRC/symbol errors increasing | cable/optic/dirty connector | `ethtool -S` twice, 60 s apart | reseat, clean, replace the DAC/AOC |
 | Throughput collapses under load, pause counters huge | PFC storm / mismatched QoS | `rx_pause_ctrl_phy`, `mlnx_qos -i <if>` | align trust mode + PFC priority both ends (01 Ansible `12b-roce-qos.yml`) |
-| RDMA works host-to-host, NCCL in pods uses sockets | pod can't see RDMA devices | `kubectl --context llms -n batch exec <pod> -- ibv_devices` | hostNetwork / Network Operator; the NAD must be in `vc-llms` (Vol 16 §5.6, Vol 17 §3.3) |
+| RDMA works host-to-host, NCCL in pods uses sockets | pod can't see RDMA devices | `kubectl --context llms -n batch exec <pod> -- ibv_devices` | hostNetwork / Network Operator; the NAD must be in `vc-llms` (Step 17 §5.6, Step 18 §3.3) |
 | Link flaps | thermal/power, bad cable | `link_down_events_phy`, `dmesg \| grep mlx5` | replace the cable. Check airflow |
 
 ---

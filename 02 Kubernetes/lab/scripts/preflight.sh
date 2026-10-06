@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run ON the Spark before the 02 lab (Volume 15 step 0). Read-only.
+# Run ON the Spark before the 02 lab (Step 05 §4 Task 0). Read-only.
 # Checks the host, the kubeadm root cluster built by 01 Ansible playbook 05/06,
 # and — if they exist yet — the two vClusters (playbook 06b).
 source "$(dirname "$0")/lib.sh"
@@ -10,7 +10,7 @@ echo "── host"
 cores=$(nproc); [[ "$cores" -eq 20 ]] && ok "20 CPU cores (10 X925 + 10 A725)" || warn "nproc=$cores (GB10 has 20)"
 mem_gib=$(awk '/MemTotal/ {printf "%d", $2/1048576}' /proc/meminfo)
 [[ "$mem_gib" -ge 110 ]] && ok "MemTotal ${mem_gib} GiB (unified CPU+GPU pool)" || warn "MemTotal ${mem_gib} GiB"
-[[ "$(stat -fc %T /sys/fs/cgroup)" == cgroup2fs ]] && ok "cgroup v2" || bad "cgroup v1 — kubelet QoS maths in Vol 12 assume v2"
+[[ "$(stat -fc %T /sys/fs/cgroup)" == cgroup2fs ]] && ok "cgroup v2" || bad "cgroup v1 — kubelet QoS maths in Step 14 assume v2"
 [[ "$(swapon --noheadings 2>/dev/null | wc -l)" -eq 0 ]] && ok "swap off" || bad "swap is on — kubelet won't start (01 Ansible kubeadm_cluster turns it off)"
 
 if command -v nvidia-smi >/dev/null; then
@@ -50,5 +50,5 @@ command -v vcluster >/dev/null && ok "vcluster CLI $(vcluster --version 2>/dev/n
 free_gib=$(df -BG --output=avail / | tail -1 | tr -dc 0-9)
 [[ "$free_gib" -ge 300 ]] && ok "${free_gib} GiB free on / (models + images)" || warn "only ${free_gib} GiB free on /"
 [[ -d /data/k8s ]] && ok "/data/k8s exists" || warn "/data/k8s missing: sudo mkdir -p /data/k8s"
-yq --version 2>/dev/null | grep -q mikefarah && ok "yq (mikefarah) present" || warn "mikefarah yq missing (used in Vol 05/10/17): see versions.env YQ_VERSION"
+yq --version 2>/dev/null | grep -q mikefarah && ok "yq (mikefarah) present" || warn "mikefarah yq missing (used in Steps 07/12/18): see versions.env YQ_VERSION"
 summary

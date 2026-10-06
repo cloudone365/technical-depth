@@ -11,7 +11,7 @@ violations show up in CI instead of as a stuck ReplicaSet.
   python3 tests/pod_template_check.py manifests/llms/90-serving/vllm manifests/llms/50-workloads/qdrant-statefulset.yaml …
 Exit 1 if any template would be rejected.
 
-The lab is three API servers (Volume 27). The cluster is taken from the path:
+The lab is three API servers (Step 04). The cluster is taken from the path:
 manifests/root/… → spark-root, manifests/dev-lab/… → dev-lab, manifests/llms/… → llms
 (override the context names with ROOT_CTX / DEV_CTX / LLM_CTX). Admission inside
 a vCluster checks that vCluster's PSA/CEL/tenant quotas; the ROOT quota on its

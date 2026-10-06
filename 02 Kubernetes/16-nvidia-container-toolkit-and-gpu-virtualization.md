@@ -1,6 +1,6 @@
-# Volume 14 — NVIDIA Container Toolkit, CDI & GPU Sharing on GB10: Time-Slicing, MPS, (no) MIG
+# Step 16 · NVIDIA Container Toolkit, CDI & GPU Sharing on GB10: Time-Slicing, MPS, (no) MIG
 
-> **Module 02 · Part IV — NVIDIA platform** · Prev: [13 Hardware & drivers](13-nvidia-hardware-and-driver-stack.md) · Next: [15 DGX Spark datacenter simulation](15-dgx-spark-datacenter-simulation-lab.md) · The lab's shape: [27 Nested clusters](27-nested-clusters-with-vcluster.md)
+> **02 Kubernetes · Part V — GPU platform · Step 16 of 28** · ← [Step 15 · GB10 hardware & drivers](15-nvidia-hardware-and-driver-stack.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 17 · GPU & Network Operators](17-nvidia-gpu-operator-and-network-operator.md) →
 
 | | |
 |---|---|
@@ -25,7 +25,7 @@ One GPU, three clusters, several tenants. The sharing mechanism decides **isolat
 | Fault isolation | none. One Xid can hit all | none | yes | n/a |
 | Best for | dev pods, small services, CI | many small inference processes | multi-tenant prod on datacenter GPUs | one big model |
 
-The vClusters add no GPU machinery of their own. A tenant pod that asks for `nvidia.com/gpu: 1` inside llms is synced to the root, scheduled by the root scheduler against the root node's 15 slices, and started by the root's kubelet and containerd. Everything in this volume happens on the root.
+The vClusters add no GPU machinery of their own. A tenant pod that asks for `nvidia.com/gpu: 1` inside llms is synced to the root, scheduled by the root scheduler against the root node's 15 slices, and started by the root's kubelet and containerd. Everything in this step happens on the root.
 
 ---
 
@@ -110,9 +110,9 @@ flowchart LR
 ## 4. Integrations
 
 - **01 Ansible**: `kubeadm_cluster_default_runtime_nvidia` (role `kubeadm_cluster`) and `gpu_operator_timeslice_replicas` (role `gpu_operator`) are the two knobs; the vCluster split is `requests.nvidia.com/gpu` in [`manifests/root/05-vclusters/quotas.yaml`](lab/manifests/root/05-vclusters/quotas.yaml). Change the slice count and the quotas together and keep `tests/budget_check.py` green.
-- **Admission (Vol 02)**: `spark-no-nvidia-env-bypass` stops explicit env bypasses in tenant namespaces (inside each vCluster). The hardened runtime closes the implicit one.
-- **Kueue / quotas (Vol 05, 12)** count `nvidia.com/gpu` requests. The leak is exactly the GPU use they *don't* see — and so is the slice ledger in `platform-tools` (Vol 04).
-- **Vol 13** gives the single-slice baseline B that §5.3 compares against.
+- **Admission (Step 03)**: `spark-no-nvidia-env-bypass` stops explicit env bypasses in tenant namespaces (inside each vCluster). The hardened runtime closes the implicit one.
+- **Kueue / quotas (Steps 07, 14)** count `nvidia.com/gpu` requests. The leak is exactly the GPU use they *don't* see — and so is the slice ledger in `platform-tools` (Step 06).
+- **Step 15** gives the single-slice baseline B that §5.3 compares against.
 
 ---
 
@@ -192,7 +192,7 @@ done
 kubectl --context spark-root -n platform-tools scale deploy gemm-contention --replicas=0
 ```
 
-What to expect, with your baseline B from Vol 13:
+What to expect, with your baseline B from Step 15:
 
 | Pods | Per pod | Aggregate |
 |---|---|---|
@@ -200,7 +200,7 @@ What to expect, with your baseline B from Vol 13:
 | 2 | ≈ B/2 | ≈ B (minus switch overhead) |
 | 4 | ≈ B/4 | ≈ B, or a bit lower |
 
-**Time-slicing adds no capacity.** It shares one GPU fairly and costs some context-switch overhead. Fifteen `nvidia.com/gpu` slices don't mean fifteen GPUs. They mean fifteen tickets to one GPU — and the split gives llms 8 tickets, not 8/15 of the GPU's throughput. If llms runs one busy model server and dev-lab runs one, each gets about half while they're both computing, whatever the quota says. While the loop runs, `kubectl --context spark-root -n platform-tools get cm gpu-slice-ledger -o yaml` (Vol 04) shows the slices in use across all three clusters.
+**Time-slicing adds no capacity.** It shares one GPU fairly and costs some context-switch overhead. Fifteen `nvidia.com/gpu` slices don't mean fifteen GPUs. They mean fifteen tickets to one GPU — and the split gives llms 8 tickets, not 8/15 of the GPU's throughput. If llms runs one busy model server and dev-lab runs one, each gets about half while they're both computing, whatever the quota says. While the loop runs, `kubectl --context spark-root -n platform-tools get cm gpu-slice-ledger -o yaml` (Step 06) shows the slices in use across all three clusters.
 
 ### 5.4 Reproduce and understand the leak
 

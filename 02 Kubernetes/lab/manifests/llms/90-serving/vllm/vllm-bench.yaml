@@ -1,4 +1,4 @@
-# Load test with vLLM's own benchmark client (Volume 21 §5.5). Reports
+# Load test with vLLM's own benchmark client (Step 20 §5.5). Reports
 # throughput, TTFT, TPOT/ITL percentiles for a fixed synthetic workload.
 #   kubectl apply -f vllm-bench.yaml && kubectl -n llm-serving logs -f job/vllm-bench
 apiVersion: batch/v1

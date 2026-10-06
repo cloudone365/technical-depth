@@ -1,6 +1,6 @@
-# Volume 24 — Disaggregated Prefill & Decode: KV-Cache Transfer with vLLM + NIXL, Routing, and When It Pays Off
+# Step 23 · Disaggregated Prefill & Decode: KV-Cache Transfer with vLLM + NIXL, Routing, and When It Pays Off
 
-> **Module 02 · Part VI — Serving** · Prev: [23 Alternatives & KServe](23-llm-inference-alternatives-and-kserve.md) · Next: [25 Hyperscaler silicon](25-hyperscaler-silicon-and-compilers.md) · The lab's shape: [27 Nested clusters](27-nested-clusters-with-vcluster.md)
+> **02 Kubernetes · Part VII — LLM serving · Step 23 of 28** · ← [Step 22 · SGLang, TensorRT-LLM & KServe](22-llm-inference-alternatives-and-kserve.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 24 · Accelerators & compilers](24-hyperscaler-silicon-and-compilers.md) →
 
 | | |
 |---|---|
@@ -82,7 +82,7 @@ The side channel uses `VLLM_NIXL_SIDE_CHANNEL_HOST=status.podIP`. That IP is the
 | `pd-proxy` | stdlib Python (`pd_proxy.py`): prefill with `max_tokens=1` → copy `kv_transfer_params` → decode, streaming passthrough, `X-Prefill-Ms` header; 100m · 256 Mi limit |
 | Services | `vllm-prefill:8000`, `vllm-decode:8000`, `pd-proxy:8000` |
 
-| Budget (Vol 21 §9) | CPU | Memory limit | Slices |
+| Budget (Step 20 §9) | CPU | Memory limit | Slices |
 |---|---|---|---|
 | P + D + proxy | 1.6 | 40.25 Gi | 2 |
 | + always-on (mocks, Qdrant) | 2.0 | 42.6 Gi | 2 |
@@ -93,7 +93,7 @@ The experiment doesn't fit the tenant ceiling but does fit the vCluster — if n
 
 ### 3.2 KV-transfer time model
 
-KV bytes for a prompt = prompt tokens × KV bytes/token (Vol 21 §3.1). Transfer time ≈ bytes / effective bandwidth.
+KV bytes for a prompt = prompt tokens × KV bytes/token (Step 20 §3.1). Transfer time ≈ bytes / effective bandwidth.
 
 | Model | Prompt | KV size | CX-7 RDMA (~22 GB/s eff.) | 10 GbE TCP (~1.1 GB/s) | Same GPU (UMA copy) |
 |---|---|---|---|---|---|
@@ -107,10 +107,10 @@ KV bytes for a prompt = prompt tokens × KV bytes/token (Vol 21 §3.1). Transfer
 
 ## 4. Integrations
 
-- **Vol 21** supplies the model cache and monitoring. Both P and D export `vllm:*` metrics; the root ServiceMonitor keeps `vllm-prefill` and `vllm-decode`, so the dashboard's TTFT comes from prefill, TPOT from decode, both labelled `vcluster="llms"`.
-- **Vol 16/17**: on two Sparks, UCX needs the RDMA devices in the pods: the Multus `cx7-rdma` NetworkAttachmentDefinition (in root namespace `vc-llms` — synced pods keep their `k8s.v1.cni.cncf.io/networks` annotation and Multus resolves it in the pod's *root* namespace), `rdma/rdma_shared_cx7`, `IPC_LOCK`, and `UCX_NET_DEVICES=rocep1s0f1:1,roceP2p1s0f1:1`.
-- **Vol 06**: P↔D traffic on port 5600 stays inside `vc-llms`; the root's `vcluster-boundary` policy only blocks dev-lab ↔ llms. A tenant NetworkPolicy in `llm-serving` that default-denies ingress must allow 5600 between the two Deployments.
-- **Vol 09 §8**: at scale, the proxy's job moves into the gateway (Gateway API Inference Extension / llm-d / Dynamo routers), which also pick decode workers by KV-cache locality.
+- **Step 20** supplies the model cache and monitoring. Both P and D export `vllm:*` metrics; the root ServiceMonitor keeps `vllm-prefill` and `vllm-decode`, so the dashboard's TTFT comes from prefill, TPOT from decode, both labelled `vcluster="llms"`.
+- **Steps 17/18**: on two Sparks, UCX needs the RDMA devices in the pods: the Multus `cx7-rdma` NetworkAttachmentDefinition (in root namespace `vc-llms` — synced pods keep their `k8s.v1.cni.cncf.io/networks` annotation and Multus resolves it in the pod's *root* namespace), `rdma/rdma_shared_cx7`, `IPC_LOCK`, and `UCX_NET_DEVICES=rocep1s0f1:1,roceP2p1s0f1:1`.
+- **Step 08**: P↔D traffic on port 5600 stays inside `vc-llms`; the root's `vcluster-boundary` policy only blocks dev-lab ↔ llms. A tenant NetworkPolicy in `llm-serving` that default-denies ingress must allow 5600 between the two Deployments.
+- **Step 11 §8**: at scale, the proxy's job moves into the gateway (Gateway API Inference Extension / llm-d / Dynamo routers), which also pick decode workers by KV-cache locality.
 
 ---
 
@@ -123,11 +123,11 @@ export KUBECONFIG="$PWD/../../01 Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 
 ### 5.1 Pre-flight: does the image have NIXL?
 
-P/D uses the same image as Vol 21's vLLM, so ask the running engine before parking it:
+P/D uses the same image as Step 20's vLLM, so ask the running engine before parking it:
 
 ```bash
 kubectl --context llms -n llm-serving exec deploy/vllm -- python3 -c "import nixl, vllm; print('nixl OK, vllm', vllm.__version__)"
-# park every 32 Gi engine (Vol 21 §9)
+# park every 32 Gi engine (Step 20 §9)
 kubectl --context llms -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite \
   || kubectl --context llms -n llm-serving scale deploy vllm --replicas=0
 kubectl --context llms -n llm-serving scale deploy sglang triton --replicas=0 2>/dev/null
@@ -149,7 +149,7 @@ kubectl --context llms -n llm-serving rollout status deploy/vllm-decode --timeou
 kubectl --context llms -n llm-serving logs deploy/vllm-prefill | grep -iE 'nixl|kv_transfer|connector' | head
 ```
 
-Expected: both engines log that the `NixlConnector` initialised (role `kv_both`) with a side-channel port. If `vcluster-budget` shows less than ~41 Gi free under `limits.memory`, the root will refuse the second engine: the pod sits `Pending` in llms with no scheduler events. Free memory in llms first (batch jobs, Vol 26) rather than patching the root — that quota is the platform's promise to the other vCluster. If Argo CD already manages llms (production-mlops), its `selfHeal` reverts this patch (and §5.5's namespace label) within minutes: pause `spark-llms-10-tenancy` and `spark-llms-00-platform` for the experiment, as production-mlops §2.3 shows.
+Expected: both engines log that the `NixlConnector` initialised (role `kv_both`) with a side-channel port. If `vcluster-budget` shows less than ~41 Gi free under `limits.memory`, the root will refuse the second engine: the pod sits `Pending` in llms with no scheduler events. Free memory in llms first (batch jobs, Step 25) rather than patching the root — that quota is the platform's promise to the other vCluster. If Argo CD already manages llms (Step 28), its `selfHeal` reverts this patch (and §5.5's namespace label) within minutes: pause `spark-llms-10-tenancy` and `spark-llms-00-platform` for the experiment, as Step 28 §2.3 shows.
 
 Prove the side-channel address is a root pod IP:
 
@@ -220,7 +220,7 @@ Then add to the prefill Deployment `nodeSelector: {kubernetes.io/hostname: dgx-s
               - {name: UCX_NET_DEVICES, value: "rocep1s0f1:1,roceP2p1s0f1:1"}
               - {name: UCX_TLS, value: "rc,cuda_copy,cuda_ipc"}
             securityContext: {capabilities: {add: [IPC_LOCK]}}
-            resources: {limits: {rdma/rdma_shared_cx7: "1"}}     # Network Operator / Multus (Vol 16 §5.6)
+            resources: {limits: {rdma/rdma_shared_cx7: "1"}}     # Network Operator / Multus (Step 17 §5.6)
 ```
 
 `nodeSelector` works inside llms because the nodes it sees are the real ones, with their real `kubernetes.io/hostname` labels. Then run a prefill-heavy mix (long prompts, short outputs) against both setups with `vllm bench serve --random-input-len 8192 --random-output-len 64`. Now decode TPOT stays flat while prefill runs on the other Spark.

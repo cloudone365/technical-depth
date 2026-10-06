@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Shared helpers for the 02 Kubernetes lab scripts.
 #
-# The lab is three Kubernetes API servers in one kubeconfig (Volume 27):
+# The lab is three Kubernetes API servers in one kubeconfig (Step 04):
 #   spark-root   the kubeadm root cluster on the Spark — platform, GPU, nodes
 #   dev-lab      vCluster #1 — tenant-alpha, tenant-beta, lab-tools
 #   llms         vCluster #2 — llm-serving, batch, ingress (Traefik), Kueue, KEDA

@@ -1,4 +1,4 @@
-# A 4-thread CPU burner capped at 200m (Volume 12 §5.3), on the ROOT in platform-tools:
+# A 4-thread CPU burner capped at 200m (Step 14 §5.3), on the ROOT in platform-tools:
 # watch nr_throttled climb with scripts/cgroup-inspect.sh platform-tools cpu-throttle.
 apiVersion: v1
 kind: Pod

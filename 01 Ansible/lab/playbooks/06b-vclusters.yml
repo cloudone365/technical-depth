@@ -1,5 +1,5 @@
 ---
-# Two virtual clusters inside the root cluster (02 Kubernetes Vol 27):
+# Two virtual clusters inside the root cluster (02 Kubernetes Step 04):
 #   vCluster #1 dev-lab : 2 CPU · 8 Gi · 2 GPU slices   → https://192.168.0.111
 #   vCluster #2 llms    : 4 CPU · 48 Gi · 8 GPU slices  → https://192.168.0.112
 # The root keeps the rest (14 CPU · ~64 GiB · 5 slices) for platform services.

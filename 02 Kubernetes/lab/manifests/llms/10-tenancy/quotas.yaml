@@ -1,4 +1,4 @@
-# Serving budget INSIDE vCluster #2 · llms (Volume 12, 21, 27).
+# Serving budget INSIDE vCluster #2 · llms (Steps 14, 20, 04).
 #
 #   root   vc-llms      4 CPU · 48 Gi · 8 GPU slices · 500 Gi   ← the real cap
 #   here   llm-serving  2.5 CPU · 36 Gi · 6 slices · 400 Gi     ← ceiling for model servers

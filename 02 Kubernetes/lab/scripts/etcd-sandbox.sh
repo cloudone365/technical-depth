@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Drive the 3-member sandbox etcd (lab/etcd-sandbox/compose.yaml) — Volume 03.
+# Drive the 3-member sandbox etcd (lab/etcd-sandbox/compose.yaml) — Step 02.
 #   etcd-sandbox.sh up|down|status
 #   etcd-sandbox.sh kill-leader        # watch a new election (quorum 2/3 survives)
 #   etcd-sandbox.sh kill-two           # lose quorum: reads OK (serializable), writes fail

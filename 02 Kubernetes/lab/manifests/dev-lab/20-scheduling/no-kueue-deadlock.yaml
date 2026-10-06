@@ -1,4 +1,4 @@
-# The problem Kueue solves (Volume 05 §5.4), INSIDE vCluster #1 · dev-lab
+# The problem Kueue solves (Step 07 §5.4), INSIDE vCluster #1 · dev-lab
 # (apply with --context dev-lab). Two 2-rank "training" jobs WITHOUT a queue,
 # and dev-lab's root quota allows exactly 2 GPU slices (stop other GPU pods in
 # dev-lab first). Pods are created one at a time, so ONE slice can go to each

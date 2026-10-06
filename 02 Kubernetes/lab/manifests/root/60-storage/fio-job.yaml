@@ -1,4 +1,4 @@
-# NVMe benchmark from inside a pod (Volume 11), on the ROOT in platform-tools
+# NVMe benchmark from inside a pod (Step 13), on the ROOT in platform-tools
 # (4 CPUs: more than a whole vCluster's budget). Four profiles that map to real
 # AI I/O: weight load (seq read 1M), checkpoint write (seq write 1M),
 # dataloader (rand read 128k), metadata-ish (rand read 4k).

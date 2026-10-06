@@ -1,4 +1,4 @@
-# Priority & preemption on the root (Volume 05 §5.3). Runs in the root's
+# Priority & preemption on the root (Step 07 §5.3). Runs in the root's
 # platform-tools namespace (--context spark-root) because preemption needs the
 # NODE to be full; inside a vCluster the root quota refuses pods long before.
 # 1) filler: scale to the free slices so preemptible pods take every one left

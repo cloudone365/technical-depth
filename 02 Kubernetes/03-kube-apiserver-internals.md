@@ -1,6 +1,6 @@
-# Volume 02 — kube-apiserver Internals: AuthN, RBAC, Admission (CEL), API Priority & Fairness, Audit
+# Step 03 · kube-apiserver Internals: AuthN, RBAC, Admission (CEL), API Priority & Fairness, Audit
 
-> **Module 02 · Part I — Control plane** · Prev: [01 Core architecture](01-kubernetes-core-architecture.md) · Next: [03 etcd](03-etcd-database-deep-dive.md)
+> **02 Kubernetes · Part I — Control plane & the nested lab · Step 03 of 28** · ← [Step 02 · etcd](02-etcd-database-deep-dive.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 04 · Nested clusters with vCluster](04-nested-clusters-with-vcluster.md) →
 
 | | |
 |---|---|
@@ -75,7 +75,7 @@ flowchart LR
 | Mutating admission | "Fill in or rewrite fields" | usually silent (LimitRanger adds defaults) |
 | Validating admission | "Is the final object acceptable?" | `ValidatingAdmissionPolicy 'x' … denied request: …`, `violates PodSecurity "restricted:latest"`, `exceeded quota` |
 
-When the **root** pipeline rejects a synced pod, the tenant doesn't get an error from `kubectl` — its request already succeeded in the vCluster. The rejection shows up as a sync error event on the pod inside the vCluster, and the pod stays `Pending` (Vol 27 §4, break/fix 02).
+When the **root** pipeline rejects a synced pod, the tenant doesn't get an error from `kubectl` — its request already succeeded in the vCluster. The rejection shows up as a sync error event on the pod inside the vCluster, and the pod stays `Pending` (Step 04 §4, break/fix 02).
 
 ---
 
@@ -134,7 +134,7 @@ Both are flags kubeadm put on the root API server from the 01 Ansible config:
 | `--encryption-provider-config` | `/etc/kubernetes/encryption/config.yaml` (key generated once, mode 0600) | Secrets are stored in etcd encrypted with AES-CBC (`k8s:enc:aescbc:v1:key1:` prefix). Back the key up in vault01's KV (01 Ansible Step 18) — without it, an etcd backup's Secrets are unreadable |
 | `--audit-policy-file`, `--audit-log-*` | [`audit-policy.yaml`](lab/kubeadm/audit-policy.yaml) → `/var/log/kubernetes/audit/audit.log`, rotated at 100 MB × 5 | Metadata for secrets/configmaps (never payloads), drops noisy reads, **RequestResponse** for every mutation in `vc-dev-lab`, `vc-llms`, `gpu-operator`, `platform-tools` |
 
-The root audit log sees what reached the root: a tenant's pod appears as a **create by the syncer** (`system:serviceaccount:vc-dev-lab:vc-dev-lab`), not by Alice. Alice's own request is in dev-lab's API server. For a per-tenant audit trail, give each vCluster its own audit policy (§5 Step 7, last part).
+The root audit log sees what reached the root: a tenant's pod appears as a **create by the syncer** (`system:serviceaccount:vc-dev-lab:vc-dev-lab`), not by Alice. Alice's own request is in dev-lab's API server. For a per-tenant audit trail, give each vCluster its own audit policy (§5 Task 7, last part).
 
 ---
 
@@ -142,16 +142,16 @@ The root audit log sees what reached the root: a tenant's pod appears as a **cre
 
 | With | How |
 |---|---|
-| vault01 (01 Ansible Step 01, Step 18) | Store the tenant kubeconfigs `make-user.sh` produces in vault01's KV mount, e.g. `kv/k8s/<cluster>/<user>` — outside `kv/spark-lab/*`, which Semaphore's AppRole can read — and the encryption key `/etc/kubernetes/encryption/config.yaml`. For long-lived automation, prefer Vault's Kubernetes secrets engine, which mints short-lived SA tokens |
+| vault01 (01 Ansible Steps 01 and 18) | Store the tenant kubeconfigs `make-user.sh` produces in vault01's KV mount, e.g. `kv/k8s/<cluster>/<user>` — outside `kv/spark-lab/*`, which Semaphore's AppRole can read — and the encryption key `/etc/kubernetes/encryption/config.yaml`. For long-lived automation, prefer Vault's Kubernetes secrets engine, which mints short-lived SA tokens |
 | Loki / Alloy (01 Ansible Step 27) | Ship `/var/log/kubernetes/audit/audit.log` with a `loki.source.file` block. Query `{job="k8s-audit"} \| json \| verb="delete"` |
-| Kueue (Vol 05) | Tenants get read-only access to `workloads`, so they can see *why* their job is queued |
+| Kueue (Step 07) | Tenants get read-only access to `workloads`, so they can see *why* their job is queued |
 | CI (GitHub Actions) | `ci-deployer` token (llms) → `kubectl apply` into `llm-serving` only |
 
 ---
 
 ## 5. Lab
 
-### Step 1 · Prove audit logging and Secret encryption (on the Spark)
+### Task 1 · Prove audit logging and Secret encryption (on the Spark)
 
 ```bash
 cd "02 Kubernetes/lab"
@@ -170,7 +170,7 @@ Secrets created **before** encryption was switched on would still be stored in p
 kubectl --context spark-root get secrets -A -o json | kubectl --context spark-root replace -f - >/dev/null && echo re-encrypted
 ```
 
-### Step 2 · Apply tenancy, admission and APF
+### Task 2 · Apply tenancy, admission and APF
 
 ```bash
 for d in 00-platform 10-tenancy 15-admission 16-apf; do kubectl --context dev-lab apply -k manifests/dev-lab/$d; done
@@ -179,7 +179,7 @@ kubectl --context spark-root apply -k manifests/root/16-apf
 kubectl --context dev-lab get validatingadmissionpolicies
 ```
 
-### Step 3 · Create real users (in dev-lab)
+### Task 3 · Create real users (in dev-lab)
 
 ```bash
 scripts/make-user.sh alice team-alpha          # signed by dev-lab's CA
@@ -203,7 +203,7 @@ KUBECONFIG=$ALICE kubectl --server https://192.168.0.100:6443 --insecure-skip-tl
 
 The root doesn't trust dev-lab's CA, so Alice isn't even a user there. That's a 401, not a 403.
 
-### Step 4 · Probe RBAC before users hit it
+### Task 4 · Probe RBAC before users hit it
 
 ```bash
 kubectl --context dev-lab auth can-i --list -n tenant-alpha --as=alice --as-group=team-alpha | head -20
@@ -237,7 +237,7 @@ kubectl --context spark-root auth can-i --list -n vc-dev-lab --as=system:service
 kubectl --context spark-root auth can-i create pods -n vc-llms --as=system:serviceaccount:vc-dev-lab:vc-dev-lab    # no
 ```
 
-### Step 5 · Exercise the admission policies (server-side dry run)
+### Task 5 · Exercise the admission policies (server-side dry run)
 
 ```bash
 scripts/verify.sh admission
@@ -279,7 +279,7 @@ The CEL behind it uses optional-field access, so pods without `resources` don't 
 
 > **Seen `status.typeChecking.expressionWarnings: undefined field 'limits'`?** The type checker can't resolve `ResourceRequirements` maps on some versions. It's a warning, and the runtime result is correct. The dry-run tests above prove it. Keep a test fixture for every policy for exactly this reason.
 
-### Step 6 · API Priority & Fairness under load — both layers
+### Task 6 · API Priority & Fairness under load — both layers
 
 Generate tenant load as Alice (32 parallel LIST loops), and watch as admin in dev-lab *and* at the root:
 
@@ -302,7 +302,7 @@ pkill -f "kubectl -n tenant-alpha get pods"
 
 Expected: in dev-lab, `current_inqueue_requests{priority_level="spark-tenants"}` climbs and some of Alice's calls may get `429`. Bob's call stays under ~100 ms (queues are shuffle-sharded per user). The root barely notices: LISTs of tenant pods are answered from dev-lab's own database. Now make the root notice — create and delete pods in a loop (each one is a syncer write to the root) and watch the `spark-vcluster-syncers` lane instead.
 
-### Step 7 · Query the audit log
+### Task 7 · Query the audit log
 
 ```bash
 KUBECONFIG=$ALICE kubectl -n tenant-alpha run audit-demo --image=registry.k8s.io/pause:3.10 \
@@ -337,11 +337,11 @@ Expected: `21 passed, 0 warnings, 0 failed`.
 | `401 Unauthorized` | AuthN | `kubectl auth whoami` fails. `openssl x509 -in .cache/alice.crt -noout -enddate -issuer` | Cert expired (7 days here) → re-run `make-user.sh`. Or the cert is from another cluster's CA (dev-lab user against the root/llms) |
 | `403 … cannot list resource` | RBAC | `kubectl --context dev-lab auth can-i list pods -n X --as=alice --as-group=team-alpha` · `kubectl get rolebinding -n X -o wide` | Bind the ClusterRole in the right namespace **in the right cluster**. Check the **group** in the cert (`openssl x509 -noout -subject`) |
 | Deployment created but 0 pods | Validating admission on the **pod** | `kubectl describe rs -l app=…` → `FailedCreate` | Fix the pod template (drill: `scripts/breakfix.sh inject 14`) |
-| Pod created, stays `Pending`, no scheduler events | **root** admission refused the synced pod | events on the pod in the vCluster; `kubectl --context spark-root -n vc-<name> describe resourcequota` | Vol 27 §8; break/fix 02 |
+| Pod created, stays `Pending`, no scheduler events | **root** admission refused the synced pod | events on the pod in the vCluster; `kubectl --context spark-root -n vc-<name> describe resourcequota` | Step 04 §8; break/fix 02 |
 | `violates PodSecurity "restricted:latest"` | PSA | message lists the missing fields | add `runAsNonRoot`, `seccompProfile`, `capabilities.drop: [ALL]`, `allowPrivilegeEscalation: false` |
 | `failed calling webhook … context deadline exceeded` | Webhook admission | `kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations` in that cluster. Is the webhook's pod running? | Restore the webhook's backend (cert-manager, KServe, Kueue — in llms). For lab-only emergencies, set `failurePolicy: Ignore`. This is why the lab prefers CEL policies |
 | `429 Too Many Requests` | APF | `apiserver_flowcontrol_rejected_requests_total` by `priority_level` (in the cluster that answered) | Fix the client (watch instead of poll, add backoff) or raise shares |
-| Secrets readable in etcd | Encryption off | `sudo grep encryption-provider /etc/kubernetes/manifests/kube-apiserver.yaml` | 01 Ansible `kubeadm_cluster` writes the config and the flag; on an existing cluster run `kubeadm init phase control-plane apiserver --config /etc/kubernetes/kubeadm-config.yaml`, then re-encrypt (Step 1) |
+| Secrets readable in etcd | Encryption off | `sudo grep encryption-provider /etc/kubernetes/manifests/kube-apiserver.yaml` | 01 Ansible `kubeadm_cluster` writes the config and the flag; on an existing cluster run `kubeadm init phase control-plane apiserver --config /etc/kubernetes/kubeadm-config.yaml`, then re-encrypt (§5 Task 1) |
 | API server down after editing its manifest | bad flag / missing mount | `sudo crictl ps -a --name kube-apiserver`, `sudo crictl logs <id>` | revert the edit; every `--…-file` flag needs a matching `extraVolumes` mount |
 
 ---

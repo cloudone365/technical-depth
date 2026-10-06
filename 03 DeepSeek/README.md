@@ -2,7 +2,7 @@
 
 Forty-one practical volumes that take DeepSeek from the research papers to a production-style service on one DGX Spark (a second is optional). You prove the architecture ideas (MLA, DeepSeekMoE, MTP, FP8, GRPO) with runnable code. Then you size, serve and compare the models that fit a GB10, fine-tune and RL-train them, build the application stack around them (gateway, chat UI, RAG, agents), and operate it: automation, secrets, day-2 jobs, telemetry, drills and GitOps. Every volume has the same shape: **why → HLD → LLD → integrations → step-by-step lab → verification with expected results → troubleshooting → scale-out path → checklist**. Every command runs against the files in [`lab/`](lab/README.md), on the platform built by [01 Ansible](../01%20Ansible/README.md) and [02 Kubernetes](../02%20Kubernetes/README.md).
 
-**Start here:** [00 · Step-by-step guide](00-deepseek-step-by-step-guide.md) (shortest correct path) · [`lab/README.md`](lab/README.md) · [40 · Workbook](40-hands-on-exercises-workbook.md) (prove it) · [Production MLOps](production-mlops.md) (run it like a team)
+**Start here:** [00 · Step-by-step guide](00-deepseek-step-by-step-guide.md) (shortest correct path) · [`lab/README.md`](lab/README.md) · [40 · Workbook](40-hands-on-exercises-workbook.md) (prove it) · [Production MLOps](28-production-mlops-and-gitops.md) (run it like a team)
 
 ---
 
@@ -129,7 +129,7 @@ flowchart TB
 | 31 | [Ansible one-click](31-ansible-one-click-deployment-playbook.md) | preflight guards, check mode, tags, rollback. Linted and dry-run in CI |
 | 32 | [Vault](32-hashicorp-vault-secrets-integration.md) | Kubernetes auth, least-privilege sync, rotation that rolls consumers |
 | 33 | [Day-2 operations](33-automated-weight-sync-and-day2-ops.md) | revision pinning, upstream drift, integrity, backups, upgrade runbook |
-| — | [Production MLOps](production-mlops.md) | Argo CD for models, PostSync eval gate, canary, revert |
+| — | [Production MLOps](28-production-mlops-and-gitops.md) | Argo CD for models, PostSync eval gate, canary, revert |
 
 ### Part IX — Model comparisons
 

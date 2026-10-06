@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end verification of the 02 Kubernetes lab (Volume 15 §6, Volume 20, 27).
+# End-to-end verification of the 02 Kubernetes lab (Step 05 §6, Steps 27, 04).
 # Prints PASS/WARN/FAIL per check; exit 0 only if nothing FAILed.
 #   scripts/verify.sh              # everything
 #   scripts/verify.sh tenancy gpu  # selected sections:
@@ -16,7 +16,7 @@ if want platform; then
   nr=$(kr get nodes --no-headers | awk '$2!="Ready"' | wc -l); [[ $nr -eq 0 ]] && ok "all nodes Ready" || bad "$nr node(s) not Ready"
   kr -n kube-system get deploy coredns -o jsonpath='{.status.readyReplicas}' | grep -q '^[1-9]' && ok "CoreDNS ready" || bad "CoreDNS not ready"
   kr -n kube-system get ds cilium -o jsonpath='{.status.numberReady}' | grep -q '^[1-9]' && ok "Cilium ready" || bad "Cilium not ready"
-  kr -n kube-system get ds kube-proxy >/dev/null 2>&1 && ok "kube-proxy present (iptables mode, Volume 07)" || warn "kube-proxy missing"
+  kr -n kube-system get ds kube-proxy >/dev/null 2>&1 && ok "kube-proxy present (iptables mode, Step 09)" || warn "kube-proxy missing"
   miss=0; for pc in spark-platform spark-serving spark-interactive spark-batch spark-preemptible; do
     kr get priorityclass $pc >/dev/null 2>&1 || { bad "PriorityClass $pc missing"; miss=1; }; done
   [[ $miss -eq 0 ]] && ok "5 PriorityClasses"
@@ -117,7 +117,7 @@ if want serving; then
         -d '{"model":"qwen2.5-0.5b","messages":[{"role":"user","content":"Say OK"}],"max_tokens":5}')
       grep -q '"choices"' <<<"$out" && ok "vLLM answered a chat completion" || bad "vLLM response: $out"
     else warn "vLLM deployed but not ready"; fi
-  else info "vLLM not deployed (Volume 21)"; fi
+  else info "vLLM not deployed (Step 20)"; fi
 fi
 
 if want observability; then

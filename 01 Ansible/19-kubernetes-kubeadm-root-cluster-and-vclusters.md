@@ -2,7 +2,7 @@
 
 > **01 Ansible · Part IV — Secrets & platforms · Step 19 of 30** · ← [Step 18 · Vault AppRole & SSH certificates](18-vault-approle-secrets-and-ssh-certificates.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 20 · NVIDIA GPU Operator](20-nvidia-gpu-operator-and-time-slicing.md) →
 >
-> Deep dive on what you build here: [02 Kubernetes Vol 01 · Core architecture](../02%20Kubernetes/01-kubernetes-core-architecture.md) · [02 Kubernetes Vol 27 · Nested clusters](../02%20Kubernetes/27-nested-clusters-with-vcluster.md)
+> Deep dive on what you build here: [02 Kubernetes Step 01 · Core architecture](../02%20Kubernetes/01-kubernetes-core-architecture.md) · [02 Kubernetes Step 04 · Nested clusters](../02%20Kubernetes/04-nested-clusters-with-vcluster.md)
 
 | | |
 |---|---|
@@ -25,7 +25,7 @@ A datacenter GPU cluster is almost always "upstream Kubernetes bootstrapped by k
 | Readable in one sitting | ✅ every line is shown below | No. You configure it through group_vars rather than read it |
 | Fits a 1–2 node lab on 128 GB of unified memory | ✅ nothing you didn't ask for | Works, but installs and checks far more than one Spark needs |
 | Teaching value | You see each kubeadm phase, the containerd edits, the kubeconfig merge | Hides them (that is its job) |
-| HA control plane | `controlPlaneEndpoint` is already set; add control planes by hand (02 Kubernetes Vol 01 §8.2) | Built in: `kube_control_plane` × 3, `etcd` group |
+| HA control plane | `controlPlaneEndpoint` is already set; add control planes by hand (02 Kubernetes Step 01 §8.2) | Built in: `kube_control_plane` × 3, `etcd` group |
 | When you move to a DGX fleet | Keep it as the reference for *what* must happen on a node | **The scale-out path**, alongside NVIDIA Base Command Manager, which deploys Kubernetes on DGX clusters itself |
 
 The inventory model carries over. Kubespray's groups are `kube_control_plane`, `kube_node` and `etcd`; this lab's are `k8s_control_plane` and `k8s_workers` (etcd is stacked on the control plane). Mapping one onto the other is a `children:` block in the inventory (Step 06).
@@ -140,7 +140,7 @@ Single Spark: remove dgx-spark-2 from `spark` and `k8s_workers`. The cluster is 
 
 ### 2.4 LLD: the kubeadm config
 
-kubeadm reads one file, once, at `kubeadm init`. The role renders it to `/etc/kubernetes/kubeadm-config.yaml`. 02 Kubernetes [Vol 01](../02%20Kubernetes/01-kubernetes-core-architecture.md) walks through the running result; here is what Ansible decides:
+kubeadm reads one file, once, at `kubeadm init`. The role renders it to `/etc/kubernetes/kubeadm-config.yaml`. 02 Kubernetes [Step 01](../02%20Kubernetes/01-kubernetes-core-architecture.md) walks through the running result; here is what Ansible decides:
 
 ```yaml
 # lab/roles/kubeadm_cluster/templates/kubeadm-init.yaml.j2 (abridged)
@@ -197,7 +197,7 @@ mode: iptables
 | `evictionHard` lists all four signals | — | Setting the map **replaces** kubelet's defaults; a signal you omit is no longer enforced |
 | `maxPods: 200` | — | Two vClusters plus platform add-ons on one node pass the default 110 quickly: every tenant pod is a real pod here |
 | `bind-address: 0.0.0.0`, etcd metrics `:2381` | — | kube-prometheus-stack scrapes them from the pod network |
-| kube-proxy `mode: iptables` | Cilium with `kubeProxyReplacement=false` | 02 Kubernetes Vol 07 reads the `KUBE-SVC-*` chains. Cilium's kube-proxy replacement (eBPF) is the faster alternative; turn it on only together with removing kube-proxy |
+| kube-proxy `mode: iptables` | Cilium with `kubeProxyReplacement=false` | 02 Kubernetes Step 09 reads the `KUBE-SVC-*` chains. Cilium's kube-proxy replacement (eBPF) is the faster alternative; turn it on only together with removing kube-proxy |
 | node labels | `spark.lab/gpu=gb10`, `spark.lab/node-index` | Lab-owned selectors: they exist before the GPU Operator, and GFD never rewrites them (it owns `nvidia.com/gpu.product`) |
 
 ### 2.5 LLD: one kubeconfig, three contexts
@@ -322,7 +322,7 @@ ETCDCTL_API=3 etcdctl \
 etcdutl snapshot status "$dir/$name" -w table
 ```
 
-> **Back up the encryption key with the snapshots.** An etcd snapshot without `/etc/kubernetes/encryption/config.yaml` restores every Secret as unreadable ciphertext. Store the key in Vault (Step 18). The etcd snapshot does **not** contain the vClusters' state: each keeps its own SQLite database on a PVC (02 Kubernetes Vol 27 §6.7).
+> **Back up the encryption key with the snapshots.** An etcd snapshot without `/etc/kubernetes/encryption/config.yaml` restores every Secret as unreadable ciphertext. Store the key in Vault (Step 18). The etcd snapshot does **not** contain the vClusters' state: each keeps its own SQLite database on a PVC (02 Kubernetes Step 04 §6.7).
 
 #### Workers: join without a long-lived secret
 
@@ -415,7 +415,7 @@ vclusters_list:
 | 4 | Read Secret `vc-<name>` (written by `exportKubeConfig`), write `.cache/kubeconfig-<name>.yaml`, merge contexts `dev-lab`, `llms` | §2.5 |
 | 5 | `k8s_info` on Namespace `default` **through each new context** | Proves the MetalLB IP, the certificate SAN and the credentials together |
 
-Budgets, sync rules and naming are taught in 02 Kubernetes [Vol 27](../02%20Kubernetes/27-nested-clusters-with-vcluster.md). The one rule to keep in mind here: the root keeps 14 CPU, ~64 GiB and 5 GPU slices; `dev-lab` gets 2 / 8 Gi / 2 and `llms` 4 / 48 Gi / 8, enforced by the **root's** ResourceQuota on each `vc-*` namespace.
+Budgets, sync rules and naming are taught in 02 Kubernetes [Step 04](../02%20Kubernetes/04-nested-clusters-with-vcluster.md). The one rule to keep in mind here: the root keeps 14 CPU, ~64 GiB and 5 GPU slices; `dev-lab` gets 2 / 8 Gi / 2 and `llms` 4 / 48 Gi / 8, enforced by the **root's** ResourceQuota on each `vc-*` namespace.
 
 ### 3.5 Things worth noticing
 
@@ -512,7 +512,7 @@ systemctl list-timers etcd-snapshot.timer
 sudo etcd-snapshot drill-1 && ls -lh /var/lib/etcd-snapshots
 ```
 
-The audit record for the Secret is at `Metadata` level (no payload), as the policy says. 02 Kubernetes Vol 02 §5 Step 1 does the same proof in more depth; Vol 03 rehearses a restore from these snapshots.
+The audit record for the Secret is at `Metadata` level (no payload), as the policy says. 02 Kubernetes Step 03 §5 Task 1 does the same proof in more depth; 02 Kubernetes Step 02 rehearses a restore from these snapshots.
 
 ### 4.5 Add the vClusters and use three contexts
 
@@ -537,11 +537,11 @@ kubectl --context spark-root -n vc-dev-lab get pod web-x-default-x-dev-lab \
 kubectl --context dev-lab delete pod web
 ```
 
-The host copy carries `requests` and `limits` that you never wrote. They come from the root LimitRange `vcluster-defaults` in `vc-dev-lab`, which exists because the root quota caps memory and would otherwise reject the pod. The tenant's cluster has its own API server, but the scheduler, kubelet, containerd and Cilium that ran `web` are the root's, built by this volume. The rest of the 02 lab (tenants, serving, Traefik on `.115`) goes on with `scripts/apply-lab.sh`; see 02 Kubernetes [Vol 15](../02%20Kubernetes/15-dgx-spark-datacenter-simulation-lab.md).
+The host copy carries `requests` and `limits` that you never wrote. They come from the root LimitRange `vcluster-defaults` in `vc-dev-lab`, which exists because the root quota caps memory and would otherwise reject the pod. The tenant's cluster has its own API server, but the scheduler, kubelet, containerd and Cilium that ran `web` are the root's, built by this volume. The rest of the 02 lab (tenants, serving, Traefik on `.115`) goes on with `scripts/apply-lab.sh`; see 02 Kubernetes [Step 05](../02%20Kubernetes/05-dgx-spark-datacenter-simulation-lab.md).
 
 ### 4.6 Upgrade the root
 
-kubeadm upgrades go one minor at a time: control plane first, then kubelets. The full procedure is in 02 Kubernetes Vol 01 §8.1. The `ssh` and `kubectl` steps below run from your MacBook (as `nvidia`, with the fetched kubeconfig); the converge step is the `05 Kubernetes` template. What matters for Ansible is **order**. Don't bump `kubeadm_cluster_version` and re-run `05-kubernetes.yml` first. `packages.yml` would install the new **kubelet** on a control plane that still runs the old API server, and a kubelet newer than its API server is outside Kubernetes' version-skew policy.
+kubeadm upgrades go one minor at a time: control plane first, then kubelets. The full procedure is in 02 Kubernetes Step 01 §8.1. The `ssh` and `kubectl` steps below run from your MacBook (as `nvidia`, with the fetched kubeconfig); the converge step is the `05 Kubernetes` template. What matters for Ansible is **order**. Don't bump `kubeadm_cluster_version` and re-run `05-kubernetes.yml` first. `packages.yml` would install the new **kubelet** on a control plane that still runs the old API server, and a kubelet newer than its API server is outside Kubernetes' version-skew policy.
 
 ```bash
 # Patch release inside v1.36 (same pkgs.k8s.io repo):

@@ -1,4 +1,4 @@
-# Two 3-pod "distributed" jobs that each need 3 GPU slices (Volume 05 lab).
+# Two 3-pod "distributed" jobs that each need 3 GPU slices (Step 07 lab).
 # spark-cq allows 4 slices: both together (6) don't fit, either alone does.
 # Without Kueue: pods start one by one → each job can hold a partial gang (deadlock).
 # With Kueue:    gang-a is admitted whole, gang-b waits whole, then runs.

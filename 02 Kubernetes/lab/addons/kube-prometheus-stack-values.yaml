@@ -1,4 +1,4 @@
-# Helm values for kube-prometheus-stack on the ROOT cluster (Volume 16, 19).
+# Helm values for kube-prometheus-stack on the ROOT cluster (Steps 17, 26).
 # Prometheus Operator + Prometheus + Alertmanager + Grafana, sized for one Spark:
 # 15d retention, 50Gi on local NVMe. Installed by scripts/install-addons.sh kps:
 #   helm upgrade --install kps prometheus-community/kube-prometheus-stack \

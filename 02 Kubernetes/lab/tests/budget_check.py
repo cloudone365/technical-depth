@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static consistency check of the 80/20-style split of one DGX Spark (Volume 27).
+"""Static consistency check of the 80/20-style split of one DGX Spark (Step 04).
 
 Reads the files that define the split and fails if they disagree:
   * root quotas            manifests/root/05-vclusters/quotas.yaml

@@ -1,10 +1,10 @@
-# SGLang with RadixAttention prefix caching (Volume 23). The `spark` tag is
+# SGLang with RadixAttention prefix caching (Step 22). The `spark` tag is
 # the arm64/sm_121 build published for DGX Spark — re-check tags before use.
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: sglang, namespace: llm-serving, labels: {app: sglang}}
 spec:
-  replicas: 0                          # scale to 1 once vLLM is parked (Vol 21 §9: one 32 Gi engine at a time)
+  replicas: 0                          # scale to 1 once vLLM is parked (Step 20 §9: one 32 Gi engine at a time)
   strategy: {type: Recreate}
   selector: {matchLabels: {app: sglang}}
   template:

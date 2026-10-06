@@ -1,6 +1,6 @@
-# Volume 15 — The DGX Spark Datacenter Simulation: End-to-End Build, Gates & Day-2 Operations
+# Step 05 · The DGX Spark Datacenter Simulation: End-to-End Build, Gates & Day-2 Operations
 
-> **Module 02 · Part IV — NVIDIA platform** · Prev: [14 Container Toolkit & GPU sharing](14-nvidia-container-toolkit-and-gpu-virtualization.md) · Next: [16 GPU & Network Operators](16-nvidia-gpu-operator-and-network-operator.md) · Short path: [00 step-by-step](00-kubernetes-step-by-step-guide.md) · The shape: [27 Nested clusters](27-nested-clusters-with-vcluster.md)
+> **02 Kubernetes · Part I — Control plane & the nested lab · Step 05 of 28** · ← [Step 04 · Nested clusters with vCluster](04-nested-clusters-with-vcluster.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 06 · Controllers](06-kube-controller-manager-and-controllers.md) →
 
 | | |
 |---|---|
@@ -183,7 +183,7 @@ flowchart LR
   class G6,G7,G8 gpu
 ```
 
-### Step 0 · Toolchain (your MacBook)
+### Task 0 · Toolchain (your MacBook)
 
 ```bash
 git clone https://github.com/cloudone365/technical-depth.git && cd "technical-depth/02 Kubernetes/lab"
@@ -193,7 +193,7 @@ tests/run-local-checks.sh
 
 **Gate:** `ALL LOCAL CHECKS PASSED`.
 
-### Step 1 · Root cluster (01 Ansible, from Semaphore)
+### Task 1 · Root cluster (01 Ansible, from Semaphore)
 
 In Semaphore (project `spark-lab`): run `05 Kubernetes`, then `06 GPU Operator` (break-glass CLI: `ansible-playbook playbooks/05-kubernetes.yml -l dgx-spark-1,localhost -K`). Then on your MacBook:
 
@@ -206,7 +206,7 @@ cd "../../02 Kubernetes/lab" && scripts/preflight.sh
 
 **Gate:** both task logs end in `failed=0`; `fetch-kubeconfig.sh` lists `spark-root`; preflight `0 failed`. `allocatable nvidia.com/gpu=15`. No control-plane taint.
 
-### Step 2 · Control plane hardening
+### Task 2 · Control plane hardening
 
 ```bash
 kubectl --context spark-root get secrets -A -o json | kubectl --context spark-root replace -f - >/dev/null
@@ -214,9 +214,9 @@ scripts/etcd-drill.sh status && scripts/etcd-drill.sh snapshot
 systemctl list-timers etcd-snapshot.timer
 ```
 
-**Gate:** 1 etcd member, leader, no alarms, ≥ 1 snapshot, timer scheduled. Secrets in etcd start with `k8s:enc:aescbc:v1:` (Vol 02 §5 Step 1).
+**Gate:** 1 etcd member, leader, no alarms, ≥ 1 snapshot, timer scheduled. Secrets in etcd start with `k8s:enc:aescbc:v1:` (Step 03 §5 Task 1).
 
-### Step 3 · Platform add-ons and vClusters
+### Task 3 · Platform add-ons and vClusters
 
 ```bash
 scripts/install-addons.sh all          # root: storage metrics-server kps vclusters · llms: traefik kueue keda
@@ -226,7 +226,7 @@ scripts/verify.sh vclusters
 
 **Gate:** no root pods outside `Running/Completed`. Both vClusters answer and show their budgets. Grafana answers on :32000.
 
-### Step 4–5 · Tenancy, policies and workloads
+### Task 4–5 · Tenancy, policies and workloads
 
 ```bash
 scripts/apply-lab.sh                   # root → dev-lab → llms
@@ -235,7 +235,7 @@ scripts/verify.sh platform vclusters tenancy admission storage
 
 **Gate:** all PASS.
 
-### Step 6 · GPU
+### Task 6 · GPU
 
 ```bash
 scripts/verify.sh gpu                  # gpu-smoke from inside dev-lab
@@ -245,7 +245,7 @@ kubectl --context spark-root -n platform-tools logs -f job/gemm-solo
 
 **Gate:** gpu-smoke PASS. Baseline TFLOPS recorded.
 
-### Step 7 · Serving
+### Task 7 · Serving
 
 ```bash
 kubectl --context llms apply -f manifests/llms/60-storage/model-prefetch-job.yaml
@@ -257,7 +257,7 @@ scripts/verify.sh ingress serving
 
 **Gate:** `vLLM answered a chat completion`. Streaming PASS through `192.168.0.115`.
 
-### Step 8 · Batch
+### Task 8 · Batch
 
 ```bash
 tests/kueue-gang-test.sh
@@ -267,13 +267,13 @@ kubectl --context llms -n batch logs -f -l job-name=ddp --prefix
 
 **Gate:** gang test PASS. DDP prints `correctness OK`.
 
-### Step 9 · Operations
+### Task 9 · Operations
 
 ```bash
 kubectl --context spark-root apply -k manifests/root/95-observability
 scripts/verify.sh observability
 scripts/collect-diag.sh                     # know how to produce a bundle before you need one
-scripts/breakfix.sh list                    # then do at least three drills (Vol 19/20)
+scripts/breakfix.sh list                    # then do at least three drills (Steps 26/27)
 ```
 
 **Gate:** `verify.sh` all PASS. Dashboard *Spark · Kubernetes* shows data in every row, including `vcluster="llms"` serving metrics.
@@ -319,14 +319,14 @@ scripts/verify.sh
 
 | Task | Frequency | How |
 |---|---|---|
-| etcd snapshot off-box | daily | copy `/var/lib/etcd-snapshots/` off the Spark to the MacBook or sema01's backed-up disk (Vol 03 §5.7) |
-| vCluster backup | weekly | scale the control plane to 0, tar its PVC directory (Vol 27 §6.7) |
+| etcd snapshot off-box | daily | copy `/var/lib/etcd-snapshots/` off the Spark to the MacBook or sema01's backed-up disk (Step 02 §5.7) |
+| vCluster backup | weekly | scale the control plane to 0, tar its PVC directory (Step 04 §6.7) |
 | Restore rehearsal | monthly | `scripts/etcd-drill.sh restore …` on a quiet day; one vCluster PVC restore |
 | Version review | monthly | `versions.env` vs upstream releases. Test in CI (kind + 2 vClusters) first |
-| Kubernetes upgrade | per minor release | 01 Ansible `kubeadm_cluster_version` → `kubeadm upgrade plan/apply` (Vol 01 §8) → `scripts/verify.sh`; vCluster supports host 1.34–1.36 |
-| vCluster upgrade | per release | bump `VCLUSTER_VERSION`, `helm upgrade` dev-lab first, then llms (Vol 27) |
-| DGX OS / driver upgrade | per NVIDIA release | Semaphore template `17 DGX OS upgrade` (drain → upgrade → validate) → Vol 12 UMA experiment again |
-| Capacity review | weekly | Grafana *vCluster CPU/memory used / hard* panels. `VClusterQuotaNearlyExhausted`, `PodsPendingOnGPU` history; resize with one `kubectl patch` (Vol 27 §6.5) |
+| Kubernetes upgrade | per minor release | 01 Ansible `kubeadm_cluster_version` → `kubeadm upgrade plan/apply` (Step 01 §8) → `scripts/verify.sh`; vCluster supports host 1.34–1.36 |
+| vCluster upgrade | per release | bump `VCLUSTER_VERSION`, `helm upgrade` dev-lab first, then llms (Step 04) |
+| DGX OS / driver upgrade | per NVIDIA release | Semaphore template `17 DGX OS upgrade` (drain → upgrade → validate) → Step 14 UMA experiment again |
+| Capacity review | weekly | Grafana *vCluster CPU/memory used / hard* panels. `VClusterQuotaNearlyExhausted`, `PodsPendingOnGPU` history; resize with one `kubectl patch` (Step 04 §6.5) |
 | Drills | weekly | one `breakfix` scenario, timed |
 | Drift check · validation | nightly · weekly | scheduled Semaphore templates `20 Drift check` and `30 Validate`; a failed task is the alert (01 Ansible Step 04 §9) |
 | Full rebuild | when needed | Semaphore `99 Reset Kubernetes` (`reset_confirm=RESET`) → `05` → `06` → `06b`, then `fetch-kubeconfig.sh sema01` and `scripts/install-addons.sh all` |
@@ -342,11 +342,11 @@ scripts/verify.sh
 | 1 | GPU Operator validator not Running | 01 Ansible Step 20 troubleshooting. containerd must have the `nvidia` runtime (`grep nvidia /etc/containerd/config.toml`) |
 | 2 | no etcd snapshot | `systemctl status etcd-snapshot.service`; `etcdctl` version must match the etcd image (role downloads it) |
 | 3 | a vCluster never Ready | its PVC Pending → storage not installed first; `kubectl --context spark-root -n vc-<name> describe pod <name>-0` |
-| 3 | `context dev-lab` unreachable | MetalLB didn't assign `.111` (pool, `services.loadbalancers` quota) → Vol 27 §8 |
+| 3 | `context dev-lab` unreachable | MetalLB didn't assign `.111` (pool, `services.loadbalancers` quota) → Step 04 §8 |
 | 4 | admission tests fail | a policy binding namespace label missing → re-apply `<vcluster>/00-platform` |
 | 6 | gpu-smoke Pending with no events | dev-lab's 2 slices are in use → drill 02 explains it; scale down demos |
-| 7 | vLLM never Ready | `kubectl --context llms logs deploy/vllm`: model download, wrong image arch, `--gpu-memory-utilization` too high for free UMA, or the llms 48 Gi budget spent by another engine (Vol 21 §9) |
-| 8 | DDP hangs | Kueue not installed in llms → both jobs started partially (Vol 05). NCCL on 1 node needs `BACKEND=gloo` |
+| 7 | vLLM never Ready | `kubectl --context llms logs deploy/vllm`: model download, wrong image arch, `--gpu-memory-utilization` too high for free UMA, or the llms 48 Gi budget spent by another engine (Step 20 §9) |
+| 8 | DDP hangs | Kueue not installed in llms → both jobs started partially (Step 07). NCCL on 1 node needs `BACKEND=gloo` |
 
 ---
 
@@ -373,9 +373,9 @@ flowchart LR
 1. Cable the QSFP ports. Run 01 Ansible `02-fabric.yml` (CX-7 addressing, MTU 9000) and `11-rdma-perftest.yml` (≥ 180 Gb/s gate).
 2. Uncomment `dgx-spark-2` under `k8s_workers` in the inventory and run `05-kubernetes.yml` (kubeadm join, Cilium agent) and `06-gpu-operator.yml`.
 3. `kubectl --context spark-root get nodes` → 2 Ready, 30 slices allocatable. Both vClusters see the new node at once (node sync). Raise the root budgets you want to grow (`root/05-vclusters/quotas.yaml`, then `tests/budget_check.py` with `SPARK` doubled) and `spark-cq`.
-4. Serve weights from NFS (Vol 11 §8) instead of per-node local PVs.
-5. Run `manifests/llms/80-distributed/two-spark` (NCCL over RoCE, Vol 17).
-6. The root control plane still has one etcd voter. For real HA you need three control-plane nodes (Vol 03 §8).
+4. Serve weights from NFS (Step 13 §8) instead of per-node local PVs.
+5. Run `manifests/llms/80-distributed/two-spark` (NCCL over RoCE, Step 18).
+6. The root control plane still has one etcd voter. For real HA you need three control-plane nodes (Step 02 §8).
 
 ---
 

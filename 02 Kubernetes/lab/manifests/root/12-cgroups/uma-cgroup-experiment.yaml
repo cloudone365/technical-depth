@@ -1,4 +1,4 @@
-# THE question for a UMA box (Volume 12 §5.5): is a CUDA allocation charged to
+# THE question for a UMA box (Step 14 §5.5): is a CUDA allocation charged to
 # the pod's memory cgroup? Memory limit 4 Gi, GPU allocation 16 GiB.
 # Runs on the ROOT (platform-tools). The answer decides how the vCluster memory
 # budgets in root/05-vclusters/quotas.yaml must be read: if CUDA memory is NOT

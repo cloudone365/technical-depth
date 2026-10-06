@@ -1,6 +1,6 @@
-# Volume 25 — Accelerators & Compilers Beyond the GPU: TPU, Trainium, Blackwell, and What Compilers Buy You
+# Step 24 · Accelerators & Compilers Beyond the GPU: TPU, Trainium, Blackwell, and What Compilers Buy You
 
-> **Module 02 · Part VII — Hyperscale** · Prev: [24 Disaggregated P/D](24-disaggregated-prefill-and-decode-serving.md) · Next: [26 Ultra-scale resilience](26-ultra-scale-cluster-resilience-and-fault-tolerance.md) · The lab's shape: [27 Nested clusters](27-nested-clusters-with-vcluster.md)
+> **02 Kubernetes · Part VIII — Scale & resilience · Step 24 of 28** · ← [Step 23 · Prefill/decode split](23-disaggregated-prefill-and-decode-serving.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 25 · Resilience at scale](25-ultra-scale-cluster-resilience-and-fault-tolerance.md) →
 
 | | |
 |---|---|
@@ -31,7 +31,7 @@ Your Spark runs the same software stack as NVIDIA's datacenter systems (CUDA, cu
 
 ### 1.1 Why the benchmark runs on the root
 
-The lab puts hardware benchmarking in the root's `platform-tools` namespace, not in a vCluster. A compiler benchmark measures the *GB10*, and its result is a platform fact (like the baseline TFLOPS in Vol 15 Step 6) that every tenant's numbers are compared against. `platform-tools` has no ResourceQuota: the root's share of the Spark (14 CPU, ~64 GiB, 5 of the 15 time-slices) is kept by convention and watched by the slice ledger, not enforced. That is the usual platform-team trade — more freedom, more responsibility. Take a 6th slice and a tenant pod inside llms or dev-lab gets `Insufficient nvidia.com/gpu` from the root scheduler even though its vCluster quota still has room.
+The lab puts hardware benchmarking in the root's `platform-tools` namespace, not in a vCluster. A compiler benchmark measures the *GB10*, and its result is a platform fact (like the baseline TFLOPS in Step 05 §4 Task 6) that every tenant's numbers are compared against. `platform-tools` has no ResourceQuota: the root's share of the Spark (14 CPU, ~64 GiB, 5 of the 15 time-slices) is kept by convention and watched by the slice ledger, not enforced. That is the usual platform-team trade — more freedom, more responsibility. Take a 6th slice and a tenant pod inside llms or dev-lab gets `Insufficient nvidia.com/gpu` from the root scheduler even though its vCluster quota still has room.
 
 ---
 
@@ -129,9 +129,9 @@ The middle row is the nested-cluster version of a cloud fact: device plugins, DR
 ## 4. Integrations
 
 - **Module 06 Gemma** uses JAX/XLA and MaxText on NVIDIA. The XLA:GPU path above runs on your Spark with NVIDIA's JAX containers.
-- **Module 07 Nvidia** goes inside the kernels (SASS, Nsight Compute). Point it at the fused kernels this volume generates.
-- **Serving (Vol 21–23)**: vLLM and SGLang already use CUDA graphs and `torch.compile` internally. That's part of their startup time ("Capturing CUDA graphs") and part of why their startup probes allow 30 minutes.
-- **Vol 14**: the same ConfigMap drives `gemm-solo` and `gemm-contention`; compare compiled vs eager *under contention* by scaling `gemm-contention` while §5.1 runs.
+- **Module 07 Nvidia** goes inside the kernels (SASS, Nsight Compute). Point it at the fused kernels this step generates.
+- **Serving (Steps 20–22)**: vLLM and SGLang already use CUDA graphs and `torch.compile` internally. That's part of their startup time ("Capturing CUDA graphs") and part of why their startup probes allow 30 minutes.
+- **Step 16**: the same ConfigMap drives `gemm-solo` and `gemm-contention`; compare compiled vs eager *under contention* by scaling `gemm-contention` while §5.1 runs.
 
 ---
 
@@ -146,7 +146,7 @@ export KUBECONFIG="$PWD/../../01 Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 
 ```bash
 kubectl --context spark-root apply -k manifests/root/70-gpu                 # ConfigMap gemm-bench (+ gemm-contention at 0 replicas)
-kubectl --context spark-root get cm -n platform-tools gpu-slice-ledger -o yaml   # who holds slices right now (Vol 04 controller)
+kubectl --context spark-root get cm -n platform-tools gpu-slice-ledger -o yaml   # who holds slices right now (Step 06 controller)
 kubectl --context spark-root apply -f manifests/root/70-gpu/compile-compare.yaml
 kubectl --context spark-root -n platform-tools logs -f job/compile-compare
 ```

@@ -1,4 +1,4 @@
-# Who can do what INSIDE vCluster #1 · dev-lab (Volume 02, 27). Groups come
+# Who can do what INSIDE vCluster #1 · dev-lab (Steps 03, 04). Groups come
 # from client-cert O= fields (scripts/make-user.sh --context dev-lab) or your
 # OIDC provider in production. These users exist only in dev-lab: they have no
 # rights at all on the root or in llms.

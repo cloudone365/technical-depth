@@ -1,4 +1,4 @@
-# Helm values for Traefik v3 INSIDE vCluster #2 · llms (Volume 09, 27): the
+# Helm values for Traefik v3 INSIDE vCluster #2 · llms (Steps 11, 04): the
 # API gateway of the serving tier — Ingress + Gateway API + Traefik CRDs.
 # Installed by scripts/install-addons.sh traefik:
 #   helm --kube-context llms upgrade --install traefik-lab traefik/traefik \

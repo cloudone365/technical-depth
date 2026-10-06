@@ -1,4 +1,4 @@
-# Queue-depth autoscaling with KEDA INSIDE vCluster #2 · llms (Volume 21 §8, 27).
+# Queue-depth autoscaling with KEDA INSIDE vCluster #2 · llms (Step 20 §8, Step 04).
 # Scale on what users feel (requests waiting), not on GPU utilisation (a
 # time-sliced GB10 reads ~100 % whenever anything runs).
 # Install KEDA in llms: scripts/install-addons.sh keda

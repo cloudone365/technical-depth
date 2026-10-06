@@ -1,6 +1,6 @@
-# Volume 19 — Cluster Diagnostics & Failure Playbook for a DGX Spark Kubernetes Platform
+# Step 26 · Cluster Diagnostics & Failure Playbook for a DGX Spark Kubernetes Platform
 
-> **Module 02 · Part V — Distributed AI & diagnostics** · Prev: [18 Fabrics](18-large-scale-superpod-and-network-fabrics.md) · Next: [20 Workbook](20-hands-on-practice-exercises-workbook.md)
+> **02 Kubernetes · Part IX — Operations · Step 26 of 28** · ← [Step 25 · Resilience at scale](25-ultra-scale-cluster-resilience-and-fault-tolerance.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 27 · Hands-on workbook](27-hands-on-practice-exercises-workbook.md) →
 
 | | |
 |---|---|
@@ -26,13 +26,13 @@ flowchart TD
   Qv -- yes --> Q2{"node Ready?<br/>conditions clean?"}
   Q2 -- no --> ND["NODE<br/>kubelet · pressure · containerd<br/>§3.6–3.7"]
   Q2 -- yes --> Q3{"pod exists on the root?<br/>(vc-&lt;name&gt;, via annotations)"}
-  Q3 -- "no" --> SY["SYNC / ROOT ADMISSION<br/>vcluster-budget · LimitRange · PSA on vc-*<br/>§3.11, Vol 27"]
-  Q3 -- "yes, Pending" --> SC["SCHEDULING<br/>slices · taints · PVC · priorities<br/>Vol 05, 11, 12"]
-  Q3 -- "yes, not Running" --> RT["RUNTIME<br/>image · probes · OOM · GPU injection<br/>Vol 13, 14"]
+  Q3 -- "no" --> SY["SYNC / ROOT ADMISSION<br/>vcluster-budget · LimitRange · PSA on vc-*<br/>§3.11, Step 04"]
+  Q3 -- "yes, Pending" --> SC["SCHEDULING<br/>slices · taints · PVC · priorities<br/>Steps 07, 13, 14"]
+  Q3 -- "yes, not Running" --> RT["RUNTIME<br/>image · probes · OOM · GPU injection<br/>Steps 15, 16"]
   Q3 -- "yes, Running" --> Q5{"reachable by IP?"}
-  Q5 -- no --> NET["NETWORK<br/>netpol (synced) · Cilium · kube-proxy · MTU<br/>§3.4, Vol 06–07"]
+  Q5 -- no --> NET["NETWORK<br/>netpol (synced) · Cilium · kube-proxy · MTU<br/>§3.4, Steps 08–09"]
   Q5 -- yes --> Q6{"reachable by name /<br/>through Traefik .115?"}
-  Q6 -- no --> DNS["DNS / INGRESS / LB<br/>root vs vCluster CoreDNS · MetalLB<br/>§3.5, §3.11, Vol 08–09"]
+  Q6 -- no --> DNS["DNS / INGRESS / LB<br/>root vs vCluster CoreDNS · MetalLB<br/>§3.5, §3.11, Steps 10–11"]
   Q6 -- yes --> APP["APPLICATION / GPU<br/>Xid · UMA · stragglers · SLOs<br/>§3.8–3.10"]
   classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
   classDef sec fill:#cf222e,stroke:#82071e,color:#fff
@@ -48,7 +48,7 @@ flowchart TD
   class APP gpu
 ```
 
-The `Q3` box is the one that's new compared with a single cluster. A vCluster pod has two copies: the one the tenant sees and the one the root runs (`<pod>-x-<namespace>-x-<vcluster>` in `vc-<vcluster>`, Vol 27 §3.4). If the root copy doesn't exist, no amount of scheduler or kubelet debugging will help.
+The `Q3` box is the one that's new compared with a single cluster. A vCluster pod has two copies: the one the tenant sees and the one the root runs (`<pod>-x-<namespace>-x-<vcluster>` in `vc-<vcluster>`, Step 04 §3.4). If the root copy doesn't exist, no amount of scheduler or kubelet debugging will help.
 
 **Always first:**
 
@@ -112,7 +112,7 @@ kubeadm runs the control plane as static pods: the **kubelet** reads `/etc/kuber
 | disk full? | `df -h / /var/lib/etcd /var/lib/containerd /var/log` | 100 % → etcd and containerd fail; audit logs grow fast at `RequestResponse` |
 | memory? | `free -g`, `sudo dmesg -T \| grep -i oom` | control-plane process OOM-killed under UMA pressure (§3.7) |
 
-Fixes: free disk (`sudo crictl rmi --prune`, old etcd snapshots in `/var/lib/etcd-snapshots`, rotated audit logs); revert the last edit to a manifest (keep backups **outside** `/etc/kubernetes/manifests`); restore etcd (Vol 03 §5.6) as a last resort.
+Fixes: free disk (`sudo crictl rmi --prune`, old etcd snapshots in `/var/lib/etcd-snapshots`, rotated audit logs); revert the last edit to a manifest (keep backups **outside** `/etc/kubernetes/manifests`); restore etcd (Step 02 §5.6) as a last resort.
 
 What the vClusters do meanwhile: their own API servers keep answering (`kubectl --context dev-lab get pods` works, from SQLite), but their syncers can't reach the root. Existing pods keep running; new pods stay Pending inside the vCluster, and status stops updating. A tenant reports "my pods are stuck" while the root is down — always check `Q0` first.
 
@@ -126,9 +126,9 @@ scripts/etcd-drill.sh status        # same flags: members, DB size, alarms, late
 sudo crictl logs --tail 50 $(sudo crictl ps -q --name '^etcd$')
 ```
 
-`mvcc: database space exceeded` → compact → defrag → `alarm disarm` (Vol 03 §5.5). Slow fsync (`EtcdSlowFsync`, `apply request took too long` in the etcd log) → find the competing writer (`sudo iotop -oa`: checkpoint jobs, fio in `platform-tools`, model downloads to `/data/k8s`). Rehearse NOSPACE in the sandbox, never on the root: `scripts/etcd-sandbox.sh fill`.
+`mvcc: database space exceeded` → compact → defrag → `alarm disarm` (Step 02 §5.5). Slow fsync (`EtcdSlowFsync`, `apply request took too long` in the etcd log) → find the competing writer (`sudo iotop -oa`: checkpoint jobs, fio in `platform-tools`, model downloads to `/data/k8s`). Rehearse NOSPACE in the sandbox, never on the root: `scripts/etcd-sandbox.sh fill`.
 
-Remember what etcd *doesn't* hold: the vClusters' objects live in SQLite on their PVCs (`data-dev-lab-0`, `data-llms-0` under `/data/k8s`). A vCluster whose API server logs `database is locked` or `disk I/O error` has a storage problem on its PVC, not an etcd problem. A root etcd restore doesn't roll vClusters back (Vol 27 §6.7).
+Remember what etcd *doesn't* hold: the vClusters' objects live in SQLite on their PVCs (`data-dev-lab-0`, `data-llms-0` under `/data/k8s`). A vCluster whose API server logs `database is locked` or `disk I/O error` has a storage problem on its PVC, not an etcd problem. A root etcd restore doesn't roll vClusters back (Step 04 §6.7).
 
 ### 3.3 Certificates
 
@@ -145,7 +145,7 @@ until kubectl --context spark-root get --raw /readyz >/dev/null 2>&1; do sleep 3
 
 `admin.conf` was renewed too: re-fetch the kubeconfig with 01 Ansible `05-kubernetes.yml` (then `06b-vclusters.yml`, which merges the vCluster contexts into the same file). Users made with `make-user.sh … spark-root` keep working until their own cert expires; they were signed by the CA, which didn't change.
 
-The vClusters have their own CAs and certificates, generated by vCluster at install. An `x509` error against `192.168.0.111`/`.112` is usually a missing SAN (Vol 27 §8), occasionally expiry:
+The vClusters have their own CAs and certificates, generated by vCluster at install. An `x509` error against `192.168.0.111`/`.112` is usually a missing SAN (Step 04 §8), occasionally expiry:
 
 ```bash
 echo | openssl s_client -connect 192.168.0.112:443 2>/dev/null | openssl x509 -noout -enddate -ext subjectAltName
@@ -177,7 +177,7 @@ kubectl --context spark-root -n kube-system get deploy coredns; kubectl --contex
 kubectl --context llms -n kube-system get pods                          # the vCluster's own CoreDNS (runs on the root in vc-llms)
 ```
 
-Then try by IP, then by name (Vol 08 §5.5). Common faults: replicas at 0 (break/fix 07), a syntax error in an edited Corefile (`root/30-networking/coredns-corefile.yaml` — kubeadm has no `coredns-custom` import), upstream loops. Break/fix 07 shows the uneven blast radius: the root's CoreDNS down breaks platform pods at once, while cluster names inside a vCluster keep resolving through that vCluster's own CoreDNS.
+Then try by IP, then by name (Step 10 §5.5). Common faults: replicas at 0 (break/fix 07), a syntax error in an edited Corefile (`root/30-networking/coredns-corefile.yaml` — kubeadm has no `coredns-custom` import), upstream loops. Break/fix 07 shows the uneven blast radius: the root's CoreDNS down breaks platform pods at once, while cluster names inside a vCluster keep resolving through that vCluster's own CoreDNS.
 
 ### 3.6 Node NotReady
 
@@ -203,7 +203,7 @@ One node, three clusters: when dgx-spark-1 is NotReady, both vClusters show it N
 
 The vCluster memory budgets are quotas, not reservations: they cap what each vCluster may *ask for*, and protect nothing against a root pod (or a host process, or the page cache) that eats the pool. The kubelet evicts by QoS and usage once `memory.available < 4Gi` (the 01 Ansible `evictionHard`), and it doesn't care which cluster a pod came from.
 
-Order of actions: (1) stop or scale down `spark-preemptible` and `spark-batch` work (root `platform-tools`, `llms` `batch`), (2) drop page cache (`sync; echo 3 | sudo tee /proc/sys/vm/drop_caches`, or 01 Ansible `24-uma-relief.yml`), (3) lower engine memory fractions (`--gpu-memory-utilization`), (4) revisit the capacity plan (Vol 15 §3.3). Drill: BF-15.
+Order of actions: (1) stop or scale down `spark-preemptible` and `spark-batch` work (root `platform-tools`, `llms` `batch`), (2) drop page cache (`sync; echo 3 | sudo tee /proc/sys/vm/drop_caches`, or 01 Ansible `24-uma-relief.yml`), (3) lower engine memory fractions (`--gpu-memory-utilization`), (4) revisit the capacity plan (Step 05 §3.3). Drill: BF-15.
 
 ### 3.8 GPU errors (Xid)
 
@@ -231,7 +231,7 @@ Drain procedure: 01 Ansible `playbooks/21-emergency-drain.yml` (cordon → captu
 
 ### 3.9 Stragglers and hangs (distributed jobs)
 
-From Vol 17 §5.4: all ranks stuck in a collective means find the absent rank. A rank that is `Pending` inside `llms` with a quota event isn't hung — the gang never formed (Vol 17 §5.3). Per-rank step-time spread above ~10 % means a straggler. Check that rank's CPU throttling (`scripts/cgroup-inspect.sh batch <pod> llms`, Vol 12), its GPU clocks (`nvidia-smi -q -d PERFORMANCE`), its NIC counters (Vol 18) and its data loader.
+From Step 18 §5.4: all ranks stuck in a collective means find the absent rank. A rank that is `Pending` inside `llms` with a quota event isn't hung — the gang never formed (Step 18 §5.3). Per-rank step-time spread above ~10 % means a straggler. Check that rank's CPU throttling (`scripts/cgroup-inspect.sh batch <pod> llms`, Step 14), its GPU clocks (`nvidia-smi -q -d PERFORMANCE`), its NIC counters (Step 19) and its data loader.
 
 ### 3.10 Serving SLO breaches
 
@@ -240,7 +240,7 @@ From Vol 17 §5.4: all ranks stuck in a collective means find the absent rank. A
 | TTFT p95 up, queue up | `vllm:num_requests_waiting`, `spark:vllm_ttft_p95_seconds` | load > capacity. Scale (if the `llms` budget allows), or lower `max-num-seqs` to protect latency |
 | TPOT up | `spark:vllm_tpot_p95_seconds` | GPU contention (other slices busy — possibly another cluster's), thermal throttling |
 | KV cache ~100 %, preemptions | `vllm:kv_cache_usage_perc` (`vllm:gpu_cache_usage_perc` on older releases) | context lengths grew. Raise utilisation or lower `max-model-len` |
-| 5xx at ingress | Traefik metrics (`traefik-lab-metrics` in `llms`) | readiness flaps, timeouts, empty EndpointSlices (Vol 09, break/fix 08) |
+| 5xx at ingress | Traefik metrics (`traefik-lab-metrics` in `llms`) | readiness flaps, timeouts, empty EndpointSlices (Step 11, break/fix 08) |
 | HPA/KEDA doesn't scale | `kubectl --context llms -n llm-serving describe scaledobject` | `default/prometheus` missing in `llms`, or new replicas refused by the root quota |
 
 ### 3.11 vCluster-specific failures
@@ -248,7 +248,7 @@ From Vol 17 §5.4: all ranks stuck in a collective means find the absent rank. A
 | Failure | Symptom (tenant side) | Evidence (root side) | Fix |
 |---|---|---|---|
 | **Syncer / vCluster control plane down** | `kubectl --context dev-lab …` times out or `connection refused`; existing pods keep serving | `kubectl --context spark-root -n vc-dev-lab get pods` → `dev-lab-0` not Running (OOMKilled at its memory limit, PVC Pending, evicted) · `kubectl --context spark-root -n vc-dev-lab logs dev-lab-0 -c syncer --previous` | fix the cause (memory limit in `vclusters/<name>.yaml`, storage), then `kubectl --context spark-root -n vc-dev-lab delete pod dev-lab-0`. Tenant pods are root pods: they survive, but nobody can change them until it's back |
-| **Root quota rejects a synced pod** | pod `Pending` in the vCluster with **no scheduler events**; a syncer warning naming `vcluster-budget` | the pod is absent from `vc-<name>`; `kubectl --context spark-root -n vc-<name> describe resourcequota vcluster-budget` shows the resource at its hard limit; `VClusterQuotaNearlyExhausted` | free budget inside the vCluster, queue with Kueue (llms), or resize (Vol 27 §6.5). Drill: BF-02 |
+| **Root quota rejects a synced pod** | pod `Pending` in the vCluster with **no scheduler events**; a syncer warning naming `vcluster-budget` | the pod is absent from `vc-<name>`; `kubectl --context spark-root -n vc-<name> describe resourcequota vcluster-budget` shows the resource at its hard limit; `VClusterQuotaNearlyExhausted` | free budget inside the vCluster, queue with Kueue (llms), or resize (Step 04 §6.5). Drill: BF-02 |
 | **Root LimitRange / PSA rejects a synced pod** | same "Pending, no events"; the warning says `maximum memory usage per Container is 8Gi` or `violates PodSecurity` | root LimitRange `vcluster-defaults` (`max` 8 Gi in dev-lab, 40 Gi in llms), PSA labels on `vc-*` | right-size the container; RDMA/hostNetwork work belongs in `llms` (privileged), not `dev-lab` (baseline) |
 | **MetalLB pool exhausted** | a LoadBalancer Service stays `<pending>`; `kubectl --context <v>` for a *new* vCluster never works | `kubectl --context spark-root get svc -A --field-selector spec.type=LoadBalancer` (10 addresses, `.110–.119`); `kubectl --context spark-root -n metallb-system logs -l app.kubernetes.io/component=controller \| grep -i alloc`; `kubectl --context spark-root get ipaddresspool -n metallb-system lab-pool -o yaml` | delete an unused LB Service, or grow the pool in 01 Ansible `metallb_pool_addresses` (and reserve it in DHCP); pin new vCluster IPs with `metallb.io/loadBalancerIPs` |
 | **`services.loadbalancers` quota** | tenant's LoadBalancer Service rejected | root quota allows 1 (dev-lab: its API) / 2 (llms: API + Traefik) | by design; tenants publish through Traefik in `llms`, not their own LBs |
@@ -333,7 +333,7 @@ kubectl --context spark-root -n platform-tools describe svc lb-fill-$((FREE + 1)
 kubectl --context spark-root -n platform-tools delete svc $(kubectl --context spark-root -n platform-tools get svc -o name | grep lb-fill | sed 's#service/##')
 ```
 
-The last Service waits with a MetalLB allocation-failure event. If that had been a third vCluster's API Service, its context would simply never connect — the `context … unreachable` row of Vol 27 §8.
+The last Service waits with a MetalLB allocation-failure event. If that had been a third vCluster's API Service, its context would simply never connect — the `context … unreachable` row of Step 04 §8.
 
 ---
 
@@ -357,7 +357,7 @@ The last Service waits with a MetalLB allocation-failure event. If that had been
 | `kubectl delete pod` in a loop | the controller recreates the same broken pod | read events/lastState, fix the spec |
 | edit synced objects on the root (`vc-*`) | the syncer owns them and puts the virtual spec back | change the object inside the vCluster |
 | leave backups in `/etc/kubernetes/manifests` | the kubelet runs every file there | keep copies elsewhere |
-| raise every limit "to be safe" | hides leaks and breaks the UMA budget; the root quota refuses it anyway | measure, then size (Vol 12) |
+| raise every limit "to be safe" | hides leaks and breaks the UMA budget; the root quota refuses it anyway | measure, then size (Step 14) |
 | disable NetworkPolicies / admission to "test" | you'll forget to re-enable them | server-side dry-run tests (`scripts/apply-lab.sh --dry-run`), targeted exceptions |
 
 ---

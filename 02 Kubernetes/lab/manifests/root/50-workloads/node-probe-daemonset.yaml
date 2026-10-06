@@ -1,5 +1,5 @@
 # One pod per Spark that publishes GPU + UMA facts as node-exporter textfile
-# metrics (Volume 10). Runs on the ROOT in platform-tools (privileged PSA) because it reads the
+# metrics (Step 12). Runs on the ROOT in platform-tools (privileged PSA) because it reads the
 # host's /proc and the GPU without taking a device-plugin slice.
 apiVersion: apps/v1
 kind: DaemonSet

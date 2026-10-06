@@ -1,6 +1,6 @@
 # Production MLOps for the DeepSeek Stack: GitOps for Models, an Eval Gate on Every Sync, Canaries Through the Gateway, and Rollback by Revert
 
-> **Module 03 · companion** · builds on [02 Production MLOps](../02%20Kubernetes/production-mlops.md), [31 Ansible](31-ansible-one-click-deployment-playbook.md), [33 Day-2 ops](33-automated-weight-sync-and-day2-ops.md), [40 Workbook](40-hands-on-exercises-workbook.md)
+> **Module 03 · companion** · builds on [02 Production MLOps](../02%20Kubernetes/28-production-mlops-and-gitops.md), [31 Ansible](31-ansible-one-click-deployment-playbook.md), [33 Day-2 ops](33-automated-weight-sync-and-day2-ops.md), [40 Workbook](40-hands-on-exercises-workbook.md)
 
 | | |
 |---|---|
@@ -124,7 +124,7 @@ On one Spark both models must fit at once (Vol 41 §3.2). With spark-02, the can
 
 ### 5.1 Install and point at your fork
 
-Argo CD as in [02 production-mlops §2.1](../02%20Kubernetes/production-mlops.md), then:
+Argo CD as in [02 production-mlops §2.1](../02%20Kubernetes/28-production-mlops-and-gitops.md), then:
 
 ```bash
 cd "03 DeepSeek/lab"

@@ -1,6 +1,6 @@
-# Volume 12 — Multi-Tenancy on One Spark: Quotas at Two Layers, LimitRanges, QoS, cgroups v2 & the Unified-Memory Question
+# Step 14 · Multi-Tenancy on One Spark: Quotas at Two Layers, LimitRanges, QoS, cgroups v2 & the Unified-Memory Question
 
-> **Module 02 · Part III — Workloads, storage, tenancy** · Prev: [11 Storage](11-storage-csi-and-high-performance-volumes.md) · Next: [13 NVIDIA hardware & drivers](13-nvidia-hardware-and-driver-stack.md) · The lab's shape: [27 Nested clusters](27-nested-clusters-with-vcluster.md)
+> **02 Kubernetes · Part IV — Workloads, storage & tenancy · Step 14 of 28** · ← [Step 13 · Storage & model cache](13-storage-csi-and-high-performance-volumes.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 15 · GB10 hardware & drivers](15-nvidia-hardware-and-driver-stack.md) →
 
 | | |
 |---|---|
@@ -150,10 +150,10 @@ With the systemd cgroup driver (containerd `SystemdCgroup = true`, kubelet `cgro
 
 ## 4. Integrations
 
-- **vCluster (Vol 27)**: resizing a vCluster *is* editing its root quota (Vol 27 §6.5) — no reinstall.
-- **Admission (Vol 02)**: the quota admission plugin and the CEL GPU policy together keep tenants inside their slice — in each vCluster's own API server. The root runs quota admission a second time on the synced pod.
-- **Kueue (Vol 05)**: in llms, `batch` is governed by Kueue's `spark-cq`, `llm-serving` by `serving-budget`; both sit under the root budget. Don't put a quota *and* a ClusterQueue on one namespace — they double-count.
-- **Grafana (Vol 16)**: the *Tenancy* row plots the root quotas' `kube_resourcequota{type="used"}` against `hard` per `vc-*` namespace, plus the top-5 throttled containers.
+- **vCluster (Step 04)**: resizing a vCluster *is* editing its root quota (Step 04 §6.5) — no reinstall.
+- **Admission (Step 03)**: the quota admission plugin and the CEL GPU policy together keep tenants inside their slice — in each vCluster's own API server. The root runs quota admission a second time on the synced pod.
+- **Kueue (Step 07)**: in llms, `batch` is governed by Kueue's `spark-cq`, `llm-serving` by `serving-budget`; both sit under the root budget. Don't put a quota *and* a ClusterQueue on one namespace — they double-count.
+- **Grafana (Step 17)**: the *Tenancy* row plots the root quotas' `kube_resourcequota{type="used"}` against `hard` per `vc-*` namespace, plus the top-5 throttled containers.
 - **01 Ansible (`roles/kubeadm_cluster`)** owns `systemReserved`, `kubeReserved`, `evictionHard` and `maxPods: 200`. kubeadm doesn't reconcile a running node: change the defaults there for rebuilds, and on a live node edit `/var/lib/kubelet/config.yaml` and restart the kubelet (the role prints exactly that when the config changed).
 
 ---
@@ -345,7 +345,7 @@ python3 tests/budget_check.py
 |---|---|---|---|
 | `must specify limits.cpu` / `requests.memory` on create (inside a vCluster) | the tenant quota covers it and there's no LimitRange default | `kubectl --context <v> -n X describe limitrange` | add the LimitRange (lab has one) or set resources |
 | Some replicas never appear | inner quota exhausted | ReplicaSet `FailedCreate` events in the vCluster | raise the quota / shrink requests (drill 01) |
-| Pod Pending in a vCluster, **no** scheduler events | root `vcluster-budget` spent | pod events (from the syncer); `kubectl --context spark-root -n vc-<name> describe resourcequota vcluster-budget` | free capacity, Kueue, or move budget between vClusters (drill 02, Vol 27 §6.5) |
+| Pod Pending in a vCluster, **no** scheduler events | root `vcluster-budget` spent | pod events (from the syncer); `kubectl --context spark-root -n vc-<name> describe resourcequota vcluster-budget` | free capacity, Kueue, or move budget between vClusters (drill 02, Step 04 §6.5) |
 | A pod is rejected with `maximum memory usage per Container is 8Gi` | root LimitRange `max` on `vc-dev-lab` | `kubectl --context spark-root -n vc-dev-lab get limitrange vcluster-defaults -o yaml` | by design; raise `max` with the budget |
 | Job 5× slower than on the laptop, no errors | CPU throttling | `cgroup-inspect.sh <ns> <pod> <context>` → `nr_throttled` | raise the CPU limit or remove it (keep the request). Match thread count (`OMP_NUM_THREADS`, `torch.set_num_threads`) to the limit |
 | `OOMKilled` (137) | container exceeded `memory.max` | `lastState.terminated`, `memory.events` | raise the limit to measured peak + 20 %, or fix the leak |
@@ -362,7 +362,7 @@ python3 tests/budget_check.py
 |---|---|
 | root quota per vCluster + tenant quotas inside | the same hierarchy, generated from a tenant catalog in Git; or Capsule / HNC for namespace-level hierarchies |
 | quotas count declared limits, not usage | the same — plus admission policies that require realistic limits, and showback from measured usage |
-| time-slicing, no GPU memory isolation | MIG (H100/B200) for hard isolation, or DRA with GPU partitioning (Vol 05). **GB10 has no MIG** |
+| time-slicing, no GPU memory isolation | MIG (H100/B200) for hard isolation, or DRA with GPU partitioning (Step 07). **GB10 has no MIG** |
 | all tenants share one kernel and one kubepods tree | separate nodes per tenant class (node selectors on the vCluster), or separate clusters for untrusted tenants |
 | engine flags as the GPU-memory guardrail | the same, plus admission policies that *require* those flags on serving images |
 

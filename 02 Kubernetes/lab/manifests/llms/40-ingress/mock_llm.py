@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tiny OpenAI-compatible mock LLM (Volume 09, 21).
+"""Tiny OpenAI-compatible mock LLM (Steps 11, 20).
 
 Lets you test ingress, streaming, timeouts, auth and autoscaling with zero GPU.
   GET  /health                -> 200 "ok"

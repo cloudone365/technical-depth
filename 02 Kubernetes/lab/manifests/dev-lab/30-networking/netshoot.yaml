@@ -1,4 +1,4 @@
-# Network toolbox (Volume 06-08), INSIDE vCluster #1 · dev-lab (--context dev-lab):
+# Network toolbox (Steps 08–10), INSIDE vCluster #1 · dev-lab (--context dev-lab):
 #   netshoot      — inside the pod network (what a tenant workload sees)
 # Its node-level twin, netshoot-host (hostNetwork + NET_ADMIN: veth, iptables,
 # conntrack, Cilium), runs on the root: manifests/root/30-networking/netshoot-host.yaml.

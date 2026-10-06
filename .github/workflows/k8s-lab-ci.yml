@@ -1,4 +1,4 @@
-# CI for "02 Kubernetes/lab" — see 02 Kubernetes/20-hands-on-practice-exercises-workbook.md §0
+# CI for "02 Kubernetes/lab" — see 02 Kubernetes/27-hands-on-practice-exercises-workbook.md §0
 # The lab is a root cluster with two vClusters inside (Volume 27). CI builds the
 # same shape on kind: kind = root (fake GB10 with 15 slices), then vCluster
 # dev-lab and llms from the lab's own Helm values, reached by port-forward.

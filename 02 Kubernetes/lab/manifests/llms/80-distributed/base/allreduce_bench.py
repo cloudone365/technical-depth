@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""torch.distributed all-reduce bus-bandwidth sweep (Volume 17).
+"""torch.distributed all-reduce bus-bandwidth sweep (Step 18).
 
 Same maths as nccl-tests: busbw = algbw * 2(n-1)/n.
 Launched by torchrun (RANK/WORLD_SIZE/MASTER_ADDR from env).

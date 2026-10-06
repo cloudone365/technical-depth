@@ -1,6 +1,6 @@
-# Volume 08 — CoreDNS & Service Discovery: Records, the `ndots:5` Tax, Custom Zones, DNS Failures
+# Step 10 · CoreDNS & Service Discovery: Records, the `ndots:5` Tax, Custom Zones, DNS Failures
 
-> **Module 02 · Part II — Networking** · Prev: [07 kube-proxy](07-kube-proxy-and-cluster-ip-mechanics.md) · Next: [09 Ingress & Gateway API](09-ingress-controllers-and-gateway-api.md) · The lab's shape: [27 Nested clusters](27-nested-clusters-with-vcluster.md)
+> **02 Kubernetes · Part III — Networking · Step 10 of 28** · ← [Step 09 · kube-proxy & ClusterIP](09-kube-proxy-and-cluster-ip-mechanics.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 11 · Ingress & Gateway API](11-ingress-controllers-and-gateway-api.md) →
 
 | | |
 |---|---|
@@ -15,7 +15,7 @@
 
 ## 1. Why this matters on a Spark
 
-Model servers resolve names constantly: `huggingface.co` and `cdn-lfs.hf.co` at startup, `nvcr.io` for pulls, `qdrant.llm-serving` on every RAG call, and the rendezvous host for torchrun. With the Kubernetes default `ndots:5`, any name with fewer than five dots is first tried against every search domain. **One lookup of `huggingface.co` costs 6–8 extra queries** (3–4 search domains × A + AAAA) before the real answer. On a busy gateway, that's most of CoreDNS's load, and every one of those queries is also a conntrack entry (Vol 07).
+Model servers resolve names constantly: `huggingface.co` and `cdn-lfs.hf.co` at startup, `nvcr.io` for pulls, `qdrant.llm-serving` on every RAG call, and the rendezvous host for torchrun. With the Kubernetes default `ndots:5`, any name with fewer than five dots is first tried against every search domain. **One lookup of `huggingface.co` costs 6–8 extra queries** (3–4 search domains × A + AAAA) before the real answer. On a busy gateway, that's most of CoreDNS's load, and every one of those queries is also a conntrack entry (Step 09).
 
 The nesting adds a second lesson: **"cluster DNS" is not one thing here.** The root's CoreDNS answers for root pods. Each vCluster runs its own CoreDNS that reads *its* API server, so `echo.lab-tools.svc.cluster.local` exists in dev-lab and nowhere else, and a tenant can't even name a root Service. When DNS breaks, which pods notice depends on which server they use.
 
@@ -73,8 +73,8 @@ Two resolvers, one network: the dev-lab CoreDNS pod and its Service are ordinary
 |---|---|---|
 | `svc.ns.svc.cluster.local` A | ClusterIP | in llms: `vllm.llm-serving.svc.cluster.local → 10.43.x.y` |
 | headless `svc.ns.svc.cluster.local` A | every ready pod IP | in dev-lab: `echo-headless.lab-tools… → 3 IPs` |
-| `pod-hostname.subdomain.ns.svc.cluster.local` A | that pod | in llms: `ddp-0.ddp-workers.batch.svc.cluster.local` (Vol 17) |
-| `qdrant-0.qdrant-headless.llm-serving.svc.cluster.local` | StatefulSet pod | in llms, Vol 10 |
+| `pod-hostname.subdomain.ns.svc.cluster.local` A | that pod | in llms: `ddp-0.ddp-workers.batch.svc.cluster.local` (Step 18) |
+| `qdrant-0.qdrant-headless.llm-serving.svc.cluster.local` | StatefulSet pod | in llms, Step 12 |
 | `_http._tcp.echo.lab-tools.svc.cluster.local` SRV | port + target | in dev-lab, named ports |
 | `prometheus.default.svc.cluster.local` | the root's `kps-prometheus` ClusterIP | in llms only: replicated with `networking.replicateServices.fromHost` |
 | `kps-prometheus.observability.svc.cluster.local` | NXDOMAIN from inside a vCluster | that namespace exists only on the root |
@@ -106,7 +106,7 @@ Three fixes, in order of preference:
 | Server | Deployment `kube-system/coredns`, 2 replicas, PriorityClass `system-cluster-critical` | Deployment `kube-system/coredns` *inside* the vCluster; on the root a pod in `vc-<vc>` |
 | Service | `kube-system/kube-dns` = **10.43.0.10** (kubelet `clusterDNS`) | `kube-system/kube-dns` inside, synced as `kube-dns-x-kube-system-x-<vc>` with its own root ClusterIP |
 | How pods find it | kubelet writes `/etc/resolv.conf` (`dnsPolicy: ClusterFirst`) | the syncer rewrites the root pod to `dnsPolicy: None` + a `dnsConfig` with the vCluster's DNS IP and the **inner** namespace's search path |
-| Corefile | ConfigMap `kube-system/coredns`, owned by kubeadm. **No import hook: you edit the Corefile itself**, and `kubeadm upgrade` rewrites it (re-apply [`coredns-corefile.yaml`](lab/manifests/root/30-networking/coredns-corefile.yaml) after an upgrade) | managed by vCluster; change it with `controlPlane.coredns.overwriteConfig` in [`vclusters/<vc>.yaml`](lab/vclusters/dev-lab.yaml) and `helm upgrade` (Vol 27) |
+| Corefile | ConfigMap `kube-system/coredns`, owned by kubeadm. **No import hook: you edit the Corefile itself**, and `kubeadm upgrade` rewrites it (re-apply [`coredns-corefile.yaml`](lab/manifests/root/30-networking/coredns-corefile.yaml) after an upgrade) | managed by vCluster; change it with `controlPlane.coredns.overwriteConfig` in [`vclusters/<vc>.yaml`](lab/vclusters/dev-lab.yaml) and `helm upgrade` (Step 04) |
 | Reload | the `reload` plugin re-reads the ConfigMap within ~30 s, no restart | same plugin, after vCluster updates its ConfigMap |
 | Upstream | `forward . /etc/resolv.conf` → the kubelet's `resolvConf`; on DGX OS with systemd-resolved, kubeadm points that at `/run/systemd/resolve/resolv.conf` (the real servers), not `127.0.0.53` | whatever the vCluster's Corefile forwards to — read it in §5.1 |
 | Who sees `lab.local` | root pods (the lab's `lab.local:53` block) | only if the upstream it forwards to resolves `lab.local` |
@@ -116,10 +116,10 @@ Three fixes, in order of preference:
 ## 4. Integrations
 
 - **01 Ansible site DNS (`dns_servers: [192.168.0.1, …]`)**: the root's `lab.local` forward zone lets platform pods resolve `dgx-spark-2.lab.local` and your NAS by name.
-- **Model downloads (Vol 21, modules 03–06)**: set `HF_ENDPOINT`/`HF_HUB_*` and any registry mirrors as FQDNs. These pods live in llms, so it's llms' CoreDNS that pays the ndots tax.
-- **KEDA in llms (Vol 21)** queries `http://prometheus.default:9090`: a name that only exists because llms replicates the root's `observability/kps-prometheus` into itself. DNS is how a vCluster is given *selected* root services and nothing else.
-- **Prometheus (Vol 16)**: the root's CoreDNS exposes `coredns_dns_requests_total{type}` and `coredns_dns_responses_total{rcode}`. An NXDOMAIN ratio > 50 % is the ndots tax showing up in a graph. The vClusters' CoreDNS pods are not in the root's `vcluster-workloads` ServiceMonitor; adding them is an exercise.
-- **NetworkPolicy (Vol 06)**: a tenant that restricts egress must allow UDP/TCP 53 to *its vCluster's* CoreDNS. Inside the vCluster that's `kube-system`, the same selector a tenant would write in a normal cluster.
+- **Model downloads (Step 20, modules 03–06)**: set `HF_ENDPOINT`/`HF_HUB_*` and any registry mirrors as FQDNs. These pods live in llms, so it's llms' CoreDNS that pays the ndots tax.
+- **KEDA in llms (Step 20)** queries `http://prometheus.default:9090`: a name that only exists because llms replicates the root's `observability/kps-prometheus` into itself. DNS is how a vCluster is given *selected* root services and nothing else.
+- **Prometheus (Step 17)**: the root's CoreDNS exposes `coredns_dns_requests_total{type}` and `coredns_dns_responses_total{rcode}`. An NXDOMAIN ratio > 50 % is the ndots tax showing up in a graph. The vClusters' CoreDNS pods are not in the root's `vcluster-workloads` ServiceMonitor; adding them is an exercise.
+- **NetworkPolicy (Step 08)**: a tenant that restricts egress must allow UDP/TCP 53 to *its vCluster's* CoreDNS. Inside the vCluster that's `kube-system`, the same selector a tenant would write in a normal cluster.
 
 ---
 
@@ -297,7 +297,7 @@ sed '/^        log$/d' manifests/root/30-networking/coredns-corefile.yaml | kube
 | Symptom | Cause | Diagnose | Fix |
 |---|---|---|---|
 | `Could not resolve host`, everything by name fails in root pods | root CoreDNS down / 0 replicas / NetworkPolicy blocks egress to `kube-system` | `kubectl --context spark-root -n kube-system get deploy coredns`. Try by IP | restore CoreDNS (`breakfix 07`). Allow UDP/TCP 53 to `kube-system` in egress policies |
-| Names fail only inside one vCluster | that vCluster's CoreDNS pod not running (e.g. its root quota is spent, or the control plane is down) | `kubectl --context spark-root -n vc-<vc> get pods \| grep coredns`; `kubectl --context <vc> -n kube-system get pods` | free budget (Vol 27 §8); restart the vCluster's CoreDNS |
+| Names fail only inside one vCluster | that vCluster's CoreDNS pod not running (e.g. its root quota is spent, or the control plane is down) | `kubectl --context spark-root -n vc-<vc> get pods \| grep coredns`; `kubectl --context <vc> -n kube-system get pods` | free budget (Step 04 §8); restart the vCluster's CoreDNS |
 | CoreDNS `CrashLoopBackOff`, log `Loop … detected` | upstream is a local stub (127.0.0.53) forwarding back to itself | `kubectl --context spark-root -n kube-system logs deploy/coredns` | kubelet `resolvConf: /run/systemd/resolve/resolv.conf` (kubeadm sets it when systemd-resolved is active) |
 | Corefile change "didn't take" | edited the vCluster's ConfigMap (vCluster owns it), or `kubeadm upgrade` reset the root's | compare `get cm coredns` before/after; CoreDNS logs `Reloading` | root: re-apply `coredns-corefile.yaml`. vCluster: `controlPlane.coredns.overwriteConfig` + `helm upgrade` |
 | Root's `lab.local` zone works on the root, not in tenants | tenants use their vCluster's CoreDNS | §5.1 resolv.conf | add the zone to the vCluster's CoreDNS config, or use FQDNs the upstream resolves |

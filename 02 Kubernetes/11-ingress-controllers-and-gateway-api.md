@@ -1,6 +1,6 @@
-# Volume 09 — Ingress & Gateway API for LLM APIs: Streaming, Limits, Auth, Canaries, TLS, gRPC
+# Step 11 · Ingress & Gateway API for LLM APIs: Streaming, Limits, Auth, Canaries, TLS, gRPC
 
-> **Module 02 · Part II — Networking** · Prev: [08 CoreDNS](08-coredns-and-service-discovery.md) · Next: [10 Workload controllers](10-advanced-workload-controllers.md) · The lab's shape: [27 Nested clusters](27-nested-clusters-with-vcluster.md)
+> **02 Kubernetes · Part III — Networking · Step 11 of 28** · ← [Step 10 · CoreDNS](10-coredns-and-service-discovery.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 12 · Workload controllers](12-advanced-workload-controllers.md) →
 
 | | |
 |---|---|
@@ -22,7 +22,7 @@ LLM traffic breaks web-app assumptions:
 | responses in < 1 s | a long generation streams for minutes | proxy `readTimeout` 60 s cuts the stream (504) |
 | small bodies | RAG prompts and base64 images run to megabytes | `413 Request Entity Too Large` |
 | buffering responses is harmless | SSE tokens must flush one by one | the user waits 40 s then gets everything at once (drill 09) |
-| round-robin per connection | clients keep connections alive | one replica hot, others idle (Vol 07) |
+| round-robin per connection | clients keep connections alive | one replica hot, others idle (Step 09) |
 
 > **Controller choice.** A kubeadm cluster ships no ingress controller, so the lab installs a pinned Traefik with `scripts/install-addons.sh traefik` — into the **llms vCluster**, not the root. Traefik reads Middlewares, IngressRoutes and HTTPRoutes from the API server it talks to: inside llms it sees the serving team's objects under their real names; on the root it would see the syncer's translated names (`llm-x-llm-serving-x-llms`) — and Ingresses, HTTPRoutes and Middlewares aren't synced at all. The gateway belongs to the cluster whose API it serves. The community **ingress-nginx** controller has been retired (best-effort maintenance ended March 2026), so new platforms should use Gateway API implementations (Traefik, Envoy Gateway, Cilium, NGINX Gateway Fabric).
 
@@ -98,16 +98,16 @@ Two clusters cooperate on every request. The **root** owns the address (MetalLB)
 | Gateway | `ingress/lab-gateway`, listener `web` :8000 HTTP, `namespacePolicy: All` (created by the chart) |
 | Service | `traefik-lab`, type LoadBalancer, annotation `metallb.io/loadBalancerIPs: 192.168.0.115`; synced to the root as `vc-llms/traefik-lab-x-ingress-x-llms`, where MetalLB serves it. Counts against llms' root quota `services.loadbalancers: 2` (API .112 + gateway .115) |
 | Hostnames | `llm.lab.local` (Ingress), `gw.lab.local` (HTTPRoute) → add both to your laptop's `/etc/hosts` as `192.168.0.115` |
-| Metrics | no Prometheus Operator inside llms: the chart exposes a plain `traefik-lab-metrics` Service; the root's ServiceMonitor `vcluster-workloads` scrapes it → `traefik_service_*{vcluster="llms", vnamespace="ingress"}` (KEDA uses these in Vol 21) |
+| Metrics | no Prometheus Operator inside llms: the chart exposes a plain `traefik-lab-metrics` Service; the root's ServiceMonitor `vcluster-workloads` scrapes it → `traefik_service_*{vcluster="llms", vnamespace="ingress"}` (KEDA uses these in Step 20) |
 | Resources | 1 replica, requests 100m CPU / 128 Mi, limit 512 Mi — out of llms' 4 CPU / 48 Gi budget |
 
 ---
 
 ## 4. Integrations
 
-- **NetworkPolicy (Vol 06)**: `llm-serving` admits the `ingress` namespace (inside llms; synced to the root and enforced by Cilium). Without that allow, you get 504s (drill 06). The root's `vcluster-boundary` keeps dev-lab pods off Traefik's pod IP; the LoadBalancer IP stays reachable for everyone (Vol 07 §5.7).
-- **Source IPs (Vol 07 §4)**: the LoadBalancer path is masqueraded with `externalTrafficPolicy: Cluster`, so Traefik sees the node, not the client. That matters for rate limits (§5.5) and access logs.
-- **KEDA (Vol 21)**: scales `mock-llm` on `traefik_service_open_connections`, queried through `default/prometheus` — the root's Prometheus replicated into llms.
+- **NetworkPolicy (Step 08)**: `llm-serving` admits the `ingress` namespace (inside llms; synced to the root and enforced by Cilium). Without that allow, you get 504s (drill 06). The root's `vcluster-boundary` keeps dev-lab pods off Traefik's pod IP; the LoadBalancer IP stays reachable for everyone (Step 09 §5.7).
+- **Source IPs (Step 09 §4)**: the LoadBalancer path is masqueraded with `externalTrafficPolicy: Cluster`, so Traefik sees the node, not the client. That matters for rate limits (§5.5) and access logs.
+- **KEDA (Step 20)**: scales `mock-llm` on `traefik_service_open_connections`, queried through `default/prometheus` — the root's Prometheus replicated into llms.
 - **Vault (01 Ansible Step 18)**: the `llm-api-users` htpasswd Secret and TLS keys belong in Vault KV, synced by Vault Agent or External Secrets into llms.
 - **Open WebUI / LiteLLM (modules 03, 04)**: point them at `http://llm.lab.local/v1`.
 
@@ -192,7 +192,7 @@ The limit is "per client IP" — but which IP? Look at what Traefik saw:
 kubectl --context llms -n ingress logs deploy/traefik-lab --tail=200 | grep -o '"ClientHost":"[^"]*"' | sort | uniq -c
 ```
 
-The lab values don't enable access logs: add `logs: {access: {enabled: true}}` to [`addons/traefik-values.yaml`](lab/addons/traefik-values.yaml) for this step and re-run `scripts/install-addons.sh traefik`. You'll find one address — the node's, from kube-proxy's masquerade (Vol 07 §4) — so every laptop on the LAN shares one bucket. `externalTrafficPolicy: Local` on the Traefik Service keeps the real client IP (on one node there's no downside).
+The lab values don't enable access logs: add `logs: {access: {enabled: true}}` to [`addons/traefik-values.yaml`](lab/addons/traefik-values.yaml) for this step and re-run `scripts/install-addons.sh traefik`. You'll find one address — the node's, from kube-proxy's masquerade (Step 09 §4) — so every laptop on the LAN shares one bucket. `externalTrafficPolicy: Local` on the Traefik Service keeps the real client IP (on one node there's no downside).
 
 ### 5.6 API-key auth (basicAuth as a simple key)
 
@@ -215,7 +215,7 @@ For OpenAI SDKs that only send `Authorization: Bearer`, use LiteLLM (module 03) 
 for i in $(seq 200); do curl -s http://gw.lab.local/v1/models | jq -r '.data[0].id'; done | sort | uniq -c
 ```
 
-Expected: ≈ `180 mock-llm` / `20 mock-llm-canary`. Promote by editing the weights in [`gateway-routes.yaml`](lab/manifests/llms/40-ingress/gateway-routes.yaml) (90/10 → 50/50 → 0/100) and re-applying with `kubectl --context llms apply -k manifests/llms/40-ingress`. Every step is a Git diff — and in production-mlops, an Argo CD sync to the llms destination.
+Expected: ≈ `180 mock-llm` / `20 mock-llm-canary`. Promote by editing the weights in [`gateway-routes.yaml`](lab/manifests/llms/40-ingress/gateway-routes.yaml) (90/10 → 50/50 → 0/100) and re-applying with `kubectl --context llms apply -k manifests/llms/40-ingress`. Every step is a Git diff — and in Step 28, an Argo CD sync to the llms destination.
 
 ### 5.8 TLS
 
@@ -230,7 +230,7 @@ curl -s --cacert /tmp/tls.crt https://llm.lab.local/v1/models | jq -r '.data[0].
 
 In production, cert-manager issues and renews these (`scripts/install-addons.sh kserve` installs cert-manager into llms).
 
-### 5.9 gRPC to Triton (after Vol 22)
+### 5.9 gRPC to Triton (after Step 21)
 
 The Triton Service declares `appProtocol: kubernetes.io/h2c` on port 8001, so Traefik speaks cleartext HTTP/2 to it. Apply with `kubectl --context llms apply -f -`:
 
@@ -297,7 +297,7 @@ flowchart LR
 
 At two Sparks, MetalLB L2 still answers from one node at a time (failover, not load sharing); BGP mode gives you ECMP across nodes. Each tenant cluster keeping its own gateway, as llms does here, is the same pattern a platform uses with one gateway per product cluster behind a shared edge.
 
-The **Gateway API Inference Extension** adds `InferencePool` / `InferenceModel` objects and an *endpoint picker* that chooses the model-server replica by queue depth and KV-cache hit (prefix affinity). It's the production answer to "round-robin is wrong for LLMs", and the natural next step after Vol 24.
+The **Gateway API Inference Extension** adds `InferencePool` / `InferenceModel` objects and an *endpoint picker* that chooses the model-server replica by queue depth and KV-cache hit (prefix affinity). It's the production answer to "round-robin is wrong for LLMs", and the natural next step after Step 23.
 
 ---
 

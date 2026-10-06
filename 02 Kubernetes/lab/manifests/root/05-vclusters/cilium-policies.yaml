@@ -1,4 +1,4 @@
-# Root-side network rules for the vCluster namespaces (Volume 06, 27).
+# Root-side network rules for the vCluster namespaces (Steps 08, 04).
 #
 # Tenant NetworkPolicies written INSIDE a vCluster are synced here (translated)
 # and enforced by Cilium. These two root policies add what tenants can't
