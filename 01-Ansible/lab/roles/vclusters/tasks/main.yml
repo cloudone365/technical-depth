@@ -1,0 +1,158 @@
+---
+# Runs on the control node (localhost). Needs the root cluster (playbook 05),
+# MetalLB (for the vCluster API IPs) and the GPU Operator (playbook 06).
+- name: The 02-Kubernetes lab is checked out next to this one
+  ansible.builtin.stat:
+    path: "{{ vclusters_lab_dir }}/vclusters"
+  register: vclusters_dir
+  failed_when: not vclusters_dir.stat.isdir | default(false)
+
+# ---------------------------------------------------------------- storage prerequisite
+- name: Download local-path-provisioner {{ vclusters_local_path_version }}
+  ansible.builtin.get_url:
+    url: "https://raw.githubusercontent.com/rancher/local-path-provisioner/{{ vclusters_local_path_version }}/deploy/local-path-storage.yaml"
+    dest: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') }}/local-path-storage-{{ vclusters_local_path_version }}.yaml"
+    mode: "0644"
+
+- name: Local-path-provisioner
+  kubernetes.core.k8s:
+    kubeconfig: "{{ vclusters_kubeconfig }}"
+    context: "{{ vclusters_root_context }}"
+    src: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') }}/local-path-storage-{{ vclusters_local_path_version }}.yaml"
+    state: present
+
+- name: Root volumes at /data/k8s (merge-patch keeps the provisioner's helper scripts)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ vclusters_kubeconfig }}"
+    context: "{{ vclusters_root_context }}"
+    state: patched
+    merge_type: merge
+    kind: ConfigMap
+    namespace: local-path-storage
+    name: local-path-config
+    definition: "{{ lookup('ansible.builtin.file', vclusters_lab_dir ~ '/addons/local-path-config-patch.yaml') | from_yaml }}"
+
+- name: StorageClasses local-nvme and local-nvme-retain
+  kubernetes.core.k8s:
+    kubeconfig: "{{ vclusters_kubeconfig }}"
+    context: "{{ vclusters_root_context }}"
+    src: "{{ vclusters_lab_dir }}/addons/local-path-nvme.yaml"
+    state: present
+
+- name: Local-path is the default StorageClass (as it was on k3s)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ vclusters_kubeconfig }}"
+    context: "{{ vclusters_root_context }}"
+    state: patched
+    kind: StorageClass
+    name: local-path
+    definition:
+      metadata:
+        annotations:
+          storageclass.kubernetes.io/is-default-class: "true"
+
+# ---------------------------------------------------------------- root-side objects
+- name: Root namespaces, PriorityClasses, LimitRanges, ResourceQuotas, Cilium policies for the vClusters
+  kubernetes.core.k8s:
+    kubeconfig: "{{ vclusters_kubeconfig }}"
+    context: "{{ vclusters_root_context }}"
+    src: "{{ vclusters_lab_dir }}/manifests/root/{{ item }}"
+    state: present
+    apply: true
+    server_side_apply:
+      field_manager: ansible-vclusters
+  loop: "{{ vclusters_root_manifests }}"
+
+- name: Add the vCluster Helm repo
+  kubernetes.core.helm_repository:
+    name: loft
+    repo_url: https://charts.loft.sh
+
+- name: Install / upgrade the vClusters
+  kubernetes.core.helm:
+    kubeconfig: "{{ vclusters_kubeconfig }}"
+    context: "{{ vclusters_root_context }}"
+    name: "{{ item.name }}"
+    chart_ref: loft/vcluster
+    chart_version: "{{ vclusters_chart_version }}"
+    release_namespace: "{{ item.namespace }}"
+    values_files: ["{{ vclusters_lab_dir }}/vclusters/{{ item.name }}.yaml"]
+    wait: true
+    wait_timeout: 10m
+  loop: "{{ vclusters_list }}"
+  loop_control:
+    label: "{{ item.name }} in {{ item.namespace }}"
+
+# vCluster writes a ready-to-use kubeconfig into Secret vc-<name> (exportKubeConfig in the values).
+- name: Read each vCluster's exported kubeconfig
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ vclusters_kubeconfig }}"
+    context: "{{ vclusters_root_context }}"
+    kind: Secret
+    namespace: "{{ item.namespace }}"
+    name: "vc-{{ item.name }}"
+  register: vclusters_secrets
+  until: vclusters_secrets.resources | length > 0
+  retries: 30
+  delay: 10
+  loop: "{{ vclusters_list }}"
+  loop_control:
+    label: "vc-{{ item.name }}"
+  no_log: true
+
+- name: Standalone kubeconfig per vCluster (.cache/kubeconfig-<name>.yaml)
+  ansible.builtin.copy:
+    dest: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') }}/kubeconfig-{{ item.item.name }}.yaml"
+    content: "{{ item.resources[0].data.config | b64decode }}"
+    mode: "0600"
+  loop: "{{ vclusters_secrets.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  no_log: true
+
+- name: Merge the vCluster contexts into the lab kubeconfig
+  ansible.builtin.copy:
+    dest: "{{ vclusters_kubeconfig }}"
+    mode: "0600"
+    content: "{{ vclusters_merged | from_json | to_nice_yaml(indent=2) }}"
+  vars:
+    # Keep every existing entry (spark-root …), replace the vCluster ones.
+    vclusters_merged: >-
+      {%- set root = lookup('ansible.builtin.file', vclusters_kubeconfig) | from_yaml -%}
+      {%- set names = vclusters_list | map(attribute='name') | list -%}
+      {%- set clusters = root.clusters | rejectattr('name', 'in', names) | list -%}
+      {%- set users = root.users | rejectattr('name', 'in', names) | list -%}
+      {%- set contexts = root.contexts | rejectattr('name', 'in', names) | list -%}
+      {%- for r in vclusters_secrets.results -%}
+      {%-   set kc = r.resources[0].data.config | b64decode | from_yaml -%}
+      {%-   set n = r.item.name -%}
+      {%-   set _ = clusters.append({'name': n, 'cluster': kc.clusters[0].cluster}) -%}
+      {%-   set _ = users.append({'name': n, 'user': kc.users[0].user}) -%}
+      {%-   set _ = contexts.append({'name': n, 'context': {'cluster': n, 'user': n}}) -%}
+      {%- endfor -%}
+      {{ {'apiVersion': 'v1', 'kind': 'Config',
+          'current-context': root['current-context'] | default(vclusters_root_context),
+          'clusters': clusters, 'users': users, 'contexts': contexts} | to_json }}
+  no_log: true
+
+- name: Each vCluster API answers through its LoadBalancer IP
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ vclusters_kubeconfig }}"
+    context: "{{ item.name }}"
+    kind: Namespace
+    name: default
+  register: vclusters_ping
+  until: vclusters_ping.resources | length == 1
+  retries: 18
+  delay: 10
+  loop: "{{ vclusters_list }}"
+  loop_control:
+    label: "context {{ item.name }}"
+
+- name: Contexts in the lab kubeconfig
+  ansible.builtin.debug:
+    msg: >-
+      export KUBECONFIG={{ vclusters_kubeconfig | realpath }} ;
+      kubectl --context spark-root get nodes ;
+      kubectl --context dev-lab get ns ;
+      kubectl --context llms get ns

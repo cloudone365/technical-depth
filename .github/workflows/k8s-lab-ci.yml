@@ -1,4 +1,4 @@
-# CI for "02 Kubernetes/lab" — see 02 Kubernetes/27-hands-on-practice-exercises-workbook.md §0
+# CI for "02-Kubernetes/lab" — see 02-Kubernetes/27-hands-on-practice-exercises-workbook.md §0
 # The lab is a root cluster with two vClusters inside (Volume 27). CI builds the
 # same shape on kind: kind = root (fake GB10 with 15 slices), then vCluster
 # dev-lab and llms from the lab's own Helm values, reached by port-forward.
@@ -6,15 +6,15 @@ name: k8s-lab
 
 on:
   pull_request:
-    paths: ["02 Kubernetes/lab/**", "01 Ansible/lab/roles/**", ".github/workflows/k8s-lab-ci.yml"]
+    paths: ["02-Kubernetes/lab/**", "01-Ansible/lab/roles/**", ".github/workflows/k8s-lab-ci.yml"]
   push:
     branches: [main]
-    paths: ["02 Kubernetes/lab/**", "01 Ansible/lab/roles/**", ".github/workflows/k8s-lab-ci.yml"]
+    paths: ["02-Kubernetes/lab/**", "01-Ansible/lab/roles/**", ".github/workflows/k8s-lab-ci.yml"]
   workflow_dispatch:
 
 defaults:
   run:
-    working-directory: "02 Kubernetes/lab"
+    working-directory: "02-Kubernetes/lab"
 
 env:
   KUBECONFORM: v0.6.7
@@ -132,4 +132,4 @@ jobs:
         run: scripts/collect-diag.sh && ls -la diag-*.tar.gz
       - uses: actions/upload-artifact@v4
         if: failure()
-        with: {name: diag, path: "02 Kubernetes/lab/diag-*.tar.gz"}
+        with: {name: diag, path: "02-Kubernetes/lab/diag-*.tar.gz"}

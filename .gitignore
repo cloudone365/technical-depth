@@ -2,5 +2,5 @@ __pycache__/
 *.pyc
 .cache/
 diag-*.tar.gz
-03 DeepSeek/lab/results/
-03 DeepSeek/lab/observability/rules.extracted.yaml
+03-DeepSeek/lab/results/
+03-DeepSeek/lab/observability/rules.extracted.yaml

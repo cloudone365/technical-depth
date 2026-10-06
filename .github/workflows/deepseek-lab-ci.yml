@@ -1,17 +1,17 @@
-# CI for "03 DeepSeek/lab" — see 03 DeepSeek/40-hands-on-exercises-workbook.md §0
+# CI for "03-DeepSeek/lab" — see 03-DeepSeek/40-hands-on-exercises-workbook.md §0
 name: deepseek-lab
 
 on:
   pull_request:
-    paths: ["03 DeepSeek/lab/**", "02 Kubernetes/lab/**", ".github/workflows/deepseek-lab-ci.yml"]
+    paths: ["03-DeepSeek/lab/**", "02-Kubernetes/lab/**", ".github/workflows/deepseek-lab-ci.yml"]
   push:
     branches: [main]
-    paths: ["03 DeepSeek/lab/**", ".github/workflows/deepseek-lab-ci.yml"]
+    paths: ["03-DeepSeek/lab/**", ".github/workflows/deepseek-lab-ci.yml"]
   workflow_dispatch:
 
 defaults:
   run:
-    working-directory: "03 DeepSeek/lab"
+    working-directory: "03-DeepSeek/lab"
 
 env:
   KUBECONFORM: v0.6.7
@@ -40,7 +40,7 @@ jobs:
       - uses: helm/kind-action@v1
         with: {cluster_name: spark-sim, node_image: "kindest/node:v1.32.2"}
       - name: Platform from 02 + CRDs the lab expects
-        working-directory: "02 Kubernetes/lab"
+        working-directory: "02-Kubernetes/lab"
         run: |
           # surface the failing command and its stderr as an annotation
           exec 2> >(tee /tmp/step.err >&2)
@@ -69,7 +69,7 @@ jobs:
           kubectl -n lws-system rollout status deploy/lws-controller-manager --timeout=5m
           scripts/apply-lab.sh llms
       - name: All 03 checks (incl. RAG on real Qdrant and server-side dry-run)
-        run: QDRANT=/tmp/qdrant API=1 ../../02\ Kubernetes/lab/tests/ci-run.sh tests/run-local-checks.sh
+        run: QDRANT=/tmp/qdrant API=1 ../../02-Kubernetes/lab/tests/ci-run.sh tests/run-local-checks.sh
       - name: Ansible one-click playbook — lint, check mode against the kind platform, preflight guards
         run: |
           pip install "ansible-core~=2.18.0" "ansible-lint>=24" "kubernetes>=30.1.0"

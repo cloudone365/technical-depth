@@ -1,0 +1,28 @@
+---
+# Two virtual clusters inside the root cluster (02-Kubernetes Step 04).
+# The definitions are NOT duplicated here: this role applies the files in the
+# 02-Kubernetes lab, so Ansible and the lab scripts can never drift apart.
+vclusters_lab_dir: "{{ playbook_dir }}/../../../02-Kubernetes/lab"
+vclusters_chart_version: "0.37.1"            # pin; standard Kubernetes distro (vCluster ≥ 0.33 has no K3s)
+vclusters_kubeconfig: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') }}/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
+vclusters_root_context: spark-root
+
+# Each vCluster keeps its SQLite database on a PVC (storageClass local-nvme),
+# so the storage add-on must exist first. Same steps as
+# "02-Kubernetes/lab/scripts/install-addons.sh storage".
+vclusters_local_path_version: v0.0.31
+
+# Root-side objects first (paths under manifests/root): platform namespaces and
+# PriorityClasses (the vCluster control planes run at spark-platform), then the
+# vCluster namespaces and the budgets they live in.
+vclusters_root_manifests:
+  - 00-platform/namespaces.yaml
+  - 00-platform/priorityclasses.yaml
+  - 05-vclusters/namespaces.yaml
+  - 05-vclusters/limitranges.yaml
+  - 05-vclusters/quotas.yaml
+  - 05-vclusters/cilium-policies.yaml
+
+vclusters_list:
+  - { name: dev-lab, namespace: vc-dev-lab }   # vCluster #1 — 2 CPU · 8 Gi · 2 GPU slices
+  - { name: llms, namespace: vc-llms }         # vCluster #2 — 4 CPU · 48 Gi · 8 GPU slices

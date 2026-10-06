@@ -1,0 +1,68 @@
+# vCluster #2 · llms — Helm values for chart loft/vcluster 0.37.x (Step 04).
+# Installed into host namespace vc-llms by 01-Ansible playbooks/06b-vclusters.yml
+# or scripts/install-addons.sh vclusters.
+#
+# Budget (enforced by the ROOT ResourceQuota in manifests/root/05-vclusters/quotas.yaml):
+#   4 CPU (requests) · 48 Gi memory (requests = limits) · 8 GPU time-slices · 500 Gi storage
+# Everything below — this control plane, CoreDNS, Traefik, Kueue, KEDA, every
+# model server — counts against it.
+#
+# Inside: llm-serving, batch, ingress (Traefik + Gateway API), kueue-system, keda (manifests/llms).
+controlPlane:
+  distro:
+    k8s:
+      enabled: true
+  backingStore:
+    database:
+      embedded:
+        enabled: true
+  statefulSet:
+    scheduling:
+      priorityClassName: spark-platform   # tenants can't preempt their own control plane
+    resources:
+      requests: {cpu: 250m, memory: 768Mi, ephemeral-storage: 1Gi}
+      limits: {memory: 1536Mi, ephemeral-storage: 4Gi}
+    persistence:
+      volumeClaim:
+        size: 5Gi
+        storageClass: local-nvme
+  service:
+    annotations:
+      metallb.io/loadBalancerIPs: 192.168.0.112
+    spec:
+      type: LoadBalancer
+  proxy:
+    extraSANs: [192.168.0.112]
+
+exportKubeConfig:
+  context: llms
+  server: https://192.168.0.112:443
+
+sync:
+  toHost:
+    networkPolicies:
+      enabled: true
+    priorityClasses:
+      enabled: true            # tenant PriorityClasses are copied to the root so its scheduler can use them
+    podDisruptionBudgets:
+      enabled: true            # a root 'kubectl drain' must respect tenant PDBs (break/fix 11)
+  fromHost:
+    nodes:
+      enabled: true
+      selector:
+        all: true
+      clearImageStatus: true
+    storageClasses:
+      enabled: true
+
+networking:
+  # The root's Prometheus appears inside this vCluster as service default/prometheus,
+  # so KEDA ScaledObjects (manifests/llms/90-serving/autoscaling.yaml) can query it.
+  replicateServices:
+    fromHost:
+      - from: observability/kps-prometheus
+        to: default/prometheus
+
+integrations:
+  metricsServer:
+    enabled: true              # 'kubectl top' and HPAs inside the vCluster read the root's metrics-server

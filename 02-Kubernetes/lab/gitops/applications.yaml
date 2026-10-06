@@ -1,0 +1,513 @@
+# GitOps for the 02 lab with Argo CD (Steps 28, 04).
+# Argo CD runs on the ROOT and deploys to all three clusters:
+#   in-cluster  https://kubernetes.default.svc   the root (platform layers)
+#   dev-lab     https://192.168.0.111:443        vCluster #1 (tenants, labs)
+#   llms        https://192.168.0.112:443        vCluster #2 (serving, batch)
+# App-of-apps: one Application per manifests/<cluster>/<layer>, in sync-wave order
+# (root platform → vCluster budgets → in-vCluster platform → policy → workloads).
+#
+#   scripts/install-addons.sh argocd
+#   scripts/argocd-register-vclusters.sh          # tells Argo CD how to reach dev-lab and llms
+#   kubectl --context spark-root apply -n argocd -f gitops/applications.yaml
+# Point repoURL at YOUR fork if you want to push changes.
+# The vClusters themselves (Helm releases) stay with 01-Ansible / install-addons.sh:
+# an Application that can prune a whole vCluster is one typo away from deleting it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-root-00-platform
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/root/00-platform"
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: false          # never auto-delete namespaces / budgets / data
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-root-05-vclusters
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-9"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/root/05-vclusters"
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: false          # never auto-delete namespaces / budgets / data
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-root-16-apf
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/root/16-apf"
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-root-30-networking
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/root/30-networking"
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-root-45-controller
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/root/45-controller"
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-root-50-workloads
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/root/50-workloads"
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-root-70-gpu
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/root/70-gpu"
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-root-95-observability
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/root/95-observability"
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-dev-lab-00-platform
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-8"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/dev-lab/00-platform"
+  destination:
+    server: https://192.168.0.111:443
+  syncPolicy:
+    automated:
+      prune: false          # never auto-delete namespaces / budgets / data
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-dev-lab-10-tenancy
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/dev-lab/10-tenancy"
+  destination:
+    server: https://192.168.0.111:443
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-dev-lab-15-admission
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/dev-lab/15-admission"
+  destination:
+    server: https://192.168.0.111:443
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-dev-lab-16-apf
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/dev-lab/16-apf"
+  destination:
+    server: https://192.168.0.111:443
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-dev-lab-30-networking
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/dev-lab/30-networking"
+  destination:
+    server: https://192.168.0.111:443
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-llms-00-platform
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-8"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/llms/00-platform"
+  destination:
+    server: https://192.168.0.112:443
+  syncPolicy:
+    automated:
+      prune: false          # never auto-delete namespaces / budgets / data
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-llms-10-tenancy
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/llms/10-tenancy"
+  destination:
+    server: https://192.168.0.112:443
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-llms-15-admission
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/llms/15-admission"
+  destination:
+    server: https://192.168.0.112:443
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-llms-60-storage
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/llms/60-storage"
+  destination:
+    server: https://192.168.0.112:443
+  syncPolicy:
+    automated:
+      prune: false          # never auto-delete namespaces / budgets / data
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-llms-40-ingress
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/llms/40-ingress"
+  destination:
+    server: https://192.168.0.112:443
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-llms-50-workloads
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/llms/50-workloads"
+  destination:
+    server: https://192.168.0.112:443
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-llms-20-scheduling
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/cloudone365/technical-depth.git
+    targetRevision: main
+    path: "02-Kubernetes/lab/manifests/llms/20-scheduling"
+  destination:
+    server: https://192.168.0.112:443
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [ServerSideApply=true, CreateNamespace=false]
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}

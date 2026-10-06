@@ -1,0 +1,124 @@
+# Model catalog for the 03-DeepSeek lab (Volumes 11-19, 34-37, 41).
+# scripts/gen_overlays.py turns every entry into k8s/models/<name>/ — a
+# kustomize overlay of the 02-Kubernetes vLLM Deployment. Only ONE chat model
+# runs at a time on a single Spark (unified memory): applying an overlay
+# replaces the running model.
+#
+# util      vLLM --gpu-memory-utilization (fraction of ≈119.7 GiB)
+# mem       pod memory limit (CPU-side; see 02 Vol 12 §5.5 for the UMA question)
+# weights   approximate weight size on disk (for prefetch planning)
+# revision  optional Hugging Face commit SHA that pins the exact weights and tokenizer
+#           (tools/catalog_drift.py pin writes it; Volume 33). Unpinned = branch main.
+models:
+  - name: r1-1.5b
+    hf: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+    util: 0.15
+    max_len: 16384
+    mem: 16Gi
+    weights: 3.6GB
+    args: [--reasoning-parser=deepseek_r1]
+    use: fastest reasoning model; speculative-decoding draft for the 7B/32B distills
+  - name: r1-7b
+    hf: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+    util: 0.30
+    max_len: 32768
+    mem: 32Gi
+    weights: 15GB
+    args: [--reasoning-parser=deepseek_r1]
+    use: everyday reasoning model on one time-slice
+  - name: r1-32b
+    hf: deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
+    util: 0.70
+    max_len: 16384
+    mem: 90Gi
+    weights: 66GB
+    args: [--reasoning-parser=deepseek_r1, --max-num-seqs=16]
+    use: best single-Spark reasoning quality in BF16 (uses most of the box)
+  - name: r1-32b-fp8
+    hf: RedHatAI/DeepSeek-R1-Distill-Qwen-32B-FP8-dynamic
+    util: 0.45
+    max_len: 32768
+    mem: 56Gi
+    weights: 34GB
+    args: [--reasoning-parser=deepseek_r1, --max-num-seqs=32]
+    use: 32B quality at half the memory (FP8 W8A8, dynamic activation scales)
+  - name: v2-lite
+    hf: deepseek-ai/DeepSeek-V2-Lite-Chat
+    util: 0.45
+    max_len: 16384
+    mem: 56Gi
+    weights: 32GB
+    args: [--trust-remote-code, --max-num-seqs=32]
+    use: the MLA + DeepSeekMoE architecture of V2/V3 at a size one Spark can hold
+  - name: coder-v2-lite
+    hf: deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct
+    util: 0.45
+    max_len: 32768
+    mem: 56Gi
+    weights: 32GB
+    args: [--trust-remote-code, --max-num-seqs=32]
+    use: code completion / FIM, 16B MoE with 2.4B active
+  - name: qwen2.5-7b-tools
+    hf: Qwen/Qwen2.5-7B-Instruct
+    util: 0.30
+    max_len: 32768
+    mem: 32Gi
+    weights: 15GB
+    args: [--enable-auto-tool-choice, --tool-call-parser=hermes]
+    use: tool calling and JSON agents (Vol 30); comparison baseline (Vol 35)
+  - name: qwen2.5-32b-awq
+    hf: Qwen/Qwen2.5-32B-Instruct-AWQ
+    util: 0.40
+    max_len: 32768
+    mem: 48Gi
+    weights: 19GB
+    args: [--quantization=awq_marlin, --max-num-seqs=32]
+    use: dense 32B non-reasoning comparison (Vol 35)
+  - name: qwq-32b-awq
+    hf: Qwen/QwQ-32B-AWQ
+    util: 0.40
+    max_len: 32768
+    mem: 48Gi
+    weights: 20GB
+    args: [--quantization=awq_marlin, --max-num-seqs=32, --reasoning-parser=deepseek_r1]
+    use: Qwen's own reasoning model on the same Qwen2.5-32B base — RL-trained vs R1-distilled (Vol 35)
+  - name: llama-3.1-8b
+    hf: meta-llama/Llama-3.1-8B-Instruct
+    util: 0.30
+    max_len: 32768
+    mem: 32Gi
+    weights: 16GB
+    args: [--enable-auto-tool-choice, --tool-call-parser=llama3_json]
+    use: Meta baseline (Vol 34, 41); gated on Hugging Face — needs hf-token
+  - name: r1-llama-8b
+    hf: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+    util: 0.30
+    max_len: 32768
+    mem: 32Gi
+    weights: 16GB
+    args: [--reasoning-parser=deepseek_r1]
+    use: R1 reasoning distilled into Llama-3.1-8B — same base as llama-3.1-8b, isolates what R1 distillation adds (Vol 34)
+  - name: mistral-7b
+    hf: mistralai/Mistral-7B-Instruct-v0.3
+    util: 0.30
+    max_len: 32768
+    mem: 32Gi
+    weights: 15GB
+    args: [--tokenizer-mode=mistral, --config-format=mistral, --load-format=mistral]
+    use: Mistral baseline (Vol 36)
+  - name: mixtral-8x7b-fp8
+    hf: RedHatAI/Mixtral-8x7B-Instruct-v0.1-FP8
+    util: 0.55
+    max_len: 32768
+    mem: 64Gi
+    weights: 47GB
+    args: [--max-num-seqs=32]
+    use: Mistral's sparse MoE (8 experts, top-2) vs DeepSeekMoE in v2-lite (Vol 36)
+  - name: nemotron-nano-8b
+    hf: nvidia/Llama-3.1-Nemotron-Nano-8B-v1
+    util: 0.30
+    max_len: 32768
+    mem: 32Gi
+    weights: 16GB
+    args: []
+    use: NVIDIA Nemotron reasoning model (Vol 41); toggle reasoning with the system prompt

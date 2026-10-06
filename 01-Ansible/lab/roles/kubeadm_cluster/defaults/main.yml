@@ -1,0 +1,60 @@
+---
+# Root Kubernetes cluster built with kubeadm (Step 19).
+# dgx-spark-1 is the control plane AND a worker (no control-plane taint), so one
+# Spark is a complete cluster; dgx-spark-2 (optional) joins as a worker.
+kubeadm_cluster_version: "1.36.5"            # pin! check https://kubernetes.io/releases/
+kubeadm_cluster_minor: "{{ kubeadm_cluster_version.split('.')[:2] | join('.') }}"
+kubeadm_cluster_apt_repo: "https://pkgs.k8s.io/core:/stable:/v{{ kubeadm_cluster_minor }}/deb/"
+kubeadm_cluster_package_suffix: "-1.1"       # pkgs.k8s.io revision, e.g. kubeadm=1.36.5-1.1
+
+kubeadm_cluster_control_plane_group: k8s_control_plane
+kubeadm_cluster_worker_group: k8s_workers
+kubeadm_cluster_name: spark-root
+
+# API/management traffic and the Cilium VXLAN tunnel use the 10GbE mgmt network.
+# Bulk GPU traffic (NCCL/RDMA) uses the 200GbE CX-7 fabric through Multus
+# (playbooks/13-multus-rdma.yml), not the pod network.
+kubeadm_cluster_node_ip: "{{ ansible_host }}"
+kubeadm_cluster_api_endpoint: >-
+  {{ hostvars[groups[kubeadm_cluster_control_plane_group][0]].ansible_host }}:6443
+kubeadm_cluster_cert_sans:
+  - "{{ hostvars[groups[kubeadm_cluster_control_plane_group][0]].ansible_host }}"
+  - "{{ groups[kubeadm_cluster_control_plane_group][0] }}"
+  - "{{ groups[kubeadm_cluster_control_plane_group][0] }}.{{ lab_domain | default('lab.local') }}"
+
+# Same CIDRs the old k3s lab used, so every address in the docs stays valid.
+kubeadm_cluster_pod_cidr: 10.42.0.0/16
+kubeadm_cluster_service_cidr: 10.43.0.0/16
+kubeadm_cluster_dns_domain: cluster.local
+
+# kubelet: protect DGX OS + Dashboard on a unified-memory box.
+kubeadm_cluster_system_reserved: { cpu: "2", memory: 8Gi }
+kubeadm_cluster_kube_reserved: { cpu: "1", memory: 2Gi }
+kubeadm_cluster_eviction_hard:
+  memory.available: 4Gi
+  nodefs.available: 10%
+  nodefs.inodesFree: 5%
+  imagefs.available: 15%
+kubeadm_cluster_max_pods: 200                # two vClusters + platform add-ons on one node
+kubeadm_cluster_node_labels:
+  - "spark.lab/gpu=gb10"                     # lab-owned: GFD rewrites nvidia.com/gpu.product (e.g. -SHARED suffix under time-slicing)
+  - "spark.lab/node-index={{ spark_node_index | default(0) }}"
+
+# containerd comes from DGX OS's containerd.io package (the one Docker uses).
+# kubeadm needs its CRI plugin enabled, systemd cgroups, and the NVIDIA runtime
+# as the default so GPU pods work with the device plugin.
+kubeadm_cluster_containerd_config: /etc/containerd/config.toml
+kubeadm_cluster_default_runtime_nvidia: true  # set false + use runtimeClassName: nvidia for strict multi-tenancy
+
+# API server hardening (02-Kubernetes Step 03): audit log + Secret encryption at rest.
+kubeadm_cluster_audit_dir: /etc/kubernetes/audit
+kubeadm_cluster_audit_log_dir: /var/log/kubernetes/audit
+kubeadm_cluster_encryption_dir: /etc/kubernetes/encryption
+
+# etcd: stacked static pod. Snapshots every 6 h, newest 20 kept (02-Kubernetes Step 02).
+kubeadm_cluster_etcd_snapshot_dir: /var/lib/etcd-snapshots
+kubeadm_cluster_etcd_snapshot_calendar: "*-*-* 00/6:00:00"
+kubeadm_cluster_etcd_snapshot_keep: 20
+
+kubeadm_cluster_kubeconfig_local: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') }}/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
+kubeadm_cluster_context: spark-root

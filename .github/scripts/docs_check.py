@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Docs checks for the curriculum folders.
 
-  python3 .github/scripts/docs_check.py "02 Kubernetes" [--render] [--png OUTDIR]
+  python3 .github/scripts/docs_check.py "02-Kubernetes" [--render] [--png OUTDIR]
 
 * every relative link / image in *.md resolves to a file (anchors ignored)
 * every ```mermaid block parses and renders (with --render; needs mmdc)

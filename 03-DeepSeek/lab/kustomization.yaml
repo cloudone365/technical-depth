@@ -1,0 +1,47 @@
+# `kubectl apply -k "03-DeepSeek/lab"` ships the lab's Python tools and eval data
+# into the cluster as ConfigMaps, so Jobs can run them without building images.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+configMapGenerator:
+  - name: deepseek-tools
+    namespace: llm-serving
+    files:
+      - tools/model_math.py
+      - tools/eval_harness.py
+      - tools/rag_demo.py
+      - tools/agent_tools.py
+      - tools/weights_verify.py
+      - tools/moe_router_probe.py
+      - tools/mla_attention_demo.py
+      - tools/fp8_blockscale.py
+      - tools/spec_decode_calc.py
+      - tools/grouped_gemm_bench.py
+      - tools/needle_test.py
+      - tools/ring_attention_demo.py
+      - tools/vault_sync.py
+      - tools/stream_probe.py
+      - tools/catalog_drift.py
+      - tools/format_check.py
+      - tools/grpo_tiny.py
+  - name: deepseek-evaldata
+    namespace: llm-serving
+    files:
+      - data/math_word.jsonl
+      - data/code_tasks.jsonl
+      - data/json_tasks.jsonl
+      - data/rag_gold.jsonl
+  - name: deepseek-catalog
+    namespace: llm-serving
+    files:
+      - models.yaml
+  - name: deepseek-train
+    namespace: batch
+    files:
+      - tools/grpo_tiny.py
+      - tools/sft_lora.py
+      - tools/unsloth_sft.py
+      - tools/fsdp_finetune.py
+      - tools/model_math.py
+      - tools/lora_calc.py
+generatorOptions:
+  disableNameSuffixHash: true
