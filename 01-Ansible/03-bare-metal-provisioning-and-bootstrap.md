@@ -95,7 +95,7 @@ Two paths, one end state:
 Either way you need an SSH key on the MacBook first; `03.1-bootstrap.yml` installs `~/.ssh/id_ed25519.pub` (`spark_admin_pubkeys` in [`group_vars/all.yml`](lab/inventory/group_vars/all.yml)):
 
 ```bash
-ls ~/.ssh/id_ed25519.pub || ssh-keygen -t ed25519 -C "ansible@control"   # create one if you don't have a key
+ls ~/.ssh/id_ed25519.pub || ssh-keygen -t ed25519 -C "$(whoami)@$(hostname -s)"   # create one if you don't have a key; -C is only a label
 ```
 
 Both paths end when `ssh dgxadmin@192.168.0.100 hostname` prints `dgx-spark-1` without asking for a password (§7).
