@@ -388,7 +388,7 @@ ansible -m debug -a "var=cx7_interfaces" spark           # per-host value
 In Semaphore this is the template **`02.1 Ping`** ([Chapter 04 §5.6](04-dgx-spark-as-semaphore-target.md)): the log shows play 1, *Get an SSH certificate from Vault*, then this play. From the MacBook (bootstrap or break-glass):
 
 ```bash
-ansible-playbook playbooks/02.1-ping.yml -l dgx-spark-1,localhost -K     # -K prompts for nvidia's sudo password
+ansible-playbook playbooks/02.1-ping.yml -l dgx-spark-1,localhost -K     # -K prompts for dgxadmin's sudo password
 ```
 
 Expected output (trimmed; your exact numbers and kernel will differ):
@@ -405,7 +405,7 @@ Ad-hoc commands are how you poke a box without writing a playbook. Semaphore run
 ansible dgx-spark-1 -m command -a "nvidia-smi --query-gpu=name,driver_version --format=csv"
 ansible dgx-spark-1 -m shell   -a "free -g | head -2"
 ansible dgx-spark-1 -m setup   -a "filter=ansible_processor*"
-ansible dgx-spark-1 -b -K -m apt -a "name=nvtop state=present"   # -b = become, -K = nvidia's sudo password
+ansible dgx-spark-1 -b -K -m apt -a "name=nvtop state=present"   # -b = become, -K = dgxadmin's sudo password
 ```
 
 ### 3.6 Teach Ansible about the GPU: custom facts
