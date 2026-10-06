@@ -8,7 +8,7 @@
 | **Hardware** | spark-01 |
 | **Time** | 75 min |
 | **Risk** | Low. One engine at a time |
-| **Lab files** | [`k8s/sglang/r1-32b-fp8`](lab/k8s/sglang/r1-32b-fp8/kustomization.yaml), [`02 …/90-serving/sglang/sglang.yaml`](../02%20Kubernetes/lab/manifests/90-serving/sglang/sglang.yaml), [`02 …/scripts/ttft_probe.py`](../02%20Kubernetes/lab/scripts/ttft_probe.py), [`tools/eval_harness.py`](lab/tools/eval_harness.py) |
+| **Lab files** | [`k8s/sglang/r1-32b-fp8`](lab/k8s/sglang/r1-32b-fp8/kustomization.yaml), [`02 …/90-serving/sglang/sglang.yaml`](../02%20Kubernetes/lab/manifests/llms/90-serving/sglang/sglang.yaml), [`02 …/scripts/ttft_probe.py`](../02%20Kubernetes/lab/scripts/ttft_probe.py), [`tools/eval_harness.py`](lab/tools/eval_harness.py) |
 
 ---
 

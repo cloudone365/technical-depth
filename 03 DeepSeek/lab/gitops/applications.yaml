@@ -1,4 +1,4 @@
-# GitOps for the 03 DeepSeek lab with Argo CD (28-production-mlops-and-gitops.md).
+# GitOps for the 03 DeepSeek lab with Argo CD (production-mlops.md).
 # Requires the 02 platform (its own gitops/applications.yaml) and Argo CD.
 #   kubectl apply -n argocd -f "03 DeepSeek/lab/gitops/applications.yaml"
 # Point repoURL at YOUR fork if you want to push changes.

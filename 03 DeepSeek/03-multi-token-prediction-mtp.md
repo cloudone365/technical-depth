@@ -112,7 +112,7 @@ python3 tools/spec_decode_calc.py --sweep --draft-cost 0.1                 # 1.5
 ```bash
 scripts/serve-model.sh r1-1.5b            # downloads the draft weights into model-cache too
 scripts/serve-model.sh r1-7b
-kubectl apply -f "../../02 Kubernetes/lab/manifests/90-serving/vllm/vllm-bench.yaml"
+kubectl apply -f "../../02 Kubernetes/lab/manifests/llms/90-serving/vllm/vllm-bench.yaml"
 kubectl -n llm-serving logs -f job/vllm-bench | grep -E 'max-concurrency|Output token throughput|Mean TPOT'
 ```
 

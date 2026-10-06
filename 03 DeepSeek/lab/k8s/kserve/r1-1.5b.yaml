@@ -1,7 +1,7 @@
 # The same R1 distill as an InferenceService (Volume 22). Uses 02's ServingRuntime
 # 'vllm-spark' (RawDeployment: plain Deployment + Service + HPA, no Knative/Istio).
 # KServe appends these args to the runtime's. Needs: 02 scripts/install-addons.sh kserve
-#   kubectl apply -f "02 Kubernetes/lab/manifests/90-serving/kserve/inferenceservice.yaml"   # runtime
+#   kubectl apply -f "02 Kubernetes/lab/manifests/llms/90-serving/kserve/inferenceservice.yaml"   # runtime
 #   kubectl apply -f k8s/kserve/r1-1.5b.yaml
 apiVersion: serving.kserve.io/v1beta1
 kind: InferenceService

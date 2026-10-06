@@ -18,7 +18,7 @@ info "prefetching $hf into model-cache"
 k -n $NS delete job model-prefetch --ignore-not-found >/dev/null
 rev=$(model_field "$name" revision); rev=${rev:-main}
 sed -e "s|value: Qwen/Qwen2.5-0.5B-Instruct|value: $hf|" -e "s|{name: REVISION, value: main}|{name: REVISION, value: \"$rev\"}|" \
-  "$K8S_LAB/manifests/60-storage/model-prefetch-job.yaml" | k apply -f - >/dev/null
+  "$K8S_LAB/manifests/llms/60-storage/model-prefetch-job.yaml" | k apply -f - >/dev/null
 k -n $NS wait --for=condition=complete job/model-prefetch --timeout=60m >/dev/null && ok "weights cached" || { bad "prefetch failed: kubectl -n $NS logs job/model-prefetch"; exit 1; }
 if [[ -w /proc/sys/vm/drop_caches ]] || sudo -n true 2>/dev/null; then
   sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches' && info "page cache dropped (UMA headroom for the load)"

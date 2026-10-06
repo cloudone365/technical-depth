@@ -8,7 +8,7 @@
 | **Hardware** | spark-01 |
 | **Time** | 90 min |
 | **Risk** | Low |
-| **Lab files** | [`models.yaml`](lab/models.yaml), [`scripts/gen_overlays.py`](lab/scripts/gen_overlays.py), [`k8s/models/`](lab/k8s/models/), [`scripts/serve-model.sh`](lab/scripts/serve-model.sh), [`02 …/90-serving/vllm/vllm.yaml`](../02%20Kubernetes/lab/manifests/90-serving/vllm/vllm.yaml), [`breakfix/`](lab/breakfix/) D01–D03 |
+| **Lab files** | [`models.yaml`](lab/models.yaml), [`scripts/gen_overlays.py`](lab/scripts/gen_overlays.py), [`k8s/models/`](lab/k8s/models/), [`scripts/serve-model.sh`](lab/scripts/serve-model.sh), [`02 …/90-serving/vllm/vllm.yaml`](../02%20Kubernetes/lab/manifests/llms/90-serving/vllm/vllm.yaml), [`breakfix/`](lab/breakfix/) D01–D03 |
 
 ---
 

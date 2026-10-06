@@ -8,7 +8,7 @@
 | **Hardware** | spark-01 |
 | **Time** | 90 min |
 | **Risk** | Low. The tamper drill modifies a *copy* of a weight file |
-| **Lab files** | [`tools/catalog_drift.py`](lab/tools/catalog_drift.py), [`tools/weights_verify.py`](lab/tools/weights_verify.py), [`k8s/ops/`](lab/k8s/ops/) (`catalog-drift`, `weights-verify`, `webui-backup`, `litellm-db-backup`, `vault-sync`), [`models.yaml`](lab/models.yaml) (`revision`), [`02 …/60-storage/model-prefetch-job.yaml`](../02%20Kubernetes/lab/manifests/60-storage/model-prefetch-job.yaml) (`REVISION`) |
+| **Lab files** | [`tools/catalog_drift.py`](lab/tools/catalog_drift.py), [`tools/weights_verify.py`](lab/tools/weights_verify.py), [`k8s/ops/`](lab/k8s/ops/) (`catalog-drift`, `weights-verify`, `webui-backup`, `litellm-db-backup`, `vault-sync`), [`models.yaml`](lab/models.yaml) (`revision`), [`02 …/60-storage/model-prefetch-job.yaml`](../02%20Kubernetes/lab/manifests/llms/60-storage/model-prefetch-job.yaml) (`REVISION`) |
 
 ---
 

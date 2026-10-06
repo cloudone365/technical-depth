@@ -8,7 +8,7 @@
 | **Hardware** | spark-01 |
 | **Time** | 60 min |
 | **Risk** | Low. Drill D04 changes LiteLLM's timeout. `breakfix.sh reset D04` restores it |
-| **Lab files** | [`tools/stream_probe.py`](lab/tools/stream_probe.py), [`k8s/apps/litellm.yaml`](lab/k8s/apps/litellm.yaml), [`02 …/addons/traefik.yaml`](../02%20Kubernetes/lab/addons/traefik.yaml), [`02 …/40-ingress/`](../02%20Kubernetes/lab/manifests/40-ingress/) |
+| **Lab files** | [`tools/stream_probe.py`](lab/tools/stream_probe.py), [`k8s/apps/litellm.yaml`](lab/k8s/apps/litellm.yaml), [`02 …/addons/traefik.yaml`](../02%20Kubernetes/lab/addons/traefik-values.yaml), [`02 …/40-ingress/`](../02%20Kubernetes/lab/manifests/llms/40-ingress/) |
 
 ---
 

@@ -18,7 +18,7 @@ def _str(dumper, data):
 
 
 yaml.add_representer(str, _str, Dumper=yaml.SafeDumper)
-BASE = "../../../../../02 Kubernetes/lab/manifests/90-serving/vllm"
+BASE = "../../../../../02 Kubernetes/lab/manifests/llms/90-serving/vllm"
 
 
 def overlay(m):

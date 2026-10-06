@@ -8,7 +8,7 @@
 | **Hardware** | spark-01 (any kind cluster works for §5.1–5.3) |
 | **Time** | 60 min |
 | **Risk** | Low. Read-only until §5.4 |
-| **Lab files** | [`lab/kustomization.yaml`](lab/kustomization.yaml), [`lab/k8s/`](lab/k8s/), [`02 …/90-serving/vllm/vllm.yaml`](../02%20Kubernetes/lab/manifests/90-serving/vllm/vllm.yaml), [`02 …/tests/pod_template_check.py`](../02%20Kubernetes/lab/tests/pod_template_check.py), [`tests/run-local-checks.sh`](lab/tests/run-local-checks.sh) |
+| **Lab files** | [`lab/kustomization.yaml`](lab/kustomization.yaml), [`lab/k8s/`](lab/k8s/), [`02 …/90-serving/vllm/vllm.yaml`](../02%20Kubernetes/lab/manifests/llms/90-serving/vllm/vllm.yaml), [`02 …/tests/pod_template_check.py`](../02%20Kubernetes/lab/tests/pod_template_check.py), [`tests/run-local-checks.sh`](lab/tests/run-local-checks.sh) |
 
 ---
 

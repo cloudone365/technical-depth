@@ -8,7 +8,7 @@
 | **Hardware** | spark-01 |
 | **Time** | 45 min |
 | **Risk** | Low. fio writes scratch data on a PVC |
-| **Lab files** | [`02 Kubernetes/lab/manifests/60-storage/fio-job.yaml`](../02%20Kubernetes/lab/manifests/60-storage/fio-job.yaml), [`scripts/serve-model.sh`](lab/scripts/serve-model.sh), [`tools/weights_verify.py`](lab/tools/weights_verify.py). Module [08 Storage](../08%20Storage/README.md) goes deeper |
+| **Lab files** | [`02 Kubernetes/lab/manifests/root/60-storage/fio-job.yaml`](../02%20Kubernetes/lab/manifests/root/60-storage/fio-job.yaml), [`scripts/serve-model.sh`](lab/scripts/serve-model.sh), [`tools/weights_verify.py`](lab/tools/weights_verify.py). Module [08 Storage](../08%20Storage/README.md) goes deeper |
 
 ---
 

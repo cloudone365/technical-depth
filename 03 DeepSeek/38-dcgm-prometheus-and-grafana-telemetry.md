@@ -8,7 +8,7 @@
 | **Hardware** | spark-01 |
 | **Time** | 90 min |
 | **Risk** | Low |
-| **Lab files** | [`observability/rules.yaml`](lab/observability/rules.yaml), [`observability/rules.test.yaml`](lab/observability/rules.test.yaml), [`observability/gen_dashboard.py`](lab/observability/gen_dashboard.py), [`observability/deepseek-serving-dashboard.json`](lab/observability/deepseek-serving-dashboard.json), [`02 …/95-observability/`](../02%20Kubernetes/lab/manifests/95-observability/), [`02 …/addons/dcgm-exporter-values.md`](../02%20Kubernetes/lab/addons/dcgm-exporter-values.md) |
+| **Lab files** | [`observability/rules.yaml`](lab/observability/rules.yaml), [`observability/rules.test.yaml`](lab/observability/rules.test.yaml), [`observability/gen_dashboard.py`](lab/observability/gen_dashboard.py), [`observability/deepseek-serving-dashboard.json`](lab/observability/deepseek-serving-dashboard.json), [`02 …/95-observability/`](../02%20Kubernetes/lab/manifests/root/95-observability/), [`02 …/addons/dcgm-exporter-values.md`](../02%20Kubernetes/lab/addons/dcgm-exporter-values.md) |
 
 ---
 

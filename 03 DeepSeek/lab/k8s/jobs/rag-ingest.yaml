@@ -1,4 +1,4 @@
-# Index this repository into Qdrant (Volume 29). Needs: Qdrant (02 manifests/50-workloads),
+# Index this repository into Qdrant (Volume 29). Needs: Qdrant (02 manifests/llms/50-workloads),
 # bge-m3 (k8s/apps), tools ConfigMap (kubectl apply -k "03 DeepSeek/lab").
 apiVersion: batch/v1
 kind: Job

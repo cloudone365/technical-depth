@@ -7,7 +7,7 @@ want() { [[ " ${SECTIONS[*]} " == *" $1 "* ]]; }
 if want platform; then
   echo "── platform (from 02 Kubernetes)"
   k get ns llm-serving batch >/dev/null 2>&1 && ok "namespaces llm-serving + batch" || bad "02 platform not applied (02 scripts/apply-lab.sh)"
-  k -n $NS get pvc model-cache >/dev/null 2>&1 && ok "model-cache PVC" || bad "model-cache PVC missing (02 manifests/60-storage)"
+  k -n $NS get pvc model-cache >/dev/null 2>&1 && ok "model-cache PVC" || bad "model-cache PVC missing (02 manifests/llms/60-storage)"
   k -n $NS get cm deepseek-tools deepseek-evaldata >/dev/null 2>&1 && ok "tool/eval ConfigMaps" || bad "kubectl apply -k \"03 DeepSeek/lab\""
 fi
 if want serving; then

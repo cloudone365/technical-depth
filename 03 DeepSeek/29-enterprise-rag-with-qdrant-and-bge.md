@@ -8,7 +8,7 @@
 | **Hardware** | spark-01 |
 | **Time** | 90 min |
 | **Risk** | Low. Re-indexing never touches the live collection until it passes the gate |
-| **Lab files** | [`tools/rag_demo.py`](lab/tools/rag_demo.py), [`data/rag_gold.jsonl`](lab/data/rag_gold.jsonl), [`k8s/jobs/rag-ingest.yaml`](lab/k8s/jobs/rag-ingest.yaml), [`k8s/apps/bge-m3.yaml`](lab/k8s/apps/bge-m3.yaml), [`02 …/50-workloads/qdrant-statefulset.yaml`](../02%20Kubernetes/lab/manifests/50-workloads/qdrant-statefulset.yaml) |
+| **Lab files** | [`tools/rag_demo.py`](lab/tools/rag_demo.py), [`data/rag_gold.jsonl`](lab/data/rag_gold.jsonl), [`k8s/jobs/rag-ingest.yaml`](lab/k8s/jobs/rag-ingest.yaml), [`k8s/apps/bge-m3.yaml`](lab/k8s/apps/bge-m3.yaml), [`02 …/50-workloads/qdrant-statefulset.yaml`](../02%20Kubernetes/lab/manifests/llms/50-workloads/qdrant-statefulset.yaml) |
 
 ---
 
@@ -134,7 +134,7 @@ user:   Sources:
 ### 5.1 Prerequisites
 
 ```bash
-kubectl apply -k "02 Kubernetes/lab/manifests/50-workloads"         # Qdrant (if not already)
+kubectl apply -k "02 Kubernetes/lab/manifests/llms/50-workloads"         # Qdrant (if not already)
 cd "03 DeepSeek/lab"
 kubectl apply -k . && kubectl apply -k k8s/apps
 kubectl -n llm-serving rollout status deploy/bge-m3 --timeout=20m

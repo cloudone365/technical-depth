@@ -97,7 +97,7 @@
         wait_condition: {type: Complete, status: "True"}
         wait_timeout: 3600
         definition: >-
-          {{ lookup('ansible.builtin.file', k8s_lab ~ '/manifests/60-storage/model-prefetch-job.yaml')
+          {{ lookup('ansible.builtin.file', k8s_lab ~ '/manifests/llms/60-storage/model-prefetch-job.yaml')
              | replace('value: Qwen/Qwen2.5-0.5B-Instruct', 'value: ' ~ model.hf)
              | replace('{name: REVISION, value: main}', '{name: REVISION, value: "' ~ (model.revision | default('main')) ~ '"}')
              | from_yaml }}

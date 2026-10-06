@@ -134,7 +134,7 @@ fi
 
 if [[ "${API:-0}" == 1 ]]; then
   echo "== server-side dry-run (API=1)"
-  "$KUBECTL" apply -k "$K8S_LAB/manifests/00-platform" >/dev/null
+  "$KUBECTL" apply -k "$K8S_LAB/manifests/llms/00-platform" >/dev/null
   "$KUBECTL" apply -f k8s/multinode/namespace.yaml >/dev/null
   "$KUBECTL" apply --dry-run=server -k . >/dev/null
   for d in k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/lora/* k8s/multi/* k8s/serving k8s/sglang/* k8s/apps observability; do "$KUBECTL" apply --dry-run=server -k "$d" >/dev/null; done

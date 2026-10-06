@@ -8,7 +8,7 @@
 | **Hardware** | spark-01 (spark-02 raises `maxReplicaCount` to 2) |
 | **Time** | 90 min |
 | **Risk** | Medium. Scaling vLLM to 0 makes the API unavailable until it scales back. Do it outside your own working hours or adjust the cron window |
-| **Lab files** | [`k8s/autoscale/vllm-office-hours.yaml`](lab/k8s/autoscale/vllm-office-hours.yaml), [`k8s/kserve/r1-1.5b.yaml`](lab/k8s/kserve/r1-1.5b.yaml), [`k8s/jobs/sft.yaml`](lab/k8s/jobs/sft.yaml), [`k8s/jobs/grpo.yaml`](lab/k8s/jobs/grpo.yaml), [`02 …/20-scheduling/kueue.yaml`](../02%20Kubernetes/lab/manifests/20-scheduling/kueue.yaml), [`02 …/90-serving/`](../02%20Kubernetes/lab/manifests/90-serving/) |
+| **Lab files** | [`k8s/autoscale/vllm-office-hours.yaml`](lab/k8s/autoscale/vllm-office-hours.yaml), [`k8s/kserve/r1-1.5b.yaml`](lab/k8s/kserve/r1-1.5b.yaml), [`k8s/jobs/sft.yaml`](lab/k8s/jobs/sft.yaml), [`k8s/jobs/grpo.yaml`](lab/k8s/jobs/grpo.yaml), [`02 …/20-scheduling/kueue.yaml`](../02%20Kubernetes/lab/manifests/llms/20-scheduling/kueue.yaml), [`02 …/90-serving/`](../02%20Kubernetes/lab/manifests/llms/90-serving/) |
 
 ---
 
@@ -198,7 +198,7 @@ Free a slice first (Kueue's 2 + vLLM + bge-m3 already use all 4):
 
 ```bash
 kubectl -n batch delete job --all
-kubectl apply -f "../../02 Kubernetes/lab/manifests/90-serving/kserve/inferenceservice.yaml"   # runtime vllm-spark (+ demo qwen-small)
+kubectl apply -f "../../02 Kubernetes/lab/manifests/llms/90-serving/kserve/inferenceservice.yaml"   # runtime vllm-spark (+ demo qwen-small)
 kubectl -n llm-serving delete isvc qwen-small
 kubectl apply -f k8s/kserve/r1-1.5b.yaml
 kubectl -n llm-serving get isvc r1-1-5b -w                 # READY True after download + load

@@ -8,7 +8,7 @@
 | **Hardware** | spark-01 (spark-02 optional for §5.6) |
 | **Time** | 75 min |
 | **Risk** | Low. §5.4 drops the page cache, which is harmless but slows the next read |
-| **Lab files** | [`02 …/addons/local-path-nvme.yaml`](../02%20Kubernetes/lab/addons/local-path-nvme.yaml), [`02 …/60-storage/`](../02%20Kubernetes/lab/manifests/60-storage/), [`scripts/serve-model.sh`](lab/scripts/serve-model.sh), [`tools/weights_verify.py`](lab/tools/weights_verify.py) |
+| **Lab files** | [`02 …/addons/local-path-nvme.yaml`](../02%20Kubernetes/lab/addons/local-path-nvme.yaml), [`02 …/60-storage/`](../02%20Kubernetes/lab/manifests/llms/60-storage/), [`scripts/serve-model.sh`](lab/scripts/serve-model.sh), [`tools/weights_verify.py`](lab/tools/weights_verify.py) |
 
 ---
 
@@ -137,7 +137,7 @@ df -h /data
 ### 5.2 Benchmark the NVMe from a pod
 
 ```bash
-kubectl apply -f "../02 Kubernetes/lab/manifests/60-storage/fio-job.yaml"
+kubectl apply -f "../02 Kubernetes/lab/manifests/root/60-storage/fio-job.yaml"
 kubectl -n lab-tools logs -f job/fio-ai | grep -E '^\[|READ:|WRITE:'
 ```
 
