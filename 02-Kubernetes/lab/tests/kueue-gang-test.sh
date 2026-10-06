@@ -5,6 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 K=(kubectl --context "${LLM_CTX:-llms}")
 J=manifests/llms/20-scheduling/gang-demo-jobs.yaml
+# The llms API must answer first (in CI it is reached through a port-forward that may be reconnecting)
+for _ in $(seq 30); do "${K[@]}" get --raw /readyz >/dev/null 2>&1 && break; sleep 2; done
 "${K[@]}" delete -f "$J" --ignore-not-found --wait=true >/dev/null
 "${K[@]}" apply -f "$J" >/dev/null
 for _ in $(seq 60); do
