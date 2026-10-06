@@ -42,9 +42,11 @@ flowchart LR
   end
   P -->|scrape| NE1 & NE2
   P -.->|scrape| DC1
-  P -.->|"/v1/sys/metrics"| V["Vault :8200"]
+  P -.->|"/v1/sys/metrics"| V["vault01 · 192.168.0.211:8200<br/>(outside the Spark)"]
   AM -->|webhook| W["Slack / ntfy / email"]
   DD["DGX Dashboard :11000<br/>(NVIDIA's local UI — unchanged)"]
+  classDef mgmt fill:#fff3e6,stroke:#fb8500,color:#000
+  class V mgmt
 ```
 
 ### 2.2 LLD
@@ -357,15 +359,17 @@ groups:
 
 ## 4. Hands-on
 
+Run the Semaphore template **`04 Telemetry`** (break-glass: `ansible-playbook playbooks/04-telemetry.yml -l dgx-spark-01,localhost -K`), then check from the MacBook:
+
 ```bash
 cd "01 Ansible/lab"
-ansible-playbook playbooks/04-telemetry.yml -K
 # node side
 ssh nvidia@192.168.0.100 'cat /var/lib/prometheus/node-exporter/spark_gpu.prom; curl -s localhost:9100/metrics | grep ^spark_ | head'
 # stack
 curl -s http://192.168.0.100:9090/api/v1/targets | jq -r '.data.activeTargets[] | "\(.labels.host) \(.health)"'
 curl -s http://192.168.0.100:9090/api/v1/rules | jq -r '.data.groups[].rules[].name'
 # Grafana: http://192.168.0.100:3000  (admin / gpu_telemetry_grafana_admin_password) → Spark Lab → Overview
+#   (the Spark's :3000; Semaphore's UI is http://192.168.0.210:3000 on sema01)
 ```
 
 ### 4.1 Make the alerts fire (on purpose)
@@ -378,7 +382,7 @@ curl -s http://192.168.0.100:9090/api/v1/rules | jq -r '.data.groups[].rules[].n
 | `SparkGPUUnresponsive` | Temporarily break PATH for the collector: `sudo systemctl edit spark-gpu-metrics.service` → `Environment=PATH=/nonexistent` |
 | `SparkGPUMetricsStale` | `sudo systemctl stop spark-gpu-metrics.timer` for 4 min (the `.prom` file stops updating while node_exporter keeps serving it) |
 
-Check them in Prometheus (Alerts tab) and Alertmanager (`:9093`). Wire a receiver by setting `gpu_telemetry_webhook_url` (e.g. an ntfy.sh or Slack-compatible webhook) and re-running the play.
+Check them in Prometheus (Alerts tab) and Alertmanager (`:9093`). Wire a receiver by setting `gpu_telemetry_webhook_url` (e.g. an ntfy.sh or Slack-compatible webhook) as an extra variable on the `04 Telemetry` template and re-running it.
 
 ### 4.2 DCGM: when and how
 
@@ -394,7 +398,7 @@ dcgmi dmon -e 150,155,203 -c 5   # temp, power, util
 If the GPU is listed, enable the exporter container:
 
 ```bash
-ansible-playbook playbooks/04-telemetry.yml -K -e gpu_telemetry_dcgm_enabled=true
+ansible-playbook playbooks/04-telemetry.yml -l dgx-spark-01,localhost -K -e gpu_telemetry_dcgm_enabled=true   # or template 04 Telemetry + extra variable
 curl -s localhost:9400/metrics | grep -E '^DCGM_FI_DEV_(GPU_TEMP|POWER_USAGE|GPU_UTIL)'
 ```
 
@@ -406,7 +410,8 @@ Expect some fields (framebuffer memory in particular) to be absent or meaningles
 
 | System | How |
 |---|---|
-| Vault | Add a scrape job for `https://dgx-spark-01:8200/v1/sys/metrics?format=prometheus` with a `bearer_token` from a metrics-only policy; alert on `vault_core_unsealed == 0` |
+| Vault (vault01) | Add a scrape job for `https://192.168.0.211:8200/v1/sys/metrics?format=prometheus` with vault01's TLS certificate as CA and a `bearer_token` from a metrics-only policy; alert on `vault_core_unsealed == 0`: a sealed vault01 means no Semaphore task can get a certificate |
+| Semaphore (sema01) | Task failures are the alert for scheduled templates (`20 Drift check`, `30 Validate`): add a Slack, Telegram or e-mail alert in the project settings (00b §9). A node_exporter on sema01 and vault01 is a good next step, scraped by this Prometheus |
 | Kubernetes / GPU Operator | The operator's DCGM exporter is off by default in the lab (`gpu_operator_dcgm_exporter: false` in `roles/gpu_operator`). Turn it on and the root's kube-prometheus-stack (namespace `observability`) scrapes it in-cluster. Pick one exporter path per node to avoid double counting. The GPU is the root's: pods in the `dev-lab` and `llms` vClusters run on the same GB10 and show up in the same per-node metrics |
 | Slurm | The same `spark_gpu_up`/Xid signals drive the Slurm health check (Volume 18). Alerts and scheduler agree |
 | Drift (Volume 22) | `spark_drift_report.py --prom` writes `spark_config_drift.prom` into the textfile dir, and it shows on the dashboard |

@@ -28,6 +28,18 @@ flowchart LR
 
 **`serial: 1`, and refuse to run without `-l`.** A drain that runs against every host at once is an outage you caused yourself.
 
+**Two ways to start it.** Normally from Semaphore: the template **`21 Emergency drain`** in project `spark-lab`, whose CLI args name the node (`["--limit", "dgx-spark-02,localhost"]`; keep `localhost` for play 1 and the `kubectl` steps) and whose extra variables pick the stages (`node_drain_reboot`, `node_drain_undrain_after`, `node_drain_bug_report`). The task history then records who drained which node, when, and what happened. **Break-glass** from your MacBook, when sema01 or vault01 is down (00b §10):
+
+```bash
+cd "01 Ansible/lab"
+tools/fetch-kubeconfig.sh sema01 || true          # if sema01 still answers; otherwise use the copy you fetched last
+ansible-playbook playbooks/21-emergency-drain.yml -l dgx-spark-02,localhost -K -e node_drain_reboot=true
+```
+
+Without the Semaphore variable group, play 1 is skipped and the play logs in as `nvidia` with your key; the kubeconfig and the incident bundle are read from and written to the MacBook's `.cache/`. Afterwards, re-run the template in Semaphore so the record and the state are back on sema01.
+
+> **The 15-minute certificate and the reboot.** Under Semaphore, play 1's certificate covers new logins for 15 minutes. The drain, the evidence and the containers use the already-open ControlPersist connection, but the reconnect **after** the reboot is a new login. With `node_drain_bug_report=true` (minutes of `nvidia-bug-report.sh`) plus a slow boot you can pass 15 minutes, and the reconnect fails with `Permission denied (publickey)`. Nothing is lost: the node is up and still drained. Run the template again with `node_drain_reboot=false node_drain_undrain_after=true`; play 1 issues a fresh certificate and the role validates and returns the node.
+
 ---
 
 ## 2. The role
@@ -44,9 +56,9 @@ node_drain_bug_report: false            # nvidia-bug-report.sh takes minutes; en
 node_drain_reboot: false
 node_drain_undrain_after: false         # only after reboot + validation passes
 node_drain_reason: "maint: ansible drain {{ now(utc=true, fmt='%Y-%m-%dT%H:%MZ') }}"
-node_drain_kubeconfig: "{{ playbook_dir }}/../.cache/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
+node_drain_kubeconfig: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') }}/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
 node_drain_context: spark-root          # the root owns the nodes; vCluster pods are drained as root pods
-node_drain_bundle_dir: "{{ playbook_dir }}/../.cache/incidents"
+node_drain_bundle_dir: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') }}/incidents"
 ```
 
 ```yaml
@@ -164,6 +176,9 @@ node_drain_bundle_dir: "{{ playbook_dir }}/../.cache/incidents"
 ---
 # ansible-playbook playbooks/21-emergency-drain.yml -l dgx-spark-02 \
 #   -e node_drain_reboot=true -e node_drain_undrain_after=true -e node_drain_bug_report=true
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: Emergency drain / remediation
   hosts: spark
   become: true
@@ -181,7 +196,7 @@ node_drain_bundle_dir: "{{ playbook_dir }}/../.cache/incidents"
 
 ### 2.1 What a drain does to the nested clusters
 
-`node_drain_kubeconfig` is the lab file `.cache/kubeconfig-spark-lab.yaml`, and `node_drain_context` pins `k8s_drain` to `spark-root` — whatever the file's `current-context` happens to be (someone may have run `kubectl config use-context llms` on it). Only the root has nodes to cordon. The by-hand equivalent is:
+`node_drain_kubeconfig` is the lab file `kubeconfig-spark-lab.yaml` in the controller's state folder (sema01's state volume under Semaphore, `.cache/` on the MacBook), and `node_drain_context` pins `k8s_drain` to `spark-root` — whatever the file's `current-context` happens to be (someone may have run `kubectl config use-context llms` on it). Only the root has nodes to cordon. The by-hand equivalent is:
 
 ```bash
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
@@ -214,12 +229,14 @@ kubectl --context spark-root get pdb -A                                         
 
 **Signals:** `SparkGPUUnresponsive` alert; Slurm health check drains the node (`healthcheck: nvidia-smi unresponsive`); workloads stuck in CUDA calls.
 
+Semaphore: template `21 Emergency drain`, `--limit dgx-spark-02,localhost`, extra variables `node_drain_bug_report: true`, `node_drain_reboot: true`, `node_drain_undrain_after: true` (see the certificate note in §1). Break-glass:
+
 ```bash
-ansible-playbook playbooks/21-emergency-drain.yml -l dgx-spark-02 -K \
+ansible-playbook playbooks/21-emergency-drain.yml -l dgx-spark-02,localhost -K \
   -e node_drain_bug_report=true -e node_drain_reboot=true -e node_drain_undrain_after=true
 ```
 
-If it happens again after the reboot, keep the node drained and open a case with the bundle (`.cache/incidents/dgx-spark-02-*.tgz` includes `nvidia-bug-report.log.gz`), and check for a driver/firmware update (Volumes 07, 10).
+If it happens again after the reboot, keep the node drained and open a case with the bundle (`incidents/dgx-spark-02-*.tgz` in the state folder, `/opt/spark-lab/cache` on sema01; it includes `nvidia-bug-report.log.gz`), and check for a driver/firmware update (Volumes 07, 10).
 
 ### Runbook B — Xid triage
 
@@ -256,6 +273,9 @@ Kubernetes side first: `kubectl --context spark-root get pods -A --field-selecto
 #   ansible-playbook playbooks/24-uma-relief.yml -l dgx-spark-01 -K                       # diagnose only
 #   ansible-playbook playbooks/24-uma-relief.yml -l dgx-spark-01 -K -e uma_drop_caches=true
 #   ansible-playbook playbooks/24-uma-relief.yml -l dgx-spark-01 -K -e uma_stop_label=spark.lab/idle=true
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: UMA pressure diagnosis and relief
   hosts: spark
   become: true
@@ -317,9 +337,11 @@ Kubernetes side first: `kubectl --context spark-root get pods -A --field-selecto
         msg: "MemAvailable {{ uma_before.stdout }} GiB → {{ uma_after.stdout }} GiB"
 ```
 
+Semaphore: template `24 UMA relief` (`--limit dgx-spark-01,localhost`; extra variable `uma_drop_caches: true` to relieve). Break-glass:
+
 ```bash
-ansible-playbook playbooks/24-uma-relief.yml -l dgx-spark-01 -K                          # diagnose
-ansible-playbook playbooks/24-uma-relief.yml -l dgx-spark-01 -K -e uma_drop_caches=true   # relieve
+ansible-playbook playbooks/24-uma-relief.yml -l dgx-spark-01,localhost -K                          # diagnose
+ansible-playbook playbooks/24-uma-relief.yml -l dgx-spark-01,localhost -K -e uma_drop_caches=true   # relieve
 ```
 
 Prevent it from recurring: set memory limits on model-server containers, keep the kubelet reserve (Volume 16), give idle services the `spark.lab/idle=true` label so this runbook can stop them, and don't run Kubernetes and Slurm GPU jobs on the same node at the same time.
@@ -329,9 +351,10 @@ Prevent it from recurring: set memory limits on model-server containers, keep th
 **Signals:** `SparkCX7Degraded` (speed < 200G), NCCL falls back to `NET/Socket`, NFS falls back to TCP.
 
 ```bash
-ansible spark -b -m shell -a "ibdev2netdev; ethtool enp1s0f1np1 | grep -E 'Speed|Link detected'"
-ansible-playbook playbooks/02-fabric.yml -K                   # re-assert config + verify
-ansible-playbook playbooks/11-rdma-perftest.yml -K            # measure after fixing
+ansible spark -b -K -m shell -a "ibdev2netdev; ethtool enp1s0f1np1 | grep -E 'Speed|Link detected'"   # MacBook, ad hoc
+# then Semaphore: 02 Fabric (re-assert config + verify), 11 RDMA perftest (measure after fixing); break-glass:
+ansible-playbook playbooks/02-fabric.yml -K
+ansible-playbook playbooks/11-rdma-perftest.yml -K
 ```
 
 Fix order: reseat the cable, then check that the same cage is used on both ends, then check the switch port speed (forced 200G), and finally reboot both nodes (NVIDIA's documented step when links won't come up). Drain dependent Slurm or Kubernetes multi-node jobs first (the llms vCluster's `batch` jobs use the CX-7 through the Multus NADs in `vc-llms`). A 2-node job can't run on a broken link.
@@ -343,7 +366,7 @@ A Spark has **no out-of-band management**. When SSH and ping fail:
 1. Check from the other Spark over the fabric (`ping 192.168.100.12`). If that works, the problem is on the management network, not the node.
 2. Check the local console (monitor/keyboard), or the power LED.
 3. Power-cycle. For a desk lab, a **smart plug** with an API is the practical stand-in for a BMC power action. Ansible can drive it (e.g. a Home Assistant or Tasmota HTTP call from `delegate_to: localhost`).
-4. After it boots: `21-emergency-drain.yml -e node_drain_collect=true` still captures the *previous boot's* kernel log (`journalctl -k -b -1`) because journald is persistent (Volume 01A baseline).
+4. After it boots: the template `21 Emergency drain` (default `node_drain_collect=true`) still captures the *previous boot's* kernel log (`journalctl -k -b -1`) because journald is persistent (Volume 01A baseline).
 
 ---
 
@@ -353,18 +376,18 @@ A Spark has **no out-of-band management**. When SSH and ping fail:
 sequenceDiagram
   participant P as Prometheus
   participant AM as Alertmanager
-  participant AWX as AWX (webhook-enabled workflow)
+  participant AWX as Controller (Semaphore integration / AWX workflow)
   participant OPS as On-call human
   participant S as Spark
   P->>AM: SparkGPUXid (host=dgx-spark-02)
-  AM->>AWX: webhook → launch "spark · drain" workflow, limit=dgx-spark-02
+  AM->>AWX: webhook → launch the drain template, limit=dgx-spark-02
   AWX->>S: drain + evidence (no reboot)
   AWX->>OPS: approval: "Reboot dgx-spark-02?" (bundle link attached)
   OPS-->>AWX: approve
   AWX->>S: reboot → validate → return to service
 ```
 
-Automate **steps 1–3** (safe and reversible). Gate **step 4** (reboot or reload) behind an approval node. On a single-user lab you can skip the approval, but keep the structure.
+Automate **steps 1–3** (safe and reversible). Gate **step 4** (reboot or reload) behind a human. Semaphore has no approval node: give the webhook-triggered run only the drain-and-evidence stages (`node_drain_reboot=false`), and keep the reboot as a separate run a person starts. AWX can express the whole flow with an approval node (Volume 20). On a single-user lab you can skip the approval, but keep the structure.
 
 ---
 
@@ -373,7 +396,8 @@ Automate **steps 1–3** (safe and reversible). Gate **step 4** (reboot or reloa
 | Symptom | Diagnose | Fix |
 |---|---|---|
 | k8s drain times out | `kubectl --context spark-root get pods -A -o wide --field-selector spec.nodeName=dgx-spark-02`; `kubectl --context spark-root get pdb -A` | PodDisruptionBudgets (including tenant PDBs synced from a vCluster into `vc-*`) or unmanaged pods; `terminate_grace_period`; delete stuck pods with the owner's consent. For a tenant pod, ask the tenant to delete it through their own context (`--context llms`), or the syncer may fight you |
-| Drain fails with "node not found" / context error | `kubectl --kubeconfig .cache/kubeconfig-spark-lab.yaml config get-contexts` | `node_drain_context` must name the root (`spark-root`); a vCluster context has synced nodes you can't cordon from there. Fix the variable or re-run `05-kubernetes.yml` to restore the context |
+| Drain fails with "node not found" / context error | `kubectl --kubeconfig .cache/kubeconfig-spark-lab.yaml config get-contexts` | `node_drain_context` must name the root (`spark-root`); a vCluster context has synced nodes you can't cordon from there. Fix the variable or re-run the template `05 Kubernetes` to restore the context. Break-glass from the MacBook: `tools/fetch-kubeconfig.sh sema01` first, or the drain uses a stale or missing `.cache/` copy |
+| Reconnect after the reboot: `Permission denied (publickey)` (Semaphore) | Task duration vs. the 15-minute certificate | Run the template again with `node_drain_reboot=false node_drain_undrain_after=true` (§1) |
 | Slurm DRAIN never reaches DRAINED | `squeue -w dgx-spark-02` | Running jobs finish first (by design); `scancel` only if agreed |
 | Evidence capture hangs | Which command? Everything is wrapped in `timeout` | A new command without `timeout` → add it |
 | Reboot task times out | Console | Capsule/firmware work on boot takes long (Volume 10), or the node didn't come back: Runbook E |
@@ -385,3 +409,4 @@ Automate **steps 1–3** (safe and reversible). Gate **step 4** (reboot or reloa
 - [ ] Drill C: load a model until `SparkUnifiedMemoryLow` fires; relieve with the runbook; record before/after GiB.
 - [ ] Drill D: pull the QSFP cable during a perftest; alert, then diagnosis, then recovery.
 - [ ] The playbook refuses to run without `-l`.
+- [ ] Break-glass drill: with the Semaphore container stopped (`docker compose stop semaphore` on sema01), drain and return a node from the MacBook, then start Semaphore again and re-run the template.

@@ -1,12 +1,12 @@
 # Step-by-Step: From the Ansible-Built Root Cluster to a Complete AI Platform on DGX Spark
 
-> **Module 02 companion guide.** The shortest correct path through the lab, in the order that avoids rework. Each step lists the commands, what "done" looks like, and the volume that explains it. Prerequisite: the [01 Ansible step-by-step guide](../01%20Ansible/00-ansible-step-by-step-guide.md) through its Step 10 — the kubeadm root cluster, Cilium, MetalLB and the GPU Operator (playbooks 05 and 06).
+> **Module 02 companion guide.** The shortest correct path through the lab, in the order that avoids rework. Each step lists the commands, what "done" looks like, and the volume that explains it. Prerequisite: the [01 Ansible step-by-step guide](../01%20Ansible/00-ansible-step-by-step-guide.md) through its Step 10 — the kubeadm root cluster, Cilium, MetalLB and the GPU Operator — run as the Semaphore templates `05 Kubernetes` and `06 GPU Operator` on sema01 ([00b](../01%20Ansible/00b-dgx-spark-semaphore-target.md)), with the kubeconfig copied to your MacBook by `01 Ansible/lab/tools/fetch-kubeconfig.sh sema01`.
 >
 > **Three clusters, one kubeconfig.** Every command names its context: `spark-root` (the kubeadm root — platform team), `dev-lab` (vCluster #1 — tenants and labs) or `llms` (vCluster #2 — serving and training). [Volume 27](27-nested-clusters-with-vcluster.md) explains the shape; the [lab README](lab/README.md#which-cluster-am-i-talking-to) has the rule of thumb.
 
-**What you are building** — your MacBook is only the terminal; the root cluster and both vClusters all run on the Spark ([how to read this picture](README.md#the-lab-in-one-picture-three-clusters-nested-on-one-spark)):
+**What you are building** — your MacBook is only a client (browser, git, kubectl), sema01 and vault01 run the automation outside the Spark, and the root cluster and both vClusters all run on the Spark ([how to read this picture](README.md#the-lab-in-one-picture-three-clusters-nested-on-one-spark)):
 
-![DGX Spark nested Kubernetes lab: your MacBook as the terminal, a kubeadm root cluster on the Spark, and the dev-lab and llms vClusters inside it](diagrams/nested-lab-architecture.svg)
+![DGX Spark nested Kubernetes lab: your MacBook as a client, sema01 (Semaphore) and vault01 outside the Spark, a kubeadm root cluster on the Spark, and the dev-lab and llms vClusters inside it](diagrams/nested-lab-architecture.svg)
 
 **The path through it:**
 
@@ -38,21 +38,22 @@ flowchart LR
 
 **One Spark or two?** Everything works on one. Steps marked **(2×)** have an optional second part that needs dgx-spark-02 and the QSFP cable.
 
-**The Spark is your playground.** Every step can be undone: `scripts/breakfix.sh reset all` for drills, and `01 Ansible playbooks/99-reset-kubernetes.yml` to wipe Kubernetes and rebuild from playbook 05. Breaking things on purpose is part of the course.
+**The Spark is your playground.** Every step can be undone: `scripts/breakfix.sh reset all` for drills, and for a full rebuild the Semaphore templates `99 Reset Kubernetes` → `05 Kubernetes` → `06 GPU Operator` → `06b vClusters` (then `fetch-kubeconfig.sh sema01` again). Semaphore and Vault live outside the Spark, so nothing you break here can take them with it. Breaking things on purpose is part of the course.
 
 ---
 
-## Step 0 · Toolchain on your MacBook — the control node (20 min) → [20 §CI](20-hands-on-practice-exercises-workbook.md)
+## Step 0 · Toolchain on your MacBook — a kubectl client (20 min) → [20 §CI](20-hands-on-practice-exercises-workbook.md)
 
 ```bash
 cd "technical-depth/02 Kubernetes/lab"
 pip install yamllint shellcheck-py pyyaml
 # kubectl, helm, kubeconform, promtool, mikefarah yq: versions in versions.env / the CI workflow
+"../../01 Ansible/lab/tools/fetch-kubeconfig.sh" sema01    # kubeconfig from sema01's state volume → 01 Ansible/lab/.cache/ (re-run after 05/06b)
 export KUBECONFIG="$PWD/../../01 Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 tests/run-local-checks.sh
 ```
 
-✅ `ALL LOCAL CHECKS PASSED` (includes `budget check OK`: the vCluster budgets fit the Spark)
+✅ `fetch-kubeconfig.sh` lists `spark-root` (plus `dev-lab`, `llms` once 06b has run). `ALL LOCAL CHECKS PASSED` (includes `budget check OK`: the vCluster budgets fit the Spark)
 
 ## Step 1 · Preflight (5 min) → [01](01-kubernetes-core-architecture.md)
 
@@ -84,7 +85,7 @@ sudo tail -2 /var/log/kubernetes/audit/audit.log
 scripts/install-addons.sh storage
 scripts/install-addons.sh metrics-server
 scripts/install-addons.sh kps
-scripts/install-addons.sh vclusters        # = 01 Ansible playbooks/06b-vclusters.yml
+scripts/install-addons.sh vclusters        # = Semaphore template 06b vClusters; helm upgrade --install, safe to re-run
 kubectl config get-contexts
 scripts/verify.sh vclusters
 ```

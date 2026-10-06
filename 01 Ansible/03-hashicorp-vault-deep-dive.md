@@ -1,15 +1,17 @@
-# Volume 03B — HashiCorp Vault on the Spark: Raft Storage, TLS, Init/Unseal, Audit & Backup
+# Volume 03B — HashiCorp Vault for the Lab: vault01's Raft Storage, TLS, Seal/Unseal, Policies, Audit & Backup
 
-> **Module 01 · Part I — Foundations** · Prev: [03A Inventory](03-dynamic-inventory-and-cloud-infrastructure.md) · Next: [04 Jinja2 & data transforms](04-advanced-jinja2-filters-and-data-transforms.md) · Ansible integration: [Volume 19](19-hashicorp-vault-approle-and-dynamic-secrets.md)
+> **Module 01 · Part I — Foundations** · Prev: [03A Inventory](03-dynamic-inventory-and-cloud-infrastructure.md) · Next: [04 Jinja2 & data transforms](04-advanced-jinja2-filters-and-data-transforms.md) · Build: [00a §3–4](00a-semaphore-vault-lab-guide.md) · Spark lab additions: [00b §6](00b-dgx-spark-semaphore-target.md) · Ansible integration: [Volume 19](19-hashicorp-vault-approle-and-dynamic-secrets.md)
 
 | | |
 |---|---|
-| **You will build** | A single-node Vault on dgx-spark-01 (integrated Raft storage, TLS from a lab CA, audit log, snapshots), deployed and configured entirely by Ansible |
-| **Hardware** | 1× DGX Spark |
-| **Time** | 90 min |
-| **Risk** | Medium. **Losing the unseal keys means losing every secret.** Read §5 before running |
+| **You will build** | An operator's understanding of `vault01`, the lab's **single** Vault (built by hand in [00a §3–4](00a-semaphore-vault-lab-guide.md)): integrated Raft storage, TLS, the Shamir seal, policies, the audit log and snapshots. Then you add the Spark lab's KV engine and read-only policy with `08-vault.yml`, the one playbook that writes to vault01 |
+| **Hardware** | `vault01` (192.168.0.211), your MacBook; `sema01` + `dgx-spark-01` for the seal test (§3.3) |
+| **Time** | 75 min |
+| **Risk** | Medium. **Losing the unseal keys means losing every secret, including the SSH CA that every Semaphore task depends on.** A restart of vault01 halts all new Semaphore tasks until you unseal it (§3.3). Read §5 before you change anything on vault01 |
 
-The lab needs secrets for NGC API keys, the Grafana admin password, the AWX credentials, SSH signing and Kubernetes credentials (the lab kubeconfig, vCluster user certificates). Vault gives you one audited place to keep them, short-lived credentials, and an API that Ansible, AWX and pods can all use.
+The Spark lab needs secrets: the NGC API key, later a Grafana admin password, the ansible-vault password, and above all the **SSH CA** that signs the 15-minute certificates every Semaphore task uses. Vault gives you one audited place for them, short-lived credentials, and an API that Semaphore, Ansible, AWX and pods can all use.
+
+**Why Vault lives on vault01, not on the Spark.** `99-reset-kubernetes.yml` wipes Kubernetes and a DGX OS reinstall wipes the box. A Vault on the Spark would take the SSH CA (and therefore every automation login) down with it, so you'd need Vault to rebuild the machine that holds Vault. The management plane (sema01 + vault01) stays outside, like out-of-band management in a datacenter ([00b §1](00b-dgx-spark-semaphore-target.md)).
 
 ---
 
@@ -19,413 +21,416 @@ The lab needs secrets for NGC API keys, the Grafana admin password, the AWX cred
 
 ```mermaid
 flowchart LR
-  subgraph CN[Control node]
-    PB["08-vault.yml"]
-    INIT[".cache/vault-init.json<br/>(LAB ONLY)"]
-    CA[".cache/spark-lab-ca.crt"]
+  classDef mgmt fill:#fff3e6,stroke:#fb8500,color:#000
+  subgraph MB[MacBook]
+    PB["08-vault.yml<br/>(admin VAULT_TOKEN from env)"]
+    CA[".cache/vault-ca.crt<br/>(vault01 TLS cert)"]
   end
-  subgraph S1["dgx-spark-01"]
-    V["vault server :8200 (API) :8201 (cluster)"]
+  subgraph V1["vault01 · 192.168.0.211"]
+    V["vault server<br/>:8200 API/UI · :8201 cluster"]
     R[("Raft storage<br/>/opt/vault/data")]
-    A["audit log<br/>/var/log/vault/audit.log"]
+    A["audit log<br/>/var/log/vault_audit.log"]
     T["TLS<br/>/opt/vault/tls"]
+    E["engines: ssh-client-signer · kv<br/>auth: approle (role semaphore)"]
   end
-  PB -->|install, TLS, init, unseal| V
-  PB -->|"HTTP API (vault_config role)"| V
-  V --- R & A & T
-  CONS["Consumers:<br/>Ansible lookups · AWX credentials ·<br/>Kubernetes pods on spark-root and in the vClusters (Vault Agent) · sshd (SSH CA)"] -->|HTTPS + token| V
+  subgraph S1["sema01 · 192.168.0.210"]
+    P1["Semaphore task<br/>play 1 (00-vault-cert.yml)"]
+  end
+  SP["dgx-spark-01<br/>sshd trusts vault01's CA"]
+  PB -->|"HTTP API: KV mount, policy spark-lab-read"| V
+  P1 -->|"AppRole login, sign, read kv/spark-lab/*"| V
+  P1 -->|"SSH as svc-ansible + 15-min cert"| SP
+  V --- R & A & T & E
+  class V1,S1 mgmt
 ```
+
+Nobody configures vault01 over SSH from the lab: it isn't in [`inventory/hosts.yml`](lab/inventory/hosts.yml) on purpose. Its address lives in [`group_vars/all.yml`](lab/inventory/group_vars/all.yml) (`vault_addr`, `vault_cacert`, `vault_ssh_*`, `vault_kv_*`).
 
 ### 1.2 LLD
 
-| Item | Value | Notes |
+| Item | Value on vault01 | Built in |
 |---|---|---|
-| Package | `vault` from `apt.releases.hashicorp.com` (arm64) | Version pinned with an apt wildcard (`1.20.*`) |
-| Config | `/etc/vault.d/vault.hcl` | Rendered by `vault_server` |
-| Storage | Integrated Raft, `/opt/vault/data` | No Consul needed; add nodes later with `retry_join` |
-| Listener | `0.0.0.0:8200`, TLS ≥ 1.2 | Cert SANs: hostname, FQDN, mgmt IP, 127.0.0.1 |
-| Cluster port | 8201 | Raft and request forwarding between nodes |
-| TLS | Lab CA (ECDSA P-384) → server cert (P-256, 825 days) | CA added to the system trust store and fetched to the control node |
-| Seal | Shamir, 5 shares, threshold 3 | Production: auto-unseal (transit, KMS or HSM) |
-| Audit | `file` device → `/var/log/vault/audit.log` | Every request is logged with HMAC'd secrets |
-| Telemetry | Prometheus format at `/v1/sys/metrics?format=prometheus` | Scraped in Volume 09 |
+| Package | `vault` from `apt.releases.hashicorp.com` (creates the `vault` user and systemd unit) | 00a §3.1 |
+| Config | `/etc/vault.d/vault.hcl`: `ui = true`, `disable_mlock = true` | 00a §3.3 |
+| Storage | Integrated Raft, `path = /opt/vault/data`, `node_id = vault01` | 00a §3.3 |
+| Listener | `0.0.0.0:8200`, TLS | 00a §3.3 |
+| `api_addr` / `cluster_addr` | `https://192.168.0.211:8200` / `:8201` | 00a §3.3 |
+| TLS | Self-signed RSA-4096 **leaf** certificate (`CA:FALSE`), SANs `IP:192.168.0.211`, `DNS:vault01`, 365 days, in `/opt/vault/tls/`; public copy `~/vault-ca.crt` | 00a §3.2–3.3 |
+| Seal | Shamir, **3 shares, threshold 2** | 00a §3.4 |
+| Audit | `file` device → `/var/log/vault_audit.log` | 00a §3.5 |
+| SSH CA | engine `ssh-client-signer/`, role `ansible` (principal `svc-ansible`, ttl 15m, max 1h) | 00a §4 |
+| AppRole | `auth/approle/role/semaphore`: policy `semaphore-ssh`, token ttl 10m, max 30m | 00a §4 |
+| Lab secrets | KV v2 at `kv/`, policy `spark-lab-read` for `kv/spark-lab/*`, attached to AppRole `semaphore` | **`08-vault.yml`** (00b §6) |
+| Firewall | 8200 from 192.168.0.0/24 only | 00a §2.1 |
 
-### 1.3 Seal/unseal, briefly and practically
+Where the controllers find the TLS certificate (`vault_cacert` in `group_vars/all.yml`): inside the Semaphore container it's `/etc/semaphore/vault-ca.crt` (mounted in 00a §7.3); on the MacBook it's `lab/.cache/vault-ca.crt` (copied in 00b §2).
 
-Vault encrypts everything with a **data key**. That key is itself encrypted with the **root key**, which only exists in memory after an unseal. With Shamir sealing the root key is split into 5 shares, and any 3 reconstruct it. After **every restart Vault comes up sealed** and serves nothing until it's unsealed. That's why the role's restart handler is followed by unseal tasks, and why production uses auto-unseal.
+### 1.3 Who builds what
+
+| Object | Built by | The lab's playbooks |
+|---|---|---|
+| Install, TLS, `vault.hcl`, init, unseal, audit device | You, by hand ([00a §3](00a-semaphore-vault-lab-guide.md)) | never touch it |
+| SSH engine, signing role `ansible`, policy `semaphore-ssh`, AppRole `semaphore` | You, by hand ([00a §4](00a-semaphore-vault-lab-guide.md)) | `08-vault.yml` **checks** them (asserts), never rewrites them |
+| KV v2 `kv/`, policy `spark-lab-read`, its attachment to AppRole `semaphore`, placeholder `kv/spark-lab/ngc` | `08-vault.yml` (role [`vault_config`](lab/roles/vault_config/)), from the MacBook with an admin token | idempotent: read → compare → write |
+| The real NGC key, `kv/spark-lab/ansible-vault` | You, `vault kv put` | read by play 1 / `tools/vault-pass.sh` |
+
+### 1.4 Seal/unseal, briefly and practically
+
+Vault encrypts everything in storage with a **data encryption key** (the keyring). The keyring is encrypted with the **root key**, which exists only in memory after an unseal. With Shamir sealing the root key is split into shares: on vault01, 3 shares, and any 2 reconstruct it. After **every restart Vault comes up sealed** and answers almost every request with `503 Vault is sealed` until it's unsealed. Then:
+
+- play 1 of every Semaphore task fails at **Log in to Vault with AppRole**, so no new certificates are issued;
+- certificates already issued keep working until they expire (sshd checks them offline against the CA public key);
+- the public CA key and `sys/health` are the only things that still answer.
+
+That's why production uses **auto-unseal** (§5).
 
 ```mermaid
 stateDiagram-v2
   [*] --> Uninitialised
-  Uninitialised --> Sealed: vault operator init (once)
-  Sealed --> Unsealed: 3 of 5 key shares
-  Unsealed --> Sealed: restart / vault operator seal
+  Uninitialised --> Sealed: vault operator init (once, 00a §3.4)
+  Sealed --> Unsealed: 2 of 3 key shares
+  Unsealed --> Sealed: restart / reboot / vault operator seal
   Unsealed --> Unsealed: serve requests
 ```
 
----
+### 1.5 Integrated Raft storage
 
-## 2. The role
+Raft is Vault's built-in, replicated storage: no Consul, no external database. Every node holds a full copy; one node is the **leader** and takes all writes; a write is committed when a **quorum** (more than half) of the nodes has it.
 
-```yaml
-# lab/roles/vault_server/defaults/main.yml
----
-vault_server_version: "1.20.*"             # apt pin pattern; HashiCorp publishes arm64 debs
-vault_server_addr: "https://{{ ansible_host }}:8200"
-vault_server_data_dir: /opt/vault/data
-vault_server_tls_dir: /opt/vault/tls
-vault_server_node_id: "{{ inventory_hostname }}"
-vault_server_ui: true
+| Nodes | Quorum | Failures tolerated | Comment |
+|---|---|---|---|
+| 1 (vault01 today) | 1 | 0 | fine for a lab; a lost disk = restore from snapshot |
+| 2 | 2 | 0 | worse than one: twice the hardware, no extra tolerance |
+| 3 | 2 | 1 | minimum for HA |
+| 5 | 3 | 2 | production for important estates |
 
-# LAB ONLY: init output (unseal keys + root token) is written to the control node.
-# In production: PGP-encrypt shares (-pgp-keys) or use auto-unseal (transit/KMS/HSM).
-vault_server_init_file: "{{ playbook_dir }}/../.cache/vault-init.json"
-vault_server_key_shares: 5
-vault_server_key_threshold: 3
-```
+`node_id` names the node in the cluster, `cluster_addr` (port 8201) carries Raft replication and request forwarding, and new nodes join with `retry_join` blocks in their `vault.hcl`. Additional nodes belong next to vault01 in the management plane (VMs), **not** on the Sparks, for the reason at the top of this volume. Even a single-node Raft cluster gives you **snapshots** (§3.5), which is the backup unit.
 
-```jinja
-# lab/roles/vault_server/templates/vault.hcl.j2
-# {{ ansible_managed }}
-ui            = {{ vault_server_ui | lower }}
-cluster_name  = "{{ lab_name | default('spark-lab') }}"
-api_addr      = "{{ vault_server_addr }}"
-cluster_addr  = "https://{{ ansible_host }}:8201"
-disable_mlock = true   # required with integrated storage (raft) — see docs
+### 1.6 Policies: deny by default, paths and capabilities
 
-storage "raft" {
-  path    = "{{ vault_server_data_dir }}"
-  node_id = "{{ vault_server_node_id }}"
-}
+Every token carries a list of policies. Anything not explicitly granted is denied. A policy is a list of **paths** (exact or with `*` / `+` globs) and **capabilities** (`create`, `read`, `update`, `delete`, `list`, `sudo`, `deny`). These are the policies on vault01:
 
-listener "tcp" {
-  address         = "0.0.0.0:8200"
-  cluster_address = "0.0.0.0:8201"
-  tls_cert_file   = "{{ vault_server_tls_dir }}/vault.crt"
-  tls_key_file    = "{{ vault_server_tls_dir }}/vault.key"
-  tls_min_version = "tls12"
-}
-
-telemetry {
-  prometheus_retention_time = "24h"
-  disable_hostname          = true
+```hcl
+# semaphore-ssh (00a §4): the only thing play 1 may do with SSH is ask for a signature from role ansible
+path "ssh-client-signer/sign/ansible" {
+  capabilities = ["create", "update"]   # signing is a write in Vault's API
 }
 ```
 
-```yaml
-# lab/roles/vault_server/tasks/main.yml
+```hcl
+# spark-lab-read (08-vault.yml / roles/vault_config/defaults/main.yml): read the lab's secrets, nothing else
+path "kv/data/spark-lab/*"     { capabilities = ["read"] }
+path "kv/metadata/spark-lab/*" { capabilities = ["list", "read"] }
+```
+
+The `default` policy (attached to every token) lets a token look itself up and renew itself. The **root token** bypasses policies entirely, which is why it's for bootstrap only (§5).
+
+> **KV v2 path gotcha:** the API path for *reading* is `kv/data/<path>`, for *listing* `kv/metadata/<path>`. Policies must use those exact prefixes; the CLI (`vault kv get kv/spark-lab/ngc`) hides the `data/` segment from you. `vault token capabilities <path>` tells you what the current token can do on a path.
+
 ---
-# ------------------------------------------------------------ install
-- name: HashiCorp apt key
-  ansible.builtin.get_url:
-    url: https://apt.releases.hashicorp.com/gpg
-    dest: /usr/share/keyrings/hashicorp-archive-keyring.asc
-    mode: "0644"
 
-- name: HashiCorp apt repo
-  ansible.builtin.apt_repository:
-    repo: >-
-      deb [arch=arm64 signed-by=/usr/share/keyrings/hashicorp-archive-keyring.asc]
-      https://apt.releases.hashicorp.com {{ ansible_facts.distribution_release }} main
-    filename: hashicorp
-    state: present
+## 2. Automating Vault with Ansible
 
-- name: Install Vault
-  ansible.builtin.apt:
-    name: "vault={{ vault_server_version }}"
-    state: present
-    update_cache: true
+### 2.1 Building a Vault server with Ansible (concepts; not a lab step)
 
-# ------------------------------------------------------------ TLS (self-signed CA for the lab)
-- name: TLS directory
-  ansible.builtin.file:
-    path: "{{ vault_server_tls_dir }}"
-    state: directory
-    owner: vault
-    group: vault
-    mode: "0750"
+In this lab vault01 is built **by hand** with [00a §3](00a-semaphore-vault-lab-guide.md), on purpose: it's the trust anchor, it's built once, and every step teaches something. When you manage many Vault clusters, you automate the build. The patterns that matter:
 
-- name: CA key
-  community.crypto.openssl_privatekey:
-    path: "{{ vault_server_tls_dir }}/ca.key"
-    type: ECC
-    curve: secp384r1
-    owner: vault
-    mode: "0600"
+- **TLS with `community.crypto`** (`openssl_privatekey`, `openssl_csr_pipe`, `x509_certificate`), which is idempotent: a re-run doesn't regenerate keys unless they're missing or expiring.
+- **`vault operator init` guarded** by `sys/seal-status.initialized`. Running init twice on a live cluster would be catastrophic, and the guard makes it impossible from Ansible.
+- **`no_log: true`** on every task that touches keys or tokens. Without it they'd end up in `ansible.log`, the Semaphore task log, AWX job output and ARA.
+- **HTTP API via `uri`** for status (no CLI parsing); the CLI for init and unseal, which have no clean idempotent wrapper.
+- **Where the init output goes.** This is the hard part. Writing the unseal keys and root token to a file on the controller is the classic anti-pattern: that file *is* your whole Vault. Use `-pgp-keys` (each share encrypted to a different person) or auto-unseal.
 
-- name: CA CSR
-  community.crypto.openssl_csr_pipe:
-    privatekey_path: "{{ vault_server_tls_dir }}/ca.key"
-    common_name: "{{ lab_name | default('spark-lab') }} Lab CA"
-    basic_constraints: ["CA:TRUE"]
-    basic_constraints_critical: true
-    key_usage: [keyCertSign, cRLSign]
-    key_usage_critical: true
-  register: vault_server_ca_csr
-  changed_when: false
+> **Illustrative only, not part of this lab.** A trimmed excerpt of what such a role looks like. It's for a dedicated Vault host in its own inventory group; the Spark lab has no such group, and vault01 is never configured by the lab's playbooks.
 
-- name: CA certificate
-  community.crypto.x509_certificate:
-    path: "{{ vault_server_tls_dir }}/ca.crt"
-    csr_content: "{{ vault_server_ca_csr.csr }}"
-    privatekey_path: "{{ vault_server_tls_dir }}/ca.key"
-    provider: selfsigned
-    selfsigned_not_after: "+3650d"
-    mode: "0644"
-
-- name: Server key
-  community.crypto.openssl_privatekey:
-    path: "{{ vault_server_tls_dir }}/vault.key"
-    type: ECC
-    curve: secp256r1
-    owner: vault
-    mode: "0600"
-
-- name: Server CSR
-  community.crypto.openssl_csr_pipe:
-    privatekey_path: "{{ vault_server_tls_dir }}/vault.key"
-    common_name: "{{ inventory_hostname }}"
-    subject_alt_name:
-      - "DNS:{{ inventory_hostname }}"
-      - "DNS:{{ inventory_hostname }}.{{ lab_domain | default('lab.local') }}"
-      - "DNS:localhost"
-      - "IP:{{ ansible_host }}"
-      - "IP:127.0.0.1"
-  register: vault_server_csr
-  changed_when: false
-
-- name: Server certificate signed by lab CA
-  community.crypto.x509_certificate:
-    path: "{{ vault_server_tls_dir }}/vault.crt"
-    csr_content: "{{ vault_server_csr.csr }}"
-    provider: ownca
-    ownca_path: "{{ vault_server_tls_dir }}/ca.crt"
-    ownca_privatekey_path: "{{ vault_server_tls_dir }}/ca.key"
-    ownca_not_after: "+825d"
-    owner: vault
-    mode: "0644"
-  notify: Restart vault
-
-- name: Trust lab CA system-wide (so curl/hvac on the node verify TLS)
-  ansible.builtin.copy:
-    src: "{{ vault_server_tls_dir }}/ca.crt"
-    dest: /usr/local/share/ca-certificates/spark-lab-ca.crt
-    remote_src: true
-    mode: "0644"
-  notify: Update CA trust
-
-- name: Fetch CA to the control node (for VAULT_CACERT)
-  ansible.builtin.fetch:
-    src: "{{ vault_server_tls_dir }}/ca.crt"
-    dest: "{{ playbook_dir }}/../.cache/spark-lab-ca.crt"
-    flat: true
-
-# ------------------------------------------------------------ configure + start
-- name: Data and audit-log directories
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: directory
-    owner: vault
-    group: vault
-    mode: "0750"
-  loop:
-    - "{{ vault_server_data_dir }}"
-    - /var/log/vault
-
-- name: Render vault.hcl
-  ansible.builtin.template:
-    src: vault.hcl.j2
-    dest: /etc/vault.d/vault.hcl
-    owner: vault
-    group: vault
-    mode: "0640"
-  notify: Restart vault
-
-- name: Start Vault
-  ansible.builtin.systemd_service:
-    name: vault
-    state: started
-    enabled: true
-
-- name: Flush handlers
-  ansible.builtin.meta: flush_handlers
-
-- name: Wait for the listener
-  ansible.builtin.wait_for:
-    port: 8200
-    timeout: 60
-
-# ------------------------------------------------------------ init + unseal
+```yaml
+# ILLUSTRATIVE — a Vault-server role for a fleet of Vault hosts (not in this repository)
 - name: Read seal status
   ansible.builtin.uri:
-    url: "{{ vault_server_addr }}/v1/sys/seal-status"
-    ca_path: "{{ vault_server_tls_dir }}/ca.crt"
-    return_content: true
-  register: vault_server_seal
+    url: "https://{{ ansible_host }}:8200/v1/sys/seal-status"
+    ca_path: /opt/vault/tls/vault.crt
+  register: vault_seal
 
-- name: Initialise Vault (first run only)
+- name: Initialise Vault (first run only; shares PGP-encrypted to three operators)
   ansible.builtin.command: >-
-    vault operator init -format=json
-    -key-shares={{ vault_server_key_shares }} -key-threshold={{ vault_server_key_threshold }}
+    vault operator init -format=json -key-shares=3 -key-threshold=2
+    -pgp-keys=/etc/vault.d/ops1.asc,/etc/vault.d/ops2.asc,/etc/vault.d/ops3.asc
   environment:
-    VAULT_ADDR: "{{ vault_server_addr }}"
-    VAULT_CACERT: "{{ vault_server_tls_dir }}/ca.crt"
-  register: vault_server_init
-  when: not vault_server_seal.json.initialized
+    VAULT_ADDR: "https://{{ ansible_host }}:8200"
+    VAULT_CACERT: /opt/vault/tls/vault.crt
+  register: vault_init
+  when: not vault_seal.json.initialized
   changed_when: true
-  no_log: true
+  no_log: true          # the output still holds the (encrypted) shares and the root token
 
-- name: Save init material on the control node (LAB ONLY — chmod 600)  # noqa: no-handler (must happen before unseal)
-  ansible.builtin.copy:
-    content: "{{ vault_server_init.stdout }}"
-    dest: "{{ vault_server_init_file }}"
-    mode: "0600"
-  delegate_to: localhost
-  become: false
-  when: vault_server_init is changed
-  no_log: true
-
-- name: Load init material
-  ansible.builtin.set_fact:
-    vault_server_keys: "{{ lookup('ansible.builtin.file', vault_server_init_file) | from_json }}"
-  no_log: true
-
-- name: Unseal
-  ansible.builtin.command: "vault operator unseal {{ item }}"
-  environment:
-    VAULT_ADDR: "{{ vault_server_addr }}"
-    VAULT_CACERT: "{{ vault_server_tls_dir }}/ca.crt"
-  loop: "{{ vault_server_keys.unseal_keys_b64[:vault_server_key_threshold] }}"
-  when: vault_server_seal.json.sealed or vault_server_init is changed
-  changed_when: true
-  no_log: true
-
-- name: Confirm unsealed + raft leader
+- name: Confirm unsealed (unsealing itself is done by humans or by auto-unseal)
   ansible.builtin.uri:
-    url: "{{ vault_server_addr }}/v1/sys/health"
-    ca_path: "{{ vault_server_tls_dir }}/ca.crt"
+    url: "https://{{ ansible_host }}:8200/v1/sys/health"
+    ca_path: /opt/vault/tls/vault.crt
     status_code: [200]
-  register: vault_server_health
+  register: vault_health
   retries: 10
   delay: 3
-  until: vault_server_health.status == 200
+  until: vault_health.status == 200
+```
+
+`sys/health` encodes the state in the status code (200 active, 429 standby, 501 not initialised, 503 sealed), which makes it a natural `until:` condition and a load-balancer health check.
+
+### 2.2 What the lab automates: `vault_config` (real lab code)
+
+The only playbook that writes to vault01 is [`08-vault.yml`](lab/playbooks/08-vault.yml), which runs the role [`vault_config`](lab/roles/vault_config/tasks/main.yml) on `localhost` against vault01's HTTP API. Every step is **read → compare → write only when different**, and what 00a built is checked, never rewritten:
+
+```yaml
+# lab/roles/vault_config/tasks/main.yml (excerpt)
+- name: An admin token is required for this run
+  ansible.builtin.assert:
+    that: vault_config_token | length > 0          # lookup('env', 'VAULT_TOKEN'): never stored
+    fail_msg: "export VAULT_TOKEN=<admin token from vault01> and run again (00b guide §6)"
+    quiet: true
+
+- name: The signing role must exist and allow the automation account
+  ansible.builtin.assert:
+    that:
+      - vault_config_sshrole.status == 200
+      - vault_config_ssh_principal in (vault_config_sshrole.json.data.allowed_users | split(','))
+    quiet: true
+
+- name: Attach the lab policy to the Semaphore AppRole (keeps its existing policies)
+  ansible.builtin.uri:
+    url: "{{ vault_config_addr }}/v1/auth/approle/role/{{ vault_config_approle }}"
+    method: POST
+    headers: "{{ vault_config_headers }}"
+    ca_path: "{{ vault_config_cacert }}"
+    body_format: json
+    body:
+      token_policies: "{{ vault_config_role.json.data.token_policies + [vault_config_policy_name] }}"
+    status_code: [200, 204]
+  when: vault_config_policy_name not in vault_config_role.json.data.token_policies
+  changed_when: true
+
+- name: Seed placeholder secrets (only if absent)
+  ansible.builtin.uri:
+    url: "{{ vault_config_addr }}/v1/{{ vault_config_kv_mount }}/data/{{ vault_config_kv_prefix }}/{{ item.key }}"
+    method: POST
+    body: { data: "{{ item.value }}", options: { cas: 0 } }   # cas=0: write only when the secret does not exist
+    status_code: [200, 204, 400]
+    # … headers, ca_path, loop, no_log as in the file
 ```
 
 Things to notice:
 
-- **TLS is built with `community.crypto`,** so it's idempotent. A re-run doesn't regenerate keys unless they're missing or expiring.
-- **`vault operator init` is guarded** by `sys/seal-status.initialized`. Running init twice would be catastrophic, and this guard makes it impossible from Ansible.
-- **`no_log: true`** on every task that touches keys or tokens. Without it they'd end up in `ansible.log`, AWX job output and ARA.
-- The **HTTP API via `uri`** is used for status (no CLI parsing), while the CLI is used for init and unseal, which have no clean idempotent API wrapper.
+- **Attach, don't replace.** Writing `token_policies` replaces the whole list. The role appends to what it read, so `semaphore-ssh` survives. A naive `token_policies: [spark-lab-read]` would silently break every Semaphore task's SSH signing.
+- **`cas: 0`** (check-and-set) makes the seed write fail with 400 when the secret already exists, so a re-run never overwrites your real NGC key with `REPLACE_ME`.
+- **The admin token comes from the environment** and lives only in that shell. Semaphore never holds it: its AppRole can sign and read, nothing else. That's why 08 runs from the MacBook and isn't in `site.yml`.
 
 ---
 
 ## 3. Hands-on
 
-```bash
-cd "01 Ansible/lab"
-ansible-playbook playbooks/08-vault.yml -K
-```
-
-Then work with it from the control node:
+All commands are against vault01. Run the `vault` CLI either **on vault01** (the 00a setup: `VAULT_ADDR`, `VAULT_CACERT=$HOME/vault-ca.crt`) or **on your MacBook** if you installed the CLI there:
 
 ```bash
-export VAULT_ADDR=https://192.168.0.100:8200
-export VAULT_CACERT=$PWD/.cache/spark-lab-ca.crt
-export VAULT_TOKEN=$(jq -r .root_token .cache/vault-init.json)     # lab only!
-
-vault status                         # Sealed false, Storage Type raft, HA Enabled true
-vault operator raft list-peers       # dgx-spark-01 leader
-vault secrets list                   # kv/, ssh-client-signer/ (from vault_config)
-vault audit list                     # file/
-vault kv put kv/spark-lab/ngc api_key=nvapi-xxxxxxxx
-vault kv get -field=api_key kv/spark-lab/ngc
-sudo tail -1 /var/log/vault/audit.log | jq '.request.path, .auth.display_name'   # on dgx-spark-01
+cd ~/technical-depth/"01 Ansible/lab"                                         # MacBook: the lab folder
+export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=$PWD/.cache/vault-ca.crt   # vault01 + its TLS cert (00b §2)
+vault login                                                                   # admin token (the root token in the lab)
 ```
 
-### 3.1 Prove the seal behaviour
+### 3.1 Inspect vault01
 
 ```bash
-ssh nvidia@192.168.0.100 sudo systemctl restart vault
-vault status | grep Sealed           # true: every secret read now returns 503
-ansible-playbook playbooks/08-vault.yml -K     # detects sealed=true and unseals; everything else reports ok
-vault status | grep Sealed           # false
+vault status                         # Initialized true, Sealed false, Total Shares 3, Threshold 2, Storage Type raft, HA Enabled true
+vault operator raft list-peers       # one peer: vault01, State leader, Voter true
+vault secrets list                   # ssh-client-signer/ (00a), kv/ once 08 has run, plus cubbyhole/, identity/, sys/
+vault auth list                      # approle/ and token/
+vault audit list                     # file/  file_path=/var/log/vault_audit.log
+vault policy list                    # default, semaphore-ssh, root; spark-lab-read once 08 has run
+vault read ssh-client-signer/roles/ansible | grep -E 'allowed_users|ttl'   # svc-ansible, 15m, 1h
 ```
 
-### 3.2 Backups: Raft snapshots
+### 3.2 Add the Spark lab's KV engine and policy (on your MacBook)
+
+This is [00b §6](00b-dgx-spark-semaphore-target.md); skip the first run if you already did it there.
+
+```bash
+export VAULT_TOKEN=$(vault print token)          # the playbook reads the admin token from the environment
+ansible-playbook playbooks/08-vault.yml          # localhost only: talks to vault01's API
+ansible-playbook playbooks/08-vault.yml          # run it AGAIN: every task ok, changed=0 (idempotent)
+vault kv put kv/spark-lab/ngc api_key=<your NGC API key>   # replaces the REPLACE_ME placeholder
+unset VAULT_TOKEN                                # no admin token left in the shell
+```
+
+**Verify:**
+
+```bash
+vault read -field=token_policies auth/approle/role/semaphore     # [semaphore-ssh spark-lab-read]
+vault policy read spark-lab-read                                 # the two kv/… paths from §1.6
+vault kv metadata get kv/spark-lab/ngc | grep current_version   # 2 (version 1 = the placeholder, 2 = your key)
+```
+
+Then set `vault_lab_secrets_enabled` to `true` in the Semaphore variable group `vault-approle` (00b §6), so play 1 reads the lab secrets.
+
+### 3.3 Prove the seal behaviour (vault01 + Semaphore)
+
+```bash
+sudo systemctl restart vault         # on vault01
+vault status | grep Sealed           # true
+curl -s --cacert $VAULT_CACERT $VAULT_ADDR/v1/sys/health -o /dev/null -w '%{http_code}\n'   # 503
+```
+
+In Semaphore (project `spark-lab`) run **00 Ping**: play 1 fails at *Log in to Vault with AppRole* (status 503, details hidden by `no_log`), and no host play runs. That's the whole lab stopping on one sealed Vault.
+
+```bash
+vault operator unseal                # on vault01: key share 1 of 2
+vault operator unseal                # key share 2 → Sealed false
+vault status | grep -E 'Sealed|HA Mode'   # Sealed false, HA Mode active
+```
+
+Run **00 Ping** again: `failed=0`. Lesson: the unseal keys are an operational dependency of every task, so who holds them and how fast they can respond is part of the design (§5).
+
+### 3.4 Read the audit log (on vault01)
+
+The `file` audit device writes one JSON line per request and one per response. Values are **HMAC'd** (salted SHA-256), so the log proves *that* something was read without revealing *what*.
+
+```bash
+# The last Semaphore runs: who, which path, which AppRole
+sudo jq -c 'select(.type=="response") | {time, path: .request.path, who: .auth.display_name, role: .auth.metadata.role_name}' \
+  /var/log/vault_audit.log | tail -6
+# expect: auth/approle/login, ssh-client-signer/sign/ansible and (if enabled) kv/data/spark-lab/ngc, role "semaphore"
+
+# The requested principal is HMAC'd; prove it was svc-ansible without un-hashing anything
+sudo jq -r 'select(.type=="request" and .request.path=="ssh-client-signer/sign/ansible") | .request.data.valid_principals' \
+  /var/log/vault_audit.log | tail -1                          # hmac-sha256:…
+vault write -field=hash sys/audit-hash/file input=svc-ansible   # the same hmac-sha256:… value
+```
+
+`sys/audit-hash/<device>` hashes an input with that device's salt. It's how an investigator checks "was this value used?" without the log ever storing it.
+
+### 3.5 Backups: Raft snapshots (on vault01)
+
+A snapshot is a consistent copy of the whole Raft store: secrets, policies, the SSH CA key, AppRoles, secret_id accessors.
+
+```bash
+mkdir -p ~/vault-backups && chmod 700 ~/vault-backups
+vault operator raft snapshot save ~/vault-backups/raft-$(date +%Y%m%d-%H%M).snap
+ls -l ~/vault-backups                 # a few hundred KB in the lab
+```
+
+**Restore drill** (do it once, right after a snapshot, and change nothing else on vault01 in between: a restore rolls back *everything* to the snapshot):
+
+```bash
+vault kv put kv/spark-lab/drill canary=before          # a throwaway secret
+vault operator raft snapshot save ~/vault-backups/drill.snap
+vault kv delete kv/spark-lab/drill                     # "lose" it
+vault operator raft snapshot restore -force ~/vault-backups/drill.snap
+vault kv get -field=canary kv/spark-lab/drill          # before
+vault kv metadata delete kv/spark-lab/drill            # clean up
+```
+
+A snapshot is useless without the unseal keys that were valid **when it was taken**, so store the two together and offline. Schedule snapshots on vault01 itself (cron or a systemd timer with a snapshot-only token). In an estate where Vault nodes are Ansible-managed hosts, the same thing is a task:
 
 ```yaml
-# add to your ops playbooks; runs on the vault host
+# ILLUSTRATIVE — for an inventory that contains the Vault nodes (vault01 is deliberately not in the lab's)
 - name: Raft snapshot
   ansible.builtin.command: >
     vault operator raft snapshot save /var/backups/vault/raft-{{ now(fmt='%Y%m%d-%H%M') }}.snap
   environment:
     VAULT_ADDR: "https://127.0.0.1:8200"
-    VAULT_TOKEN: "{{ vault_backup_token }}"   # a token with a snapshot-only policy
+    VAULT_TOKEN: "{{ vault_backup_token }}"   # a token whose policy allows only the snapshot endpoint
   changed_when: true
 ```
 
-Restore (disaster drill, do it once):
+### 3.6 Metrics (optional, on vault01)
+
+00a's `vault.hcl` has no `telemetry` block, so Prometheus-format metrics are off. Add it, and practise the restart → unseal cycle while you're at it:
 
 ```bash
-vault operator raft snapshot restore -force raft-20260929-0300.snap
+sudo tee -a /etc/vault.d/vault.hcl <<'EOF'
+telemetry {
+  prometheus_retention_time = "24h"   # keep metrics in memory for the Prometheus endpoint
+  disable_hostname          = true    # metric names without the hostname prefix
+}
+EOF
+sudo systemctl restart vault && vault operator unseal && vault operator unseal   # restart re-seals: two shares
+curl -s --cacert $VAULT_CACERT -H "X-Vault-Token: $(vault print token)" \
+  "$VAULT_ADDR/v1/sys/metrics?format=prometheus" | grep -E '^vault_core_unsealed|^vault_raft'
 ```
 
-A snapshot is useless without the unseal keys that were valid **when it was taken**, so store them together.
+Volume 09's Prometheus can scrape this with a token whose policy allows `read` on `sys/metrics`. Alert on `vault_core_unsealed == 0`: that alert means "no Semaphore task can start".
 
-### 3.3 Metrics
+### 3.7 Retire the root token for `08-vault.yml` (on vault01)
+
+`08-vault.yml` doesn't need root. Give it exactly what `vault_config` touches, as a short-lived token:
 
 ```bash
-curl -s --cacert $VAULT_CACERT -H "X-Vault-Token: $VAULT_TOKEN" \
-  "$VAULT_ADDR/v1/sys/metrics?format=prometheus" | grep -E '^vault_core_unsealed|^vault_raft_leader'
+vault policy write spark-lab-admin - <<'EOF'
+path "ssh-client-signer/roles/ansible"  { capabilities = ["read"] }                       # check the 00a signing role
+path "auth/approle/role/semaphore"      { capabilities = ["read", "create", "update"] }   # check + attach the policy
+path "sys/mounts"                       { capabilities = ["read"] }                       # list engines
+path "sys/mounts/kv"                    { capabilities = ["create", "update", "sudo"] }   # mount kv/ once
+path "sys/policies/acl/spark-lab-read"  { capabilities = ["read", "create", "update"] }   # the lab policy only
+path "kv/data/spark-lab/*"              { capabilities = ["create", "read", "update"] }   # seed + vault kv put
+path "kv/metadata/spark-lab/*"          { capabilities = ["list", "read"] }
+EOF
+vault token create -policy=spark-lab-admin -ttl=30m -field=token   # paste into export VAULT_TOKEN=… on the MacBook
 ```
 
-Add a Prometheus job in Volume 09 (use a token with a `sys/metrics` read policy). Alert on `vault_core_unsealed == 0`.
+Run `ansible-playbook playbooks/08-vault.yml` with that token: all `ok`. Try `vault policy write semaphore-ssh …` with it: `permission denied`. In production that token comes from a named admin's OIDC/LDAP login, and the root token is revoked (§5).
 
 ---
 
 ## 4. Integrations
 
-| Consumer | Mechanism | Volume |
+| Consumer | Mechanism | Where |
 |---|---|---|
-| Ansible playbooks | `community.hashi_vault` lookup with AppRole auth | 19 |
-| SSH | Vault SSH CA signs short-lived user certs; sshd trusts `TrustedUserCAKeys` | 19 (+ `08-vault.yml` play 3) |
-| AWX | "HashiCorp Vault Secret Lookup" credential type | 20 |
-| Kubernetes pods (root cluster or inside `dev-lab` / `llms`) | Vault Agent Injector or the External Secrets Operator; each vCluster has its own API server and ServiceAccount issuer, so it needs its own Kubernetes auth mount | 17 |
-| NGC / Docker | `container_runtime_ngc_api_key` from a Vault lookup | 08 |
+| Every Semaphore task (play 1) | AppRole `semaphore` login → `ssh-client-signer/sign/ansible` → 15-minute cert for `svc-ansible` | [`00-vault-cert.yml`](lab/playbooks/00-vault-cert.yml), 00a §8.3, Volume 19 |
+| sshd on the Sparks | `TrustedUserCAKeys /etc/ssh/trusted-user-ca-keys.pem` (vault01's CA public key) | [`00b-semaphore-target.yml`](lab/playbooks/00b-semaphore-target.yml), 00b §3 |
+| Lab secrets (NGC key) | play 1's token reads `kv/data/spark-lab/*` when `vault_lab_secrets_enabled=true` | [`03-containers.yml`](lab/playbooks/03-containers.yml), [`19-vault-integration.yml`](lab/playbooks/19-vault-integration.yml), Volumes 08, 19 |
+| ansible-vault password | `kv/spark-lab/ansible-vault`, read by [`tools/vault-pass.sh`](lab/tools/vault-pass.sh) | Volume 19 §3.4 |
+| AWX | "HashiCorp Vault Secret Lookup" and "HashiCorp Vault Signed SSH" credential types | Volume 20 |
+| Kubernetes pods (root cluster or inside `dev-lab` / `llms`) | Vault Agent Injector or the External Secrets Operator; each vCluster has its own API server and ServiceAccount issuer, so it needs its own Kubernetes auth mount on vault01 | Volume 17 |
 
 ## 5. Production hardening
 
-- [ ] **Unseal keys:** never on the control node in plain text. Use `vault operator init -pgp-keys=...` to encrypt each share to a different person's key, or use **auto-unseal**.
-- [ ] **Auto-unseal options:** a *transit* seal against a second small Vault (a good home-lab pattern: a Raspberry Pi or a VM), a cloud KMS, or an HSM via PKCS#11 (Enterprise).
-- [ ] **Revoke the root token** after bootstrap (`vault token revoke <root>`). Regenerate it with `vault operator generate-root` when needed.
-- [ ] **HA:** three Raft nodes (dgx-spark-01, dgx-spark-02 and a small third box) with `retry_join`. Two nodes can't reach quorum after one failure.
-- [ ] **Audit device redundancy:** if every audit device fails, Vault **stops serving requests**. Add a second (`socket` to Loki or syslog) and rotate the file with `logrotate` using `copytruncate` or a HUP.
-- [ ] **TLS:** replace the lab CA with your org CA; monitor certificate expiry (825 days here).
+| Area | vault01 today | Production |
+|---|---|---|
+| Unseal keys | 3 shares printed by `vault operator init` (00a §3.4), kept by you | `-pgp-keys` so each share is encrypted to a different person, or **auto-unseal**: a *transit* seal against a second small Vault, a cloud KMS, or an HSM via PKCS#11 (Enterprise) |
+| Root token | used for 00a and for `08-vault.yml` | §3.7 policy for 08; named admins via OIDC/LDAP with MFA; `vault token revoke <root>`; regenerate with `vault operator generate-root` for break-glass |
+| HA | single Raft node | 3 (or 5) Raft nodes **in the management plane** with `retry_join`, never on the Sparks; two nodes can't keep quorum after one failure |
+| Backups | manual snapshot (§3.5) | scheduled snapshots, copied off-host, restore tested quarterly |
+| Audit | one `file` device | **if every audit device fails, Vault stops serving requests**. Add a second (`socket` to Loki, or `syslog`), rotate the file with `logrotate` + HUP, forward to the SIEM, alert on root-token use and failed AppRole logins |
+| TLS | self-signed leaf, 365 days | internal PKI with automated renewal; monitor expiry (a lapsed cert stops every task just like a seal) |
+| Network | 8200 from the /24 | management VLAN: 8200 from sema01, admins and (later) the Sparks' pods only |
+
+More context: 00a §11.
 
 ## 6. Troubleshooting & diagnostics
 
 | Symptom | Diagnose | Fix |
 |---|---|---|
-| `x509: certificate signed by unknown authority` | `openssl s_client -connect 192.168.0.100:8200 -showcerts` | Set `VAULT_CACERT` to `.cache/spark-lab-ca.crt`, or install the CA on the client |
-| `x509: certificate is valid for dgx-spark-01, not 192.168.0.100` | Inspect the SANs: `openssl x509 -in /opt/vault/tls/vault.crt -noout -ext subjectAltName` | Add the name or IP to `subject_alt_name` and re-run (the cert is reissued) |
-| `503 Vault is sealed` after a reboot | `vault status` | Re-run `08-vault.yml` (it unseals) or `vault operator unseal` ×3 |
-| `Error initializing: Vault is already initialized` | — | Expected on re-runs. The role checks first; if you ran init by hand, recover the keys you got then |
-| Vault won't start: `failed to open raft storage: permission denied` | `journalctl -u vault -n 50`; `ls -ld /opt/vault/data` | `chown -R vault:vault /opt/vault` |
-| Vault won't start: `mlock` error | Config | `disable_mlock = true` is required for integrated storage on most setups |
+| `x509: certificate signed by unknown authority` | `openssl s_client -connect 192.168.0.211:8200 -showcerts </dev/null` | Point `VAULT_CACERT` at `~/vault-ca.crt` (vault01) or `lab/.cache/vault-ca.crt` (MacBook, 00b §2); in Semaphore check the `/etc/semaphore/vault-ca.crt` mount (00a §7.3) |
+| `x509: certificate is valid for 192.168.0.211, vault01, not …` | `openssl x509 -in ~/vault-ca.crt -noout -ext subjectAltName` | Use the IP or `vault01`; for another name, reissue the cert with that SAN (00a §3.2) and copy it everywhere again |
+| `503 Vault is sealed`; play 1 fails at the AppRole login | `vault status` | `vault operator unseal` twice with two different shares (§3.3) |
+| `08-vault.yml`: `export VAULT_TOKEN=…` assertion | `echo ${VAULT_TOKEN:+set}` | §3.2: export an admin token in that shell |
+| `08-vault.yml`: signing role does not allow svc-ansible / AppRole not found | `vault read ssh-client-signer/roles/ansible`; `vault read auth/approle/role/semaphore` | vault01 differs from 00a §4: fix it there; the playbook won't |
+| Vault won't start: `failed to open raft storage: permission denied` | `journalctl -u vault -n 50`; `ls -ld /opt/vault/data` | `sudo chown -R vault:vault /opt/vault/data` |
+| Vault won't start: `disable_mlock must be configured` | `vault.hcl` | `disable_mlock = true` (required with Raft) |
+| Vault won't start: `No leaf certificates detected` | `openssl x509 -in /opt/vault/tls/vault.crt -noout -ext basicConstraints` | The cert was made as a CA; regenerate with `CA:FALSE` (00a §3.2) |
 | Requests hang, and the audit log disk is full | `df -h /var/log`; journal shows `audit backend failed` | Free space; add a second audit device; logrotate |
-| `permission denied` on a path that should be allowed | `vault token capabilities <path>`; audit log `error` field | The policy path is wrong: KV v2 needs `kv/data/...` for read and `kv/metadata/...` for list |
-| `apt` can't find `vault=1.20.*` | `apt-cache policy vault` | The repo line must say `arch=arm64`; check that the release codename (`noble`) is published |
+| `permission denied` on a path that should be allowed | `vault token capabilities <token> <path>`; audit log `error` field | Wrong prefix (KV v2 needs `kv/data/…` / `kv/metadata/…`) or the policy isn't on the token: tokens issued before `08-vault.yml` attached `spark-lab-read` keep their old policies until they expire |
+| `prometheus is not enabled` from `sys/metrics` | `vault.hcl` | Add the `telemetry` block (§3.6) |
 
 ## 7. Validation
 
 ```bash
-vault status -format=json | jq '{sealed, initialized, storage_type, ha_enabled}'
+vault status -format=json | jq '{sealed, initialized, storage_type, ha_enabled, t, n}'   # false, true, raft, true, 2, 3
 vault operator raft autopilot state | head
 vault read sys/audit
+vault read -field=token_policies auth/approle/role/semaphore                              # [semaphore-ssh spark-lab-read]
+python3 tools/capstone_scorecard.py | grep 03B                                            # on the MacBook, in lab/
 ```
 
-- [ ] Sealed `false`, storage `raft`, one audit device.
-- [ ] A restart leaves Vault sealed, and one playbook run brings it back.
-- [ ] A snapshot restore drill succeeded on a throwaway secret.
-- [ ] `.cache/vault-init.json` is `chmod 600` and listed in `.gitignore`. You have a plan to get rid of it (§5).
+- [ ] Sealed `false`, storage `raft`, one audit device writing `/var/log/vault_audit.log`.
+- [ ] A restart leaves vault01 sealed and **00 Ping** fails at play 1; two unseal shares bring both back.
+- [ ] `08-vault.yml` runs twice with `changed=0` the second time, and with the §3.7 token instead of root.
+- [ ] A snapshot restore drill succeeded on a throwaway secret; the snapshot and the unseal keys are stored together, offline.
+- [ ] Scorecard check **03B/19** passes: `vault-ca.crt` is in the cache and no Vault init output, AppRole or token file is anywhere in it.

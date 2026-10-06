@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | A layered inventory: a static YAML baseline, **fact-driven groups** (`gpu_ready`, `driver_580`, `uma_pressure`), a **custom mDNS inventory plugin** that finds Sparks on the LAN, and NetBox as an optional source of truth |
-| **Hardware** | 1–2× DGX Spark; the control node on the same LAN for mDNS |
+| **Hardware** | 1–2× DGX Spark; for mDNS, a Linux machine on the Sparks' L2 segment (or a capture taken on a Spark, §3.2) |
 | **Time** | 90 min |
 | **Risk** | None. Inventory is read-only |
 
@@ -91,10 +91,12 @@ keyed_groups:
     key: ansible_architecture | default('unknown')
 ```
 
+Do this from your MacBook. Semaphore's inventory (00b §5.5) is the **file** `01 Ansible/lab/inventory/hosts.yml`, not the directory, so `zz-constructed.yml` isn't loaded there and these fact-driven groups don't exist in Semaphore tasks; the static and functional groups do. On the MacBook, `ansible.cfg` loads the whole `inventory/` directory and the fact cache is your own `.cache/facts`:
+
 ```bash
 cd "01 Ansible/lab"
-ansible-playbook playbooks/00-ping.yml -K        # populates .cache/facts/*
-ansible-playbook playbooks/01-baseline.yml -K --tags facts   # adds ansible_local.spark
+ansible-playbook playbooks/00-ping.yml -l dgx-spark-01,localhost -K                   # populates .cache/facts/*
+ansible-playbook playbooks/01-baseline.yml -l dgx-spark-01,localhost -K --tags facts  # adds ansible_local.spark
 ansible-inventory --graph
 ```
 
@@ -127,6 +129,8 @@ ansible-playbook playbooks/21-emergency-drain.yml -l 'slurm_compute[1]'
 | `a:!b` | exclusion |
 | `group[0]`, `group[0:2]` | index / slice |
 | `~spark-0[12]` | regex |
+
+These state-based patterns are a MacBook tool for the reason above. In Semaphore, limit by name or functional group, and keep `localhost` in the limit for play 1: `["--limit", "k8s_workers,localhost"]`.
 
 > **Stale facts = wrong groups.** Constructed groups are only as fresh as the cache (`fact_caching_timeout = 7200`). For safety-critical targeting (drain, upgrade), refresh first: `ansible spark -m setup -a filter=ansible_local`.
 
@@ -256,12 +260,16 @@ keyed_groups:
     prefix: seen_on
 ```
 
+Discovery is an interactive tool, not something Semaphore runs: the lab's Semaphore image has no Avahi, and multicast doesn't cross into a container's bridge network anyway. On a Linux machine on the Sparks' LAN:
+
 ```bash
-sudo apt install avahi-utils                         # control node
+sudo apt install avahi-utils                         # the machine you run the discovery from
 avahi-browse -p -r -t _ssh._tcp | grep '^='          # raw view
 ansible-inventory -i inventory-examples/spark.mdns.yml --graph
 ansible-inventory -i inventory -i inventory-examples/spark.mdns.yml --graph   # merged with static
 ```
+
+A MacBook has no `avahi-browse` (macOS uses `dns-sd`). Take the capture on a Spark instead (`ssh nvidia@192.168.0.100 'avahi-browse -p -r -t _ssh._tcp' > .cache/mdns.txt`, after `sudo apt install avahi-utils` there) and point the plugin at it with `from_file: .cache/mdns.txt`.
 
 The plugin accepts `from_file:` so you can unit-test it against a saved capture without any Sparks on the network. That's how it was validated for this lab:
 
@@ -367,6 +375,7 @@ NETBOX_TOKEN=... ansible-inventory -i inventory-examples/netbox.yml --graph
 
 | Consumer | Uses |
 |---|---|
+| Semaphore (00b) | Inventory type **File** → `01 Ansible/lab/inventory/hosts.yml` from the repository; its `group_vars/`, `host_vars/` come along, `zz-constructed.yml` does not |
 | AWX (Volume 02B/20) | Inventory source "Sourced from a Project" → `lab/inventory/`; NetBox has a native source type |
 | Drift (Volume 22) | `-l gpu_ready` keeps drift checks off nodes that are already known-bad |
 | Drain (Volume 24) | `-l uma_pressure` finds nodes to relieve first |
@@ -379,7 +388,7 @@ NETBOX_TOKEN=... ansible-inventory -i inventory-examples/netbox.yml --graph
 | `[WARNING]: Unable to parse ... as an inventory source` | `ansible-inventory -i <file> --list -vvv` | For custom plugins the file name must pass `verify_file` (`spark.mdns.yml`), and the plugin must be in `enable_plugins` |
 | Constructed groups empty | `ls .cache/facts/`; `jq .ansible_local .cache/facts/dgx-spark-01` | Gather facts first; check `fact_caching_timeout`; `strict: false` hides errors, so set `strict: true` temporarily |
 | Host appears twice with different names (IP vs name) | `ansible-inventory --list \| jq '._meta.hostvars \| keys'` | Keep one naming source. Use `compose: ansible_host` rather than naming hosts by IP |
-| mDNS finds nothing | `avahi-browse -a -t` on the control node | Different L2 segment, or multicast filtered (Wi-Fi APs, VLANs); `systemctl status avahi-daemon` on the Spark |
+| mDNS finds nothing | `avahi-browse -a -t` on the machine running discovery | Different L2 segment, or multicast filtered (Wi-Fi APs, VLANs); `systemctl status avahi-daemon` on the Spark |
 | Variables from `group_vars/spark.yml` missing for mDNS hosts | `ansible-inventory --host dgx-spark-01` | group_vars load relative to the inventory *source*. Pass both `-i inventory -i inventory-examples/...` so the directory's group_vars apply |
 | NetBox plugin: `ansible.utils.ipaddr` not found | — | `ansible-galaxy collection install ansible.utils`; `pip install netaddr` |
 

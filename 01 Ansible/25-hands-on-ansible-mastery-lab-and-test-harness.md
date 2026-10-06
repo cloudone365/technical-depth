@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **You will do** | Rebuild the whole lab from a clean state with one command, pass 25 hands-on challenges, survive a chaos drill (random fault injected, then found and fixed with your own tooling), and earn a scorecard computed from **evidence**, not self-assessment |
+| **You will do** | Rebuild the whole lab from a clean state with one Semaphore template (`site`), pass 25 hands-on challenges, survive a chaos drill (random fault injected, then found and fixed with your own tooling), and earn a scorecard computed from **evidence**, not self-assessment |
 | **Hardware** | 1× DGX Spark minimum; 2× for the fabric/NCCL/NFS challenges |
 | **Time** | A weekend |
 | **Risk** | You'll break things on purpose. Everything here is reversible with the lab's playbooks |
@@ -16,18 +16,18 @@
 ```mermaid
 flowchart TB
   subgraph BUILD["Build"]
-    SITE["playbooks/site.yml"]
+    SITE["Semaphore template site<br/>(playbooks/site.yml on sema01)"]
   end
   subgraph PROVE["Prove (three independent angles)"]
-    V["spark_validate role<br/>(Ansible, from the control node)<br/>→ .cache/validation/*.json"]
+    V["spark_validate role<br/>(template 30 Validate, from sema01)<br/>→ validation/*.json on the state volume"]
     I["tools/spark_invariants.py<br/>(ON the node, no Ansible)<br/>exit code = failed checks"]
     D["tools/drift-cycle.sh<br/>(check mode vs desired state)"]
   end
   subgraph BREAK["Break"]
-    C["playbooks/25-chaos.yml<br/>(sealed random fault)"]
+    C["template 25 Chaos<br/>(sealed random fault)"]
   end
   subgraph GRADE["Grade"]
-    S["tools/capstone_scorecard.py<br/>reads .cache/ evidence"]
+    S["tools/capstone_scorecard.py<br/>reads the state folder (SPARK_LAB_CACHE)"]
   end
   SITE --> V & I & D --> S
   C --> V & I & D
@@ -294,6 +294,25 @@ ssh nvidia@192.168.0.101 'python3 spark_invariants.py --peer 192.168.100.11'
 
 ### 1.3 Evidence-based scorecard
 
+The scorecard reads one state folder: `$SPARK_LAB_CACHE` if set, else `lab/.cache`. In this lab the evidence is split between two places:
+
+| Where | Evidence |
+|---|---|
+| sema01, `/opt/spark-lab/cache` (Semaphore's state volume) | `ansible.log`, `facts/`, `validation/`, `drift/` (if you run `drift-cycle.sh` there), `incidents/`, `firmware-inventory.json`, `kubeconfig-*.yaml` |
+| MacBook, `01 Ansible/lab/.cache` | `vault-ca.crt` (00b §2), `bench.csv` (Volume 02A runs from the MacBook), `drift/` from `drift-cycle.sh`, the fetched kubeconfig |
+
+So grade on sema01 against the state volume, after copying in the two MacBook-only files:
+
+```bash
+# MacBook
+scp .cache/bench.csv sema01:/tmp/ && ssh sema01 'sudo install -o 1001 -m 0600 /tmp/bench.csv /opt/spark-lab/cache/ && rm /tmp/bench.csv'
+# sema01 (vault-ca.crt is the copy next to the 00a compose file; the repository clone is from 00b §4)
+sudo install -o 1001 -m 0644 ~/semaphore/vault-ca.crt /opt/spark-lab/cache/vault-ca.crt
+sudo SPARK_LAB_CACHE=/opt/spark-lab/cache python3 ~/technical-depth/"01 Ansible/lab/tools/capstone_scorecard.py"
+```
+
+Check `03B/19` passes only when vault01's CA certificate is present **and** no file that looks like Vault init output, an AppRole secret or a token sits in the folder: the lab never writes a Vault token or an AppRole secret to disk, and the check keeps it that way.
+
 ```python
 # lab/tools/capstone_scorecard.py
 #!/usr/bin/env python3
@@ -310,7 +329,7 @@ import json
 import os
 import re
 
-CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".cache")
+CACHE = os.environ.get("SPARK_LAB_CACHE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".cache")
 
 
 def p(*parts):
@@ -412,12 +431,11 @@ def _():
     return ok, ", ".join(os.path.basename(x) for x in k) or "none"
 
 
-@check("03B/19", "Vault CA present; init material NOT world-readable")
+@check("03B/19", "vault01 CA copied; no Vault token or AppRole secret left in the cache")
 def _():
-    ca = os.path.exists(p("spark-lab-ca.crt"))
-    init = p("vault-init.json")
-    safe = (not os.path.exists(init)) or (os.stat(init).st_mode & 0o077) == 0
-    return ca and safe, f"ca={ca} init_safe={safe}"
+    ca = os.path.exists(p("vault-ca.crt"))
+    leaks = [os.path.basename(x) for x in glob.glob(p("*")) if re.search(r"(vault-init|approle|token)", os.path.basename(x))]
+    return ca and not leaks, f"ca={ca} leaks={leaks or 'none'}"
 
 
 def main():
@@ -453,12 +471,12 @@ Complete them in order. "Evidence" is what the scorecard or a reviewer checks.
 
 | # | Vol | Challenge | Evidence |
 |---|---|---|---|
-| 1 | 01A | Control node from scratch; `00-ping` shows aarch64/20 cores/GB10 facts | `.cache/facts/*` with `ansible_local.spark` |
+| 1 | 00a/00b, 01A | Management plane outside the Spark, MacBook toolchain from scratch, Spark onboarded as a target; template `00 Ping` shows aarch64/20 cores/GB10 facts | `facts/*` with `ansible_local.spark` on the state volume; play 1 ok in the task log |
 | 2 | 01B | Explode and execute an AnsiballZ payload on the Spark | Screenshot / notes |
-| 3 | 02A | 64-node fleet benchmark matrix | `.cache/bench.csv` ≥ 7 rows |
-| 4 | 02B | AWX running on the root cluster `spark-root` (or hybrid), configured as code | `awx-config.yml` applied; job history |
-| 5 | 03A | Target by state: `-l 'gpu_ready:&k8s_workers:!uma_pressure'` | `--list-hosts` output |
-| 6 | 03B | Vault up; restart → sealed → playbook unseals | `vault status` before/after |
+| 3 | 02A | 64-node fleet benchmark matrix (from the MacBook) | `bench.csv` ≥ 7 rows |
+| 4 | 02B | (Optional, the alternative controller) AWX running on the root cluster `spark-root` (or hybrid), configured as code, with read-only templates only | `awx-config.yml` applied; job history |
+| 5 | 03A | Target by state from the MacBook: `-l 'gpu_ready:&k8s_workers:!uma_pressure'` | `--list-hosts` output |
+| 6 | 03B | vault01 operations: restart vault01 → sealed → a Semaphore task fails cleanly at play 1 → unseal by hand (00a) → the same task passes | `vault status` on vault01 before/after; the failed and the passing task in Semaphore's history |
 | 7 | 04 | 7/7 Jinja katas + one kata on live data | CI green |
 | 8 | 05 | Collection built; arm64 EE built on the Spark | `cloudone-spark-*.tar.gz`, `docker image inspect` arm64 |
 | 9 | 06 | Wizard → bootstrap with dead-man switch (drill the rollback) | `journalctl -t bootstrap` |
@@ -474,21 +492,24 @@ Complete them in order. "Evidence" is what the scorecard or a reviewer checks.
 | 19 | 16 | kubeadm root cluster with Cilium (VXLAN) and MetalLB; both vClusters answer on `.111` / `.112`; reset and rebuild once with `99-reset-kubernetes.yml` | `ip -d link show cilium_vxlan`; `kubectl --context dev-lab get ns` and `kubectl --context llms get ns` |
 | 20 | 17 | 15 time-slices on one GB10, and the vCluster budget holds: with two 1-slice pods running in `dev-lab`, a third is accepted by the vCluster API but stays `Pending`, because the root quota in `vc-dev-lab` refuses the synced pod | `kubectl --context spark-root get node dgx-spark-01 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}'` = 15; `kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget` |
 | 21 | 18 | Slurm: confinement proven; 2-node NCCL job | job output |
-| 22 | 19 | Automation run with only AppRole creds; SSH via Vault certificate | Vault audit log |
+| 22 | 19 | Every build template runs with only the AppRole in Semaphore's variable group; SSH as `svc-ansible` via a 15-minute vault01 certificate; `19 Vault integration` reads `kv/spark-lab/ngc` without printing it | vault01 audit log (`auth/approle/login`, `sign/ansible`, the KV read) per task; `ED25519-CERT` lines in the Spark's sshd log; scorecard `03B/19` |
 | 23 | 21 | CI green; Molecule green on the Spark runner | Actions run |
-| 24 | 22–23 | Drift found (with auditd showing who), safe-healed, recheck clean | `.cache/drift/recheck-*.md`, `ausearch -k` |
-| 25 | 24–25 | Chaos drill solved (below) + incident bundle | `.cache/incidents/*.tgz`, sealed-fault reveal |
+| 24 | 22–23 | Drift found (with auditd showing who), safe-healed, recheck clean; `20 Drift check` scheduled nightly | `drift/recheck-*.md`, `ausearch -k`, the schedule's task history |
+| 25 | 24–25 | Chaos drill solved (below) + incident bundle; one drain done break-glass from the MacBook | `incidents/*.tgz`, sealed-fault reveal |
 
 ---
 
 ## 3. Chaos drill
 
+Run the Semaphore template `25 Chaos` with `--limit dgx-spark-02,localhost` (or `dgx-spark-01,localhost` with one Spark) and extra variable `chaos_fault: random`. Break-glass equivalent:
+
 ```bash
 cd "01 Ansible/lab"
-ansible-playbook playbooks/25-chaos.yml -l dgx-spark-02 -K -e chaos_fault=random
-# Now find it using ONLY: 30-validate, tools/drift-cycle.sh, Grafana/alerts, Loki, spark_invariants.py, 16-driver-audit
-# Then fix it with the normal playbooks and prove it with all three angles.
-base64 -d .cache/chaos-dgx-spark-02.sealed    # reveal AFTER you've fixed it
+ansible-playbook playbooks/25-chaos.yml -l dgx-spark-02,localhost -K -e chaos_fault=random
+# Now find it using ONLY: 30 Validate, tools/drift-cycle.sh, Grafana/alerts, Loki, spark_invariants.py, 16 Driver audit
+# Then fix it with the normal templates and prove it with all three angles.
+sudo base64 -d /opt/spark-lab/cache/chaos-dgx-spark-02.sealed   # on sema01; reveal AFTER you've fixed it
+#   (break-glass run: base64 -d .cache/chaos-dgx-spark-02.sealed on the MacBook)
 ```
 
 <details>
@@ -512,25 +533,31 @@ The lesson from fault 3 is why the lab ships a **staleness** alert, `SparkGPUMet
 
 ## 4. Full rebuild and final proof
 
+In Semaphore, one template after the other, each ending in `failed=0`:
+
+1. `site` (everything, idempotently), then `site` again: `changed=0` across the board.
+2. `30 Validate`, and on the MacBook `tools/drift-cycle.sh; echo "drift exit=$?"` → 0.
+3. Kubernetes from zero: `99 Reset Kubernetes` (extra variable `reset_confirm: RESET`), then `05 Kubernetes` → `06 GPU Operator` → `06b vClusters` bring back `spark-root`, `dev-lab` and `llms`; `tools/fetch-kubeconfig.sh sema01` on the MacBook.
+4. `19 Firmware inventory`.
+5. The scorecard on sema01 (§1.3): target 10/10.
+
+`site.yml` leaves out `00-bootstrap.yml`, `00b-semaphore-target.yml` and `08-vault.yml` on purpose: they run from the MacBook, before Semaphore can log in or with an admin token Semaphore must never hold. The break-glass form of the same proof:
+
 ```bash
 cd "01 Ansible/lab"
-ansible-playbook playbooks/site.yml -K                 # everything, idempotently
-ansible-playbook playbooks/site.yml -K                 # second run: changed=0 across the board
-ansible-playbook playbooks/30-validate.yml -K
-tools/drift-cycle.sh; echo "drift exit=$?"             # 0
-# Kubernetes from zero: reset, then the three stages bring back spark-root, dev-lab and llms
-ansible-playbook playbooks/99-reset-kubernetes.yml -K   # type RESET
-ansible-playbook playbooks/05-kubernetes.yml -K && ansible-playbook playbooks/06-gpu-operator.yml && ansible-playbook playbooks/06b-vclusters.yml
-ansible-playbook playbooks/19-firmware-inventory.yml -K
-python3 tools/capstone_scorecard.py                    # target 10/10
+ansible-playbook playbooks/site.yml -l dgx-spark-01,localhost -K                 # everything, idempotently
+ansible-playbook playbooks/site.yml -l dgx-spark-01,localhost -K                 # second run: changed=0 across the board
+ansible-playbook playbooks/30-validate.yml -l dgx-spark-01,localhost -K
+ansible-playbook playbooks/99-reset-kubernetes.yml -l dgx-spark-01,localhost -K   # type RESET
+ansible-playbook playbooks/05-kubernetes.yml -l dgx-spark-01,localhost -K && ansible-playbook playbooks/06-gpu-operator.yml && ansible-playbook playbooks/06b-vclusters.yml
 ```
 
 ## 5. Mastery criteria
 
-- [ ] **Rebuild:** a re-imaged Spark returns to validated state using only playbooks, in under an hour (Volume 06 drill).
+- [ ] **Rebuild:** a re-imaged Spark returns to validated state using only playbooks (00-bootstrap + 00b from the MacBook, then Semaphore templates), in under an hour (Volume 06 drill), while Semaphore, vault01 and their history are untouched.
 - [ ] **Idempotence:** `site.yml` second run is `changed=0`.
 - [ ] **Three-angle proof:** validate + invariants + drift all green.
-- [ ] **No long-lived secrets:** AppRole + SSH certificates; `.cache/vault-init.json` retired (auto-unseal or PGP shares).
+- [ ] **No long-lived secrets on the automation path:** Semaphore holds only the AppRole (its secret_id encrypted in the variable group); every task logs in with a 15-minute vault01 certificate; no Vault token or AppRole secret in any state folder (scorecard `03B/19`); vault01's unseal keys and root token kept off sema01 and the Sparks (00a §11).
 - [ ] **Chaos:** at least 5 of 7 faults found without the reveal.
 - [ ] **Scorecard:** 10/10.
 

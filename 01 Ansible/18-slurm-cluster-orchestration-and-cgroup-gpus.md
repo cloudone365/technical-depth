@@ -39,7 +39,7 @@ flowchart LR
 
 | File | Content | Notes |
 |---|---|---|
-| `/etc/munge/munge.key` | 1024 random bytes, generated **once** on the control node, `0400 munge:munge` | Identical everywhere or nothing authenticates |
+| `/etc/munge/munge.key` | 1024 random bytes, generated **once** on the controller (`munge.key` in the state folder: sema01's `/opt/spark-lab/cache`), `0400 munge:munge` | Identical everywhere or nothing authenticates |
 | `/etc/slurm/slurm.conf` | cluster, nodes, partition, plugins | **Identical** on all nodes (Slurm checks a hash) |
 | `/etc/slurm/gres.conf` | `Name=gpu Type=gb10 File=/dev/nvidia0` | Explicit `File=` works without NVML-enabled builds |
 | `/etc/slurm/cgroup.conf` | `CgroupPlugin=cgroup/v2`, `ConstrainDevices/Cores/RAMSpace=yes` | Jobs only see what they asked for |
@@ -273,7 +273,7 @@ exit 0
 
 Design choices:
 
-- **The munge key is generated with `creates:`** on the control node and never regenerated. A new key on a live cluster would lock out every node.
+- **The munge key is generated with `creates:`** on the controller and never regenerated. A new key on a live cluster would lock out every node. In this lab "the controller" is Semaphore, and the key lives on sema01's state volume. A break-glass run from the MacBook has its own `.cache/` **without** that key, so it would generate a new one and push it to every node. Before running `07-slurm.yml` from the MacBook, copy the key over (`ssh sema01 'cd ~/semaphore && docker compose exec -T semaphore cat /var/lib/spark-lab/cache/munge.key' > .cache/munge.key && chmod 600 .cache/munge.key`), and delete it again afterwards. Keeping a copy in vault01's `kv/spark-lab/` is the production answer.
 - **"Resume" is selective.** Nodes drained by `healthcheck:` or `maint:` reasons stay drained. Only nodes down because of the reconfiguration itself get resumed. An automation that blindly resumes everything would undo your own safety net.
 - **Same template, every node.** The role renders `slurm.conf` from inventory, so adding dgx-spark-03 is an inventory edit plus a run.
 
@@ -281,9 +281,9 @@ Design choices:
 
 ## 3. Hands-on
 
+Run the Semaphore template **`07 Slurm`** (break-glass: `ansible-playbook playbooks/07-slurm.yml -l dgx-spark-01,localhost -K`, after copying the munge key as above). Then on the Spark:
+
 ```bash
-cd "01 Ansible/lab"
-ansible-playbook playbooks/07-slurm.yml -K
 ssh nvidia@192.168.0.100
 sinfo -N -o "%N %T %G %m %c"          # dgx-spark-01 idle gpu:gb10:1 106496 20
 scontrol show node dgx-spark-01 | grep -E 'Gres|RealMemory|State'
@@ -349,12 +349,12 @@ sbatch ~/nccl-2node.sbatch
 sudo sed -i 's/-lt 4 ]/-lt 999 ]/' /usr/local/sbin/spark-slurm-healthcheck.sh
 sleep 130; sinfo -R          # REASON: healthcheck: UMA MemAvailable < 4 GiB
 
-# from the control node — re-running the role restores the script (template drift fixed)
-# and deliberately does NOT resume a node drained with a 'healthcheck:' reason
-ansible-playbook playbooks/07-slurm.yml -K
+# Semaphore: run the template 07 Slurm again — re-running the role restores the script
+# (template drift fixed) and deliberately does NOT resume a node drained with a 'healthcheck:' reason
+#   break-glass: ansible-playbook playbooks/07-slurm.yml -K
 sinfo -R                     # still drained: that's the point
 
-# a human (or an AWX job with approval) resumes it after checking
+# a human (or a separate, restricted Semaphore template) resumes it after checking
 sudo scontrol update NodeName=dgx-spark-02 State=RESUME
 ```
 
@@ -381,7 +381,7 @@ Does the job get OOM-killed at about 8 GiB, or does it sail past? The answer tel
 | Telemetry (Volume 09) | The health check uses the same signals as the alerts, so scheduler and monitoring agree |
 | Drain (Volume 24) | `node_drain` issues `scontrol … DRAIN reason="maint: …"`, and the Slurm role respects `maint:` |
 | NFS (Volume 15) | `/mnt/models` present on every compute node, so jobs are location-independent |
-| AWX | A job template "Slurm: resume node" with a survey (node name) gives operators a safe button |
+| Semaphore (or AWX) | A template "Slurm: resume node" with a survey (node name) gives operators a safe button, with the task history as the record |
 | Accounting (stretch) | Add `slurmdbd` + MariaDB for `sacct` history and fair-share |
 
 ## 5. Troubleshooting & diagnostics

@@ -33,7 +33,7 @@ On a DGX Spark, four things differ from a textbook cluster:
 
 ```mermaid
 flowchart TB
-  subgraph LAPTOP["Control node"]
+  subgraph LAPTOP["Your MacBook · kubectl client"]
     KC["kubectl<br/>contexts spark-root · dev-lab · llms"]
   end
   subgraph SPARK["dgx-spark-01 · 192.168.0.100 · DGX OS 7 (Ubuntu 24.04 arm64)"]

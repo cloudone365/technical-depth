@@ -38,11 +38,14 @@ One Spark can only be one *node*. But a datacenter has *several clusters*: a pla
 
 ## 2. HLD — the whole picture
 
-The full picture, with your MacBook as the terminal, is at the top of the [module README](README.md#the-lab-in-one-picture-three-clusters-nested-on-one-spark) ([SVG](diagrams/nested-lab-architecture.svg)). The diagram below adds the communication paths between the components.
+The full picture, with your MacBook as a client and sema01/vault01 running the automation outside the Spark, is at the top of the [module README](README.md#the-lab-in-one-picture-three-clusters-nested-on-one-spark) ([SVG](diagrams/nested-lab-architecture.svg)). The diagram below adds the communication paths between the components.
 
 ```mermaid
 flowchart TB
-  ADMIN(["your MacBook · kubectl<br/>one kubeconfig, 3 contexts"])
+  ADMIN(["your MacBook · kubectl<br/>one kubeconfig, 3 contexts<br/>(fetched from sema01)"])
+  SEMA["sema01 · Semaphore<br/>runs 05 · 06 · 06b<br/>certs from vault01"]
+  SEMA -. "kubeconfig (fetch-kubeconfig.sh)" .-> ADMIN
+  SEMA -- "helm · kubectl :6443" --> RAPI
   ADMIN -- "spark-root" --> RAPI
   ADMIN -- "dev-lab · 192.168.0.111" --> DAPI
   ADMIN -- "llms · 192.168.0.112" --> LAPI
@@ -95,6 +98,8 @@ flowchart TB
   class OBS obs
   class DPODS,LPODS,TOOLS tenant
   class ADMIN ext
+  classDef mgmt fill:#fff3e6,stroke:#fb8500,color:#000
+  class SEMA mgmt
   style SPARK fill:#e6f4f5,stroke:#0e7c86,stroke-width:2px
   style ROOT fill:#ffffff,stroke:#1f6feb
   style VCD fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
@@ -216,14 +221,16 @@ Inner quotas are ceilings, not reservations: `tenant-alpha` + `tenant-beta` + `l
 
 Either path gives the same result. The vCluster definitions live once, in the 02 lab; Ansible applies those files.
 
+**A — 01 Ansible, from Semaphore** (project `spark-lab` on sema01): run the templates `05 Kubernetes` → `06 GPU Operator` → `06b vClusters`, each to `failed=0`. They write the kubeconfig with all three contexts to sema01's state volume. Break-glass CLI from the MacBook: the same playbooks with `-l dgx-spark-01,localhost -K`.
+
 ```bash
-# A — 01 Ansible (root cluster, GPU Operator, then the vClusters)
+# after A (or after 05 + 06 for B) — on your MacBook
 cd "01 Ansible/lab"
-ansible-playbook playbooks/05-kubernetes.yml playbooks/06-gpu-operator.yml playbooks/06b-vclusters.yml
+tools/fetch-kubeconfig.sh sema01                 # copies kubeconfig-spark-lab.yaml from sema01 to .cache/
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
 
-# B — the 02 lab scripts (after 05 + 06)
-cd "02 Kubernetes/lab"
+# B — the 02 lab scripts from the MacBook (after 05 + 06); they merge dev-lab/llms into this local kubeconfig only
+cd "../../02 Kubernetes/lab"
 scripts/install-addons.sh storage
 scripts/install-addons.sh metrics-server
 scripts/install-addons.sh kps

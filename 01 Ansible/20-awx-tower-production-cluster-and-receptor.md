@@ -10,6 +10,19 @@
 | **Time** | 2–3 h |
 | **Risk** | Medium. Restores and upgrades touch the AWX database; rehearse them on purpose |
 
+> **AWX is the alternative controller here.** This lab's controller is **Semaphore on `sema01`** (192.168.0.210), with SSH certificates from **`vault01`** (192.168.0.211), both outside the Spark ([00a](00a-semaphore-vault-lab-guide.md), [00b](00b-dgx-spark-semaphore-target.md)). The management plane must survive `99-reset-kubernetes.yml` and a re-image of the Spark, and an AWX on `spark-root` doesn't (Volume 02B explains the trade-off). Learn AWX's production layer here because it's what large shops run; the concepts map one to one:
+>
+> | Semaphore in this lab | AWX equivalent (this volume) |
+> |---|---|
+> | Task template + CLI args `--limit dgx-spark-01,localhost` | Job template + `ask_limit_on_launch` |
+> | Variable group `vault-approle` (AppRole `semaphore`) + play 1 `00-vault-cert.yml` | *HashiCorp Vault Signed SSH* credential linked to a Machine credential (§2.2) |
+> | `vault_lab_secrets_enabled` → play 1 reads `kv/spark-lab/*` | *HashiCorp Vault Secret Lookup* credential |
+> | Schedule on `20 Drift check` | `awx.awx.schedule` |
+> | Template permissions (*Task Runner* role, separate `spark-danger` project) | RBAC + an **approval node** (§2.3), which Semaphore doesn't have |
+> | sema01 container + state volume `/opt/spark-lab/cache` | EE pods / execution nodes + PVCs |
+>
+> If you run both, keep AWX on its own AppRole and its own templates, and don't let both controllers change the same hosts.
+
 ---
 
 ## 1. Architecture
@@ -33,7 +46,9 @@ flowchart LR
   TASK -->|"receptor"| HOP -->|receptor| E1
   TASK -.->|"direct receptor peer (lab)"| E1
   E1 -->|SSH| T1[dgx-spark-01] & T2[dgx-spark-02]
-  E1 -->|HTTPS| V[(Vault)]
+  E1 -->|HTTPS :8200| V[("vault01 · 192.168.0.211")]
+  classDef mgmt fill:#fff3e6,stroke:#fb8500,color:#000
+  class V mgmt
 ```
 
 | Execution option | Where jobs run | Use it when |
@@ -60,7 +75,7 @@ flowchart LR
 ### 2.1 Make dgx-spark-02 an execution node
 
 1. In AWX: **Instances → Add** → hostname `dgx-spark-02`, node type **execution**, listener port `27199`, peers from control. Save and **download the install bundle** (`dgx-spark-02_install_bundle.tar.gz`).
-2. From the control node:
+2. From your MacBook (as `nvidia`, the bootstrap path):
 
 ```bash
 mkdir -p .cache/receptor && tar xzf ~/Downloads/dgx-spark-02_install_bundle.tar.gz -C .cache/receptor
@@ -85,6 +100,8 @@ The execution node runs your EE with **podman** under a dedicated user. Pre-pull
 
 ### 2.2 Vault-backed credentials (no stored secrets)
 
+The Vault is **vault01**, the same one Semaphore uses. Give AWX its **own** AppRole (for example `awx`, created on vault01 the way 00a §4 creates `semaphore`, with a policy that allows `ssh-client-signer/sign/ansible` and, if needed, `kv/data/spark-lab/*`), so you can revoke one controller without breaking the other. The targets need nothing new: `00b-semaphore-target.yml` already made them trust vault01's CA for `svc-ansible`.
+
 ```yaml
 # playbooks/awx-config.yml (continued from Volume 02B)
 - name: Vault lookup credential (AppRole)
@@ -93,9 +110,9 @@ The execution node runs your EE with **podman** under a dedicated user. Pre-pull
     organization: SparkLab
     credential_type: HashiCorp Vault Secret Lookup
     inputs:
-      url: https://192.168.0.100:8200
-      cacert: "{{ lookup('file', '.cache/spark-lab-ca.crt') }}"
-      role_id: "{{ lookup('env', 'ANSIBLE_HASHI_VAULT_ROLE_ID') }}"
+      url: https://192.168.0.211:8200                                  # vault01
+      cacert: "{{ lookup('file', '.cache/vault-ca.crt') }}"            # vault01's TLS certificate (00b §2)
+      role_id: "{{ lookup('env', 'ANSIBLE_HASHI_VAULT_ROLE_ID') }}"    # AWX's own AppRole, not 'semaphore'
       secret_id: "{{ lookup('env', 'ANSIBLE_HASHI_VAULT_SECRET_ID') }}"
       api_version: v2
   no_log: true
@@ -106,8 +123,8 @@ The execution node runs your EE with **podman** under a dedicated user. Pre-pull
     organization: SparkLab
     credential_type: HashiCorp Vault Signed SSH
     inputs:
-      url: https://192.168.0.100:8200
-      cacert: "{{ lookup('file', '.cache/spark-lab-ca.crt') }}"
+      url: https://192.168.0.211:8200
+      cacert: "{{ lookup('file', '.cache/vault-ca.crt') }}"
       role_id: "{{ lookup('env', 'ANSIBLE_HASHI_VAULT_ROLE_ID') }}"
       secret_id: "{{ lookup('env', 'ANSIBLE_HASHI_VAULT_SECRET_ID') }}"
   no_log: true
@@ -118,7 +135,7 @@ The execution node runs your EE with **podman** under a dedicated user. Pre-pull
     organization: SparkLab
     credential_type: Machine
     inputs:
-      username: nvidia
+      username: svc-ansible                                         # the automation account from 00b
       ssh_key_data: "{{ lookup('file', '~/.ssh/awx_ed25519') }}"   # private key; public cert comes from Vault
   no_log: true
 
@@ -131,10 +148,12 @@ The execution node runs your EE with **podman** under a dedicated user. Pre-pull
       public_key: "{{ lookup('file', '~/.ssh/awx_ed25519.pub') }}"
       secret_path: ssh-client-signer
       role: ansible
-      valid_principals: nvidia
+      valid_principals: svc-ansible                                 # the only principal role 'ansible' allows (00a §4)
 ```
 
-Each job now gets a freshly signed, 30-minute certificate. AWX stores **no** usable long-term access on its own: the private key alone won't pass sshd without a valid certificate.
+Each job now gets a freshly signed certificate with the signing role's lifetime (15 minutes on vault01). AWX stores **no** usable long-term access on its own: the private key alone won't pass sshd without a valid certificate.
+
+Two lab details. `group_vars/spark.yml` picks `ansible_user` from `vault_role_id`, which AWX doesn't define, so it would say `nvidia` and override the credential's username: give the job templates the extra variable `ansible_user: svc-ansible`. And play 1 (`00-vault-cert.yml`) skips itself for the same reason, so it never competes with the credential plugin.
 
 ### 2.3 Workflow: drift → approval → remediate → validate
 
@@ -224,7 +243,8 @@ Useful series: `awx_pending_jobs_total`, `awx_running_jobs_total`, `awx_instance
 |---|---|---|
 | Execution node stuck **Unavailable** | `receptorctl status` on both ends; `journalctl -u receptor` | TCP 27199 blocked; certificate CN mismatch; the node hostname must match what AWX expects |
 | Jobs on the execution node fail pulling the EE | `podman pull <ee>` as the receptor user | Registry auth; arm64 image missing → build `spark-ee` (Volume 05) |
-| `Credential lookup failed: permission denied` | Vault audit log for the AppRole | Policy lacks `ssh-client-signer/sign/ansible` or `kv/data/...` |
+| `Credential lookup failed: permission denied` | vault01's audit log (`/var/log/vault_audit.log`) for AWX's AppRole | Policy lacks `ssh-client-signer/sign/ansible` or `kv/data/...` |
+| `Permission denied (publickey)` although the lookup worked | The Spark's `journalctl -u ssh`: certificate principal | `valid_principals` must be `svc-ansible`, and the job must log in as `svc-ansible` (extra variable `ansible_user`, §2.2) |
 | Workflow never reaches approval | Workflow visualizer: drift node edge type | The drift job must *fail* on drift; wire it to `failure_nodes` |
 | Restore works, but credentials show errors | `awx-secret-key` in the restored namespace | The backup was restored without the matching secret key |
 | `awx_instance_remaining_capacity` 0, jobs pending | Instance page | Too many forks per job for the instance's capacity; add a node or adjust capacity |
@@ -232,7 +252,7 @@ Useful series: `awx_pending_jobs_total`, `awx_running_jobs_total`, `awx_instance
 ## 5. Validation
 
 - [ ] dgx-spark-02 shows **Ready** as an execution node and runs `spark · validate`.
-- [ ] A job's machine credential uses a Vault-signed cert (job output shows `Signed SSH` lookup; the Spark's `/var/log/auth.log` shows `Accepted publickey ... ID ... (serial N) CA`).
+- [ ] A job's machine credential uses a vault01-signed cert (job output shows `Signed SSH` lookup; the Spark's `/var/log/auth.log` shows `Accepted publickey for svc-ansible ... ED25519-CERT ID ... (serial N) CA`).
 - [ ] The drift workflow pauses for approval when you introduce drift.
 - [ ] Restore drill: credentials decrypt in the restored instance.
 - [ ] AWX metrics visible in Prometheus.

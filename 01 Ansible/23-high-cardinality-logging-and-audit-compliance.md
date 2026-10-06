@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **You will build** | Four linked audit layers: **auditd** on every Spark (changes to sudoers, sshd, netplan, docker, containerd, `/etc/kubernetes`, kubelet config, slurm, vault; every root command), **journald → Grafana Alloy → Loki** for searchable logs (including NVRM/Xid kernel lines), **ARA** recording every playbook run task by task, and the **Vault audit log** for secret access, all viewable in the Grafana from Volume 09 |
+| **You will build** | Four linked audit layers on the Sparks: **auditd** (changes to sudoers, sshd and the trusted SSH CA, netplan, docker, containerd, `/etc/kubernetes`, kubelet config, slurm; every root command), **journald → Grafana Alloy → Loki** for searchable logs (including NVRM/Xid kernel lines and sshd's `ED25519-CERT` logins), **ARA** recording playbook runs task by task, and the Kubernetes API audit log. Plus the management plane's own records outside the Spark: **Semaphore's task history** on sema01 (who ran which template, when, with what result) and **vault01's audit log** (every AppRole login, certificate signature and secret read) |
 | **Hardware** | 1–2× DGX Spark (Loki + ARA on the monitoring host) |
 | **Clusters** | `spark-root` (its API-server audit log, §4.5) and `dev-lab` (to generate a tenant write) |
 | **Time** | 60 min |
@@ -19,9 +19,11 @@
 | "Which playbook run changed `/etc/sysctl.d/90-spark.conf` on dgx-spark-02 last Tuesday, and with what diff?" | **ARA** (+ `ansible.log`) |
 | "Did someone edit netplan by hand outside Ansible?" | **auditd** key `network` + drift (Volume 22) |
 | "What did the kernel say about the GPU right before the job died?" | **Loki**: `{host="dgx-spark-02"} \|= "NVRM: Xid"` |
-| "Who read the NGC key?" | **Vault audit log** (Volume 03B) |
+| "Who read the NGC key?" | **vault01's audit log**, `/var/log/vault_audit.log` on vault01 (00a §3.5): the `kv/data/spark-lab/ngc` read by the `semaphore` AppRole token, or by an admin |
+| "Who ran `21 Emergency drain` on Saturday, with which extra variables, and did it succeed?" | **Semaphore task history** on sema01 (task log, user, start/end, status), kept in its PostgreSQL |
+| "Which credential did that run log in with?" | **sshd** on the Spark: `Accepted publickey for svc-ansible … ED25519-CERT ID vault-… serial N CA …`, matched by time to the `sign/ansible` entry in vault01's audit log |
 | "Who raised the `vc-llms` GPU quota, and what did the request body say?" | **Kubernetes API audit log** on dgx-spark-01, `/var/log/kubernetes/audit/audit.log` (written by the root kube-apiserver; §4.5) |
-| "Who launched the remediation job and who approved it?" | **AWX** activity stream + job history (Volume 20) |
+| "Who launched the remediation job and who approved it?" | **Semaphore** task history (this lab); **AWX** activity stream + job history if you run AWX (Volume 20) |
 
 ## 2. Architecture
 
@@ -30,7 +32,7 @@ flowchart LR
   subgraph NODES["Every Spark"]
     AU["auditd<br/>/etc/audit/rules.d/60-spark.rules<br/>→ /var/log/audit/audit.log"] --> AL
     K["kernel (NVRM, mlx5)"] --> J
-    SVC["sshd · sudo · kubelet · containerd · slurmd · docker · vault"] --> J
+    SVC["sshd (incl. ED25519-CERT logins) · sudo · kubelet · containerd · slurmd · docker"] --> J
     KA["kube-apiserver (static pod, dgx-spark-01)<br/>→ /var/log/kubernetes/audit/audit.log"] -.->|"not shipped by default (§4.5)"| AL
     J["journald<br/>(persistent, 4G cap)"] --> AL["Grafana Alloy<br/>loki.source.journal + loki.source.file"]
   end
@@ -38,13 +40,21 @@ flowchart LR
     LOKI["Loki :3100<br/>tsdb v13, 30d retention"]
     ARA["ARA API :8000<br/>sqlite"]
     GRAF["Grafana :3000<br/>datasources: Prometheus + Loki"]
-    VA["Vault audit.log"] --> J2["journald → Alloy"]
+  end
+  subgraph MP["Management plane (outside the Spark)"]
+    CN["sema01: Semaphore container<br/>ansible-playbook · task history (PostgreSQL)"]
+    VA["vault01: /var/log/vault_audit.log<br/>AppRole login · sign/ansible · kv reads"]
   end
   AL -->|push| LOKI
-  CN["Control node / AWX<br/>ansible-playbook"] -->|"ara callback"| ARA
-  CN -->|"log_path"| LOG[".cache/ansible.log"]
+  CN -->|"ara callback (optional, §4.2)"| ARA
+  CN -->|"log_path"| LOG["ansible.log on the state volume"]
+  CN -. "play 1" .-> VA
   LOKI --> GRAF
+  classDef mgmt fill:#fff3e6,stroke:#fb8500,color:#000
+  class CN,VA mgmt
 ```
+
+vault01's audit file and Semaphore's history stay on their own machines: the lab ships neither to Loki. That's deliberate for a lab (the management plane doesn't depend on the Spark it manages), and the first thing a production design would change: forward both to a SIEM (00a §11).
 
 | Component | Image / package | Config |
 |---|---|---|
@@ -77,7 +87,6 @@ flowchart LR
 -w /etc/containerd/ -p wa -k container-runtime
 -w /etc/slurm/ -p wa -k slurm
 -w /etc/munge/munge.key -p rwa -k slurm-secret
--w /etc/vault.d/ -p wa -k vault
 -w /etc/sysctl.d/ -p wa -k kernel-tuning
 -w /etc/modprobe.d/ -p wa -k kernel-tuning
 -w /etc/default/grub.d/ -p wa -k boot
@@ -92,7 +101,7 @@ flowchart LR
 # lab/playbooks/templates/alloy.river.j2
 // {{ ansible_managed }}
 // Grafana Alloy on {{ inventory_hostname }}: ship the systemd journal (kernel NVRM/Xid,
-// sshd, sudo, kubelet, containerd, slurmd, docker, vault, auditd via journald) to Loki.
+// sshd, sudo, kubelet, containerd, slurmd, docker, auditd via journald) to Loki.
 loki.relabel "journal" {
   forward_to = []
   rule {
@@ -178,6 +187,9 @@ compactor:
 #   * Loki on the monitoring host + Grafana Alloy on every Spark shipping the journal
 #   * Loki datasource in the Volume 09 Grafana
 #   * ARA API server recording every ansible-playbook run
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: Auditd on every Spark
   hosts: spark
   become: true
@@ -367,25 +379,43 @@ compactor:
 
 ### 4.1 Deploy
 
+Run the Semaphore template **`23 Logging audit`** (break-glass: `ansible-playbook playbooks/23-logging-audit.yml -l dgx-spark-01,localhost -K`), then:
+
 ```bash
-cd "01 Ansible/lab"
-ansible-playbook playbooks/23-logging-audit.yml -K
 curl -s http://192.168.0.100:3100/ready                        # ready
 curl -s http://192.168.0.100:8000/api/v1/ | jq 'keys'           # ARA API
 ```
 
 ### 4.2 Record every playbook run in ARA
 
+The ARA callback runs on the **controller**. The lab's Semaphore image doesn't include it, so start on the MacBook:
+
 ```bash
-pip install "ara>=1.7"                                       # client side, on the control node
+pip install "ara>=1.7"                                       # client side, on the controller (here: the MacBook)
 export ANSIBLE_CALLBACK_PLUGINS=$(python3 -m ara.setup.callback_plugins)
 export ARA_API_CLIENT=http ARA_API_SERVER=http://192.168.0.100:8000
-ansible-playbook playbooks/01-baseline.yml -K
+ansible-playbook playbooks/01-baseline.yml -l dgx-spark-01,localhost -K
 ara playbook list --limit 5
 ara result list --playbook <id> --changed      # every changed task, with the diff
 ```
 
-To make it permanent, put the three variables in your shell profile or in the AWX job template environment (Volume 20). For AWX, install `ara` into the EE (Volume 05).
+To record the **Semaphore** runs too, add `ara` to [`semaphore/requirements-semaphore.txt`](lab/semaphore/requirements-semaphore.txt), rebuild the image (00b §4), and put the three variables in the variable group's environment. Semaphore's task history already answers "who ran what, when"; ARA adds per-task results and diffs you can query. For AWX, install `ara` into the EE (Volume 05) and set the variables in the job template environment (Volume 20).
+
+### 4.2b The management-plane trail: Semaphore, vault01, sshd
+
+One template run leaves three matching records. Run `00 Ping` in Semaphore, then:
+
+```bash
+# sema01: the task, who ran it, its status (also in the UI: project spark-lab → Task history)
+cd ~/semaphore && docker compose exec semaphore ls /var/lib/spark-lab/cache   # ansible.log grows with every task
+# vault01: the AppRole login and the signature for that task
+sudo grep -E 'auth/approle/login|sign/ansible' /var/log/vault_audit.log | tail -2 | jq -c '{time, path: .request.path, type}'
+# dgx-spark-01: the login with that certificate, then the sudo commands
+sudo journalctl -u ssh --since "10 minutes ago" | grep 'ED25519-CERT'
+sudo grep svc-ansible /var/log/auth.log | grep COMMAND | tail -3
+```
+
+Line the three up by time: the Semaphore task's start, the `sign/ansible` request a second later, the `ED25519-CERT` login right after (Vault's audit log HMACs response values such as the serial by default, so the timestamp and the request path are the join keys). That's how you show a change on the Spark came from a specific Semaphore task and not from a human with a copied key: a copied key without a fresh certificate can't log in as `svc-ansible` at all.
 
 ### 4.3 Queries worth saving in Grafana (Explore → Loki)
 
@@ -395,7 +425,7 @@ To make it permanent, put the three variables in your shell profile or in the AW
 | CX-7 link flaps | `{transport="kernel"} \|~ "mlx5_core.*(link down\|Link up\|module)"` |
 | sudo commands on dgx-spark-02 | `{host="dgx-spark-02", ident="sudo"}` |
 | Config file watches that fired (auditd log file) | `{job="auditd"} \|~ "key=\"(network\|sshd\|priv\|container-runtime)\""` |
-| SSH logins using Vault certificates | `{unit="ssh.service"} \|= "CA ED25519"` |
+| SSH logins using vault01 certificates | `{unit="ssh.service"} \|= "ED25519-CERT"` |
 | kubelet / containerd errors | `{unit=~"kubelet.service\|containerd.service", level="err"}` |
 | Who touched Kubernetes host config (auditd) | `{job="auditd"} \|= "key=\"kubernetes\""` |
 | Rate of Xids per host (graph) | `sum by (host) (count_over_time({transport="kernel"} \|= "NVRM: Xid" [5m]))` |
@@ -407,7 +437,8 @@ ssh nvidia@192.168.0.101 'sudo sed -i "s/mtu: 9000/mtu: 1500/" /etc/netplan/40-c
 ssh nvidia@192.168.0.101 'sudo ausearch -k network -i --start recent | tail -20'
 # → type=SYSCALL ... comm="sed" ... auid=nvidia ... key="network"
 tools/drift-cycle.sh      # drift reports the fabric template (and doesn't auto-heal it)
-ansible-playbook playbooks/02-fabric.yml -K -l dgx-spark-02    # a human puts it back
+# a human puts it back: Semaphore template 02 Fabric with --limit dgx-spark-02,localhost
+#   (break-glass: ansible-playbook playbooks/02-fabric.yml -K -l dgx-spark-02,localhost)
 ```
 
 ### 4.5 The Kubernetes API audit log: root vs vCluster
@@ -454,6 +485,8 @@ The 4-layer stack above does **not** ship this file yet: Alloy tails `/var/log/a
 | Alerting (Volume 09) | Loki ruler or Grafana alert on the Xid-rate query, complementing the Prometheus `SparkGPUXid` alert |
 | Drift (Volume 22) | The auditd `key` explains *who/what* caused the drift the playbook found |
 | Drain (Volume 24) | The incident bundle captures local logs; Loki keeps them after the node is re-imaged |
+| Semaphore (sema01) | Task history in its database; `ansible.log` on the state volume. Neither is shipped to Loki by default |
+| vault01 | `/var/log/vault_audit.log`; forward it to a SIEM in production (00a §11) |
 | AWX (Volume 20) | External logging → Loki (`Settings → Logging`), so job events sit next to host logs |
 
 ## 7. Troubleshooting & diagnostics
@@ -471,6 +504,7 @@ The 4-layer stack above does **not** ship this file yet: Alloy tails `/var/log/a
 
 - [ ] Grafana Explore shows journal logs from every Spark, filterable by `host`/`unit`.
 - [ ] The Xid query returns results after a test (or at least runs clean).
+- [ ] For one Semaphore task you can show all three records: the task in Semaphore's history, the `sign/ansible` entry in vault01's audit log, and the `ED25519-CERT` login on the Spark.
 - [ ] `ara playbook list` shows your last runs, with per-task changed results.
 - [ ] A manual netplan edit is visible in `ausearch -k network` **and** in the drift report.
 - [ ] A change to the `vc-llms` ResourceQuota is in `/var/log/kubernetes/audit/audit.log` with the user who made it, and a tenant write in `dev-lab` shows up there as the syncer's ServiceAccount.

@@ -278,6 +278,8 @@ sudo ./svc.sh install && sudo ./svc.sh start
 
 In the repo's branch protection, require the `ansible-lab / static` check. Molecule stays manual (it needs the Spark to be online), and hardware validation is part of the release checklist (Volume 25).
 
+In this lab the gate matters more than usual: Semaphore's repository points at branch `main` (00b §5.4) and clones it at the start of **every** task. Whatever merges to `main` is what the next template run executes against the Sparks. So branch protection is the change control for the controller: a red static job never reaches sema01.
+
 ---
 
 ### 4.3 What the Kubernetes roles get from CI
@@ -289,6 +291,21 @@ The Kubernetes stage (`kubeadm_cluster`, `cilium`, `metallb`, `gpu_operator`, `v
 | Lint + `--syntax-check` | `ansible-lab` workflow (`tests/run-local-checks.sh`) | `05-kubernetes.yml`, `06-gpu-operator.yml`, `06b-vclusters.yml`, `99-reset-kubernetes.yml` parse; production-profile lint on every role |
 | Same manifests on kind | `.github/workflows/k8s-lab-ci.yml`, which also triggers on `01 Ansible/lab/roles/**` | A kind cluster renamed to context `spark-root` (fake GB10 node) runs the root budgets, both vClusters from `vclusters/*.yaml`, and the tenant checks: the exact files the `vclusters` role applies |
 | Hardware | `playbooks/30-validate.yml` on the Spark (Volume 25) | `k8s_ready_gpu`: the node is `Ready` and advertises `nvidia.com/gpu` > 0 |
+
+### 4.4 What the Semaphore path gets from CI
+
+The management-plane files live in the same `lab/` tree, so the same workflow covers them. No CI job talks to vault01 or sema01, and no AppRole secret is ever stored in GitHub.
+
+| File | Layer | What it proves |
+|---|---|---|
+| `playbooks/00-vault-cert.yml` (play 1) | `ansible-lint` (production) + `--syntax-check` | `no_log` on every task that touches the token, certificate or secrets; `check_mode: false` parses; imported cleanly by every playbook that SSHes to the Sparks |
+| `playbooks/00b-semaphore-target.yml` | `ansible-lint` + `--syntax-check` | lint-clean; the sudoers drop-in is written with `validate: visudo -cf %s` and the sshd drop-in with `sshd -t`, so a bad file never lands |
+| `playbooks/08-vault.yml`, `roles/vault_config` | `ansible-lint` + `--syntax-check` | `localhost`-only play; HTTP API calls with `no_log` |
+| `semaphore/docker-compose.override.yml` | `yamllint -s .` | valid YAML that Compose can merge with the 00a file |
+| `semaphore/Dockerfile` | not linted yet | it carries a `# hadolint ignore=DL3006` marker, so adding `hadolint` to the static job is a one-line exercise |
+| `tools/fetch-kubeconfig.sh`, `tools/vault-ssh-cert.sh` | `bash -n tools/*.sh` | they parse; their behaviour is proven by the 00b Verify steps |
+
+Neither login case of `group_vars/spark.yml` (svc-ansible with `vault_role_id`, nvidia without) is exercised by CI: the syntax check doesn't render inventory variables. The Semaphore case only runs for real on sema01. Its test is the template `00 Ping` (00b §5.6): run it after every change to play 1, `group_vars/spark.yml` or the Semaphore image.
 
 ## 5. Troubleshooting & diagnostics
 

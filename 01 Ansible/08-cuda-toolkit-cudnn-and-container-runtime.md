@@ -224,15 +224,19 @@ Design choices:
 
 ### 3.1 Converge the runtime
 
+Your NGC key lives in **vault01** at `kv/spark-lab/ngc` ([00b §6](00b-dgx-spark-semaphore-target.md): `08-vault.yml` from the MacBook, then `vault kv put kv/spark-lab/ngc api_key=nvapi-…`). The playbook never sees it in the repository or on a command line:
+
+- **Semaphore (normal):** run the template **`03 Containers`**. With `vault_lab_secrets_enabled: true` in the variable group, play 1 (`00-vault-cert.yml`) reads `kv/spark-lab/ngc` with its AppRole token (policy `spark-lab-read`) into `hostvars['localhost'].vault_lab_secrets`, and `03-containers.yml` passes it to `container_runtime_ngc_api_key` under `no_log`. The task log shows the NGC login task, never the key.
+- **Break-glass (MacBook):** there's no AppRole on the MacBook, so play 1 is skipped. Pass the key yourself, read with your own vault01 login:
+
 ```bash
 cd "01 Ansible/lab"
-# Put your NGC key in Vault once (Volume 03B/19)
-vault kv put kv/spark-lab/ngc api_key=nvapi-XXXXXXXX
-ansible-playbook playbooks/03-containers.yml -K \
+export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=$PWD/.cache/vault-ca.crt   # vault login first
+ansible-playbook playbooks/03-containers.yml -l dgx-spark-01,localhost -K \
   -e ngc_api_key="$(vault kv get -field=api_key kv/spark-lab/ngc)"
 ```
 
-(Volume 19 replaces the `-e` with an in-playbook Vault lookup.)
+`ngc_api_key` wins when it's set; otherwise the playbook falls back to the vault01 value, and with neither (or the placeholder `REPLACE_ME`) it skips the NGC login. Volume 19 explains the play 1 pattern.
 
 Check the result:
 
@@ -300,6 +304,9 @@ int main() {
 # CUDA end-to-end on the host AND in a container:
 #   1. nvcc compiles for sm_121 and the binary runs (host toolkit OK)
 #   2. an NGC PyTorch container sees the GPU and runs a bf16 matmul (runtime + toolkit + CDI OK)
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: CUDA toolchain and container smoke tests
   hosts: spark
   become: true
@@ -378,8 +385,10 @@ int main() {
           - "{{ cuda_smoke_torch.stdout | default('pytorch test skipped') }}"
 ```
 
+Semaphore template `18 CUDA smoke`, or break-glass:
+
 ```bash
-ansible-playbook playbooks/18-cuda-smoke.yml -K
+ansible-playbook playbooks/18-cuda-smoke.yml -l dgx-spark-01,localhost -K
 ```
 
 What to look for in the output:
@@ -423,7 +432,7 @@ Automate it with a weekly systemd timer from Ansible (exercise), but **never** p
 
 | System | Integration point |
 |---|---|
-| Vault (Volume 19) | `container_runtime_ngc_api_key` from `community.hashi_vault` lookup; `no_log` on login |
+| Vault (vault01, Volume 19) | `container_runtime_ngc_api_key` from `kv/spark-lab/ngc`, read by play 1 with Semaphore's AppRole token (or `-e ngc_api_key` on the break-glass path); `no_log` on login. The `community.hashi_vault` lookup in the defaults comment is the alternative for controllers without play 1 |
 | Kubernetes (Volume 16) | The `kubeadm_cluster` role reuses this containerd: it enables the CRI plugin (Docker's stock config disables it), sets `SystemdCgroup = true`, and runs `nvidia-ctk runtime configure --runtime=containerd --set-as-default`. `daemon.json` doesn't affect Kubernetes, but a `systemctl restart containerd` restarts the runtime under **both** Docker and every pod (root and vCluster) |
 | GPU Operator (Volume 17) | `toolkit.enabled=false`: the host toolkit from this volume is the one used |
 | Slurm (Volume 18) | Jobs run containers via `srun docker run --gpus …` or enroot/pyxis (a plugin that runs container images inside Slurm jobs) |
@@ -445,8 +454,9 @@ Automate it with a weekly systemd timer from Ansible (exercise), but **never** p
 ## 6. Validation
 
 ```bash
-ansible spark -b -m command -a "docker run --rm --device nvidia.com/gpu=all nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04 nvidia-smi -L"
-ansible-playbook playbooks/18-cuda-smoke.yml -K
+# MacBook (as nvidia); in Semaphore, run 18 CUDA smoke instead of the second line
+ansible dgx-spark-01 -b -K -m command -a "docker run --rm --device nvidia.com/gpu=all nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04 nvidia-smi -L"
+ansible-playbook playbooks/18-cuda-smoke.yml -l dgx-spark-01,localhost -K
 ```
 
 - [ ] Both `--gpus` and CDI smoke tests pass.

@@ -174,7 +174,7 @@ Exercise: how many optical transceivers does the 127-node design need, if every 
 ### 5.3 (2 Sparks) Baseline and counters
 
 ```bash
-cd "../../01 Ansible/lab" && ansible-playbook playbooks/11-rdma-perftest.yml     # host RDMA baseline
+# host RDMA baseline: Semaphore template for playbooks/11-rdma-perftest.yml (two Sparks, so no --limit)
 ssh nvidia@192.168.0.100 'ethtool -S enp1s0f1np1 | grep -E "crc|symbol|discard|pause|cnp|link_down" | grep -v ": 0$"'
 ```
 

@@ -11,6 +11,8 @@
 
 You only own one or two Sparks, but the problems you'll meet on a 256-node DGX cluster (fork exhaustion, SSH storms, fact-gathering minutes) only show up with many hosts. The Spark has enough cores and RAM to fake that fleet.
 
+> **Run this volume from your MacBook, not from Semaphore.** The benchmark measures *a controller*, so you want one whose CPU you can watch. And the fake nodes trust **your** key: `13-fleet-sim.yml` copies `spark_admin_pubkeys` (your `~/.ssh/id_ed25519.pub`) into them and the generated `fleet.ini` logs in as `nvidia`. Semaphore's container has no such key; its only credential is the certificate for `svc-ansible`, which the fake nodes don't trust. So `13-fleet-sim.yml` and `14-fleet-bench.yml` use the CLI form (the break-glass path of the [README convention](README.md)). §4.6 carries the results over to Semaphore on sema01.
+
 ---
 
 ## 1. Where the time goes
@@ -29,11 +31,11 @@ c = SSH round-trips × RTT + remote Python start (≈50–150 ms on Arm) + modul
 | ControlPersist + pipelining | 1 | Module goes over stdin; nothing is written to disk |
 | Mitogen | ~0 per task (persistent interpreter) | Also removes Python start-up; compatibility risk |
 
-Forks only help until something else saturates: the control node's CPU (each fork is a Python process of roughly 50–80 MB), the target's `sshd` `MaxStartups`, or a shared API.
+Forks only help until something else saturates: the controller's CPU (each fork is a Python process of roughly 50–80 MB), the target's `sshd` `MaxStartups`, or a shared API.
 
 ```mermaid
 flowchart LR
-  subgraph CN[Control node]
+  subgraph CN["Controller (MacBook for this lab; Semaphore container on sema01 normally)"]
     W1[worker 1] & W2[worker 2] & Wn[worker F]
     CM[(ControlMaster sockets<br/>~/.ansible/cp/*)]
   end
@@ -77,6 +79,9 @@ CMD ["/usr/sbin/sshd", "-D", "-e"]
 #   ansible-playbook playbooks/13-fleet-sim.yml -e fleet_size=64 -K
 #   ansible-playbook -i .cache/fleet.ini playbooks/14-fleet-bench.yml -f 50
 #   ansible-playbook playbooks/13-fleet-sim.yml -e fleet_state=absent -K
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: Fake fleet on the Spark
   hosts: spark[0]
   become: true
@@ -133,7 +138,7 @@ CMD ["/usr/sbin/sshd", "-D", "-e"]
 
     - name: Write inventory on the control node
       ansible.builtin.copy:
-        dest: "{{ playbook_dir }}/../.cache/fleet.ini"
+        dest: "{{ lab_cache_dir }}/fleet.ini"
         mode: "0644"
         content: |
           [fleet]
@@ -202,7 +207,7 @@ bench mux-pipe-f64-free     ANSIBLE_FORKS=64 ANSIBLE_STRATEGY=free
 bench mux-pipe-f64-nofacts  ANSIBLE_FORKS=64 ANSIBLE_GATHERING=explicit
 ```
 
-Record your results in a table like this. The shape is what matters; absolute numbers depend on your control node:
+Record your results in a table like this. The shape is what matters; absolute numbers depend on your controller:
 
 | Run | Expect relative to baseline | What you're seeing |
 |---|---|---|
@@ -216,7 +221,7 @@ Record your results in a table like this. The shape is what matters; absolute nu
 Watch the saturation point live while `f64` runs:
 
 ```bash
-# control node
+# controller (MacBook)
 top -o %CPU     # ansible-playbook workers
 # on the Spark
 docker stats --no-stream | sort -k3 -h | tail
@@ -261,9 +266,9 @@ fact_caching_timeout    = 7200
       gather_subset: [min, hardware, network, local]   # skip 'all' (virtual, ohai/facter probes, …)
 ```
 
-### 4.3 Forks: size to the control node, not the fleet
+### 4.3 Forks: size to the controller, not the fleet
 
-A reasonable starting point is `forks ≈ 2–4 × control-node cores`, capped by memory at roughly 80 MB per fork. Then measure. For a laptop controlling two Sparks, `forks = 10` is plenty. For AWX controlling a 256-node cluster, scale out with execution nodes (Volume 20) rather than setting `forks = 256` on one pod.
+A reasonable starting point is `forks ≈ 2–4 × controller cores`, capped by memory at roughly 80 MB per fork. Then measure. For a laptop controlling two Sparks, `forks = 10` is plenty, and so is it for sema01 (4 GB+ RAM, 00a §2), which also runs PostgreSQL and the Kubernetes tools. For AWX controlling a 256-node cluster, scale out with execution nodes (Volume 20) rather than setting `forks = 256` on one pod.
 
 ### 4.4 Target-side limits
 
@@ -288,7 +293,15 @@ ANSIBLE_STRATEGY=mitogen_linear \
   ansible-playbook -i .cache/fleet.ini playbooks/14-fleet-bench.yml -f 20
 ```
 
-Add it as another row in your benchmark. **Adopt it only if** (a) it's a large win on *your* playbooks and (b) `molecule test` and `20-drift-check.yml` pass unchanged under it.
+Add it as another row in your benchmark. **Adopt it only if** (a) it's a large win on *your* playbooks and (b) `molecule test` and `20-drift-check.yml` pass unchanged under it. In this lab there's a third condition: the Semaphore image ([`lab/semaphore/Dockerfile`](lab/semaphore/Dockerfile)) doesn't install Mitogen, so adopting it means adding it there and rebuilding (00b §4).
+
+### 4.6 What carries over to Semaphore on sema01
+
+The same `ansible.cfg` runs inside the Semaphore container (`ANSIBLE_CONFIG="01 Ansible/lab/ansible.cfg"`), so pipelining, ControlPersist and the fact cache apply unchanged. Three things differ:
+
+- **The SSH user and credential.** Semaphore logs in as `svc-ansible` with the 15-minute certificate from play 1 (`group_vars/spark.yml`, [01A Step 2b](01-ansible-core-deep-dive.md)). Pipelining needs no TTY for that user either: its sudoers drop-in is plain `NOPASSWD`.
+- **ControlPersist vs. the certificate.** The certificate is checked only when a connection authenticates. The master opened in the first minute carries every later task, so a 30-minute run is fine *as long as the master lives*. A reconnect after the certificate expired (host reboot, idle > 600 s, `ControlMaster=no`) is refused. That's why the `baseline-f5` row (no mux) is a MacBook-only experiment: under Semaphore, a long run without the mux starts failing at minute 15.
+- **Where the sockets and the cache live.** `~/.ansible/cp` is inside the container (gone on restart, which is harmless). The fact cache goes to the state volume via `ANSIBLE_CACHE_PLUGIN_CONNECTION=/var/lib/spark-lab/cache/facts`, so `gathering = smart` still saves time between template runs.
 
 ---
 
@@ -296,6 +309,7 @@ Add it as another row in your benchmark. **Adopt it only if** (a) it's a large w
 
 | Where the tuning matters | Setting |
 |---|---|
+| Semaphore templates on sema01 (00b) | same `ansible.cfg`; keep ControlPersist on (the certificate only covers new logins for 15 minutes); one task at a time on a small sema01 |
 | AWX job templates (Volume 20) | `forks` per template; container groups scale horizontally |
 | Drift checks every 30 min (Volume 22) | fact cache + `gather_subset` keep them cheap |
 | Emergency drain (Volume 24) | `serial: 1` makes speed deliberately irrelevant; correctness first |
@@ -307,7 +321,7 @@ Add it as another row in your benchmark. **Adopt it only if** (a) it's a large w
 |---|---|---|
 | `Control socket connect(...): No such file or directory` / stale socket | `ls -la ~/.ansible/cp/` | `rm ~/.ansible/cp/*`; very long hostnames can overflow the 108-char socket path, so shorten `control_path_dir` |
 | Fleet hosts randomly `UNREACHABLE` at high forks | `journalctl -u ssh \| grep MaxStartups` inside a container, or on the host | Raise `MaxStartups`; lower forks |
-| Control node swaps during a run | `free -m` during the run | Fewer forks; or run from a bigger box (the Spark itself) |
+| Controller swaps during a run | `free -m` during the run (on sema01: `docker stats`) | Fewer forks; or give the controller more RAM. Don't move it onto the Spark: it must survive a reset of the Spark (00b §1) |
 | Pipelining silently not used | `-vvvv` shows `PUT` lines | A `become` method or plugin that disables it; `Defaults requiretty` |
 | Mitogen: `ansible_mitogen ... unsupported Ansible version` | `pip show mitogen ansible-core` | Pin to a compatible pair, or drop Mitogen |
 | Runs slow only when the first task is `setup` | `profile_tasks` output | `gather_subset`, `gathering=smart`, fact cache |
@@ -320,5 +334,5 @@ docker ps --filter label=spark.lab/fleet-sim=true -q | wc -l     # 0
 ```
 
 - [ ] `.cache/bench.csv` has at least 7 rows and you can explain each delta.
-- [ ] You identified your control node's fork saturation point.
+- [ ] You identified your controller's fork saturation point, and checked that `forks` in `ansible.cfg` also fits sema01.
 - [ ] Your final `ansible.cfg` values are justified by your numbers, not by folklore.

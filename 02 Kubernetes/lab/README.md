@@ -7,6 +7,8 @@ Everything the 27 volumes (plus the [step-by-step guide](../00-kubernetes-step-b
 
 This directory holds their definitions and everything that runs on them. Every code block in the volumes is taken from here.
 
+> **Convention:** `ansible-playbook playbooks/NN-….yml` in this module = run Semaphore template NN in project `spark-lab` ([01 Ansible 00b](../../01%20Ansible/00b-dgx-spark-semaphore-target.md#7-build-the-lab-from-semaphore)); the CLI form is break-glass from the MacBook (`-l dgx-spark-01,localhost -K`).
+
 ```
 lab/
 ├── versions.env                 # every pinned version, in one place
@@ -62,8 +64,12 @@ lab/
 
 ```mermaid
 flowchart LR
-  subgraph CTL["Your MacBook · terminal (control node)"]
+  subgraph CTL["Your MacBook · client (browser · git · kubectl)"]
     K["kubectl · helm<br/>KUBECONFIG = 01 Ansible .cache/kubeconfig-spark-lab.yaml<br/>contexts: spark-root · dev-lab · llms"]
+  end
+  subgraph MGMT["management plane · outside the Spark (01 Ansible 00a/00b)"]
+    SEMA["sema01 · 192.168.0.210<br/>Semaphore :3000 · runs every playbook<br/>state volume: kubeconfig"]
+    VLT["vault01 · 192.168.0.211<br/>SSH CA · 15-min certs · lab secrets"]
   end
   subgraph S1["dgx-spark-01 · 192.168.0.100 · root cluster (kubeadm)"]
     direction TB
@@ -80,6 +86,10 @@ flowchart LR
   subgraph S2["dgx-spark-02 · 192.168.0.101 · optional root worker"]
     G2["GB10 → 15 slices"]
   end
+  K -->|"browser :3000"| SEMA
+  SEMA -->|"fetch-kubeconfig.sh"| K
+  SEMA -->|"AppRole → cert"| VLT
+  SEMA -->|"SSH svc-ansible · kubectl/helm :6443"| S1
   K -->|6443| CP
   K -->|443| DV
   K -->|443| LV
@@ -96,9 +106,12 @@ flowchart LR
   class GPU,G2 gpu
   class PL net
   class K ext
+  classDef mgmt fill:#fff3e6,stroke:#fb8500,color:#000
+  class SEMA,VLT mgmt
   style S1 fill:#e6f4f5,stroke:#0e7c86,stroke-width:2px
   style S2 fill:#e6f4f5,stroke:#0e7c86,stroke-dasharray:5 3
   style CTL fill:#f6f8fa,stroke:#57606a
+  style MGMT fill:#fffaf3,stroke:#fb8500,stroke-dasharray:5 3
   style VD fill:#ffffff,stroke:#57606a,stroke-dasharray:5 3
   style VL fill:#ffffff,stroke:#57606a,stroke-dasharray:5 3
 ```
@@ -110,8 +123,9 @@ black = external/user · grey = tenant workload.
 ## Quick start
 
 ```bash
-# 0. The 01 Ansible lab has built the root cluster + GPU Operator (+ the vClusters):
-#      ansible-playbook playbooks/05-kubernetes.yml playbooks/06-gpu-operator.yml playbooks/06b-vclusters.yml
+# 0. The 01 Ansible lab has built the root cluster + GPU Operator (+ the vClusters), as Semaphore
+#    templates 05 Kubernetes → 06 GPU Operator → 06b vClusters on sema01. Then, from the repo root:
+"01 Ansible/lab/tools/fetch-kubeconfig.sh" sema01   # kubeconfig from sema01 → 01 Ansible/lab/.cache/
 export KUBECONFIG="$PWD/01 Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 cd "02 Kubernetes/lab"
 tests/run-local-checks.sh                   # proves your toolchain, no Spark needed
@@ -144,14 +158,13 @@ Every script and every command in the volumes names a context. The rule of thumb
 
 ## The Spark is the playground
 
-Break things freely. Two commands bring you back:
+Break things freely. Two ways back:
 
 ```bash
 scripts/breakfix.sh reset all                                         # undo every drill
-cd "../../01 Ansible/lab" && ansible-playbook playbooks/99-reset-kubernetes.yml   # wipe Kubernetes, keep DGX OS/drivers/Docker
 ```
 
-Then rebuild with playbooks 05 → 06 → 06b and `scripts/install-addons.sh all`. A rebuild from scratch takes well under an hour.
+For a full reset, run the Semaphore template `99 Reset Kubernetes` (extra var `reset_confirm=RESET`; wipes Kubernetes, keeps DGX OS/drivers/Docker), then `05 Kubernetes` → `06 GPU Operator` → `06b vClusters`, then `"01 Ansible/lab/tools/fetch-kubeconfig.sh" sema01` and `scripts/install-addons.sh all`. sema01 and vault01 are outside the Spark, so the reset never touches them. A rebuild from scratch takes well under an hour.
 
 ## No Spark yet?
 

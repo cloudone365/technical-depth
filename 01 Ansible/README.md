@@ -8,17 +8,26 @@ Where a data-centre concept doesn't exist on a Spark (NVSwitch/Fabric Manager, I
 
 ## Reference lab
 
+The lab has two halves. The **management plane** stays outside the Spark: `sema01` (Semaphore UI) runs every playbook, and `vault01` (HashiCorp Vault) signs a 15-minute SSH certificate for each task and keeps the lab's secrets. The **DGX Spark** is only a target, so you can reset or re-image it without losing the tool that rebuilds it.
+
+![The DGX Spark as a Semaphore target: sema01 and vault01 outside the Spark, dgx-spark-01 with the root cluster and two vClusters inside](diagrams/semaphore-dgx-spark.svg)
+
 ```mermaid
 flowchart LR
-  subgraph CTL["Control node"]
-    ANS["ansible-core 2.18 · collections<br/>lab/ (git) · .cache/ (secrets, kubeconfig, reports)"]
+  subgraph MAC["MacBook"]
+    ANS["browser · git · kubectl<br/>bootstrap + break-glass playbooks<br/>lab/.cache/ (kubeconfig, vault-ca.crt)"]
+  end
+  subgraph MGMT["Management plane (00a), outside the Spark"]
+    direction TB
+    SEMA["sema01 · 192.168.0.210<br/>Semaphore UI + PostgreSQL<br/>controller: play 1, kubectl, helm<br/>state volume /opt/spark-lab/cache"]
+    VAULT["vault01 · 192.168.0.211<br/>SSH CA ssh-client-signer · AppRole semaphore<br/>KV kv/spark-lab/* · audit log"]
   end
   subgraph S1["dgx-spark-01 · 192.168.0.100"]
     direction TB
-    S1A["kubeadm root cluster spark-root (control plane + worker)<br/>Cilium · MetalLB · GPU Operator · AWX"]
+    S1A["kubeadm root cluster spark-root (control plane + worker)<br/>Cilium · MetalLB · GPU Operator · AWX (optional)"]
     S1V["vClusters dev-lab (192.168.0.111) · llms (192.168.0.112)"]
     S1B["slurmctld + slurmd"]
-    S1C["Vault · Prometheus · Grafana · Loki · ARA"]
+    S1C["Prometheus · Grafana · Loki · ARA"]
     S1D["NFS/RDMA server /srv/models"]
   end
   subgraph S2["dgx-spark-02 · 192.168.0.101"]
@@ -27,27 +36,40 @@ flowchart LR
     S2B["NFS/RDMA client /mnt/models"]
     S2C["(optional) AWX execution node"]
   end
-  ANS -- "SSH · mgmt 10GbE (enP7s7)" --> S1 & S2
+  ANS -- "HTTPS :3000 (run templates)" --> SEMA
+  SEMA -- "AppRole login · sign/ansible" --> VAULT
+  SEMA -- "SSH as svc-ansible (15-min cert) · mgmt 10GbE" --> S1 & S2
+  SEMA -- "kubectl/helm :6443" --> S1A
+  ANS -. "break-glass: SSH as nvidia" .-> S1
   S1A --> S1V
   S1 <== "QSFP · CX-7 200GbE RoCEv2<br/>192.168.100.0/24 · 192.168.101.0/24" ==> S2
+  classDef mgmt fill:#fff3e6,stroke:#fb8500,color:#000
+  class SEMA,VAULT mgmt
 ```
 
-Single Spark? Remove `dgx-spark-02` from the inventory. The fabric, NCCL and NFS/RDMA steps skip themselves, and `dgx-spark-01` alone is a complete Kubernetes cluster (no control-plane taint).
+Single Spark? Keep `dgx-spark-02` in the inventory and give every Semaphore template the CLI argument `--limit dgx-spark-01,localhost` ([00b §5.5](00b-dgx-spark-semaphore-target.md)). The fabric, NCCL and NFS/RDMA steps skip themselves, and `dgx-spark-01` alone is a complete Kubernetes cluster (no control-plane taint).
 
-The Kubernetes end-state is one **kubeadm** root cluster (`spark-root`) with two **vClusters** inside it, `dev-lab` and `llms`. Ansible builds it in three stages: `05-kubernetes.yml` (kubeadm, Cilium, MetalLB) → `06-gpu-operator.yml` (15 GPU time-slices) → `06b-vclusters.yml` (the two vClusters, applied from the [02 Kubernetes lab](../02%20Kubernetes/lab/README.md)). All three contexts land in one file, `lab/.cache/kubeconfig-spark-lab.yaml`.
+The Kubernetes end-state is one **kubeadm** root cluster (`spark-root`) with two **vClusters** inside it, `dev-lab` and `llms`. Ansible builds it in three stages: `05-kubernetes.yml` (kubeadm, Cilium, MetalLB) → `06-gpu-operator.yml` (15 GPU time-slices) → `06b-vclusters.yml` (the two vClusters, applied from the [02 Kubernetes lab](../02%20Kubernetes/lab/README.md)). All three contexts land in one file, `kubeconfig-spark-lab.yaml`, on sema01's state volume; `lab/tools/fetch-kubeconfig.sh sema01` copies it to `lab/.cache/` on your MacBook, where the 02 Kubernetes labs expect it.
+
+> **Convention used in every volume.** A command written as `ansible-playbook playbooks/NN-….yml …` means **run the Semaphore template `NN …`** in project `spark-lab` (template names follow the playbook names: `05 Kubernetes` ↔ `05-kubernetes.yml`). The CLI form stays valid as the **break-glass** path from the MacBook, with `-l dgx-spark-01,localhost -K`: without the Semaphore variable group, play 1 is skipped and you log in as `nvidia` with your own key. Only `00-bootstrap.yml`, `00b-semaphore-target.yml` and `08-vault.yml` are run from the MacBook as the normal path.
 
 ## Start here
 
-1. **[Step-by-step build guide](00-ansible-step-by-step-guide.md)**: the build order, 19 steps.
-2. **[Learning roadmap](ansible-tower-vault-roadmap.md)**: skills and checkpoints by level.
-3. **[`lab/README.md`](lab/README.md)**: the project layout and quick start.
+Build in this order:
+
+1. **[00a · Semaphore UI + Vault](00a-semaphore-vault-lab-guide.md)**: the management plane, `vault01` and `sema01`, built by hand (Step 0a).
+2. **[00b · Add dgx-spark-01 as a Semaphore target](00b-dgx-spark-semaphore-target.md)**: trust vault01's CA on the Spark, the lab's Semaphore image and project, lab secrets in vault01 (Step 1b).
+3. **[Step-by-step build guide](00-ansible-step-by-step-guide.md)**: the whole build order, from the MacBook toolchain (Step 0) and the bootstrap (Step 1) to the capstone, with the Semaphore template for every step.
+4. **[Learning roadmap](ansible-tower-vault-roadmap.md)**: skills and checkpoints by level.
+5. **[`lab/README.md`](lab/README.md)**: the project layout and quick start.
 
 ```bash
-cd "01 Ansible/lab"
+cd "01 Ansible/lab"                          # on your MacBook
 pip install -r requirements.txt && ansible-galaxy collection install -r requirements.yml -p ./collections
 tests/run-local-checks.sh                    # lint, syntax, katas, fixture tests: no Spark needed
-ansible-playbook playbooks/site.yml -K       # the whole lab
 ```
+
+Then, in Semaphore (project `spark-lab`), run the template `site` for the whole lab, or the stage templates one after the other.
 
 ---
 
@@ -57,12 +79,14 @@ ansible-playbook playbooks/site.yml -K       # the whole lab
 
 | Vol | Title | Lab pieces |
 |---|---|---|
-| 01A | [Core on DGX Spark: control node, inventory, first contact](01-ansible-core-deep-dive.md) | `ansible.cfg`, inventory, `spark_facts`, `spark_baseline` |
+| 00a | [Management plane: Semaphore UI + Vault, automation account](00a-semaphore-vault-lab-guide.md) | `sema01`, `vault01`, `00-vault-cert.yml` (play 1) |
+| 00b | [Add dgx-spark-01 as a Semaphore target](00b-dgx-spark-semaphore-target.md) | `00b-semaphore-target.yml`, `semaphore/`, `tools/fetch-kubeconfig.sh`, `08-vault.yml` |
+| 01A | [Core on DGX Spark: controllers (Semaphore + MacBook), inventory, first contact](01-ansible-core-deep-dive.md) | `ansible.cfg`, inventory, `spark_facts`, `spark_baseline` |
 | 01B | [Execution internals & debugging](01-ansible-core-engine-and-execution-internals.md) | AnsiballZ explode/execute, async, debugger |
 | 02A | [Performance at scale: SSH mux, pipelining, forks, Mitogen](02-high-concurrency-tuning-mitogen-and-ssh-mux.md) | `13-fleet-sim`, `14-fleet-bench` |
-| 02B | [AWX on the Spark: install & configure as code](02-ansible-tower-awx-deep-dive.md) | awx-operator, `awx.awx` |
+| 02B | [AWX on the Spark: install & configure as code](02-ansible-tower-awx-deep-dive.md) (the alternative controller; this lab runs Semaphore) | awx-operator, `awx.awx` |
 | 03A | [Inventory: static, constructed, mDNS discovery, NetBox](03-dynamic-inventory-and-cloud-infrastructure.md) | `inventory_plugins/spark_mdns.py`, `zz-constructed.yml` |
-| 03B | [Vault server: raft, TLS, init/unseal, audit, backup](03-hashicorp-vault-deep-dive.md) | `vault_server` |
+| 03B | [Vault server: raft, TLS, init/unseal, audit, backup](03-hashicorp-vault-deep-dive.md) | `vault01` (built by 00a, outside the Spark) |
 | 04 | [Jinja2 & data transforms on real Spark output](04-advanced-jinja2-filters-and-data-transforms.md) | `15-jinja-lab.yml` (7 katas) |
 | 05 | [Roles, collections & arm64 Execution Environments](05-role-architecture-collections-and-galaxy.md) | `argument_specs`, `build-collection.sh`, `ee/` |
 
@@ -93,7 +117,7 @@ ansible-playbook playbooks/site.yml -K       # the whole lab
 | 16 | [Kubernetes with kubeadm: root cluster, Cilium, MetalLB, vClusters](16-kubernetes-bare-metal-bootstrap-kubeadm.md) | `kubeadm_cluster`, `cilium`, `metallb`, `vclusters`, `05-kubernetes`, `06b-vclusters`, `99-reset-kubernetes` |
 | 17 | [GPU Operator: host-driver mode, time-slicing](17-nvidia-gpu-operator-helm-automation.md) | `gpu_operator`, `06-gpu-operator` |
 | 18 | [Slurm: GRES, cgroup v2, health checks, 2-node NCCL](18-slurm-cluster-orchestration-and-cgroup-gpus.md) | `slurm_cluster` |
-| 19 | [Vault ↔ Ansible: AppRole, KV, SSH certificates](19-hashicorp-vault-approle-and-dynamic-secrets.md) | `vault_config`, `19-vault-integration` |
+| 19 | [Vault ↔ Ansible: AppRole, KV, SSH certificates](19-hashicorp-vault-approle-and-dynamic-secrets.md) | `00-vault-cert`, `vault_config` (`08-vault`), `19-vault-integration` |
 | 20 | [AWX in production: execution nodes, Vault creds, workflows, backup](20-awx-tower-production-cluster-and-receptor.md) | receptor, `AWXBackup` |
 
 ### Part V — Production SRE
@@ -117,11 +141,11 @@ Built and checked in a workspace **without** Spark hardware, so it was verified 
 | `ansible-lint` (production profile) + `yamllint` | pass |
 | `ansible-playbook --syntax-check` on every playbook | pass |
 | Jinja katas against real Spark command output | 7/7 |
-| Template rendering (netplan, slurm.conf, Prometheus, Vault HCL) | rendered and YAML-validated |
+| Template rendering (netplan, slurm.conf, Prometheus) | rendered and YAML-validated |
 | Prometheus config + 7 alert rules + collector output | `promtool check config/rules/metrics` pass |
 | Loki config / Alloy pipeline | `loki -verify-config` / `alloy fmt` pass |
 | `uma_probe.cu` | compiles for `sm_121` with nvcc 13.x |
-| Vault integration (AppRole → token → KV v2 → SSH sign) | exercised against a stand-in for Vault's HTTP API |
+| Vault integration (play 1: AppRole → token → SSH sign → KV v2) | exercised against a stand-in for Vault's HTTP API |
 | Custom inventory plugin, drift reporter, firmware diff, argument specs, collection build | fixture-tested |
 
 **Not yet run on a real Spark.** Your first pass through the step-by-step guide is the hardware test. Versions pinned in the lab (Kubernetes, Cilium, MetalLB, GPU Operator and vCluster charts, container images, NCCL) are current as of this writing; check them before you run.

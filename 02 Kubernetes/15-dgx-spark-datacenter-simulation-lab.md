@@ -5,9 +5,9 @@
 | | |
 |---|---|
 | **You will build** | The whole "AI datacenter in a box" on one Spark: a kubeadm **root cluster** that owns the hardware, two **vClusters** with hard budgets (`dev-lab` for tenants, `llms` for serving and training), a serving tier behind an API gateway, a gang-scheduled batch tier, observability across all three clusters, backups and a scripted verification gate after every layer. Everything is designed to add dgx-spark-02 without rework |
-| **Hardware** | 1 DGX Spark (2 optional) · your MacBook as the terminal (control node) |
+| **Hardware** | 1 DGX Spark (2 optional) · `sema01` (Semaphore, runs every playbook) and `vault01` (SSH CA, lab secrets) outside the Spark, from [01 Ansible 00a/00b](../01%20Ansible/00b-dgx-spark-semaphore-target.md) · your MacBook as a client (browser, git, kubectl) |
 | **Time** | 4–6 h the first time, ~45 min once practised |
-| **Risk** | Medium. Everything is rebuildable: `01 Ansible playbooks/99-reset-kubernetes.yml` wipes Kubernetes, playbooks 05 → 06 → 06b rebuild it |
+| **Risk** | Medium. Everything is rebuildable: Semaphore template `99 Reset Kubernetes` wipes Kubernetes, `05` → `06` → `06b` rebuild it; sema01 and vault01 are outside the Spark and untouched |
 | **Lab files** | the whole [`lab/`](lab/README.md) directory |
 
 ---
@@ -38,7 +38,12 @@ The goal isn't scale. It's the **same shape and the same failure modes** as a pr
 ```mermaid
 flowchart TB
   USER(["Users · SDKs · Open WebUI"]) --> EDGE
-  ADMIN(["Your MacBook · kubectl<br/>contexts spark-root · dev-lab · llms"])
+  ADMIN(["Your MacBook · browser · git · kubectl<br/>contexts spark-root · dev-lab · llms"])
+  subgraph MGMT["management plane · outside the Spark"]
+    direction LR
+    SEMA["sema01 · 192.168.0.210<br/>Semaphore · runs every playbook"]
+    VLT["vault01 · 192.168.0.211<br/>SSH CA · 15-min certs · kv/spark-lab"]
+  end
   subgraph SPARK["dgx-spark-01 · DGX OS 7 · GB10 · 128 GB UMA (~119.7 GiB usable)"]
     direction TB
     subgraph ROOT["Root cluster · kubeadm v1.36 · master + worker"]
@@ -73,6 +78,9 @@ flowchart TB
   end
   S2["dgx-spark-02 (optional)<br/>root worker · +15 slices<br/>CX-7 200 GbE"]
   ADMIN --> API
+  ADMIN -. "browser · fetch-kubeconfig.sh" .-> SEMA
+  SEMA -->|"AppRole → cert"| VLT
+  SEMA -->|"SSH svc-ansible · helm/kubectl"| SPARK
   EDGE --> SERVE
   SERVE & BATCH & TA & TB & PT --> GB10
   SERVE --> NVME
@@ -93,12 +101,15 @@ flowchart TB
   class OBS obs
   class SERVE,BATCH,TA,TB,LT,PT tenant
   class USER,ADMIN ext
+  classDef mgmt fill:#fff3e6,stroke:#fb8500,color:#000
+  class SEMA,VLT mgmt
   style SPARK fill:#e6f4f5,stroke:#0e7c86,stroke-width:2px
   style ROOT fill:#ffffff,stroke:#1f6feb
   style PLATFORM fill:#ffffff,stroke:#8c959f
   style CP fill:#ffffff,stroke:#1f6feb
   style DEV fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
   style LLM fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
+  style MGMT fill:#fffaf3,stroke:#fb8500,stroke-dasharray:5 3
 ```
 
 ---
@@ -113,7 +124,7 @@ flowchart TB
 | dev-lab API (`dev-lab`) | `https://192.168.0.111:443` | MetalLB IP of the vCluster's Service; same kubeconfig |
 | llms API (`llms`) | `https://192.168.0.112:443` | same |
 | llms gateway (Traefik) | `192.168.0.115:80`, `:443` | hosts `llm.lab.local`, `gw.lab.local` in your MacBook's `/etc/hosts` |
-| Grafana (kps) | `http://192.168.0.100:32000` | admin / from Vault |
+| Grafana (kps) | `http://192.168.0.100:32000` | admin / `adminPassword` in the kps values (keep the real one in vault01 KV) |
 | Hubble UI | `http://192.168.0.100:31235` | Cilium flow visibility |
 | Host Grafana (01 Ansible) | `http://192.168.0.100:3000` | node/GPU view that survives a Kubernetes outage |
 | Pod CIDR / Service CIDR / DNS | 10.42.0.0/16 · 10.43.0.0/16 · 10.43.0.10 | set in the kubeadm config; vCluster Services get root ClusterIPs |
@@ -153,9 +164,11 @@ Inside llms, serving + batch can oversubscribe its 8 slices and 48 Gi by design:
 
 Each step ends with a **gate**: a command that must pass before you continue. When a gate fails, stop and fix it. Later layers hide earlier faults.
 
+The 01 Ansible stages run as **Semaphore templates** in project `spark-lab` on sema01 ([00b §7](../01%20Ansible/00b-dgx-spark-semaphore-target.md#7-build-the-lab-from-semaphore)); a gate there is the task log ending in `failed=0`. Everything from the 02 Kubernetes layer on runs with `kubectl` from your MacBook.
+
 ```mermaid
 flowchart LR
-  G0["0 · Toolchain<br/>run-local-checks"] --> G1["1 · Root<br/>01 Ansible kubeadm + Cilium + MetalLB + GPU Op"]
+  G0["0 · Toolchain<br/>run-local-checks"] --> G1["1 · Root<br/>Semaphore 05 + 06: kubeadm · Cilium · MetalLB · GPU Op"]
   G1 --> G2["2 · Control plane<br/>etcd · audit · encryption"]
   G2 --> G3["3 · Platform + vClusters<br/>storage · metrics · kps · dev-lab · llms"]
   G3 --> G4["4 · Tenancy<br/>ns · quotas · RBAC · CEL · APF · netpol"]
@@ -180,16 +193,18 @@ tests/run-local-checks.sh
 
 **Gate:** `ALL LOCAL CHECKS PASSED`.
 
-### Step 1 · Root cluster (01 Ansible)
+### Step 1 · Root cluster (01 Ansible, from Semaphore)
+
+In Semaphore (project `spark-lab`): run `05 Kubernetes`, then `06 GPU Operator` (break-glass CLI: `ansible-playbook playbooks/05-kubernetes.yml -l dgx-spark-01,localhost -K`). Then on your MacBook:
 
 ```bash
 cd "../../01 Ansible/lab"
-ansible-playbook playbooks/05-kubernetes.yml && ansible-playbook playbooks/06-gpu-operator.yml
+tools/fetch-kubeconfig.sh sema01                    # kubeconfig from sema01's state volume → .cache/
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
 cd "../../02 Kubernetes/lab" && scripts/preflight.sh
 ```
 
-**Gate:** preflight `0 failed`. `allocatable nvidia.com/gpu=15`. No control-plane taint.
+**Gate:** both task logs end in `failed=0`; `fetch-kubeconfig.sh` lists `spark-root`; preflight `0 failed`. `allocatable nvidia.com/gpu=15`. No control-plane taint.
 
 ### Step 2 · Control plane hardening
 
@@ -269,7 +284,7 @@ scripts/breakfix.sh list                    # then do at least three drills (Vol
 
 | Module | Uses this platform for |
 |---|---|
-| 01 Ansible | builds the base (kubeadm root, Cilium, MetalLB, GPU Operator, the vClusters, Vault, NFS, telemetry) and owns node-level config |
+| 01 Ansible | builds the base (kubeadm root, Cilium, MetalLB, GPU Operator, the vClusters, NFS, telemetry) as Semaphore tasks on sema01, with 15-minute certificates and lab secrets from vault01, and owns node-level config |
 | 03 DeepSeek · 04 Qwen · 05 NeMo · 06 Gemma | overlays on `llms/90-serving` (model, engine flags, quantisation), RAG on Qdrant, fine-tuning Jobs in llms `batch` — sized to the llms budget |
 | 07 Nvidia | profiling (nsys/ncu) in root `platform-tools` pods on the same GPU |
 | 08 Storage | benchmarks and caches behind `model-cache` and checkpoint PVCs (real PVs on the root) |
@@ -304,15 +319,17 @@ scripts/verify.sh
 
 | Task | Frequency | How |
 |---|---|---|
-| etcd snapshot off-box | daily | copy `/var/lib/etcd-snapshots/` to your MacBook (Vol 03 §5.7) |
+| etcd snapshot off-box | daily | copy `/var/lib/etcd-snapshots/` off the Spark to the MacBook or sema01's backed-up disk (Vol 03 §5.7) |
 | vCluster backup | weekly | scale the control plane to 0, tar its PVC directory (Vol 27 §6.7) |
 | Restore rehearsal | monthly | `scripts/etcd-drill.sh restore …` on a quiet day; one vCluster PVC restore |
 | Version review | monthly | `versions.env` vs upstream releases. Test in CI (kind + 2 vClusters) first |
 | Kubernetes upgrade | per minor release | 01 Ansible `kubeadm_cluster_version` → `kubeadm upgrade plan/apply` (Vol 01 §8) → `scripts/verify.sh`; vCluster supports host 1.34–1.36 |
 | vCluster upgrade | per release | bump `VCLUSTER_VERSION`, `helm upgrade` dev-lab first, then llms (Vol 27) |
-| DGX OS / driver upgrade | per NVIDIA release | 01 Ansible `17-dgxos-upgrade.yml` (drain → upgrade → validate) → Vol 12 UMA experiment again |
+| DGX OS / driver upgrade | per NVIDIA release | Semaphore template `17 DGX OS upgrade` (drain → upgrade → validate) → Vol 12 UMA experiment again |
 | Capacity review | weekly | Grafana *vCluster CPU/memory used / hard* panels. `VClusterQuotaNearlyExhausted`, `PodsPendingOnGPU` history; resize with one `kubectl patch` (Vol 27 §6.5) |
 | Drills | weekly | one `breakfix` scenario, timed |
+| Drift check · validation | nightly · weekly | scheduled Semaphore templates `20 Drift check` and `30 Validate`; a failed task is the alert (01 Ansible 00b §9) |
+| Full rebuild | when needed | Semaphore `99 Reset Kubernetes` (`reset_confirm=RESET`) → `05` → `06` → `06b`, then `fetch-kubeconfig.sh sema01` and `scripts/install-addons.sh all` |
 
 ---
 

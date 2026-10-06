@@ -1,5 +1,7 @@
 # Enterprise Ansible Lab: Semaphore UI + HashiCorp Vault + Automation Account
 
+> **01 Ansible · Step 0a — the management plane.** Build this first. `sema01` (Semaphore) and `vault01` (Vault) stay **outside** the DGX Spark: they run every playbook of the Spark lab, and they must survive when the Spark is rebuilt or reset. When §9 passes, continue with the [step-by-step guide](00-ansible-step-by-step-guide.md): Step 0 (MacBook toolchain), Step 1 (bootstrap), then Step 1b = [00b · Add dgx-spark-01 as a Semaphore target](00b-dgx-spark-semaphore-target.md). Overview: [README](README.md).
+
 **Goal:** no human ever holds the automation credential. every Semaphore task starts by asking Vault for a 15-minute SSH certificate, and the targets trust Vault's CA instead of static keys.
 
 Each step has a **Why** (the purpose), then commands with a comment on every line explaining what it does.
@@ -838,4 +840,16 @@ Also check whether your network gear (Nexus, IOS XE) accepts OpenSSH user certif
 | `A worker was found in a dead state` | Out of memory on sema01 | Give the VM 4 GB or more, add swap, lower Ansible forks, and never run two tasks at once |
 | Time playbook stops: chrony or timesyncd | The host runs the other time service | The current `sync_time.yaml` handles both; make sure your repository has the latest version |
 | Vault commands fail after a reboot | Vault is sealed again | `vault operator unseal` twice with two different keys |
+
+## 13. Next: add the DGX Spark
+
+Your management plane now works for the two Ubuntu targets. The DGX Spark becomes the next target, with the same CA, the same `svc-ansible` account and the same play 1, so nothing in this guide changes:
+
+| You keep | The Spark lab adds (00b guide) |
+|---|---|
+| `vault01`: SSH CA, role `ansible`, AppRole `semaphore`, audit log | a KV engine and a read-only policy for lab secrets, attached to AppRole `semaphore` |
+| `sema01`: Semaphore + PostgreSQL, project `lab` | a lab image with `kubectl`/`helm`, a state volume, and a second project `spark-lab` for this repository |
+| targets 192.168.0.201 / .202 | `dgx-spark-01` (192.168.0.100) as a third target, prepared by `playbooks/00b-semaphore-target.yml` |
+
+Continue with [00b · Add dgx-spark-01 as a Semaphore target](00b-dgx-spark-semaphore-target.md).
 

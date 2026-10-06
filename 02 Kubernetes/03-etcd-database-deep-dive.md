@@ -43,7 +43,7 @@ flowchart LR
   end
   TIMER["etcd-snapshot.timer<br/>every 6 h · keep 20"] -->|"/usr/local/sbin/etcd-snapshot"| ET
   TIMER --> DISK[("/var/lib/etcd-snapshots/")]
-  DISK -. "copy off-box (§5.7)" .-> NAS[("control node / S3")]
+  DISK -. "copy off-box (§5.7)" .-> NAS[("MacBook / NAS / S3")]
   PROM["Prometheus kps<br/>(observability)"] -->|":2381/metrics"| ET
   subgraph VC["root namespace vc-dev-lab (same for vc-llms)"]
     VAPI["dev-lab-0<br/>API server + controllers + syncer"] --> SQL[("SQLite on PVC data-dev-lab-0<br/>/data/k8s/vc-dev-lab/…")]
@@ -149,7 +149,7 @@ What the syncer copies to the root (pods, Services, PVCs, and the Secrets/Config
 | Vol 02 Secret encryption | Proven in §5.3 by reading the raw key — and shown to stop at the root boundary |
 | Prometheus (Vol 16) | kube-prometheus-stack scrapes `kubeEtcd` on port 2381 over plain HTTP ([`addons/kube-prometheus-stack-values.yaml`](lab/addons/kube-prometheus-stack-values.yaml)); two alert rules in [`rules.yaml`](lab/manifests/root/95-observability/rules.yaml) |
 | 01 Ansible `kubeadm_cluster` role | installs `etcdctl`/`etcdutl` matching the etcd image, `/usr/local/sbin/etcd-snapshot`, and the timer. `playbooks/99-reset-kubernetes.yml -e reset_wipe_data=true` deletes `/var/lib/etcd` — your off-box copy (§5.7) is the only way back after that |
-| Off-box backup | §5.7 pulls snapshots + PKI + encryption config to the control node; Vault (01 Ansible Vol 19) for the keys. In production, push to object storage (MinIO from module 08 works) from the same timer |
+| Off-box backup | §5.7 pulls snapshots + PKI + encryption config to your MacBook (not sema01: it already holds cluster-admin kubeconfigs, so keep the CA keys apart); vault01 KV (01 Ansible Vol 19) for the keys. In production, push to object storage (MinIO from module 08 works) from the same timer |
 | vClusters (Vol 27) | their state is on PVCs, not in etcd (§3.4, §5.8; Vol 27 §6.7) |
 | Storage (Vol 11) | fsync latency is a storage QoS problem. The checkpoint-write patterns in Vol 11 are what hurt etcd |
 | Controllers (Vol 04) | an informer that watches from a compacted revision gets `410 Gone` and must re-list — compaction (§5.5) and restores (§5.6) are where that comes from |
@@ -161,7 +161,7 @@ What the syncer copies to the root (pods, Services, PVCs, and the Secrets/Config
 All commands run on the Spark, from a checkout of this repo, in `02 Kubernetes/lab`: the `etcdctl` lines need the root's etcd client certificate, which only exists there. The scripts call `kubectl --context spark-root|dev-lab|llms`. The Spark's own `~/.kube/config` (written by 01 Ansible) is `admin.conf` with its context renamed to `spark-root`, which is enough for every root step; for the vCluster steps bring the full lab kubeconfig along:
 
 ```bash
-# on the control node
+# on your MacBook (after 01 Ansible/lab/tools/fetch-kubeconfig.sh sema01)
 scp "01 Ansible/lab/.cache/kubeconfig-spark-lab.yaml" nvidia@192.168.0.100:.kube/spark-lab.yaml
 # on the Spark
 export KUBECONFIG=~/.kube/spark-lab.yaml
@@ -364,7 +364,7 @@ Workbook Ex 20 asks you to doom a namespace, a ConfigMap and a Kueue LocalQueue.
 
 ### 5.7 Copy snapshots off the box
 
-A snapshot on the Spark's own NVMe protects you from a bad `kubectl delete`, not from a dead disk or `99-reset-kubernetes.yml -e reset_wipe_data=true`. From the control node, pull everything a rebuild on *new* hardware needs in one tarball:
+A snapshot on the Spark's own NVMe protects you from a bad `kubectl delete`, not from a dead disk or `99-reset-kubernetes.yml -e reset_wipe_data=true`. From your MacBook (as the admin user `nvidia` with your own key, the same login as the bootstrap playbooks), pull everything a rebuild on *new* hardware needs in one tarball:
 
 ```bash
 mkdir -p ~/spark-backups
@@ -380,7 +380,7 @@ tar tzf ~/spark-backups/spark-root-$(date +%F).tgz | head
 | `etc/kubernetes/encryption/config.yaml` | the AES key: without it every Secret in the snapshot is unreadable ciphertext |
 | `etc/kubernetes/kubeadm-config.yaml` | the exact config 01 Ansible ran `kubeadm init` with |
 
-Treat that tarball like a password: it holds the key that decrypts every Secret **and** the CA keys that can mint cluster-admin certificates. Encrypt it at rest (`age`/`gpg`), or store the keys in Vault (01 Ansible Vol 19) and only the snapshots on the NAS. Automate it daily (Vol 15's operations table) — an `OnCalendar` timer on the control node running this `ssh … | …` line is enough.
+Treat that tarball like a password: it holds the key that decrypts every Secret **and** the CA keys that can mint cluster-admin certificates. Encrypt it at rest (`age`/`gpg`), or store the keys in vault01's KV (01 Ansible Vol 19) and only the snapshots on the NAS. Automate it daily (Vol 15's operations table) — a `cron`/`launchd` job on the MacBook (or a timer on the NAS) running this `ssh … | …` line is enough.
 
 ### 5.8 Back up a vCluster's own state
 
@@ -413,7 +413,7 @@ Either way, a *consistent* lab backup is a pair: a root etcd snapshot and both v
 | raw root Secret starts with `k8s:enc:aescbc:v1:key1:` | yes |
 | Prometheus `histogram_quantile(0.99, rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m]))` | < 0.01 when idle |
 | Restore drill | root objects created after the snapshot are gone; dev-lab's `survives-restore` namespace is still there; `scripts/verify.sh platform vclusters` passes |
-| Off-box | the tarball on the control node lists `etcd-snapshots`, `pki/ca.key`, `encryption/config.yaml`; a `dev-lab-<date>.tgz` exists too |
+| Off-box | the tarball on your MacBook lists `etcd-snapshots`, `pki/ca.key`, `encryption/config.yaml`; a `dev-lab-<date>.tgz` exists too |
 
 ---
 
