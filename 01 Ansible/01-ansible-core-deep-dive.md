@@ -356,6 +356,8 @@ ansible -m debug -a "var=cx7_interfaces" spark           # per-host value
 
 ### Step 4 — First contact
 
+> **Order:** Steps 1–3 are the [step-by-step guide's](00-ansible-step-by-step-guide.md) Step 0. Before this step, do its **Step 0b**, the [00b guide](00b-dgx-spark-semaphore-target.md): the Spark trusts vault01 and Semaphore has the project `spark-lab` with the template `00 Ping`. Haven't done 00b yet? The MacBook form below works already, because it logs in as `nvidia` with your own key.
+
 ```yaml
 # lab/playbooks/00-ping.yml
 ---

@@ -1,6 +1,6 @@
 # Enterprise Ansible Lab: Semaphore UI + HashiCorp Vault + Automation Account
 
-> **01 Ansible · Step 0a — the management plane.** Build this first. `sema01` (Semaphore) and `vault01` (Vault) stay **outside** the DGX Spark: they run every playbook of the Spark lab, and they must survive when the Spark is rebuilt or reset. When §9 passes, continue with the [step-by-step guide](00-ansible-step-by-step-guide.md): Step 0 (MacBook toolchain), Step 1 (bootstrap), then Step 1b = [00b · Add dgx-spark-01 as a Semaphore target](00b-dgx-spark-semaphore-target.md). Overview: [README](README.md).
+> **01 Ansible · Step 0a — the management plane.** Build this first. `sema01` (Semaphore) and `vault01` (Vault) stay **outside** the DGX Spark: they run every playbook of the Spark lab, and they must survive when the Spark is rebuilt or reset. When §9 passes, continue with the [step-by-step guide](00-ansible-step-by-step-guide.md): Step 0 (MacBook toolchain), then Step 0b = [00b · Add dgx-spark-01 as a Semaphore target](00b-dgx-spark-semaphore-target.md). Overview: [README](README.md).
 
 **Goal:** no human ever holds the automation credential. every Semaphore task starts by asking Vault for a 15-minute SSH certificate, and the targets trust Vault's CA instead of static keys.
 

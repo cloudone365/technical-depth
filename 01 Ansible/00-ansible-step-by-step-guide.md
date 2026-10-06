@@ -5,7 +5,7 @@
 ```mermaid
 flowchart LR
   subgraph W0["Before week 1 · Management plane"]
-    Z0[0a sema01 + vault01] --> Z1[0 MacBook toolchain] --> Z2[1 Bootstrap] --> Z3[1b Spark as Semaphore target]
+    Z0[0a sema01 + vault01] --> Z1[0 MacBook toolchain] --> Z3[0b Spark as Semaphore target] --> Z2[1 First contact]
   end
   subgraph W1["Week 1 · Foundations"]
     A2[2 Baseline + facts] --> A3[3 Containers + CUDA] --> A4[4 Telemetry]
@@ -24,9 +24,9 @@ flowchart LR
   class Z0,Z3 mgmt
 ```
 
-**Who runs what.** `sema01` (Semaphore) and `vault01` (Vault) stay outside the Spark and run every playbook from Step 2 on: each step names its **Semaphore template** in project `spark-lab` (template name = playbook name, for example `05 Kubernetes` ↔ `05-kubernetes.yml`). The `ansible-playbook …` line under it is the **break-glass** form from the MacBook, for when sema01 or vault01 is down ([00b §10](00b-dgx-spark-semaphore-target.md)). Your MacBook does the rest: browser, `git push`, `kubectl` for the 02 Kubernetes labs, and the bootstrap playbooks in Steps 1 and 1b.
+**Who runs what.** `sema01` (Semaphore) and `vault01` (Vault) stay outside the Spark and run every playbook from Step 1 on: each step names its **Semaphore template** in project `spark-lab` (template name = playbook name, for example `05 Kubernetes` ↔ `05-kubernetes.yml`). The `ansible-playbook …` line under it is the **break-glass** form from the MacBook, for when sema01 or vault01 is down ([00b §10](00b-dgx-spark-semaphore-target.md)). Your MacBook does the rest: browser, `git push`, `kubectl` for the 02 Kubernetes labs, and the bootstrap playbooks in Step 0b.
 
-**One Spark or two?** Steps 5–7 and the multi-node parts of 11–12 need two Sparks and a QSFP cable. Everything else works on one: keep `dgx-spark-02` in the inventory and give every template the CLI argument `--limit dgx-spark-01,localhost` (the break-glass form uses `-l dgx-spark-01,localhost`).
+**One Spark or two?** Steps 5–7 and the multi-node parts of 11–12 need two Sparks and a QSFP cable. Everything else works on one. `dgx-spark-02` is commented out in `inventory/hosts.yml` until it joins, so no `--limit` is needed. The `-l dgx-spark-01,localhost` in the break-glass lines below is harmless; if you limit a run, always keep `localhost`.
 
 ---
 
@@ -36,7 +36,7 @@ Build `vault01` (192.168.0.211: SSH CA `ssh-client-signer`, signing role `ansibl
 
 ✅ Done when the 00a §9 checks pass: a Semaphore task on your Ubuntu targets gets a certificate in play 1 and logs in as `svc-ansible`.
 
-## Step 0 · MacBook toolchain (30 min) → [01A](01-ansible-core-deep-dive.md)
+## Step 0 · MacBook toolchain and SSH trust (30 min) → [01A](01-ansible-core-deep-dive.md) Steps 1–3
 
 ```bash
 git clone https://github.com/cloudone365/technical-depth.git && cd "technical-depth/01 Ansible/lab"
@@ -46,35 +46,41 @@ ansible-galaxy collection install -r requirements.yml -p ./collections
 tests/run-local-checks.sh              # proves your toolchain before touching hardware
 ```
 
-✅ Done when `ALL LOCAL CHECKS PASSED`. The MacBook needs this toolchain only for the bootstrap playbooks, `08-vault.yml` and break-glass runs; Semaphore brings its own (00b §4).
+Then 01A **Steps 1–3** only: the toolchain, SSH trust from the MacBook to `nvidia@dgx-spark-01`, and the inventory. 01A **Step 4** (first contact) is Step 1 below, because it runs from Semaphore, which only works after Step 0b.
 
-## Step 1 · Bootstrap the Spark (45 min, MacBook) → [06](06-bare-metal-os-provisioning-pxe-and-redfish.md)
+✅ Done when `ALL LOCAL CHECKS PASSED` and `ssh nvidia@192.168.0.100 hostname` answers without a password. The MacBook needs this toolchain only for the bootstrap playbooks, `08-vault.yml` and break-glass runs; Semaphore brings its own (00b §4).
 
-1. First-boot wizard (display or headless hotspot). Same username (`nvidia`) on every Spark. Let updates finish.
-2. Edit `inventory/hosts.yml` (IPs) and `inventory/host_vars/dgx-spark-0N.yml`.
+## Step 0b · dgx-spark-01 as a Semaphore target (60–90 min, MacBook + sema01 + Semaphore) → [00b](00b-dgx-spark-semaphore-target.md)
+
+Follow the 00b guide from top to bottom. In short:
+
+1. **Fresh DGX OS only: bootstrap** (00b §2.1). Skip this if the Spark is already named `dgx-spark-01`, on 192.168.0.100, and takes your key as `nvidia`.
+   ```bash
+   ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-01 -k -K -e bootstrap_current_ip=<dhcp-ip>
+   ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-01 -K -e bootstrap_current_ip=<dhcp-ip> -e bootstrap_static_ip=true
+   ```
+2. **Trust vault01 on the Spark**, from the MacBook (00b §2–3):
+   ```bash
+   scp vault01:~/vault-ca.crt .cache/vault-ca.crt                 # vault01's TLS certificate
+   ansible-playbook playbooks/00b-semaphore-target.yml -K         # svc-ansible, NOPASSWD sudo, trust vault01's CA
+   ```
+3. **On sema01**, build the lab's Semaphore image and state volume from [`lab/semaphore/`](lab/semaphore/) (00b §4).
+4. **In Semaphore**, create project `spark-lab`: repository, File inventory `01 Ansible/lab/inventory/hosts.yml`, variable group `vault-approle`, template `00 Ping` (00b §5).
+5. **Lab secrets**: run `08-vault.yml` from the MacBook to add them to vault01 (00b §6, Step 8 below).
+
+These playbooks run from the MacBook as `nvidia` with your own key, because the Spark doesn't trust vault01 until step 2 ([`group_vars/spark.yml`](lab/inventory/group_vars/spark.yml) picks that login whenever no `vault_role_id` is set).
+
+✅ Done when dgx-spark-01's sshd log shows `Accepted publickey for svc-ansible … ED25519-CERT` after a Semaphore run.
+
+## Step 1 · First contact from Semaphore (10 min) → [01A](01-ansible-core-deep-dive.md) Step 4
+
+**Semaphore:** run `00 Ping`. The log shows play 1 (*Get an SSH certificate from Vault*), then *Connectivity and identity check* on `dgx-spark-01`. Then try 01A Step 4's ad-hoc commands from the MacBook: Semaphore runs playbooks, not ad-hoc commands.
 
 ```bash
-ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-01 -k -K -e bootstrap_current_ip=<dhcp-ip>
-ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-01 -K -e bootstrap_current_ip=<dhcp-ip> -e bootstrap_static_ip=true
-ansible-playbook playbooks/00-ping.yml -l dgx-spark-01,localhost
+ansible-playbook playbooks/00-ping.yml -K      # break-glass (MacBook, as nvidia)
 ```
 
-This step stays on the MacBook: the Spark doesn't trust vault01 yet, so Semaphore can't log in. You connect as `nvidia` with your own key ([`group_vars/spark.yml`](lab/inventory/group_vars/spark.yml) picks that login whenever no `vault_role_id` is set).
-
-✅ Done when `00-ping` reports aarch64 / 20 cores / Ubuntu 24.04 on the static IP.
-
-## Step 1b · dgx-spark-01 as a Semaphore target (60 min) → [00b](00b-dgx-spark-semaphore-target.md)
-
-Follow the 00b guide. In short:
-
-```bash
-scp vault01:~/vault-ca.crt .cache/vault-ca.crt                                    # MacBook: vault01's TLS certificate (00b §2)
-ansible-playbook playbooks/00b-semaphore-target.yml -l dgx-spark-01,localhost -K  # MacBook: svc-ansible, NOPASSWD sudo, trust vault01's CA (00b §3)
-```
-
-Then on sema01, build the lab's Semaphore image and state volume from [`lab/semaphore/`](lab/semaphore/) (00b §4), and in Semaphore create project `spark-lab` with the repository, the File inventory `01 Ansible/lab/inventory/hosts.yml`, the variable group `vault-approle` and the template `00 Ping` (00b §5). Finally run `08-vault.yml` from the MacBook to add the lab secrets to vault01 (Step 8 below, 00b §6).
-
-✅ Done when the Semaphore template `00 Ping` shows play 1 ok and `dgx-spark-01 aarch64 20 cores …` with `failed=0`, and dgx-spark-01's sshd log shows `Accepted publickey for svc-ansible … ED25519-CERT`.
+✅ Done when `00 Ping` reports `dgx-spark-01 aarch64 20 cores … Ubuntu 24.04` with `failed=0`.
 
 ## Step 2 · Baseline and custom facts (20 min) → [01A](01-ansible-core-deep-dive.md), [07](07-nvidia-driver-and-fabric-manager-automation.md)
 
@@ -90,7 +96,7 @@ ansible-playbook playbooks/16-driver-audit.yml -l dgx-spark-01,localhost -K
 
 ## Step 3 · Containers and CUDA (40 min) → [08](08-cuda-toolkit-cudnn-and-container-runtime.md)
 
-**Semaphore:** `03 Containers` (with `vault_lab_secrets_enabled: true` it logs in to NGC with the key from vault01, Step 1b), then `18 CUDA smoke`.
+**Semaphore:** `03 Containers` (with `vault_lab_secrets_enabled: true` it logs in to NGC with the key from vault01, Step 0b), then `18 CUDA smoke`.
 
 ```bash
 # break-glass (MacBook): no vault01 token here, so pass the NGC key yourself if you need it (Volume 08 §3.1)
@@ -141,9 +147,9 @@ ansible-playbook playbooks/09-nfs-rdma.yml -K   # break-glass
 
 ✅ dgx-spark-02 `/proc/mounts` shows `proto=rdma,port=20049`.
 
-## Step 8 · Lab secrets in vault01 (20 min, done in Step 1b) → [03B](03-hashicorp-vault-deep-dive.md), [19](19-hashicorp-vault-approle-and-dynamic-secrets.md)
+## Step 8 · Lab secrets in vault01 (20 min, done in Step 0b) → [03B](03-hashicorp-vault-deep-dive.md), [19](19-hashicorp-vault-approle-and-dynamic-secrets.md)
 
-The lab has no Vault of its own: vault01 (Step 0a) holds the SSH CA **and** the lab's secrets. `08-vault.yml` only adds to it: KV v2 mount `kv`, policy `spark-lab-read` for `kv/spark-lab/*`, attached to AppRole `semaphore`, a placeholder `kv/spark-lab/ngc`. It needs an **admin** token, which Semaphore must never hold, so it runs from the MacBook. You did this in Step 1b (00b §6), because Step 3 already reads the NGC key; re-run it whenever you want to change the policy.
+The lab has no Vault of its own: vault01 (Step 0a) holds the SSH CA **and** the lab's secrets. `08-vault.yml` only adds to it: KV v2 mount `kv`, policy `spark-lab-read` for `kv/spark-lab/*`, attached to AppRole `semaphore`, a placeholder `kv/spark-lab/ngc`. It needs an **admin** token, which Semaphore must never hold, so it runs from the MacBook. You did this in Step 0b (00b §6), because Step 3 already reads the NGC key; re-run it whenever you want to change the policy.
 
 ```bash
 # MacBook, in 01 Ansible/lab

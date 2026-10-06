@@ -58,8 +58,8 @@ The Kubernetes end-state is one **kubeadm** root cluster (`spark-root`) with two
 Build in this order:
 
 1. **[00a · Semaphore UI + Vault](00a-semaphore-vault-lab-guide.md)**: the management plane, `vault01` and `sema01`, built by hand (Step 0a).
-2. **[00b · Add dgx-spark-01 as a Semaphore target](00b-dgx-spark-semaphore-target.md)**: trust vault01's CA on the Spark, the lab's Semaphore image and project, lab secrets in vault01 (Step 1b).
-3. **[Step-by-step build guide](00-ansible-step-by-step-guide.md)**: the whole build order, from the MacBook toolchain (Step 0) and the bootstrap (Step 1) to the capstone, with the Semaphore template for every step.
+2. **[00b · Add dgx-spark-01 as a Semaphore target](00b-dgx-spark-semaphore-target.md)**: trust vault01's CA on the Spark (bootstrap first if it's a fresh DGX OS), the lab's Semaphore image and project, lab secrets in vault01 (Step 0b, right after the MacBook toolchain).
+3. **[Step-by-step build guide](00-ansible-step-by-step-guide.md)**: the whole build order, from the MacBook toolchain (Step 0), the Spark as a Semaphore target (Step 0b) and first contact (Step 1) to the capstone, with the Semaphore template for every step.
 4. **[Learning roadmap](ansible-tower-vault-roadmap.md)**: skills and checkpoints by level.
 5. **[`lab/README.md`](lab/README.md)**: the project layout and quick start.
 

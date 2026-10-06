@@ -1,6 +1,6 @@
-# Step 1b · Add dgx-spark-01 as a Semaphore Target
+# Step 0b · Add dgx-spark-01 as a Semaphore Target
 
-> **01 Ansible · Step 1b** (after the MacBook toolchain, Step 0, and the bootstrap, Step 1). Prerequisite: [00a · Semaphore UI + Vault](00a-semaphore-vault-lab-guide.md) works end to end (its §9 passes). This guide makes the DGX Spark the next target of that same Semaphore and Vault. Afterwards **every playbook of the Spark lab runs as a Semaphore task**. The [step-by-step guide](00-ansible-step-by-step-guide.md) continues from its Step 2, and the [02 Kubernetes](../02%20Kubernetes/README.md) module builds on the clusters those tasks create.
+> **01 Ansible · Step 0b**, right after the MacBook toolchain (Step 0 of the [step-by-step guide](00-ansible-step-by-step-guide.md)). Prerequisite: [00a · Semaphore UI + Vault](00a-semaphore-vault-lab-guide.md) works end to end (its §9 passes). This guide makes the DGX Spark the next target of that same Semaphore and Vault. Afterwards **every playbook of the Spark lab runs as a Semaphore task**. The [step-by-step guide](00-ansible-step-by-step-guide.md) continues with Step 1 (first contact, the `00 Ping` template from §5.6) and Step 2, and the [02 Kubernetes](../02%20Kubernetes/README.md) module builds on the clusters those tasks create.
 
 **Goal:** the same rule as in 00a: no human holds the automation credential. `sema01` and `vault01` stay outside the Spark. `dgx-spark-01` trusts vault01's SSH CA, and every Semaphore task logs in as `svc-ansible` with a 15-minute certificate. Kubernetes work (kubeadm, Cilium, the GPU Operator, the vClusters) is driven from the Semaphore container over the LAN.
 
@@ -61,7 +61,16 @@ curl -s --cacert .cache/vault-ca.crt https://192.168.0.211:8200/v1/ssh-client-si
 ansible -m ping dgx-spark-01 -K                              # expect: pong (as nvidia, your key)
 ```
 
-If `dgx-spark-01` isn't set up yet (fresh DGX OS), run `ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-01 -k -K -e bootstrap_current_ip=<its DHCP IP>` first ([00 guide Step 1](00-ansible-step-by-step-guide.md), and the playbook's header for the static-IP option). It sets the hostname, your key and the admin user.
+### 2.1 Fresh DGX OS only: bootstrap
+
+Skip this if the Spark is already named `dgx-spark-01`, sits on 192.168.0.100 and takes your key as `nvidia` (the last command in Verify 2 answers `pong`). On a Spark that has just finished the first-boot wizard (password login, DHCP address), `00-bootstrap.yml` sets the hostname, installs your key for `nvidia` and, on the second run, moves it to the static IP. A dead-man timer rolls the network back if Ansible can't reconnect.
+
+```bash
+ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-01 -k -K -e bootstrap_current_ip=<its DHCP IP>                              # -k: SSH password, still on
+ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-01 -K -e bootstrap_current_ip=<its DHCP IP> -e bootstrap_static_ip=true     # move to 192.168.0.100
+```
+
+Then repeat Verify 2. Details: [Volume 06](06-bare-metal-os-provisioning-pxe-and-redfish.md) and the playbook's header.
 
 ---
 
