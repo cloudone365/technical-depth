@@ -86,7 +86,8 @@ jobs:
               --set controlPlane.statefulSet.persistence.volumeClaim.storageClass=standard \
               --set exportKubeConfig.server="https://127.0.0.1:$port" \
               --wait --timeout 10m
-            nohup kubectl -n "vc-$v" port-forward "svc/$v" "$port:443" > "/tmp/pf-$v.log" 2>&1 &
+            # port-forward exits on the first broken stream: keep restarting it
+            nohup bash -c "while true; do kubectl -n vc-$v port-forward svc/$v $port:443; sleep 1; done" > "/tmp/pf-$v.log" 2>&1 &
             # same merge the Spark uses: cluster/user/context all renamed to $v
             scripts/merge-vcluster-kubeconfig.sh "$v" "vc-$v"
             port=$((port+1))
