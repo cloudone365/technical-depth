@@ -399,7 +399,7 @@ Now try what the role must refuse:
 ```bash
 vault write ssh-client-signer/sign/ansible public_key=@$HOME/semaphore_lab.pub valid_principals=root
 # error: root is not a valid value for valid_principals   (allowed_users: svc-ansible)
-vault write ssh-client-signer/sign/ansible public_key=@$HOME/semaphore_lab.pub valid_principals=nvidia
+vault write ssh-client-signer/sign/ansible public_key=@$HOME/semaphore_lab.pub valid_principals=dgxadmin
 # error as well: the admin account can't be reached with a Vault certificate, by design
 ```
 

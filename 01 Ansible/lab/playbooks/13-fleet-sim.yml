@@ -72,7 +72,7 @@
           fleet-{{ '%03d' | format(i) }} ansible_host={{ ansible_host }} ansible_port={{ fleet_base_port + i }}
           {% endfor %}
           [fleet:vars]
-          ansible_user=nvidia
+          ansible_user=dgxadmin
           ansible_python_interpreter=/usr/bin/python3
           ansible_ssh_common_args=-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
       delegate_to: localhost

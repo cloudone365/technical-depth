@@ -63,7 +63,7 @@ Each step has a **Why**, then commands with a comment on every line, then a **Ve
     User <your-user>
   Host dgx-spark-1
     HostName 192.168.0.100
-    User nvidia
+    User dgxadmin
   EOF
   ssh vault01 hostname && ssh sema01 hostname                  # both answer
   ```
