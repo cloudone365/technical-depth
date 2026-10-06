@@ -395,13 +395,13 @@ ok: [dgx-spark-01] => msg: dgx-spark-01 aarch64 20 cores 119.6 GiB Ubuntu 24.04 
 
 > The reported memory is slightly under 128 GB: firmware and carve-outs take some. The `spark_expected.mem_total_gib_min: 110` guard allows for that.
 
-Ad-hoc commands are how you poke a box without writing a playbook:
+Ad-hoc commands are how you poke a box without writing a playbook. Semaphore runs playbooks, not ad-hoc commands, so these run **from your MacBook** as `nvidia` (no Semaphore variable group → your own key). Name the host instead of the group `spark` while the optional dgx-spark-02 isn't there:
 
 ```bash
-ansible spark -m command -a "nvidia-smi --query-gpu=name,driver_version --format=csv"
-ansible spark -m shell   -a "free -g | head -2"
-ansible spark -m setup   -a "filter=ansible_processor*"
-ansible spark -b -m apt  -a "name=nvtop state=present"        # -b = become
+ansible dgx-spark-01 -m command -a "nvidia-smi --query-gpu=name,driver_version --format=csv"
+ansible dgx-spark-01 -m shell   -a "free -g | head -2"
+ansible dgx-spark-01 -m setup   -a "filter=ansible_processor*"
+ansible dgx-spark-01 -b -K -m apt -a "name=nvtop state=present"   # -b = become, -K = nvidia's sudo password
 ```
 
 ### Step 5 — Teach Ansible about the GPU: custom facts
