@@ -53,6 +53,7 @@ jobs:
           kubectl config use-context llms
           tests/fake-gpu-node.sh
           kubectl --context spark-root apply -f addons/local-path-nvme.yaml
+          kubectl --context spark-root apply -k manifests/root/00-platform     # namespace observability (03 alert rules)
           source versions.env
           kubectl apply --server-side -f "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml"
           # Kueue's webhook also mutates Deployments (incl. LWS's): it must be up first
