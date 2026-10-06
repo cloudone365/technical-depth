@@ -73,7 +73,7 @@ cd ~/technical-depth/"01 Ansible/lab"                       # the lab folder; ev
 mkdir -p .cache && chmod 700 .cache                          # local state folder (git-ignored)
 scp vault01:~/vault-ca.crt .cache/vault-ca.crt               # vault01 TLS certificate (the copy you made in 00a §3.3)
 curl --cacert .cache/vault-ca.crt https://192.168.0.211:8200/v1/sys/health   # JSON = the MacBook trusts vault01's TLS
-ssh nvidia@192.168.0.100 'hostname; sudo -v && echo sudo-ok'   # admin login + sudo work on the Spark
+ssh -t nvidia@192.168.0.100 'hostname; sudo -v && echo sudo-ok'   # admin login + sudo (-t: a terminal, so sudo can ask for the password)
 ```
 
 **Verify 2:**
