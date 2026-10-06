@@ -267,5 +267,5 @@ One numbered path, Step 00 → Step 30: start with the [**step-by-step guide**](
 - [Ansible lab: layout & quick start](01-Ansible/lab/README.md)
 - [Inventory](01-Ansible/lab/inventory/hosts.yml)
 - [Ansible config](01-Ansible/lab/ansible.cfg)
-- [GPU telemetry playbook](01-Ansible/lab/playbooks/04-telemetry.yml)
-- [Validation (health) playbook](01-Ansible/lab/playbooks/30-validate.yml)
+- [GPU telemetry playbook](01-Ansible/lab/playbooks/12.1-telemetry.yml)
+- [Validation (health) playbook](01-Ansible/lab/playbooks/30.1-validate.yml)

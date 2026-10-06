@@ -1,12 +1,12 @@
 ---
-# Make every Spark a Semaphore target (Step 04 §3) — the same host-side trust
-# as Step 01 §5, automated:
+# Make every Spark a Semaphore target (Chapter 04 §3) — the same host-side trust
+# as Chapter 01 §5, automated:
 #   * account svc-ansible: no password, NOPASSWD sudo (the controls sit in front of it)
 #   * sshd trusts vault01's SSH CA, and svc-ansible may only log in with a key/certificate
 #
-# Run ONCE from your MacBook, right after 00-bootstrap.yml, as the admin user:
-#   scp vault01:~/vault-ca.crt .cache/vault-ca.crt        # Vault's TLS certificate (Step 01 §3.3)
-#   ansible-playbook playbooks/00b-semaphore-target.yml -l dgx-spark-1,localhost -K
+# Run ONCE from your MacBook, right after 03.1-bootstrap.yml, as the admin user:
+#   scp vault01:~/vault-ca.crt .cache/vault-ca.crt        # Vault's TLS certificate (Chapter 01 §3.3)
+#   ansible-playbook playbooks/04.1-semaphore-target.yml -l dgx-spark-1,localhost -K
 # Afterwards Semaphore runs everything else — including this playbook again, if
 # vault01's CA ever changes.
 - name: Short-lived SSH certificate from vault01 (Semaphore runs only)
@@ -70,7 +70,7 @@
       ansible.builtin.copy:
         dest: /etc/ssh/sshd_config.d/10-vault-ca.conf
         content: |
-          # {{ ansible_managed | default('Managed by Ansible') }} — 00b-semaphore-target.yml
+          # {{ ansible_managed | default('Managed by Ansible') }} — 04.1-semaphore-target.yml
           TrustedUserCAKeys /etc/ssh/trusted-user-ca-keys.pem
           Match User {{ vault_ssh_principal }}
               PasswordAuthentication no
@@ -99,7 +99,7 @@
     - name: Check sshd loaded the CA
       ansible.builtin.assert:
         that: "'trustedusercakeys /etc/ssh/trusted-user-ca-keys.pem' in target_sshd.stdout"
-        fail_msg: sshd did not load TrustedUserCAKeys — see Step 04 §3.2
+        fail_msg: sshd did not load TrustedUserCAKeys — see Chapter 04 §3.2
         quiet: true
 
   handlers:

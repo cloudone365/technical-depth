@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Gang admission check (Step 07), INSIDE vCluster llms: gang-a (3 slices) is
+# Gang admission check (Chapter 07), INSIDE vCluster llms: gang-a (3 slices) is
 # admitted whole, gang-b (3 more) waits whole, because spark-cq allows 3.
 set -euo pipefail
 cd "$(dirname "$0")/.."

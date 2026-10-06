@@ -2,7 +2,7 @@
 # Audit & logging stack:
 #   * auditd rules on every Spark (who changed sudoers, sshd, netplan, docker, kubernetes, slurm, vault…)
 #   * Loki on the monitoring host + Grafana Alloy on every Spark shipping the journal
-#   * Loki datasource in the Step 12 Grafana
+#   * Loki datasource in the Chapter 12 Grafana
 #   * ARA API server recording every ansible-playbook run
 - name: Short-lived SSH certificate from vault01 (Semaphore runs only)
   ansible.builtin.import_playbook: 00-vault-cert.yml
@@ -81,7 +81,7 @@
       retries: 30
       delay: 3
 
-    - name: Loki datasource for Grafana (Step 12 stack)
+    - name: Loki datasource for Grafana (Chapter 12 stack)
       ansible.builtin.copy:
         dest: /opt/spark-monitoring/grafana/provisioning/datasources/loki.yml
         mode: "0644"

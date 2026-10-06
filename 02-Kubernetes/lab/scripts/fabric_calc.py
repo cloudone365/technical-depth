@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rail-optimised fat-tree sizing calculator (Step 19).
+"""Rail-optimised fat-tree sizing calculator (Chapter 19).
 
 Given N nodes with G GPUs (one NIC per GPU = one rail per GPU index) and a
 switch radix R, compute a non-blocking 2-tier (leaf/spine) or 3-tier design:

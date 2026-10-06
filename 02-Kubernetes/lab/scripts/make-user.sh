@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Create a client-certificate user through the CSR API (Step 03).
+# Create a client-certificate user through the CSR API (Chapter 03).
 #   scripts/make-user.sh alice team-alpha            → .cache/alice.kubeconfig (user of dev-lab)
 #   scripts/make-user.sh ops platform spark-root     → a user of the root cluster
 # The certificate's O= becomes the Kubernetes group that RBAC binds. Tenants

@@ -1,6 +1,6 @@
 ---
-# Runs on the control node (localhost). Needs the root cluster (playbook 05),
-# MetalLB (for the vCluster API IPs) and the GPU Operator (playbook 06).
+# Runs on the control node (localhost). Needs the root cluster (playbook 19.1),
+# MetalLB (for the vCluster API IPs) and the GPU Operator (playbook 20.1).
 - name: The 02-Kubernetes lab is checked out next to this one
   ansible.builtin.stat:
     path: "{{ vclusters_lab_dir }}/vclusters"

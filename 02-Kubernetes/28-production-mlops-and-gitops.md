@@ -1,6 +1,6 @@
-# Step 28 · Production MLOps & GitOps: CI, Promotion and Rollback on the Spark Platform
+# Chapter 28 · Production MLOps & GitOps: CI, Promotion and Rollback on the Spark Platform
 
-> **02-Kubernetes · Part IX — Operations · Step 28 of 28** · ← [Step 27 · Hands-on practice exercises workbook](27-hands-on-practice-exercises-workbook.md) · [All steps](00-kubernetes-step-by-step-guide.md)
+> **02-Kubernetes · Part IX — Operations · Chapter 28 of 28** · ← [Chapter 27 · Hands-on practice exercises workbook](27-hands-on-practice-exercises-workbook.md) · [All chapters](00-kubernetes-step-by-step-guide.md)
 
 | | |
 |---|---|
@@ -56,9 +56,9 @@ flowchart LR
 | Ordering | sync waves (-10 → 10): root platform → vCluster budgets → in-vCluster platform → policy → workloads. CRD-dependent layers last | annotations |
 | Drift | `selfHeal: true`: a manual `kubectl edit` in any of the three clusters is reverted within minutes | Argo CD |
 | Safety | `prune: false` on namespaces, budgets and storage layers; the vClusters themselves (Helm releases) are **not** Argo CD apps | `applications.yaml` |
-| Secrets | never in Git. Vault (01-Ansible Step 18) → Kubernetes Secrets (Vault Agent / External Secrets) | `hf-token`, `llm-api-users`, TLS |
+| Secrets | never in Git. Vault (01-Ansible Chapter 18) → Kubernetes Secrets (Vault Agent / External Secrets) | `hf-token`, `llm-api-users`, TLS |
 | Versions | one file | `versions.env` |
-| Progressive delivery | HTTPRoute weights (90/10 → 50/50 → 0/100) on Traefik inside llms | Step 11 §5.7 |
+| Progressive delivery | HTTPRoute weights (90/10 → 50/50 → 0/100) on Traefik inside llms | Chapter 11 §5.7 |
 | Rollback | `git revert` → auto-sync | Argo CD |
 
 ### 1.1 The Applications
@@ -143,7 +143,7 @@ kubectl --context spark-root -n argocd get application spark-dev-lab-10-tenancy 
 kubectl --context dev-lab -n tenant-alpha get resourcequota tenant-budget -o jsonpath='{.spec.hard.limits\.cpu}{"\n"}'   # back to 500m
 ```
 
-Argo CD on the root noticed a change inside dev-lab's own API server and reverted it there. Even during those minutes, tenant-alpha could never have used 4 CPU: the root's `vcluster-budget` caps all of dev-lab at 2. Drift inside a vCluster is a policy problem; drift on the root (`spark-root-05-vclusters`) is a capacity problem — try the same patch on `vc-llms`'s `vcluster-budget` and watch it revert too. From now on, resizing a vCluster (Step 04 §6.5) is a Git change.
+Argo CD on the root noticed a change inside dev-lab's own API server and reverted it there. Even during those minutes, tenant-alpha could never have used 4 CPU: the root's `vcluster-budget` caps all of dev-lab at 2. Drift inside a vCluster is a policy problem; drift on the root (`spark-root-05-vclusters`) is a capacity problem — try the same patch on `vc-llms`'s `vcluster-budget` and watch it revert too. From now on, resizing a vCluster (Chapter 04 §6.5) is a Git change.
 
 > **Drills vs GitOps:** with `selfHeal: true`, Argo CD "fixes" most `breakfix.sh` injections by itself within minutes, which spoils the exercise. Pause the app first: `kubectl --context spark-root -n argocd patch application <app> --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}'`, then re-apply `gitops/applications.yaml` afterwards (`kubectl --context spark-root apply -n argocd -f gitops/applications.yaml`).
 
@@ -151,7 +151,7 @@ Argo CD on the root noticed a change inside dev-lab's own API server and reverte
 
 1. Branch, then edit `manifests/dev-lab/10-tenancy/quotas.yaml` (`requests.nvidia.com/gpu: "2"` in tenant-beta).
 2. Run `python3 tests/budget_check.py`: an inner ceiling of 2 fits dev-lab's 2 slices; `"3"` would fail (`tenant-beta GPU ceiling > vc-dev-lab budget`). The two tenants' ceilings may add up to more than the vCluster — they're ceilings, not reservations.
-3. Add a policy fixture if behaviour changes (Step 03 §5 Task 5).
+3. Add a policy fixture if behaviour changes (Chapter 03 §5 Task 5).
 4. Push and open a PR. CI runs `tests/run-local-checks.sh` and the kind job (root + both vClusters).
 5. Merge. Argo CD syncs `spark-dev-lab-10-tenancy`; run `scripts/verify.sh tenancy` as the post-sync gate.
 6. To roll back, `git revert <sha>` and push.
@@ -160,9 +160,9 @@ Argo CD on the root noticed a change inside dev-lab's own API server and reverte
 
 | Step | Change in Git | Gate |
 |---|---|---|
-| budget | does the canary fit? Two 32 Gi engines fit `llm-serving` (Step 20 §9), so old and new can run side by side if their util sum stays ≲ 0.70 (Step 20 §2). If a second engine is already running, park it, or raise `serving-budget` and the llms `vcluster-budget` in the same PR | `budget_check.py` in CI |
+| budget | does the canary fit? Two 32 Gi engines fit `llm-serving` (Chapter 20 §9), so old and new can run side by side if their util sum stays ≲ 0.70 (Chapter 20 §2). If a second engine is already running, park it, or raise `serving-budget` and the llms `vcluster-budget` in the same PR | `budget_check.py` in CI |
 | prefetch | `model-prefetch-job.yaml` `MODEL=`/`REVISION=` new revision (in llms) | Job completes |
-| canary | a second Deployment (e.g. `vllm-canary`) + HTTPRoute weight 10 on `lab-gateway` | `vllm bench serve` (Step 20 §5.5) + TTFT/TPOT alerts quiet for 1 h, filtered by `vcluster="llms"` |
+| canary | a second Deployment (e.g. `vllm-canary`) + HTTPRoute weight 10 on `lab-gateway` | `vllm bench serve` (Chapter 20 §5.5) + TTFT/TPOT alerts quiet for 1 h, filtered by `vcluster="llms"` |
 | ramp | weights 50/50, then 0/100 | same |
 | cleanup | delete the old Deployment (and shrink the budgets back, if you raised them) | `verify.sh serving` |
 

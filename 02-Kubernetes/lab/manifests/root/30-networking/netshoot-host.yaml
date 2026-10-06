@@ -1,4 +1,4 @@
-# Node-level network toolbox (Steps 08–10) on the ROOT (--context spark-root):
+# Node-level network toolbox (Chapters 08–10) on the ROOT (--context spark-root):
 # hostNetwork + NET_ADMIN — what the node sees: lxc*/cilium_* interfaces,
 # kube-proxy iptables chains, conntrack. Privileged, so it lives in the root's
 # platform-tools namespace; tenants in a vCluster can't run this, by design.

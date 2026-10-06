@@ -1,4 +1,4 @@
-# ndots experiment (Step 10), INSIDE dev-lab: same lookup, two resolver configs.
+# ndots experiment (Chapter 10), INSIDE dev-lab: same lookup, two resolver configs.
 # The resolver here is dev-lab's own CoreDNS (search path *.svc.cluster.local
 # of the vCluster), so the amplification you measure is a tenant's view.
 # 'dns-default' inherits ndots:5 → "api.openai.com" is tried against the 3 cluster search

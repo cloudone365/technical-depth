@@ -4,7 +4,7 @@ spark_drift_report.py — turn an Ansible check-mode run into a drift report.
 
 Usage:
   ANSIBLE_STDOUT_CALLBACK=ansible.posix.json \
-    ansible-playbook playbooks/20-drift-check.yml > .cache/drift.json
+    ansible-playbook playbooks/26.1-drift-check.yml > .cache/drift.json
   python3 tools/spark_drift_report.py .cache/drift.json [--markdown out.md] [--prom out.prom]
 
 Exit codes (so cron / AWX / CI can act on it):

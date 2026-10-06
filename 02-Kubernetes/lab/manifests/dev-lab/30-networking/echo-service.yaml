@@ -1,4 +1,4 @@
-# 3 replicas behind a ClusterIP + a headless Service (Steps 09, 10), INSIDE dev-lab.
+# 3 replicas behind a ClusterIP + a headless Service (Chapters 09, 10), INSIDE dev-lab.
 # agnhost 'serve-hostname' answers with the pod name, so you can *see*
 # kube-proxy's load-balancing decisions. The Service is synced to the root
 # (vc-dev-lab, name echo-x-lab-tools-x-dev-lab) and keeps the SAME ClusterIP,

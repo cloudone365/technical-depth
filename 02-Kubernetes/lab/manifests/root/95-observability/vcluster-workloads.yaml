@@ -1,5 +1,5 @@
 # The root's Prometheus scrapes model servers that live INSIDE the vClusters
-# (Steps 17, 04). Tenants can't create ServiceMonitors (no Prometheus Operator
+# (Chapters 17, 04). Tenants can't create ServiceMonitors (no Prometheus Operator
 # in a vCluster, and it couldn't see the root's anyway), so the platform team
 # runs one ServiceMonitor here that watches the vCluster host namespaces.
 #

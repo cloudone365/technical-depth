@@ -1,4 +1,4 @@
-# Root API server audit policy — who changed what (02-Kubernetes Step 03).
+# Root API server audit policy — who changed what (02-Kubernetes Chapter 03).
 # Installed to /etc/kubernetes/audit/audit-policy.yaml by the 01-Ansible
 # kubeadm_cluster role; an identical copy is kept at
 # "02-Kubernetes/lab/kubeadm/audit-policy.yaml" (tests diff the two).

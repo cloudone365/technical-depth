@@ -1,5 +1,5 @@
-# vCluster #2 · llms — Helm values for chart loft/vcluster 0.37.x (Step 04).
-# Installed into host namespace vc-llms by 01-Ansible playbooks/06b-vclusters.yml
+# vCluster #2 · llms — Helm values for chart loft/vcluster 0.37.x (Chapter 04).
+# Installed into host namespace vc-llms by 01-Ansible playbooks/20.2-vclusters.yml
 # or scripts/install-addons.sh vclusters.
 #
 # Budget (enforced by the ROOT ResourceQuota in manifests/root/05-vclusters/quotas.yaml):

@@ -1,6 +1,6 @@
-# Step 13 · Storage, CSI & High-Performance Volumes: local-path on NVMe, WaitForFirstConsumer, Model Caches, fio, UMA & Page Cache
+# Chapter 13 · Storage, CSI & High-Performance Volumes: local-path on NVMe, WaitForFirstConsumer, Model Caches, fio, UMA & Page Cache
 
-> **02-Kubernetes · Part IV — Workloads, storage & tenancy · Step 13 of 28** · ← [Step 12 · Advanced workload controllers](12-advanced-workload-controllers.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 14 · Multi-tenancy, resource quotas & cgroups](14-multi-tenancy-resource-quotas-and-cgroups.md) →
+> **02-Kubernetes · Part IV — Workloads, storage & tenancy · Chapter 13 of 28** · ← [Chapter 12 · Advanced workload controllers](12-advanced-workload-controllers.md) · [All chapters](00-kubernetes-step-by-step-guide.md) · [Chapter 14 · Multi-tenancy, resource quotas & cgroups](14-multi-tenancy-resource-quotas-and-cgroups.md) →
 
 | | |
 |---|---|
@@ -15,7 +15,7 @@
 
 ## 1. Why this matters on a Spark
 
-Every model server's start time is dominated by one number: **how fast can N gigabytes of weights get from disk into (unified) memory?** And every training job's resilience depends on how fast it can write a checkpoint without stalling etcd (Step 02). On the Spark:
+Every model server's start time is dominated by one number: **how fast can N gigabytes of weights get from disk into (unified) memory?** And every training job's resilience depends on how fast it can write a checkpoint without stalling etcd (Chapter 02). On the Spark:
 
 - **One NVMe** holds DGX OS, container images (containerd for Kubernetes *and* Docker), the root's etcd data and WAL (`/var/lib/etcd`), both vClusters' SQLite databases, model weights and checkpoints. Isolation is by directory and I/O priority, not by device.
 - **Unified memory** means the page cache and the GPU compete for the same pool — about 119.7 GiB visible of the 128 GB installed. Reading a 60 GB checkpoint through the page cache can briefly need 60 GB of cache *plus* 60 GB of model. NVIDIA's Spark guidance is to drop caches before loading big models, and `scripts/uma-watch.sh` shows why.
@@ -89,7 +89,7 @@ kubeadm ships no storage at all (K3s used to bundle local-path). `scripts/instal
 
 **Why WaitForFirstConsumer?** A local volume lives on one node. Binding at PVC creation (Immediate) could pick a node where the pod can't run (e.g. no free GPU slice). WFFC waits for the scheduler to choose the node, then provisions the volume there. With vClusters, "the scheduler" is the **root's**: it sets `volume.kubernetes.io/selected-node` on the root copy of the PVC when it places the root copy of the pod. Tenants see the result, not the mechanism.
 
-**Capacity isn't enforced.** local-path creates a directory. `resources.requests.storage` counts against ResourceQuotas (Step 14), but nothing stops the pod writing 2 TB. Use ext4/XFS project quotas or a real CSI driver for hard limits (§8).
+**Capacity isn't enforced.** local-path creates a directory. `resources.requests.storage` counts against ResourceQuotas (Chapter 14), but nothing stops the pod writing 2 TB. Use ext4/XFS project quotas or a real CSI driver for hard limits (§8).
 
 ### 3.2 AI I/O profiles (fio)
 
@@ -128,11 +128,11 @@ A PVC has to fit **both**. The inner refusal comes from the vCluster's API serve
 
 ## 4. Integrations
 
-- **Serving (Steps 20, 22, 23)** mounts `model-cache` at `/models` with `HF_HOME=/models/hf`. The prefetch Job fills it once. vLLM, SGLang and the P/D pair all read it — all inside llms, in `llm-serving`.
-- **Workloads (Step 12)**: Qdrant's `volumeClaimTemplates` use `local-nvme-retain` the same way.
-- **01-Ansible NFS-over-RDMA (`playbooks/09-nfs-rdma.yml`)** exports `/srv/models` from dgx-spark-1 to dgx-spark-2. For 2 Sparks, back the model cache with a static NFS PV (§8) so both nodes share one copy.
+- **Serving (Chapters 20, 22, 23)** mounts `model-cache` at `/models` with `HF_HOME=/models/hf`. The prefetch Job fills it once. vLLM, SGLang and the P/D pair all read it — all inside llms, in `llm-serving`.
+- **Workloads (Chapter 12)**: Qdrant's `volumeClaimTemplates` use `local-nvme-retain` the same way.
+- **01-Ansible NFS-over-RDMA (`playbooks/15.1-nfs-rdma.yml`)** exports `/srv/models` from dgx-spark-1 to dgx-spark-2. For 2 Sparks, back the model cache with a static NFS PV (§8) so both nodes share one copy.
 - **Module 08-Storage** benchmarks the same NVMe with deeper tools (GDS, `gdsio`, MinIO, JuiceFS).
-- **etcd (Step 02)**: run §5.4 while watching `etcd_disk_wal_fsync_duration_seconds` to see checkpoint-sized writes hurt the root control plane — and with it both vClusters, whose syncers write through it.
+- **etcd (Chapter 02)**: run §5.4 while watching `etcd_disk_wal_fsync_duration_seconds` to see checkpoint-sized writes hurt the root control plane — and with it both vClusters, whose syncers write through it.
 
 ---
 
@@ -264,7 +264,7 @@ Clean up: `kubectl --context spark-root delete -f manifests/root/60-storage/fio-
 `uma-watch.sh` takes the vCluster pod's name and context, finds its host copy, and prints the host pool next to that pod's cgroup:
 
 ```bash
-# terminal A (on the Spark): watch the pool while vLLM (Step 20) loads
+# terminal A (on the Spark): watch the pool while vLLM (Chapter 20) loads
 POD=$(kubectl --context llms -n llm-serving get pod -l app=vllm -o jsonpath='{.items[0].metadata.name}')
 scripts/uma-watch.sh llm-serving "$POD" llms 2
 # terminal B: restart vLLM once with a warm cache, once after dropping it
@@ -272,7 +272,7 @@ kubectl --context llms -n llm-serving rollout restart deploy/vllm
 sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'; kubectl --context llms -n llm-serving rollout restart deploy/vllm
 ```
 
-The restart creates a new pod, so re-run terminal A with the new name once it's scheduled. Watch the `Cached` column climb by roughly the model size while `MemAvailable` falls by about twice that during load. The page cache is reclaimable, and it isn't charged to anyone's quota: neither llms's 88 Gi budget nor any pod limit sees it. A CUDA allocation that arrives while the cache is full can still fail before the kernel reclaims. The 01-Ansible `playbooks/24-uma-relief.yml -e uma_drop_caches=true` automates the cache drop for big-model starts.
+The restart creates a new pod, so re-run terminal A with the new name once it's scheduled. Watch the `Cached` column climb by roughly the model size while `MemAvailable` falls by about twice that during load. The page cache is reclaimable, and it isn't charged to anyone's quota: neither llms's 88 Gi budget nor any pod limit sees it. A CUDA allocation that arrives while the cache is full can still fail before the kernel reclaims. The 01-Ansible `playbooks/29.2-uma-relief.yml -e uma_drop_caches=true` automates the cache drop for big-model starts.
 
 ---
 
@@ -320,7 +320,7 @@ scripts/verify.sh storage
 
 | Lab | 2 Sparks | Datacenter |
 |---|---|---|
-| local-path, one node | static NFS PV from `/srv/models` on dgx-spark-1 (NFS over RDMA, 01-Ansible `playbooks/09-nfs-rdma.yml`). `ReadOnlyMany` for weights | parallel FS (Weka, VAST, Lustre, GPFS) via CSI. Module 08 |
+| local-path, one node | static NFS PV from `/srv/models` on dgx-spark-1 (NFS over RDMA, 01-Ansible `playbooks/15.1-nfs-rdma.yml`). `ReadOnlyMany` for weights | parallel FS (Weka, VAST, Lustre, GPFS) via CSI. Module 08 |
 | no capacity enforcement | XFS project quotas | CSI with real quotas + snapshots (`VolumeSnapshot`) |
 | prefetch Job per model | same, run once on the NFS server | model registry + node-local cache DaemonSet (e.g. Fluid/Alluxio, KServe LocalModelCache) |
 | storage owned by one root, consumed by vClusters | same split | the same split at scale: a platform team runs CSI, tenant clusters only see classes |

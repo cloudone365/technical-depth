@@ -1,4 +1,4 @@
-# API Priority & Fairness on dev-lab's OWN API server (Steps 03, 04): tenant tooling that hammers LIST
+# API Priority & Fairness on dev-lab's OWN API server (Chapters 03, 04): tenant tooling that hammers LIST
 # (dashboards, `kubectl get pods -A -w` loops, badly written operators) gets a
 # small, fair-queued share so it can never starve dev-lab's controllers or its
 # syncer. The root API server has its own lane for the syncers

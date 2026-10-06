@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Everything CI runs that doesn't need a Spark (Step 27 §0).
+# Everything CI runs that doesn't need a Spark (Chapter 27 §0).
 #   tests/run-local-checks.sh           # static checks
 #   API=1 tests/run-local-checks.sh     # + server-side dry-run against the three contexts in $KUBECONFIG
 #                                         (spark-root, dev-lab, llms — CI builds them on kind)

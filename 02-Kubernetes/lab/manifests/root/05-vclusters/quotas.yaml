@@ -1,4 +1,4 @@
-# The hard budgets of the two vClusters (Step 04 §3). These are the real caps:
+# The hard budgets of the two vClusters (Chapter 04 §3). These are the real caps:
 # quotas inside a vCluster are ceilings for its tenants, but only this root
 # quota stops the vCluster as a whole. The root keeps the rest of the Spark:
 #
@@ -15,7 +15,7 @@
 # memory overcommit on a unified-memory box); CPU may burst into idle cores.
 # dev-lab stays small (tools and tenancy drills); llms gets the rest, because
 # that is where the models run (≈84 GiB of model memory after its own
-# control plane and gateway — Step 20 §2).
+# control plane and gateway — Chapter 20 §2).
 #
 # CPU is capped on requests only: a vCluster is guaranteed its share and may
 # burst into idle CPU. Memory is capped on requests AND limits — on a unified-

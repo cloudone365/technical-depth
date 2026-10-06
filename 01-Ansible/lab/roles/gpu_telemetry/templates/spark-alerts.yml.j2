@@ -8,7 +8,7 @@ groups:
         labels: { severity: critical }
         annotations:
           summary: "nvidia-smi not answering on {{ '{{' }} $labels.host {{ '}}' }}"
-          runbook: "Step 29 §Runbook A — GPU hang"
+          runbook: "Chapter 29 §Runbook A — GPU hang"
       - alert: SparkGPUMetricsStale
         # A textfile metric that stops updating looks exactly like a healthy one.
         expr: time() - node_textfile_mtime_seconds{file=~".*spark_gpu.prom"} > 120
@@ -16,13 +16,13 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: "GPU metrics on {{ '{{' }} $labels.host {{ '}}' }} are {{ '{{' }} $value | humanizeDuration {{ '}}' }} old — collector timer stopped?"
-          runbook: "systemctl status spark-gpu-metrics.timer; ansible-playbook playbooks/04-telemetry.yml"
+          runbook: "systemctl status spark-gpu-metrics.timer; ansible-playbook playbooks/12.1-telemetry.yml"
       - alert: SparkGPUXid
         expr: delta(spark_gpu_xid_events_24h[15m]) > 0
         labels: { severity: warning }
         annotations:
           summary: "New NVRM Xid on {{ '{{' }} $labels.host {{ '}}' }}"
-          runbook: "Step 29 §Runbook B — Xid triage"
+          runbook: "Chapter 29 §Runbook B — Xid triage"
       - alert: SparkGPUHot
         expr: spark_gpu_temperature_celsius > 85
         for: 5m
@@ -35,7 +35,7 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: "<8 GiB unified memory available on {{ '{{' }} $labels.host {{ '}}' }}"
-          runbook: "Step 29 §Runbook C — UMA pressure (drop caches, stop idle model servers)"
+          runbook: "Chapter 29 §Runbook C — UMA pressure (drop caches, stop idle model servers)"
   - name: spark-fabric
     rules:
       - alert: SparkCX7Degraded

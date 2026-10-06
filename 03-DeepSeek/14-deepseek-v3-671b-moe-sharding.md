@@ -115,7 +115,7 @@ flowchart LR
 
 ## 4. Integrations
 
-- **01-Ansible**: `02-fabric.yml` (CX-7), `11-rdma-perftest.yml` (≥ 180 Gb/s gate), `09-nfs-rdma.yml` (weights share), `05-k3s.yml` (spark-02 joins as agent).
+- **01-Ansible**: `13.1-fabric.yml` (CX-7), `13.2-rdma-perftest.yml` (≥ 180 Gb/s gate), `15.1-nfs-rdma.yml` (weights share), `05-k3s.yml` (spark-02 joins as agent).
 - **02 Vol 17**: the NCCL environment and the bandwidth you should see.
 - **LiteLLM (Vol 28)**: add `r1-70b` and `r1-671b-iq1` as aliases once they're up.
 

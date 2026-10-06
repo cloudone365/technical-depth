@@ -1,11 +1,11 @@
-# Step 15 · NFS over RDMA & Parallel File Systems: NFSv4.2 over RDMA as a Model Cache (and How It Maps to Lustre/Weka/VAST)
+# Chapter 15 · NFS over RDMA & Parallel File Systems: NFSv4.2 over RDMA as a Model Cache (and How It Maps to Lustre/Weka/VAST)
 
-> **01-Ansible · Part III — Fabric & storage · Step 15 of 30** · ← [Step 14 · RoCEv2, QoS & NCCL](14-rocev2-qos-and-nccl.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 16 · GPUDirect Storage & cuFile](16-gpudirect-storage-and-cufile.md) →
+> **01-Ansible · Part III — Fabric & storage · Chapter 15 of 30** · ← [Chapter 14 · RoCEv2, QoS & NCCL](14-rocev2-qos-and-nccl.md) · [All chapters](00-ansible-step-by-step-guide.md) · [Chapter 16 · GPUDirect Storage & cuFile](16-gpudirect-storage-and-cufile.md) →
 
 | | |
 |---|---|
 | **You will build** | dgx-spark-1 exports `/srv/models` (its NVMe) over **NFSv4.2 on RDMA** across the CX-7 link; dgx-spark-2 mounts it at `/mnt/models` with an automatic TCP fallback. One download of a 70B checkpoint serves both nodes, and tensor-parallel runs see identical paths |
-| **Hardware** | 2× DGX Spark with the CX-7 fabric from Step 13 |
+| **Hardware** | 2× DGX Spark with the CX-7 fabric from Chapter 13 |
 | **Time** | 45 min |
 | **Risk** | Low. `hard` mounts mean clients hang (rather than corrupt) if the server disappears; `x-systemd.automount` keeps boot from blocking |
 
@@ -196,7 +196,7 @@ nfs_rdma_tcp_fallback: true
 
 ```bash
 cd "01-Ansible/lab"
-ansible-playbook playbooks/09-nfs-rdma.yml -K
+ansible-playbook playbooks/15.1-nfs-rdma.yml -K
 ssh dgxadmin@192.168.0.101 'nfsstat -m | grep -A1 /mnt/models; cat /proc/fs/nfsd/portlist 2>/dev/null'
 # Expect: proto=rdma,port=20049 on the client; "rdma 20049" in the server portlist
 ```
@@ -236,7 +236,7 @@ The role's shape (server/client blocks, kernel-module pre-reqs, explicit transpo
 | Fabric config | RDMA port 20049 | LNet `o2ib` over IB or RoCE (`/etc/modprobe.d/lustre.conf: options lnet networks=o2ib0(enp1s0f1np1)`) | Frontend NICs / DPDK or RDMA config |
 | Mount | `nfs4 … proto=rdma` | `mount -t lustre mgs@o2ib:/fs /lustre` | Vendor mount type/options |
 | Verify | `/proc/mounts` `proto=rdma`; `nfsstat -m` | `lctl ping`, `lfs df` | Vendor CLI health |
-| Ansible risk | Low | **Kernel upgrades break modules**: couple to Step 10's upgrade flow | Same |
+| Ansible risk | Low | **Kernel upgrades break modules**: couple to Chapter 10's upgrade flow | Same |
 
 The lesson carries over: **every storage client with a kernel module must be part of the kernel/driver upgrade playbook**, or the next DGX OS update leaves nodes unable to mount.
 
@@ -244,10 +244,10 @@ The lesson carries over: **every storage client with a kernel module must be par
 
 | System | Integration |
 |---|---|
-| Kubernetes (Step 19) | On the root cluster (`spark-root`), expose `/mnt/models` to platform pods with a `hostPath` volume, or install `csi-driver-nfs` with `mountOptions: [vers=4.2, proto=rdma, port=20049]`. Inside the `llms` vCluster, `llm-serving` enforces Pod Security `baseline`, which forbids `hostPath`; use a PVC instead. The vCluster syncs it to the root (namespace `vc-llms`) and sees the root's StorageClasses, so an NFS-backed class on the root works there too |
-| Slurm (Step 22) | Same path on every compute node, so jobs are location-independent |
-| Telemetry (Step 12) | node_exporter's `nfs`/`mountstats` collectors expose client RPC latency |
-| Drain (Step 29) | Drain the client **before** rebooting the server, or `hard` mounts will hang processes until it's back |
+| Kubernetes (Chapter 19) | On the root cluster (`spark-root`), expose `/mnt/models` to platform pods with a `hostPath` volume, or install `csi-driver-nfs` with `mountOptions: [vers=4.2, proto=rdma, port=20049]`. Inside the `llms` vCluster, `llm-serving` enforces Pod Security `baseline`, which forbids `hostPath`; use a PVC instead. The vCluster syncs it to the root (namespace `vc-llms`) and sees the root's StorageClasses, so an NFS-backed class on the root works there too |
+| Slurm (Chapter 22) | Same path on every compute node, so jobs are location-independent |
+| Telemetry (Chapter 12) | node_exporter's `nfs`/`mountstats` collectors expose client RPC latency |
+| Drain (Chapter 29) | Drain the client **before** rebooting the server, or `hard` mounts will hang processes until it's back |
 
 ## 6. Troubleshooting & diagnostics
 
@@ -255,7 +255,7 @@ The lesson carries over: **every storage client with a kernel module must be par
 |---|---|---|
 | Server: `rdma 20049` missing from `/proc/fs/nfsd/portlist` | `journalctl -u nfs-server`; `lsmod \| grep rpcrdma` | `modprobe rpcrdma`; check `/etc/nfs.conf [nfsd] rdma=y`; restart nfs-server |
 | Client mount: `mount.nfs4: Protocol not supported` | `lsmod \| grep rpcrdma` on the client | `modprobe rpcrdma` (the role does it); make sure the fabric IP is used, not mgmt |
-| Mount falls back to TCP every time | Role output "Fallback to TCP"; `dmesg \| grep -i rpcrdma` | Wrong server IP (mgmt instead of fabric); CX-7 link down (Step 13); port 20049 blocked |
+| Mount falls back to TCP every time | Role output "Fallback to TCP"; `dmesg \| grep -i rpcrdma` | Wrong server IP (mgmt instead of fabric); CX-7 link down (Chapter 13); port 20049 blocked |
 | `Permission denied` / `access denied by server` | `exportfs -v` on the server | Client IP not in the export CIDRs (did you mount via the `.101` subnet but only export `.100`?) |
 | Processes stuck in `D` state on the client | Server down/rebooted; `hard` mount waiting | Bring the server back; it's by design. For emergencies: `umount -f -l /mnt/models` |
 | Slow small-file workloads | `nfsstat -c`; `mountstats` | NFS isn't for metadata storms; pack datasets (WebDataset/tar) or keep them local |

@@ -1,11 +1,11 @@
 # shellcheck shell=bash
 # Shared helpers for the 02-Kubernetes lab scripts.
 #
-# The lab is three Kubernetes API servers in one kubeconfig (Step 04):
+# The lab is three Kubernetes API servers in one kubeconfig (Chapter 04):
 #   spark-root   the kubeadm root cluster on the Spark — platform, GPU, nodes
 #   dev-lab      vCluster #1 — tenant-alpha, tenant-beta, lab-tools
 #   llms         vCluster #2 — llm-serving, batch, ingress (Traefik), Kueue, KEDA
-# 01-Ansible (playbooks 05, 06b) or scripts/install-addons.sh vclusters writes
+# 01-Ansible (playbooks 19.1, 20.2) or scripts/install-addons.sh vclusters writes
 # all three contexts into one file.
 set -euo pipefail
 LAB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

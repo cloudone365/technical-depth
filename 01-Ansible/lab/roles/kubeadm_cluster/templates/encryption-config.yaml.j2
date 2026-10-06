@@ -1,6 +1,6 @@
 # {{ ansible_managed }}
 # Secrets are written to etcd encrypted with AES-CBC. The key was generated once
-# by Ansible; keep a copy in Vault (Step 18) — losing it makes every Secret in
+# by Ansible; keep a copy in Vault (Chapter 18) — losing it makes every Secret in
 # an etcd backup unreadable. Rotation: add a new key FIRST in the list, restart
 # the API server, rewrite all Secrets, then remove the old key.
 apiVersion: apiserver.config.k8s.io/v1

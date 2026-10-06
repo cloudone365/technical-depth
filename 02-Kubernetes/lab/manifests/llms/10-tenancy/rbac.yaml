@@ -1,4 +1,4 @@
-# Who can do what INSIDE vCluster #2 · llms (Steps 03, 04, 28).
+# Who can do what INSIDE vCluster #2 · llms (Chapters 03, 04, 28).
 # CI deploys into llm-serving with a ServiceAccount token, nothing else.
 apiVersion: v1
 kind: ServiceAccount

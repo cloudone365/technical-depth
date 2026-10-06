@@ -1,4 +1,4 @@
-# NVMe benchmark from inside a pod (Step 13), on the ROOT in platform-tools
+# NVMe benchmark from inside a pod (Chapter 13), on the ROOT in platform-tools
 # (4 CPUs: twice dev-lab's whole budget). Four profiles that map to real
 # AI I/O: weight load (seq read 1M), checkpoint write (seq write 1M),
 # dataloader (rand read 128k), metadata-ish (rand read 4k).

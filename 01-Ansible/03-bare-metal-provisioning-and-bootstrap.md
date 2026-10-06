@@ -1,6 +1,6 @@
-# Step 03 · Bare-Metal Provisioning & Bootstrap: Day-0/Day-1 Without a BMC, Safe Network Cut-over, Redfish & PXE Practice
+# Chapter 03 · Bare-Metal Provisioning & Bootstrap: Day-0/Day-1 Without a BMC, Safe Network Cut-over, Redfish & PXE Practice
 
-> **01-Ansible · Part I — Management plane & Ansible foundations · Step 03 of 30** · ← [Step 02 · Control node & Ansible core](02-control-node-and-ansible-core.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 04 · DGX Spark as a Semaphore target](04-dgx-spark-as-semaphore-target.md) →
+> **01-Ansible · Part I — Management plane & Ansible foundations · Chapter 03 of 30** · ← [Chapter 02 · Control node & Ansible core](02-control-node-and-ansible-core.md) · [All chapters](00-ansible-step-by-step-guide.md) · [Chapter 04 · DGX Spark as a Semaphore target](04-dgx-spark-as-semaphore-target.md) →
 
 | | |
 |---|---|
@@ -26,10 +26,10 @@ stateDiagram-v2
   [*] --> Unboxed
   Unboxed --> OOBE: power on
   OOBE --> DHCP_Ready: wizard (user, Wi-Fi/Ethernet, updates)
-  DHCP_Ready --> Bootstrapped: 00-bootstrap.yml (-k -K, MacBook)
-  Bootstrapped --> Target: 00b-semaphore-target.yml (MacBook)
-  Target --> Baselined: Semaphore 01 Baseline
-  Baselined --> Operational: 02..09 (fabric, runtime, kubeadm + vClusters, slurm…)
+  DHCP_Ready --> Bootstrapped: 03.1-bootstrap.yml (-k -K, MacBook)
+  Bootstrapped --> Target: 04.1-semaphore-target.yml (MacBook)
+  Target --> Baselined: Semaphore 02.2 Baseline
+  Baselined --> Operational: templates 11.1 … 22.1 (runtime, fabric, kubeadm + vClusters, slurm…)
   Operational --> Operational: drift check / day-2
   Operational --> Recovery: disk failure · bad update · "start clean"
   Recovery --> OOBE: USB recovery image (25–30 min)
@@ -48,16 +48,16 @@ flowchart LR
   subgraph D0["Day 0 (human)"]
     W["First-boot wizard<br/>user · locale · network · updates"]
   end
-  subgraph D1["Day 1 (00-bootstrap.yml)"]
+  subgraph D1["Day 1 (03.1-bootstrap.yml)"]
     K["SSH key trust"] --> H["hostname + /etc/hosts"] --> N["static mgmt IP<br/>with dead-man rollback"]
   end
-  subgraph D1b["Day 1 (00b-semaphore-target.yml)"]
+  subgraph D1b["Day 1 (04.1-semaphore-target.yml)"]
     SA["svc-ansible + NOPASSWD sudo"] --> CA["trust vault01's SSH CA"]
   end
-  subgraph D2["Day 1½ (Semaphore: 01 Baseline)"]
+  subgraph D2["Day 1½ (Semaphore: 02.2 Baseline)"]
     F["spark.fact"] --> B["packages · NVIDIA holds ·<br/>sysctl · sshd · chrony · journald"]
   end
-  D0 --> D1 --> D1b --> D2 --> Rest["Steps 10–30"]
+  D0 --> D1 --> D1b --> D2 --> Rest["Chapters 10–30"]
 ```
 
 ### 2.2 LLD: the dead-man switch for network changes
@@ -93,19 +93,19 @@ The same pattern protects **any** change that can cut your own access: sshd conf
 2. Power on. Either use a monitor and keyboard, or join the setup hotspot from a laptop and open the URL on the Quick Start Guide sticker.
 3. Create the user. Use **the same username on every Spark** (`dgxadmin` in this lab); NVIDIA's multi-node playbooks and MPI depend on it.
 4. Let the updates finish, including the reboot.
-5. Find its DHCP address from your router, or with `avahi-browse -rt _ssh._tcp` from a Linux machine on the same LAN (Step 06).
+5. Find its DHCP address from your router, or with `avahi-browse -rt _ssh._tcp` from a Linux machine on the same LAN (Chapter 06).
 
 ### 3.2 Day 1: bootstrap with Ansible
 
 This is one of the few playbooks that runs **from your MacBook**, not from Semaphore: the Spark has no `svc-ansible` account and doesn't trust vault01's CA yet, so Semaphore can't log in. You connect as `dgxadmin` with a password (`-k`), and the play installs your key.
 
 ```yaml
-# lab/playbooks/00-bootstrap.yml
+# lab/playbooks/03.1-bootstrap.yml
 ---
 # Day-1 bootstrap for a Spark that just finished the first-boot wizard.
 # Password auth is still on, you have no key trust yet, and it's on DHCP.
 #
-#   ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-2 -k -K \
+#   ansible-playbook playbooks/03.1-bootstrap.yml -l dgx-spark-2 -k -K \
 #     -e bootstrap_current_ip=<current DHCP IP> [-e bootstrap_static_ip=true]
 #
 # NOTE: don't pass -e ansible_host=… — extra vars outrank set_fact, so Ansible
@@ -230,17 +230,17 @@ This is one of the few playbooks that runs **from your MacBook**, not from Semap
 ```bash
 cd "01-Ansible/lab"
 # First run: password SSH (-k) and sudo (-K), on the DHCP address, no IP change yet
-ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-2 -k -K -e bootstrap_current_ip=192.168.0.137
+ansible-playbook playbooks/03.1-bootstrap.yml -l dgx-spark-2 -k -K -e bootstrap_current_ip=192.168.0.137
 
 # Second run: move it to its inventory IP (192.168.0.101) with the dead-man switch
-ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-2 -K \
+ansible-playbook playbooks/03.1-bootstrap.yml -l dgx-spark-2 -K \
   -e bootstrap_current_ip=192.168.0.137 -e bootstrap_static_ip=true
 
-# Make it a Semaphore target (Step 04 §3): svc-ansible, NOPASSWD sudo, trust vault01's CA
-ansible-playbook playbooks/00b-semaphore-target.yml -l dgx-spark-2,localhost -K
+# Make it a Semaphore target (Chapter 04 §3): svc-ansible, NOPASSWD sudo, trust vault01's CA
+ansible-playbook playbooks/04.1-semaphore-target.yml -l dgx-spark-2,localhost -K
 ```
 
-From now on, plain inventory addressing works and the node belongs to Semaphore: run the templates `00 Ping` and `01 Baseline` with CLI args `--limit dgx-spark-2,localhost`. (When dgx-spark-2 is permanent, drop the `--limit dgx-spark-1,localhost` from all templates, Step 04 §5.5.)
+From now on, plain inventory addressing works and the node belongs to Semaphore: run the templates `02.1 Ping` and `02.2 Baseline` with CLI args `--limit dgx-spark-2,localhost`. (When dgx-spark-2 is permanent, drop the `--limit dgx-spark-1,localhost` from all templates, Chapter 04 §5.5.)
 
 **Test the rollback on purpose, once.** Point the node at an address your MacBook can't reach, e.g. `-e bootstrap_target_ip=10.99.99.99`. (`-e` beats the playbook's own `set_fact`, so this is a handy way to force a bad target.) The reconnect times out, and 180 s later the Spark is back on its old address. `journalctl -t bootstrap` on the Spark shows the rollback.
 
@@ -286,10 +286,10 @@ DGX OS ships tuned kernel parameters, so don't change them casually. When you mu
 
 The real test of provisioning automation is to wipe a node and rebuild it:
 
-1. Record the state: Semaphore template `30 Validate` with `--limit dgx-spark-2,localhost` (keep `validation/dgx-spark-2.json` from sema01's state volume, `/opt/spark-lab/cache`).
+1. Record the state: Semaphore template `30.1 Validate` with `--limit dgx-spark-2,localhost` (keep `validation/dgx-spark-2.json` from sema01's state volume, `/opt/spark-lab/cache`).
 2. Re-image dgx-spark-2 from the USB recovery media (the OEM/NVIDIA guide covers creating it with `dd`; verify the checksum first).
 3. Complete the wizard (§3.1).
-4. From the MacBook: `00-bootstrap.yml` (both runs), then `00b-semaphore-target.yml -l dgx-spark-2,localhost -K`. The re-image gave the node a new SSH host key, so on sema01 remove the old one first (`docker compose exec semaphore ssh-keygen -R 192.168.0.101`, Step 04 §12). Then the Semaphore template `site` with `--limit dgx-spark-2,localhost`.
+4. From the MacBook: `03.1-bootstrap.yml` (both runs), then `04.1-semaphore-target.yml -l dgx-spark-2,localhost -K`. The re-image gave the node a new SSH host key, so on sema01 remove the old one first (`docker compose exec semaphore ssh-keygen -R 192.168.0.101`, Chapter 04 §12). Then the Semaphore template `site` with `--limit dgx-spark-2,localhost`.
 5. Validate again and `diff` the two JSON reports. **Anything that differs is something you did by hand and never automated.**
 
 Semaphore, vault01 and the task history of the first build are untouched by the re-image: that's why the controller lives outside the Spark.
@@ -303,11 +303,11 @@ Time the whole thing. Under an hour from USB boot to validated is a good target.
 The Spark has no BMC, but the Redfish automation you'll use on DGX B200/GB200 systems (power control, boot override, firmware inventory, sensors) can be practised against DMTF's **Redfish Mockup Server**, which serves a realistic BMC tree from static JSON:
 
 ```yaml
-# lab/playbooks/12-redfish-practice.yml
+# lab/playbooks/03.2-redfish-practice.yml
 ---
 # DGX Spark has no BMC. To practise the Redfish automation you'll need on
 # DGX/HGX servers, run DMTF's Redfish Mockup Server on the Spark and point
-# community.general redfish modules at it (Step 03).
+# community.general redfish modules at it (Chapter 03).
 - name: Short-lived SSH certificate from vault01 (Semaphore runs only)
   ansible.builtin.import_playbook: 00-vault-cert.yml
 
@@ -358,10 +358,10 @@ The Spark has no BMC, but the Redfish automation you'll use on DGX B200/GB200 sy
         var: redfish.redfish_facts.system
 ```
 
-Semaphore template `12 Redfish practice`, or break-glass from the MacBook:
+Semaphore template `03.2 Redfish practice`, or break-glass from the MacBook:
 
 ```bash
-ansible-playbook playbooks/12-redfish-practice.yml -l dgx-spark-1,localhost -K
+ansible-playbook playbooks/03.2-redfish-practice.yml -l dgx-spark-1,localhost -K
 curl -s http://192.168.0.100:8000/redfish/v1/Systems | jq '.Members'
 ```
 
@@ -390,7 +390,7 @@ flowchart LR
   CB --> AWX["AWX: site.yml -l <new node>"]
 ```
 
-Ansible owns every box in that diagram: it templates the dnsmasq reservations from NetBox (Step 06), renders the per-node `user-data`, flips the BMC boot order through Redfish, and receives the phone-home webhook in AWX.
+Ansible owns every box in that diagram: it templates the dnsmasq reservations from NetBox (Chapter 06), renders the per-node `user-data`, flips the BMC boot order through Redfish, and receives the phone-home webhook in AWX.
 
 ---
 
@@ -400,7 +400,7 @@ Ansible owns every box in that diagram: it templates the dnsmasq reservations fr
 |---|---|---|
 | Can't find the Spark after the wizard | Router DHCP leases; `avahi-browse -rt _ssh._tcp`; `arp -a` | Use a wired connection; the Wi-Fi hotspot is setup-only |
 | `-k` fails: `to use the 'ssh' connection type with passwords, you must install the sshpass program` | — | `brew install hudochenkov/sshpass/sshpass` on the MacBook (`apt install sshpass` on Linux) |
-| Semaphore after a re-image: `Host key verification failed` | the node's host key changed | on sema01: `docker compose exec semaphore ssh-keygen -R <ip>`, only once you know why it changed (Step 04 §12) |
+| Semaphore after a re-image: `Host key verification failed` | the node's host key changed | on sema01: `docker compose exec semaphore ssh-keygen -R <ip>`, only once you know why it changed (Chapter 04 §12) |
 | Bootstrap: `wait_for_connection` times out and then the old IP answers again | The dead-man switch worked | Check the new IP/prefix/gateway; `journalctl -t bootstrap`; make sure you used `bootstrap_current_ip`, **not** `-e ansible_host`; fix and re-run |
 | Both the old DHCP and the new static address are present | Another netplan file (from the wizard/NetworkManager) still configures the NIC | Review the files the last task lists; `netplan get`; remove the duplicate; `netplan apply` |
 | `netplan apply` warns `Permissions for /etc/netplan/*.yaml are too open` | `ls -l /etc/netplan` | `mode: "0600"` (the roles already do this) |
@@ -409,7 +409,7 @@ Ansible owns every box in that diagram: it templates the dnsmasq reservations fr
 
 ## 7. Validation
 
-- [ ] A Spark goes from wizard-complete to `01-baseline.yml changed=0` using only playbooks.
+- [ ] A Spark goes from wizard-complete to `02.2-baseline.yml changed=0` using only playbooks.
 - [ ] You triggered the dead-man rollback deliberately and watched it recover.
 - [ ] (Drill) Re-image → rebuild → `diff` of the validation JSON is empty.
 - [ ] `redfish_info` returns system inventory from the mockup.

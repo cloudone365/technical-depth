@@ -1,5 +1,5 @@
-# Classic Ingress → mock-llm with streaming-safe settings (Step 11).
-# Test: curl -N http://llm.lab.local/v1/chat/completions ... (see Step 11).
+# Classic Ingress → mock-llm with streaming-safe settings (Chapter 11).
+# Test: curl -N http://llm.lab.local/v1/chat/completions ... (see Chapter 11).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

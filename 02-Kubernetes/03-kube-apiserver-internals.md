@@ -1,6 +1,6 @@
-# Step 03 · kube-apiserver Internals: AuthN, RBAC, Admission (CEL), API Priority & Fairness, Audit
+# Chapter 03 · kube-apiserver Internals: AuthN, RBAC, Admission (CEL), API Priority & Fairness, Audit
 
-> **02-Kubernetes · Part I — Control plane & the nested lab · Step 03 of 28** · ← [Step 02 · etcd database deep dive](02-etcd-database-deep-dive.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 04 · Nested clusters with vCluster](04-nested-clusters-with-vcluster.md) →
+> **02-Kubernetes · Part I — Control plane & the nested lab · Chapter 03 of 28** · ← [Chapter 02 · etcd database deep dive](02-etcd-database-deep-dive.md) · [All chapters](00-kubernetes-step-by-step-guide.md) · [Chapter 04 · Nested clusters with vCluster](04-nested-clusters-with-vcluster.md) →
 
 | | |
 |---|---|
@@ -75,7 +75,7 @@ flowchart LR
 | Mutating admission | "Fill in or rewrite fields" | usually silent (LimitRanger adds defaults) |
 | Validating admission | "Is the final object acceptable?" | `ValidatingAdmissionPolicy 'x' … denied request: …`, `violates PodSecurity "restricted:latest"`, `exceeded quota` |
 
-When the **root** pipeline rejects a synced pod, the tenant doesn't get an error from `kubectl` — its request already succeeded in the vCluster. The rejection shows up as a sync error event on the pod inside the vCluster, and the pod stays `Pending` (Step 04 §4, break/fix 02).
+When the **root** pipeline rejects a synced pod, the tenant doesn't get an error from `kubectl` — its request already succeeded in the vCluster. The rejection shows up as a sync error event on the pod inside the vCluster, and the pod stays `Pending` (Chapter 04 §4, break/fix 02).
 
 ---
 
@@ -131,7 +131,7 @@ Both are flags kubeadm put on the root API server from the 01-Ansible config:
 
 | Flag | File | What it does |
 |---|---|---|
-| `--encryption-provider-config` | `/etc/kubernetes/encryption/config.yaml` (key generated once, mode 0600) | Secrets are stored in etcd encrypted with AES-CBC (`k8s:enc:aescbc:v1:key1:` prefix). Back the key up in vault01's KV (01-Ansible Step 18) — without it, an etcd backup's Secrets are unreadable |
+| `--encryption-provider-config` | `/etc/kubernetes/encryption/config.yaml` (key generated once, mode 0600) | Secrets are stored in etcd encrypted with AES-CBC (`k8s:enc:aescbc:v1:key1:` prefix). Back the key up in vault01's KV (01-Ansible Chapter 18) — without it, an etcd backup's Secrets are unreadable |
 | `--audit-policy-file`, `--audit-log-*` | [`audit-policy.yaml`](lab/kubeadm/audit-policy.yaml) → `/var/log/kubernetes/audit/audit.log`, rotated at 100 MB × 5 | Metadata for secrets/configmaps (never payloads), drops noisy reads, **RequestResponse** for every mutation in `vc-dev-lab`, `vc-llms`, `gpu-operator`, `platform-tools` |
 
 The root audit log sees what reached the root: a tenant's pod appears as a **create by the syncer** (`system:serviceaccount:vc-dev-lab:vc-dev-lab`), not by Alice. Alice's own request is in dev-lab's API server. For a per-tenant audit trail, give each vCluster its own audit policy (§5 Task 7, last part).
@@ -142,9 +142,9 @@ The root audit log sees what reached the root: a tenant's pod appears as a **cre
 
 | With | How |
 |---|---|
-| vault01 (01-Ansible Steps 01 and 18) | Store the tenant kubeconfigs `make-user.sh` produces in vault01's KV mount, e.g. `kv/k8s/<cluster>/<user>` — outside `kv/spark-lab/*`, which Semaphore's AppRole can read — and the encryption key `/etc/kubernetes/encryption/config.yaml`. For long-lived automation, prefer Vault's Kubernetes secrets engine, which mints short-lived SA tokens |
-| Loki / Alloy (01-Ansible Step 27) | Ship `/var/log/kubernetes/audit/audit.log` with a `loki.source.file` block. Query `{job="k8s-audit"} \| json \| verb="delete"` |
-| Kueue (Step 07) | Tenants get read-only access to `workloads`, so they can see *why* their job is queued |
+| vault01 (01-Ansible Chapters 01 and 18) | Store the tenant kubeconfigs `make-user.sh` produces in vault01's KV mount, e.g. `kv/k8s/<cluster>/<user>` — outside `kv/spark-lab/*`, which Semaphore's AppRole can read — and the encryption key `/etc/kubernetes/encryption/config.yaml`. For long-lived automation, prefer Vault's Kubernetes secrets engine, which mints short-lived SA tokens |
+| Loki / Alloy (01-Ansible Chapter 27) | Ship `/var/log/kubernetes/audit/audit.log` with a `loki.source.file` block. Query `{job="k8s-audit"} \| json \| verb="delete"` |
+| Kueue (Chapter 07) | Tenants get read-only access to `workloads`, so they can see *why* their job is queued |
 | CI (GitHub Actions) | `ci-deployer` token (llms) → `kubectl apply` into `llm-serving` only |
 
 ---
@@ -337,7 +337,7 @@ Expected: `21 passed, 0 warnings, 0 failed`.
 | `401 Unauthorized` | AuthN | `kubectl auth whoami` fails. `openssl x509 -in .cache/alice.crt -noout -enddate -issuer` | Cert expired (7 days here) → re-run `make-user.sh`. Or the cert is from another cluster's CA (dev-lab user against the root/llms) |
 | `403 … cannot list resource` | RBAC | `kubectl --context dev-lab auth can-i list pods -n X --as=alice --as-group=team-alpha` · `kubectl get rolebinding -n X -o wide` | Bind the ClusterRole in the right namespace **in the right cluster**. Check the **group** in the cert (`openssl x509 -noout -subject`) |
 | Deployment created but 0 pods | Validating admission on the **pod** | `kubectl describe rs -l app=…` → `FailedCreate` | Fix the pod template (drill: `scripts/breakfix.sh inject 14`) |
-| Pod created, stays `Pending`, no scheduler events | **root** admission refused the synced pod | events on the pod in the vCluster; `kubectl --context spark-root -n vc-<name> describe resourcequota` | Step 04 §8; break/fix 02 |
+| Pod created, stays `Pending`, no scheduler events | **root** admission refused the synced pod | events on the pod in the vCluster; `kubectl --context spark-root -n vc-<name> describe resourcequota` | Chapter 04 §8; break/fix 02 |
 | `violates PodSecurity "restricted:latest"` | PSA | message lists the missing fields | add `runAsNonRoot`, `seccompProfile`, `capabilities.drop: [ALL]`, `allowPrivilegeEscalation: false` |
 | `failed calling webhook … context deadline exceeded` | Webhook admission | `kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations` in that cluster. Is the webhook's pod running? | Restore the webhook's backend (cert-manager, KServe, Kueue — in llms). For lab-only emergencies, set `failurePolicy: Ignore`. This is why the lab prefers CEL policies |
 | `429 Too Many Requests` | APF | `apiserver_flowcontrol_rejected_requests_total` by `priority_level` (in the cluster that answered) | Fix the client (watch instead of poll, add backoff) or raise shares |

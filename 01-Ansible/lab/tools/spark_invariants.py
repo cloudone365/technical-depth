@@ -55,7 +55,7 @@ def c_gpu():
     rc, out, err = sh("nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader")
     if rc != 0:
         check("GPU answers nvidia-smi", "FAIL", err or f"rc={rc}",
-              "see Step 29 Runbook A; check `dmesg | grep -i nvrm`")
+              "see Chapter 29 Runbook A; check `dmesg | grep -i nvrm`")
         return
     name, drv, cc = [x.strip() for x in out.splitlines()[0].split(",")]
     check("GPU is GB10", "PASS" if "GB10" in name else "FAIL", name)
@@ -67,7 +67,7 @@ def c_gpu():
     rc, out, _ = sh("journalctl -k --since '-24h' --no-pager | grep -c 'NVRM: Xid'")
     n = int(out or 0)
     check("no Xid in 24h", "PASS" if n == 0 else "WARN", f"{n} events",
-          "journalctl -k | grep Xid ; Step 29 Runbook B")
+          "journalctl -k | grep Xid ; Chapter 29 Runbook B")
 
 
 def c_memory():
@@ -91,7 +91,7 @@ def c_runtime():
         check("docker reachable", "FAIL", "", "sudo systemctl status docker; user in docker group?")
         return
     check("docker default runtime nvidia", "PASS" if out.startswith("nvidia") else "WARN", out.split()[0],
-          "ansible-playbook playbooks/03-containers.yml")
+          "ansible-playbook playbooks/11.1-containers.yml")
     check("CDI spec present",
           "PASS" if os.path.exists("/etc/cdi/nvidia.yaml") or os.path.exists("/var/run/cdi/nvidia.yaml") else "WARN",
           "", "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml")
@@ -115,7 +115,7 @@ def c_fabric(peer):
         check(f"{netdev} 200G", "PASS" if speed == 200000 else "FAIL", f"{speed} Mb/s",
               "switch port: disable autoneg, force 200G (e.g. 200G-baseCR4)")
         check(f"{netdev} MTU 9000", "PASS" if mtu == 9000 else "WARN", str(mtu),
-              "must match on both ends; ansible-playbook playbooks/02-fabric.yml")
+              "must match on both ends; ansible-playbook playbooks/13.1-fabric.yml")
         rc, st, _ = sh(f"ibv_devinfo -d {rdma} | awk '/state:/{{print $2; exit}}'")
         check(f"{rdma} PORT_ACTIVE", "PASS" if st == "PORT_ACTIVE" else "FAIL", st)
     if peer:

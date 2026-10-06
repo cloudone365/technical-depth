@@ -1,23 +1,23 @@
-# Step 24 · AWX Production & Receptor: Execution Nodes, Vault Credentials, Approval Workflows, Backup/Restore, Monitoring
+# Chapter 24 · AWX Production & Receptor: Execution Nodes, Vault Credentials, Approval Workflows, Backup/Restore, Monitoring
 
-> **01-Ansible · Part IV — Secrets & platforms · Step 24 of 30** · ← [Step 23 · AWX install & configuration as code](23-awx-install-and-configuration-as-code.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 25 · Testing, linting & CI](25-testing-linting-and-ci.md) →
+> **01-Ansible · Part IV — Secrets & platforms · Chapter 24 of 30** · ← [Chapter 23 · AWX install & configuration as code](23-awx-install-and-configuration-as-code.md) · [All chapters](00-ansible-step-by-step-guide.md) · [Chapter 25 · Testing, linting & CI](25-testing-linting-and-ci.md) →
 
 | | |
 |---|---|
 | **You will build** | The operational layer around AWX: a Spark as a **Receptor execution node** (the hybrid pattern), Vault-backed credentials, a **drift → approval → remediate** workflow, scheduled backups with a tested restore, and metrics in Prometheus |
-| **Prerequisite** | AWX from Step 23 (on the kubeadm root cluster, or on an x86 box for the hybrid pattern) |
+| **Prerequisite** | AWX from Chapter 23 (on the kubeadm root cluster, or on an x86 box for the hybrid pattern) |
 | **Clusters** | `spark-root` (namespace `awx`) for the AWX control plane and container group |
 | **Time** | 2–3 h |
 | **Risk** | Medium. Restores and upgrades touch the AWX database; rehearse them on purpose |
 
-> **AWX is the alternative controller here.** This lab's controller is **Semaphore on `sema01`** (192.168.0.210), with SSH certificates from **`vault01`** (192.168.0.211), both outside the Spark ([Step 01](01-management-plane-semaphore-and-vault.md), [Step 04](04-dgx-spark-as-semaphore-target.md)). The management plane must survive `99-reset-kubernetes.yml` and a re-image of the Spark, and an AWX on `spark-root` doesn't (Step 23 explains the trade-off). Learn AWX's production layer here because it's what large shops run; the concepts map one to one:
+> **AWX is the alternative controller here.** This lab's controller is **Semaphore on `sema01`** (192.168.0.210), with SSH certificates from **`vault01`** (192.168.0.211), both outside the Spark ([Chapter 01](01-management-plane-semaphore-and-vault.md), [Chapter 04](04-dgx-spark-as-semaphore-target.md)). The management plane must survive `19.2-reset-kubernetes.yml` and a re-image of the Spark, and an AWX on `spark-root` doesn't (Chapter 23 explains the trade-off). Learn AWX's production layer here because it's what large shops run; the concepts map one to one:
 >
-> | Semaphore in this lab | AWX equivalent (this step) |
+> | Semaphore in this lab | AWX equivalent (this chapter) |
 > |---|---|
 > | Task template + CLI args `--limit dgx-spark-1,localhost` | Job template + `ask_limit_on_launch` |
 > | Variable group `vault-approle` (AppRole `semaphore`) + play 1 `00-vault-cert.yml` | *HashiCorp Vault Signed SSH* credential linked to a Machine credential (§2.2) |
 > | `vault_lab_secrets_enabled` → play 1 reads `kv/spark-lab/*` | *HashiCorp Vault Secret Lookup* credential |
-> | Schedule on `20 Drift check` | `awx.awx.schedule` |
+> | Schedule on `26.1 Drift check` | `awx.awx.schedule` |
 > | Template permissions (*Task Runner* role, separate `spark-danger` project) | RBAC + an **approval node** (§2.3), which Semaphore doesn't have |
 > | sema01 container + state volume `/opt/spark-lab/cache` | EE pods / execution nodes + PVCs |
 >
@@ -55,7 +55,7 @@ flowchart LR
 |---|---|---|
 | Control-plane pods (default) | `automation-job-*` pods in the AWX namespace | AWX sits next to the targets |
 | **Container group** | Pods in any k8s namespace or cluster, with your pod spec | You want jobs on a specific node (`nodeSelector`), a GPU node, or with extra mounts |
-| **Execution node** | A VM or bare-metal host running receptor + podman | AWX control plane is elsewhere (x86, cloud) but jobs must run *near* the Sparks; also the fix for the arm64 image gap (Step 23 §2) |
+| **Execution node** | A VM or bare-metal host running receptor + podman | AWX control plane is elsewhere (x86, cloud) but jobs must run *near* the Sparks; also the fix for the arm64 image gap (Chapter 23 §2) |
 | **Hop node** | Relay only, runs no jobs | Crossing network zones (lab LAN ↔ office) with a single inbound port |
 
 ### 1.2 LLD: what lives where
@@ -96,14 +96,14 @@ receptorctl --socket /var/run/receptor/receptor.sock status     # peers, work ty
 podman images | grep -i ee                                      # EE image pulled on first job
 ```
 
-The execution node runs your EE with **podman** under a dedicated user. Pre-pull your arm64 `spark-ee` (Step 08) to avoid a slow first job.
+The execution node runs your EE with **podman** under a dedicated user. Pre-pull your arm64 `spark-ee` (Chapter 08) to avoid a slow first job.
 
 ### 2.2 Vault-backed credentials (no stored secrets)
 
-The Vault is **vault01**, the same one Semaphore uses. Give AWX its **own** AppRole (for example `awx`, created on vault01 the way Step 01 §4 creates `semaphore`, with a policy that allows `ssh-client-signer/sign/ansible` and, if needed, `kv/data/spark-lab/*`), so you can revoke one controller without breaking the other. The targets need nothing new: `00b-semaphore-target.yml` already made them trust vault01's CA for `svc-ansible`.
+The Vault is **vault01**, the same one Semaphore uses. Give AWX its **own** AppRole (for example `awx`, created on vault01 the way Chapter 01 §4 creates `semaphore`, with a policy that allows `ssh-client-signer/sign/ansible` and, if needed, `kv/data/spark-lab/*`), so you can revoke one controller without breaking the other. The targets need nothing new: `04.1-semaphore-target.yml` already made them trust vault01's CA for `svc-ansible`.
 
 ```yaml
-# playbooks/awx-config.yml (continued from Step 23)
+# playbooks/awx-config.yml (continued from Chapter 23)
 - name: Vault lookup credential (AppRole)
   awx.awx.credential:
     name: vault-approle
@@ -111,7 +111,7 @@ The Vault is **vault01**, the same one Semaphore uses. Give AWX its **own** AppR
     credential_type: HashiCorp Vault Secret Lookup
     inputs:
       url: https://192.168.0.211:8200                                  # vault01
-      cacert: "{{ lookup('file', '.cache/vault-ca.crt') }}"            # vault01's TLS certificate (Step 04 §2)
+      cacert: "{{ lookup('file', '.cache/vault-ca.crt') }}"            # vault01's TLS certificate (Chapter 04 §2)
       role_id: "{{ lookup('env', 'ANSIBLE_HASHI_VAULT_ROLE_ID') }}"    # AWX's own AppRole, not 'semaphore'
       secret_id: "{{ lookup('env', 'ANSIBLE_HASHI_VAULT_SECRET_ID') }}"
       api_version: v2
@@ -135,7 +135,7 @@ The Vault is **vault01**, the same one Semaphore uses. Give AWX its **own** AppR
     organization: SparkLab
     credential_type: Machine
     inputs:
-      username: svc-ansible                                         # the automation account from Step 04
+      username: svc-ansible                                         # the automation account from Chapter 04
       ssh_key_data: "{{ lookup('file', '~/.ssh/awx_ed25519') }}"   # private key; public cert comes from Vault
   no_log: true
 
@@ -148,7 +148,7 @@ The Vault is **vault01**, the same one Semaphore uses. Give AWX its **own** AppR
       public_key: "{{ lookup('file', '~/.ssh/awx_ed25519.pub') }}"
       secret_path: ssh-client-signer
       role: ansible
-      valid_principals: svc-ansible                                 # the only principal role 'ansible' allows (Step 01 §4)
+      valid_principals: svc-ansible                                 # the only principal role 'ansible' allows (Chapter 01 §4)
 ```
 
 Each job now gets a freshly signed certificate with the signing role's lifetime (15 minutes on vault01). AWX stores **no** usable long-term access on its own: the private key alone won't pass sshd without a valid certificate.
@@ -165,7 +165,7 @@ flowchart LR
   B -->|denied / timeout| N["notify: drift left in place"]
 ```
 
-To make "drift found" a *failure* in AWX, the drift template runs `20-drift-check.yml` followed by the drift reporter (exit code 2 on drift, Step 26), for example as a final task that fails when `spark_config_drift_tasks > 0`.
+To make "drift found" a *failure* in AWX, the drift template runs `26.1-drift-check.yml` followed by the drift reporter (exit code 2 on drift, Chapter 26), for example as a final task that fails when `spark_config_drift_tasks > 0`.
 
 ```yaml
 - name: Workflow template
@@ -242,7 +242,7 @@ Useful series: `awx_pending_jobs_total`, `awx_running_jobs_total`, `awx_instance
 | Symptom | Diagnose | Fix |
 |---|---|---|
 | Execution node stuck **Unavailable** | `receptorctl status` on both ends; `journalctl -u receptor` | TCP 27199 blocked; certificate CN mismatch; the node hostname must match what AWX expects |
-| Jobs on the execution node fail pulling the EE | `podman pull <ee>` as the receptor user | Registry auth; arm64 image missing → build `spark-ee` (Step 08) |
+| Jobs on the execution node fail pulling the EE | `podman pull <ee>` as the receptor user | Registry auth; arm64 image missing → build `spark-ee` (Chapter 08) |
 | `Credential lookup failed: permission denied` | vault01's audit log (`/var/log/vault_audit.log`) for AWX's AppRole | Policy lacks `ssh-client-signer/sign/ansible` or `kv/data/...` |
 | `Permission denied (publickey)` although the lookup worked | The Spark's `journalctl -u ssh`: certificate principal | `valid_principals` must be `svc-ansible`, and the job must log in as `svc-ansible` (extra variable `ansible_user`, §2.2) |
 | Workflow never reaches approval | Workflow visualizer: drift node edge type | The drift job must *fail* on drift; wire it to `failure_nodes` |

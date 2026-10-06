@@ -1,6 +1,6 @@
-# Step 16 · GPUDirect Storage & cuFile on a Unified-Memory Machine: Detect, Configure, Measure
+# Chapter 16 · GPUDirect Storage & cuFile on a Unified-Memory Machine: Detect, Configure, Measure
 
-> **01-Ansible · Part III — Fabric & storage · Step 16 of 30** · ← [Step 15 · NFS over RDMA & parallel file systems](15-nfs-rdma-and-parallel-file-systems.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 17 · Vault server deep dive](17-vault-server-deep-dive.md) →
+> **01-Ansible · Part III — Fabric & storage · Chapter 16 of 30** · ← [Chapter 15 · NFS over RDMA & parallel file systems](15-nfs-rdma-and-parallel-file-systems.md) · [All chapters](00-ansible-step-by-step-guide.md) · [Chapter 17 · Vault server deep dive](17-vault-server-deep-dive.md) →
 
 | | |
 |---|---|
@@ -60,7 +60,7 @@ flowchart LR
 ## 3. Hands-on
 
 ```yaml
-# lab/playbooks/14-gds-check.yml
+# lab/playbooks/16.1-gds-check.yml
 ---
 # GPUDirect Storage / cuFile on DGX Spark: detect, configure, measure.
 # On GB10 the "GPU memory" IS system memory (coherent UMA), so the question is
@@ -178,7 +178,7 @@ flowchart LR
 
 ```bash
 cd "01-Ansible/lab"
-ansible-playbook playbooks/14-gds-check.yml -K
+ansible-playbook playbooks/16.1-gds-check.yml -K
 ```
 
 Read the result:
@@ -187,7 +187,7 @@ Read the result:
 |---|---|
 | `nvidia_fs_loaded: false`, `compat_mode: true`, GPU-direct ≈ CPU-only | Expected on UMA. cuFile works, but there's no true P2P path. Your loader's efficiency is what matters |
 | GPU-direct noticeably slower than CPU-only | Compat-mode overhead. Use plain `O_DIRECT`/mmap loaders on the Spark |
-| Everything ≈ your NVMe's rated sequential read | You're storage-bound. Faster models-per-minute means fewer bytes (quantised weights) or a cache (Step 15) |
+| Everything ≈ your NVMe's rated sequential read | You're storage-bound. Faster models-per-minute means fewer bytes (quantised weights) or a cache (Chapter 15) |
 | `gdscheck not found` and no package | This DGX OS image has no GDS tools. Skip; the cuFile API isn't needed on this box |
 
 ### 3.1 The comparison that actually matters: model load time
@@ -213,10 +213,10 @@ Run it cold (after dropping caches) and warm. On a UMA machine the warm run is f
 
 | System | Relevance |
 |---|---|
-| Telemetry (Step 12) | `spark_uma_page_cache_bytes` shows how much of the unified pool the file cache holds after loads |
-| Emergency runbook (Step 29) | "UMA pressure" remediation drops caches, which is safe but makes the next load cold |
-| NFS/RDMA cache (Step 15) | For a second Spark, a shared model store avoids downloading twice; cuFile over NFS runs in compat mode too |
-| Data-centre DGX | The same `14-gds-check.yml` on an H100/B200 node should show `nvidia_fs_loaded: true`, NVMe supported, and GPU-direct > bounce. Keep the playbook for that day |
+| Telemetry (Chapter 12) | `spark_uma_page_cache_bytes` shows how much of the unified pool the file cache holds after loads |
+| Emergency runbook (Chapter 29) | "UMA pressure" remediation drops caches, which is safe but makes the next load cold |
+| NFS/RDMA cache (Chapter 15) | For a second Spark, a shared model store avoids downloading twice; cuFile over NFS runs in compat mode too |
+| Data-centre DGX | The same `16.1-gds-check.yml` on an H100/B200 node should show `nvidia_fs_loaded: true`, NVMe supported, and GPU-direct > bounce. Keep the playbook for that day |
 
 ## 5. Troubleshooting & diagnostics
 

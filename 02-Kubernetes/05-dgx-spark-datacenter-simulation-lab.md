@@ -1,13 +1,13 @@
-# Step 05 · DGX Spark Datacenter Simulation Lab: End-to-End Build, Gates & Day-2 Operations
+# Chapter 05 · DGX Spark Datacenter Simulation Lab: End-to-End Build, Gates & Day-2 Operations
 
-> **02-Kubernetes · Part I — Control plane & the nested lab · Step 05 of 28** · ← [Step 04 · Nested clusters with vCluster](04-nested-clusters-with-vcluster.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 06 · kube-controller-manager & controllers](06-kube-controller-manager-and-controllers.md) →
+> **02-Kubernetes · Part I — Control plane & the nested lab · Chapter 05 of 28** · ← [Chapter 04 · Nested clusters with vCluster](04-nested-clusters-with-vcluster.md) · [All chapters](00-kubernetes-step-by-step-guide.md) · [Chapter 06 · kube-controller-manager & controllers](06-kube-controller-manager-and-controllers.md) →
 
 | | |
 |---|---|
 | **You will build** | The whole "AI datacenter in a box" on one Spark: a kubeadm **root cluster** that owns the hardware, two **vClusters** with hard budgets (`dev-lab` for tenants, `llms` for serving and training), a serving tier behind an API gateway, a gang-scheduled batch tier, observability across all three clusters, backups and a scripted verification gate after every layer. Everything is designed to add dgx-spark-2 without rework |
-| **Hardware** | 1 DGX Spark (2 optional) · `sema01` (Semaphore, runs every playbook) and `vault01` (SSH CA, lab secrets) outside the Spark, from 01-Ansible [Step 01](../01-Ansible/01-management-plane-semaphore-and-vault.md) and [Step 04](../01-Ansible/04-dgx-spark-as-semaphore-target.md) · your MacBook as a client (browser, git, kubectl) |
+| **Hardware** | 1 DGX Spark (2 optional) · `sema01` (Semaphore, runs every playbook) and `vault01` (SSH CA, lab secrets) outside the Spark, from 01-Ansible [Chapter 01](../01-Ansible/01-management-plane-semaphore-and-vault.md) and [Chapter 04](../01-Ansible/04-dgx-spark-as-semaphore-target.md) · your MacBook as a client (browser, git, kubectl) |
 | **Time** | 4–6 h the first time, ~45 min once practised |
-| **Risk** | Medium. Everything is rebuildable: Semaphore template `99 Reset Kubernetes` wipes Kubernetes, `05` → `06` → `06b` rebuild it; sema01 and vault01 are outside the Spark and untouched |
+| **Risk** | Medium. Everything is rebuildable: Semaphore template `19.2 Reset Kubernetes` wipes Kubernetes, `19.1 Kubernetes` → `20.1 GPU Operator` → `20.2 vClusters` rebuild it; sema01 and vault01 are outside the Spark and untouched |
 | **Lab files** | the whole [`lab/`](lab/README.md) directory |
 
 ---
@@ -155,7 +155,7 @@ flowchart TB
 | vCluster llms (control plane, Traefik, Kueue, KEDA included) | 12 | 88 Gi | 11 |
 | **total** | **20** | **~119.7 GiB** | **15** |
 
-Memory is split without overcommit: what pods may use (~105.7 GiB allocatable) is exactly dev-lab + llms + the root platform. CPU may burst into idle cores. dev-lab stays small (tools, tenancy drills); llms gets the rest because the models run there: about 84 GiB for model servers after its own ≈1 CPU · 4 Gi of control plane and add-ons, so the `--gpu-memory-utilization` values of the models running at the same time should add up to ≲ 0.70 (Step 20 §2). The root's 2 slices are for `platform-tools` (GPU probes, the Step 14 §5.5 UMA experiment, the preemption demo's fillers).
+Memory is split without overcommit: what pods may use (~105.7 GiB allocatable) is exactly dev-lab + llms + the root platform. CPU may burst into idle cores. dev-lab stays small (tools, tenancy drills); llms gets the rest because the models run there: about 84 GiB for model servers after its own ≈1 CPU · 4 Gi of control plane and add-ons, so the `--gpu-memory-utilization` values of the models running at the same time should add up to ≲ 0.70 (Chapter 20 §2). The root's 2 slices are for `platform-tools` (GPU probes, the Chapter 14 §5.5 UMA experiment, the preemption demo's fillers).
 
 Inside llms, serving (8 slices · 80 Gi) + batch (3 slices · 80 Gi) add up to more than its 88 Gi by design: either side can use most of llms while the other is idle, and the root quota, Kueue and priorities decide who waits. The slices are not oversubscribed: 8 + 3 = 11. `tests/budget_check.py` keeps these numbers honest.
 
@@ -165,11 +165,11 @@ Inside llms, serving (8 slices · 80 Gi) + batch (3 slices · 80 Gi) add up to m
 
 Each step ends with a **gate**: a command that must pass before you continue. When a gate fails, stop and fix it. Later layers hide earlier faults.
 
-The 01-Ansible stages run as **Semaphore templates** in project `spark-lab` on sema01 ([01-Ansible Step 04 §7](../01-Ansible/04-dgx-spark-as-semaphore-target.md#7-build-the-lab-from-semaphore)); a gate there is the task log ending in `failed=0`. Everything from the 02-Kubernetes layer on runs with `kubectl` from your MacBook.
+The 01-Ansible stages run as **Semaphore templates** in project `spark-lab` on sema01 ([01-Ansible Chapter 04 §7](../01-Ansible/04-dgx-spark-as-semaphore-target.md#7-build-the-lab-from-semaphore)); a gate there is the task log ending in `failed=0`. Everything from the 02-Kubernetes layer on runs with `kubectl` from your MacBook.
 
 ```mermaid
 flowchart LR
-  G0["0 · Toolchain<br/>run-local-checks"] --> G1["1 · Root<br/>Semaphore 05 + 06: kubeadm · Cilium · MetalLB · GPU Op"]
+  G0["0 · Toolchain<br/>run-local-checks"] --> G1["1 · Root<br/>Semaphore 19.1 + 20.1: kubeadm · Cilium · MetalLB · GPU Op"]
   G1 --> G2["2 · Control plane<br/>etcd · audit · encryption"]
   G2 --> G3["3 · Platform + vClusters<br/>storage · metrics · kps · dev-lab · llms"]
   G3 --> G4["4 · Tenancy<br/>ns · quotas · RBAC · CEL · APF · netpol"]
@@ -196,7 +196,7 @@ tests/run-local-checks.sh
 
 ### Task 1 · Root cluster (01-Ansible, from Semaphore)
 
-In Semaphore (project `spark-lab`): run `05 Kubernetes`, then `06 GPU Operator` (break-glass CLI: `ansible-playbook playbooks/05-kubernetes.yml -l dgx-spark-1,localhost -K`). Then on your MacBook:
+In Semaphore (project `spark-lab`): run `19.1 Kubernetes`, then `20.1 GPU Operator` (break-glass CLI: `ansible-playbook playbooks/19.1-kubernetes.yml -l dgx-spark-1,localhost -K`). Then on your MacBook:
 
 ```bash
 cd "../../01-Ansible/lab"
@@ -215,7 +215,7 @@ scripts/etcd-drill.sh status && scripts/etcd-drill.sh snapshot
 systemctl list-timers etcd-snapshot.timer
 ```
 
-**Gate:** 1 etcd member, leader, no alarms, ≥ 1 snapshot, timer scheduled. Secrets in etcd start with `k8s:enc:aescbc:v1:` (Step 03 §5 Task 1).
+**Gate:** 1 etcd member, leader, no alarms, ≥ 1 snapshot, timer scheduled. Secrets in etcd start with `k8s:enc:aescbc:v1:` (Chapter 03 §5 Task 1).
 
 ### Task 3 · Platform add-ons and vClusters
 
@@ -274,7 +274,7 @@ kubectl --context llms -n batch logs -f -l job-name=ddp --prefix
 kubectl --context spark-root apply -k manifests/root/95-observability
 scripts/verify.sh observability
 scripts/collect-diag.sh                     # know how to produce a bundle before you need one
-scripts/breakfix.sh list                    # then do at least three drills (Steps 26/27)
+scripts/breakfix.sh list                    # then do at least three drills (Chapters 26/27)
 ```
 
 **Gate:** `verify.sh` all PASS. Dashboard *Spark · Kubernetes* shows data in every row, including `vcluster="llms"` serving metrics.
@@ -320,17 +320,17 @@ scripts/verify.sh
 
 | Task | Frequency | How |
 |---|---|---|
-| etcd snapshot off-box | daily | copy `/var/lib/etcd-snapshots/` off the Spark to the MacBook or sema01's backed-up disk (Step 02 §5.7) |
-| vCluster backup | weekly | scale the control plane to 0, tar its PVC directory (Step 04 §6.7) |
+| etcd snapshot off-box | daily | copy `/var/lib/etcd-snapshots/` off the Spark to the MacBook or sema01's backed-up disk (Chapter 02 §5.7) |
+| vCluster backup | weekly | scale the control plane to 0, tar its PVC directory (Chapter 04 §6.7) |
 | Restore rehearsal | monthly | `scripts/etcd-drill.sh restore …` on a quiet day; one vCluster PVC restore |
 | Version review | monthly | `versions.env` vs upstream releases. Test in CI (kind + 2 vClusters) first |
-| Kubernetes upgrade | per minor release | 01-Ansible `kubeadm_cluster_version` → `kubeadm upgrade plan/apply` (Step 01 §8) → `scripts/verify.sh`; vCluster supports host 1.34–1.36 |
-| vCluster upgrade | per release | bump `VCLUSTER_VERSION`, `helm upgrade` dev-lab first, then llms (Step 04) |
-| DGX OS / driver upgrade | per NVIDIA release | Semaphore template `17 DGX OS upgrade` (drain → upgrade → validate) → Step 14 UMA experiment again |
-| Capacity review | weekly | Grafana *vCluster CPU/memory used / hard* panels. `VClusterQuotaNearlyExhausted`, `PodsPendingOnGPU` history; resize with one `kubectl patch` (Step 04 §6.5) |
+| Kubernetes upgrade | per minor release | 01-Ansible `kubeadm_cluster_version` → `kubeadm upgrade plan/apply` (Chapter 01 §8) → `scripts/verify.sh`; vCluster supports host 1.34–1.36 |
+| vCluster upgrade | per release | bump `VCLUSTER_VERSION`, `helm upgrade` dev-lab first, then llms (Chapter 04) |
+| DGX OS / driver upgrade | per NVIDIA release | Semaphore template `10.2 DGX OS upgrade` (drain → upgrade → validate) → Chapter 14 UMA experiment again |
+| Capacity review | weekly | Grafana *vCluster CPU/memory used / hard* panels. `VClusterQuotaNearlyExhausted`, `PodsPendingOnGPU` history; resize with one `kubectl patch` (Chapter 04 §6.5) |
 | Drills | weekly | one `breakfix` scenario, timed |
-| Drift check · validation | nightly · weekly | scheduled Semaphore templates `20 Drift check` and `30 Validate`; a failed task is the alert (01-Ansible Step 04 §9) |
-| Full rebuild | when needed | Semaphore `99 Reset Kubernetes` (`reset_confirm=RESET`) → `05` → `06` → `06b`, then `fetch-kubeconfig.sh sema01` and `scripts/install-addons.sh all` |
+| Drift check · validation | nightly · weekly | scheduled Semaphore templates `26.1 Drift check` and `30.1 Validate`; a failed task is the alert (01-Ansible Chapter 04 §9) |
+| Full rebuild | when needed | Semaphore `19.2 Reset Kubernetes` (`reset_confirm=RESET`) → `19.1 Kubernetes` → `20.1 GPU Operator` → `20.2 vClusters`, then `fetch-kubeconfig.sh sema01` and `scripts/install-addons.sh all` |
 
 ---
 
@@ -338,16 +338,16 @@ scripts/verify.sh
 
 | Gate fails at | Most common cause | Fix |
 |---|---|---|
-| 1 | `kubeadm init` preflight errors (swap, port 6443 busy) | an old k3s is still there → `99-reset-kubernetes.yml -e reset_remove_k3s=true`; swap → the role turns it off, check `/etc/fstab` |
+| 1 | `kubeadm init` preflight errors (swap, port 6443 busy) | an old k3s is still there → `19.2-reset-kubernetes.yml -e reset_remove_k3s=true`; swap → the role turns it off, check `/etc/fstab` |
 | 1 | node `NotReady` | Cilium not running: `kubectl --context spark-root -n kube-system logs ds/cilium`; leftover CNI files from an earlier cluster → reset playbook |
-| 1 | GPU Operator validator not Running | 01-Ansible Step 20 troubleshooting. containerd must have the `nvidia` runtime (`grep nvidia /etc/containerd/config.toml`) |
+| 1 | GPU Operator validator not Running | 01-Ansible Chapter 20 troubleshooting. containerd must have the `nvidia` runtime (`grep nvidia /etc/containerd/config.toml`) |
 | 2 | no etcd snapshot | `systemctl status etcd-snapshot.service`; `etcdctl` version must match the etcd image (role downloads it) |
 | 3 | a vCluster never Ready | its PVC Pending → storage not installed first; `kubectl --context spark-root -n vc-<name> describe pod <name>-0` |
-| 3 | `context dev-lab` unreachable | MetalLB didn't assign `.111` (pool, `services.loadbalancers` quota) → Step 04 §8 |
+| 3 | `context dev-lab` unreachable | MetalLB didn't assign `.111` (pool, `services.loadbalancers` quota) → Chapter 04 §8 |
 | 4 | admission tests fail | a policy binding namespace label missing → re-apply `<vcluster>/00-platform` |
 | 6 | gpu-smoke Pending with no events | dev-lab's 2 slices are in use → drill 02 explains it; scale down demos |
-| 7 | vLLM never Ready | `kubectl --context llms logs deploy/vllm`: model download, wrong image arch, `--gpu-memory-utilization` too high for free UMA, or `serving-budget` (80 Gi) spent by two other engines (Step 20 §9) |
-| 8 | DDP hangs | Kueue not installed in llms → both jobs started partially (Step 07). NCCL on 1 node needs `BACKEND=gloo` |
+| 7 | vLLM never Ready | `kubectl --context llms logs deploy/vllm`: model download, wrong image arch, `--gpu-memory-utilization` too high for free UMA, or `serving-budget` (80 Gi) spent by two other engines (Chapter 20 §9) |
+| 8 | DDP hangs | Kueue not installed in llms → both jobs started partially (Chapter 07). NCCL on 1 node needs `BACKEND=gloo` |
 
 ---
 
@@ -371,12 +371,12 @@ flowchart LR
   class A1,B1 ctrl
 ```
 
-1. Cable the QSFP ports. Run 01-Ansible `02-fabric.yml` (CX-7 addressing, MTU 9000) and `11-rdma-perftest.yml` (≥ 180 Gb/s gate).
-2. Uncomment `dgx-spark-2` under `k8s_workers` in the inventory and run `05-kubernetes.yml` (kubeadm join, Cilium agent) and `06-gpu-operator.yml`.
+1. Cable the QSFP ports. Run 01-Ansible `13.1-fabric.yml` (CX-7 addressing, MTU 9000) and `13.2-rdma-perftest.yml` (≥ 180 Gb/s gate).
+2. Uncomment `dgx-spark-2` under `k8s_workers` in the inventory and run `19.1-kubernetes.yml` (kubeadm join, Cilium agent) and `20.1-gpu-operator.yml`.
 3. `kubectl --context spark-root get nodes` → 2 Ready, 30 slices allocatable. Both vClusters see the new node at once (node sync). Raise the root budgets you want to grow (`root/05-vclusters/quotas.yaml`, then `tests/budget_check.py` with `SPARK` doubled) and `spark-cq`.
-4. Serve weights from NFS (Step 13 §8) instead of per-node local PVs.
-5. Run `manifests/llms/80-distributed/two-spark` (NCCL over RoCE, Step 18).
-6. The root control plane still has one etcd voter. For real HA you need three control-plane nodes (Step 02 §8).
+4. Serve weights from NFS (Chapter 13 §8) instead of per-node local PVs.
+5. Run `manifests/llms/80-distributed/two-spark` (NCCL over RoCE, Chapter 18).
+6. The root control plane still has one etcd voter. For real HA you need three control-plane nodes (Chapter 02 §8).
 
 ---
 
@@ -384,6 +384,6 @@ flowchart LR
 
 - [ ] Every gate passed in order, and I know which volume to open when one fails.
 - [ ] I can say which of the three clusters any object lives in — and find a vCluster pod's real copy on the root.
-- [ ] I can rebuild the whole platform from `lab/` (reset → 05 → 06 → 06b → `install-addons.sh all` → `apply-lab.sh`) in under an hour.
+- [ ] I can rebuild the whole platform from `lab/` (`19.2` → `19.1` → `20.1` → `20.2` → `install-addons.sh all` → `apply-lab.sh`) in under an hour.
 - [ ] Backups and a restore rehearsal exist for etcd **and** for a vCluster, not just the backups.
 - [ ] I have a written plan (and the inventory change ready) for dgx-spark-2.

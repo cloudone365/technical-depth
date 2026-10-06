@@ -1,13 +1,13 @@
-# Step 04 · Nested Clusters with vCluster: a kubeadm Root and Two vClusters on One DGX Spark
+# Chapter 04 · Nested Clusters with vCluster: a kubeadm Root and Two vClusters on One DGX Spark
 
-> **02-Kubernetes · Part I — Control plane & the nested lab · Step 04 of 28** · ← [Step 03 · kube-apiserver internals](03-kube-apiserver-internals.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 05 · DGX Spark datacenter simulation lab](05-dgx-spark-datacenter-simulation-lab.md) →
+> **02-Kubernetes · Part I — Control plane & the nested lab · Chapter 04 of 28** · ← [Chapter 03 · kube-apiserver internals](03-kube-apiserver-internals.md) · [All chapters](00-kubernetes-step-by-step-guide.md) · [Chapter 05 · DGX Spark datacenter simulation lab](05-dgx-spark-datacenter-simulation-lab.md) →
 
 | | |
 |---|---|
 | **You will build** | The lab's shape: a **root** Kubernetes cluster (kubeadm, one node that is master *and* worker) that owns the Spark's hardware, and two **virtual clusters** inside it — `dev-lab` and `llms` — each with its own API server, its own budget and its own tenants |
 | **Hardware** | 1 DGX Spark (a second one later joins the root as a worker) |
-| **Time** | 1 h to build and explore, then it is the stage for every other step |
-| **Risk** | Low. A vCluster can be deleted and recreated in a minute; `01-Ansible playbooks/99-reset-kubernetes.yml` wipes everything |
+| **Time** | 1 h to build and explore, then it is the stage for every other chapter |
+| **Risk** | Low. A vCluster can be deleted and recreated in a minute; `01-Ansible playbooks/19.2-reset-kubernetes.yml` wipes everything |
 | **Lab files** | [`lab/vclusters/`](lab/vclusters), [`lab/manifests/root/05-vclusters/`](lab/manifests/root/05-vclusters), `scripts/install-addons.sh vclusters`, 01-Ansible [`roles/vclusters`](../01-Ansible/lab/roles/vclusters) |
 
 ---
@@ -21,7 +21,7 @@ One Spark can only be one *node*. But a datacenter has *several clusters*: a pla
 | A team is cluster-admin of "its" cluster | no — CRDs, webhooks, ClusterRoles are global | yes, inside its vCluster |
 | Install an operator only for one team (KServe, Kueue, cert-manager) | clashes with everyone | install it in that vCluster |
 | Break the control plane and recover | breaks the whole lab | break `dev-lab`; `llms` and the root keep running |
-| Multi-cluster GitOps, promotion dev → prod | one destination | three destinations (Step 28) |
+| Multi-cluster GitOps, promotion dev → prod | one destination | three destinations (Chapter 28) |
 | Hard per-team budgets | namespace quotas | a root quota per vCluster **plus** tenant quotas inside |
 | Real nodes, drains, node failure | yes | **only at the root** (a vCluster has no nodes of its own) |
 
@@ -43,7 +43,7 @@ The full picture, with your MacBook as a client and sema01/vault01 running the a
 ```mermaid
 flowchart TB
   ADMIN(["your MacBook · kubectl<br/>one kubeconfig, 3 contexts<br/>(fetched from sema01)"])
-  SEMA["sema01 · Semaphore<br/>runs 05 · 06 · 06b<br/>certs from vault01"]
+  SEMA["sema01 · Semaphore<br/>runs 19.1 · 20.1 · 20.2<br/>certs from vault01"]
   SEMA -. "kubeconfig (fetch-kubeconfig.sh)" .-> ADMIN
   SEMA -- "helm · kubectl :6443" --> RAPI
   ADMIN -- "spark-root" --> RAPI
@@ -133,15 +133,15 @@ All three contexts live in one file, `01-Ansible/lab/.cache/kubeconfig-spark-lab
 | vCluster `llms` | **12** | **88 Gi** | **11** | 800 Gi |
 | root keeps (platform) | 3 | ~9.7 GiB | 2 | the rest |
 
-Defined in [`manifests/root/05-vclusters/quotas.yaml`](lab/manifests/root/05-vclusters/quotas.yaml) and checked against the kubelet reservations, the GPU Operator's slice count and the MetalLB pool by [`tests/budget_check.py`](lab/tests/budget_check.py), which prints this table. The kubelet reservations come from 01-Ansible Step 19 (`systemReserved` 2 CPU · 8 Gi, `kubeReserved` 1 CPU · 2 Gi, eviction below 4 Gi); what is left is all that pods can ever be given.
+Defined in [`manifests/root/05-vclusters/quotas.yaml`](lab/manifests/root/05-vclusters/quotas.yaml) and checked against the kubelet reservations, the GPU Operator's slice count and the MetalLB pool by [`tests/budget_check.py`](lab/tests/budget_check.py), which prints this table. The kubelet reservations come from 01-Ansible Chapter 19 (`systemReserved` 2 CPU · 8 Gi, `kubeReserved` 1 CPU · 2 Gi, eviction below 4 Gi); what is left is all that pods can ever be given.
 
-**How the split is decided.** The vCluster memory budgets plus the root's platform must fit inside allocatable memory: 8 + 88 = 96 Gi leaves ~9.7 GiB of the ~105.7 GiB for the root's platform, and nothing is overcommitted, because on unified memory a promise of memory the box doesn't have ends with the OOM killer. CPU is compressible, so a budget is a guaranteed share and idle cores can still be used beyond it. `dev-lab` stays small: tools, tenancy drills, small GPU tests. `llms` gets the rest, because the models run there; after its own control plane, CoreDNS, Traefik, Kueue and KEDA (≈1 CPU · 4 Gi) it leaves about 84 GiB for model servers (Step 20 §2). The root keeps 2 slices for `platform-tools` (GPU probes, the Step 14 §5.5 UMA experiment, the preemption demo's 2 filler replicas).
+**How the split is decided.** The vCluster memory budgets plus the root's platform must fit inside allocatable memory: 8 + 88 = 96 Gi leaves ~9.7 GiB of the ~105.7 GiB for the root's platform, and nothing is overcommitted, because on unified memory a promise of memory the box doesn't have ends with the OOM killer. CPU is compressible, so a budget is a guaranteed share and idle cores can still be used beyond it. `dev-lab` stays small: tools, tenancy drills, small GPU tests. `llms` gets the rest, because the models run there; after its own control plane, CoreDNS, Traefik, Kueue and KEDA (≈1 CPU · 4 Gi) it leaves about 84 GiB for model servers (Chapter 20 §2). The root keeps 2 slices for `platform-tools` (GPU probes, the Chapter 14 §5.5 UMA experiment, the preemption demo's 2 filler replicas).
 
 Three rules shape the quotas themselves:
 
 - **CPU is capped on requests only.** A vCluster is guaranteed its share and may burst into idle CPU.
 - **Memory is capped on requests *and* limits.** On a unified-memory box, memory is GPU memory too, so overcommit here is how model servers die.
-- **GPU slices are time-slices, not GPUs.** All 15 share one GB10 and its memory (Step 16). `llms` getting 11 slices means up to 11 GPU pods at once, not 11× the GPU, and they all share the same ~84 GiB of model memory.
+- **GPU slices are time-slices, not GPUs.** All 15 share one GB10 and its memory (Chapter 16). `llms` getting 11 slices means up to 11 GPU pods at once, not 11× the GPU, and they all share the same ~84 GiB of model memory.
 
 The root's 3 CPUs and ~9.7 GiB are its platform: Cilium, MetalLB, the GPU Operator, Prometheus/Grafana, CoreDNS and local-path need about 2 CPU / 8 GiB (the minimum `budget_check.py` insists on). There is little headroom left; growing one vCluster now means shrinking the other (§6.5).
 
@@ -151,7 +151,7 @@ The root's 3 CPUs and ~9.7 GiB are its platform: Cilium, MetalLB, the GPU Operat
 |---|---|---|
 | vCluster → root | Pods, Services, Endpoints, PVCs, ConfigMaps, Secrets (default) | the workload really runs on the root |
 | vCluster → root | **NetworkPolicies** | tenant policies are enforced by Cilium on the node |
-| vCluster → root | **PriorityClasses** | the root scheduler can rank tenant pods (and preempt across vClusters — Step 07) |
+| vCluster → root | **PriorityClasses** | the root scheduler can rank tenant pods (and preempt across vClusters — Chapter 07) |
 | vCluster → root | **PodDisruptionBudgets** | a root `kubectl drain` respects tenant PDBs (break/fix 11) |
 | root → vCluster | **Nodes** (real, all) | tenants see the GB10 labels, 15 allocatable slices, taints |
 | root → vCluster | **StorageClasses** | `local-path`, `local-nvme`, `local-nvme-retain` (read-only) |
@@ -227,7 +227,7 @@ Inner quotas are ceilings, not reservations: `tenant-alpha` + `tenant-beta` + `l
 
 Either path gives the same result. The vCluster definitions live once, in the 02 lab; Ansible applies those files.
 
-**A — 01-Ansible, from Semaphore** (project `spark-lab` on sema01): run the templates `05 Kubernetes` → `06 GPU Operator` → `06b vClusters`, each to `failed=0`. They write the kubeconfig with all three contexts to sema01's state volume. Break-glass CLI from the MacBook: the same playbooks with `-l dgx-spark-1,localhost -K`.
+**A — 01-Ansible, from Semaphore** (project `spark-lab` on sema01): run the templates `19.1 Kubernetes` → `20.1 GPU Operator` → `20.2 vClusters`, each to `failed=0`. They write the kubeconfig with all three contexts to sema01's state volume. Break-glass CLI from the MacBook: the same playbooks with `-l dgx-spark-1,localhost -K`.
 
 ```bash
 # after A (or after 05 + 06 for B) — on your MacBook
@@ -353,7 +353,7 @@ scripts/verify.sh vclusters
 | `services.loadbalancers` quota exceeded | a tenant created a LoadBalancer Service | the root budget allows 1 (dev-lab) / 2 (llms) — by design |
 | `runtimeclass "nvidia" not found` inside a vCluster | `00-platform` not applied in that vCluster | `kubectl --context <v> apply -k manifests/<v>/00-platform` |
 | PVC `Pending` inside a vCluster | StorageClass name typo; root provisioner down | events are copied from the root PVC; `kubectl --context spark-root -n local-path-storage logs deploy/local-path-provisioner` |
-| A BestEffort pod is rejected | the root memory quota requires memory limits | by design — a vCluster can't run BestEffort pods (Step 14) |
+| A BestEffort pod is rejected | the root memory quota requires memory limits | by design — a vCluster can't run BestEffort pods (Chapter 14) |
 | vCluster objects gone after an etcd restore? | they aren't — only root objects roll back | §6.7; restore the vCluster's PVC if you need its state rolled back too |
 
 ---
@@ -361,7 +361,7 @@ scripts/verify.sh vclusters
 ## 9. Scale-out and limits
 
 - **dgx-spark-2** joins the *root* as a worker (01-Ansible `k8s_workers`). Both vClusters see the new node immediately (node sync) and the root scheduler spreads their pods. Budgets don't grow by themselves — raise the root quotas.
-- **Control-plane HA**: each vCluster runs one control-plane replica with SQLite. For HA, vCluster supports several replicas with an embedded or external etcd; the root needs three control-plane nodes first (Step 02 §8).
+- **Control-plane HA**: each vCluster runs one control-plane replica with SQLite. For HA, vCluster supports several replicas with an embedded or external etcd; the root needs three control-plane nodes first (Chapter 02 §8).
 - **Hard isolation**: vClusters share the node, the kernel and the GPU. For tenants you don't trust, use separate nodes (a vCluster can pin its pods with a node selector) or separate physical clusters.
 - **More clusters**: each extra vCluster costs ~0.3 CPU and ~0.5–1.5 Gi for its control plane, taken from its own budget.
 

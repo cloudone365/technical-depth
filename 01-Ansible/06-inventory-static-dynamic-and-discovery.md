@@ -1,6 +1,6 @@
-# Step 06 · Inventory: Static, Dynamic & Discovery: Constructed Groups, mDNS and NetBox as Source of Truth
+# Chapter 06 · Inventory: Static, Dynamic & Discovery: Constructed Groups, mDNS and NetBox as Source of Truth
 
-> **01-Ansible · Part I — Management plane & Ansible foundations · Step 06 of 30** · ← [Step 05 · Execution internals & debugging](05-execution-internals-and-debugging.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 07 · Jinja2 filters & data transforms](07-jinja2-filters-and-data-transforms.md) →
+> **01-Ansible · Part I — Management plane & Ansible foundations · Chapter 06 of 30** · ← [Chapter 05 · Execution internals & debugging](05-execution-internals-and-debugging.md) · [All chapters](00-ansible-step-by-step-guide.md) · [Chapter 07 · Jinja2 filters & data transforms](07-jinja2-filters-and-data-transforms.md) →
 
 | | |
 |---|---|
@@ -48,7 +48,7 @@ flowchart LR
 
 | File | Plugin | Purpose |
 |---|---|---|
-| `inventory/hosts.yml` | `ansible.builtin.yaml` | Hardware + functional groups (Step 02) |
+| `inventory/hosts.yml` | `ansible.builtin.yaml` | Hardware + functional groups (Chapter 02) |
 | `inventory/group_vars/*.yml`, `host_vars/*.yml` | vars plugin | Golden values and per-node addressing |
 | `inventory/zz-constructed.yml` | `ansible.builtin.constructed` | Groups computed from facts in the cache. The `zz-` prefix makes it load last |
 | `inventory_plugins/spark_mdns.py` | custom | Discovers `_ssh._tcp` Sparks via Avahi |
@@ -75,7 +75,7 @@ enable_plugins = ansible.builtin.yaml, ansible.builtin.ini, spark_mdns, ansible.
 ---
 # Loaded after hosts.yml (alphabetical). Builds groups from *facts* — including
 # the custom ansible_local.spark facts — read from the fact cache.
-# Run any play with facts once (e.g. 00-ping.yml) to populate the cache.
+# Run any play with facts once (e.g. 02.1-ping.yml) to populate the cache.
 plugin: ansible.builtin.constructed
 strict: false
 groups:
@@ -91,12 +91,12 @@ keyed_groups:
     key: ansible_architecture | default('unknown')
 ```
 
-Do this from your MacBook. Semaphore's inventory (Step 04 §5.5) is the **file** `01-Ansible/lab/inventory/hosts.yml`, not the directory, so `zz-constructed.yml` isn't loaded there and these fact-driven groups don't exist in Semaphore tasks; the static and functional groups do. On the MacBook, `ansible.cfg` loads the whole `inventory/` directory and the fact cache is your own `.cache/facts`:
+Do this from your MacBook. Semaphore's inventory (Chapter 04 §5.5) is the **file** `01-Ansible/lab/inventory/hosts.yml`, not the directory, so `zz-constructed.yml` isn't loaded there and these fact-driven groups don't exist in Semaphore tasks; the static and functional groups do. On the MacBook, `ansible.cfg` loads the whole `inventory/` directory and the fact cache is your own `.cache/facts`:
 
 ```bash
 cd "01-Ansible/lab"
-ansible-playbook playbooks/00-ping.yml -l dgx-spark-1,localhost -K                   # populates .cache/facts/*
-ansible-playbook playbooks/01-baseline.yml -l dgx-spark-1,localhost -K --tags facts  # adds ansible_local.spark
+ansible-playbook playbooks/02.1-ping.yml -l dgx-spark-1,localhost -K                   # populates .cache/facts/*
+ansible-playbook playbooks/02.2-baseline.yml -l dgx-spark-1,localhost -K --tags facts  # adds ansible_local.spark
 ansible-inventory --graph
 ```
 
@@ -114,12 +114,12 @@ Now **target by state** with inventory patterns:
 
 ```bash
 # only healthy GPU nodes that are Kubernetes workers and NOT under memory pressure
-# (30-validate targets the Sparks themselves; 05/06/06b run from localhost against the API)
-ansible-playbook playbooks/30-validate.yml -l 'gpu_ready:&k8s_workers:!uma_pressure'
+# (30.1-validate targets the Sparks themselves; 19.1/20.1/20.2 run from localhost against the API)
+ansible-playbook playbooks/30.1-validate.yml -l 'gpu_ready:&k8s_workers:!uma_pressure'
 # every node still on an old driver major
 ansible 'driver_570' -m debug -a msg="needs upgrade"
 # one node at a time from a group
-ansible-playbook playbooks/21-emergency-drain.yml -l 'slurm_compute[1]'
+ansible-playbook playbooks/29.1-emergency-drain.yml -l 'slurm_compute[1]'
 ```
 
 | Pattern | Meaning |
@@ -375,10 +375,10 @@ NETBOX_TOKEN=... ansible-inventory -i inventory-examples/netbox.yml --graph
 
 | Consumer | Uses |
 |---|---|
-| Semaphore (Step 04) | Inventory type **File** → `01-Ansible/lab/inventory/hosts.yml` from the repository; its `group_vars/`, `host_vars/` come along, `zz-constructed.yml` does not |
-| AWX (Steps 23/24) | Inventory source "Sourced from a Project" → `lab/inventory/`; NetBox has a native source type |
-| Drift (Step 26) | `-l gpu_ready` keeps drift checks off nodes that are already known-bad |
-| Drain (Step 29) | `-l uma_pressure` finds nodes to relieve first |
+| Semaphore (Chapter 04) | Inventory type **File** → `01-Ansible/lab/inventory/hosts.yml` from the repository; its `group_vars/`, `host_vars/` come along, `zz-constructed.yml` does not |
+| AWX (Chapters 23/24) | Inventory source "Sourced from a Project" → `lab/inventory/`; NetBox has a native source type |
+| Drift (Chapter 26) | `-l gpu_ready` keeps drift checks off nodes that are already known-bad |
+| Drain (Chapter 29) | `-l uma_pressure` finds nodes to relieve first |
 | Slurm / `kubeadm_cluster` roles | functional groups decide who's controller / control plane vs worker (`k8s_control_plane` runs `kubeadm init`, `k8s_workers` run `kubeadm join`) |
 
 ## 5. Troubleshooting & diagnostics

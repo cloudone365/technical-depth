@@ -7,7 +7,7 @@
 #   CNP (DCQCN): DSCP 48 → priority 6
 #   ECN        : marked by the switch, reacted to by the NIC (DCQCN)
 #
-#   ansible-playbook playbooks/12b-roce-qos.yml -K [-e roce_qos_pfc=false]   # ECN-only ("lossy RoCE")
+#   ansible-playbook playbooks/14.1-roce-qos.yml -K [-e roce_qos_pfc=false]   # ECN-only ("lossy RoCE")
 - name: Short-lived SSH certificate from vault01 (Semaphore runs only)
   ansible.builtin.import_playbook: 00-vault-cert.yml
 
@@ -100,4 +100,4 @@
       ansible.builtin.debug:
         msg: >-
           mlnx_qos / sysfs / configfs settings do not survive reboot. Re-run this play from a
-          systemd unit or AWX schedule at boot, or bake it into a oneshot service (exercise in Step 14).
+          systemd unit or AWX schedule at boot, or bake it into a oneshot service (exercise in Chapter 14).

@@ -1,6 +1,6 @@
-# Step 25 · Testing, Linting & CI: Syntax, Fixture Tests, Molecule on arm64, and CI with a Spark Runner
+# Chapter 25 · Testing, Linting & CI: Syntax, Fixture Tests, Molecule on arm64, and CI with a Spark Runner
 
-> **01-Ansible · Part V — Production operations · Step 25 of 30** · ← [Step 24 · AWX production & Receptor](24-awx-production-and-receptor.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 26 · Drift detection & self-healing](26-drift-detection-and-self-healing.md) →
+> **01-Ansible · Part V — Production operations · Chapter 25 of 30** · ← [Chapter 24 · AWX production & Receptor](24-awx-production-and-receptor.md) · [All chapters](00-ansible-step-by-step-guide.md) · [Chapter 26 · Drift detection & self-healing](26-drift-detection-and-self-healing.md) →
 
 | | |
 |---|---|
@@ -15,7 +15,7 @@
 
 ```mermaid
 flowchart TB
-  L4["4 · Real hardware<br/>30-validate.yml, 18-cuda-smoke, 10-nccl-test<br/>(on the Sparks — minutes)"]
+  L4["4 · Real hardware<br/>30.1-validate.yml, 11.2-cuda-smoke, 14.2-nccl-test<br/>(on the Sparks — minutes)"]
   L3["3 · Molecule<br/>role converge + idempotence + verify in arm64 Ubuntu 24.04 container<br/>(on the Spark — ~3 min)"]
   L2["2 · Fixture tests<br/>Jinja katas · mDNS plugin on captured avahi output · drift reporter exit codes<br/>(anywhere — seconds)"]
   L1["1 · Static<br/>yamllint · ansible-lint (production) · syntax-check · py_compile · bash -n<br/>(anywhere — seconds)"]
@@ -43,7 +43,7 @@ export ANSIBLE_CONFIG=$PWD/ansible.cfg
 echo "== yamllint";      yamllint -s .
 echo "== ansible-lint";  ansible-lint
 echo "== syntax-check";  for p in playbooks/*.yml; do ansible-playbook --syntax-check "$p" >/dev/null; done
-echo "== jinja katas";   kata=$(ansible-playbook playbooks/15-jinja-lab.yml); grep -q '7/7 Jinja katas passed' <<<"$kata"
+echo "== jinja katas";   kata=$(ansible-playbook playbooks/07.1-jinja-lab.yml); grep -q '7/7 Jinja katas passed' <<<"$kata"
 echo "== mdns plugin";   out=$(ANSIBLE_INVENTORY_ENABLED=spark_mdns ansible-inventory -i tests/fixtures/spark.mdns.yml --list)
                          echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert sorted(d["spark"]["hosts"])==["dgx-spark-1","dgx-spark-2"], d'
 echo "== drift report";  set +e; python3 tools/spark_drift_report.py tests/fixtures/drift-sample.json >/dev/null; rc=$?; set -e
@@ -101,10 +101,10 @@ The trick for hardware-dependent code: **capture real command output once from t
 avahi-browse -p -r -t _ssh._tcp > tests/fixtures/avahi-browse.txt
 ibdev2netdev > tests/fixtures/ibdev2netdev.txt
 nvidia-smi --query-gpu=index,name,temperature.gpu,power.draw,utilization.gpu,memory.used --format=csv > tests/fixtures/smi.csv
-ANSIBLE_STDOUT_CALLBACK=ansible.posix.json ansible-playbook playbooks/20-drift-check.yml > tests/fixtures/drift-real.json
+ANSIBLE_STDOUT_CALLBACK=ansible.posix.json ansible-playbook playbooks/26.1-drift-check.yml > tests/fixtures/drift-real.json
 ```
 
-Then add a case to `run-local-checks.sh`. The Jinja katas (Step 07) are this pattern taken to its conclusion.
+Then add a case to `run-local-checks.sh`. The Jinja katas (Chapter 07) are this pattern taken to its conclusion.
 
 ---
 
@@ -198,7 +198,7 @@ molecule converge && molecule login   # iterate interactively
 |---|---|
 | A container-mode flag to skip kernel/hardware tasks | `spark_baseline_container_mode` |
 | Hardware assertions in a separate role | `spark_validate`, which runs only on real nodes |
-| Pure functions (parsers) moved to filter plugins or fixture-tested Jinja | `ibdev2netdev` filter (Step 07 §2.3) |
+| Pure functions (parsers) moved to filter plugins or fixture-tested Jinja | `ibdev2netdev` filter (Chapter 07 §2.3) |
 | Side-effect tasks guarded by `when: not ansible_check_mode` where check mode can't simulate them | Drift checks stay clean |
 | Read-only probes marked `check_mode: false` so they still run under `--check` | `kubeadm_cluster` (CRI reachable, node registered), `spark_validate`, `node_drain` forensics |
 | One source of truth shared with another lab, instead of a copy | `vclusters` applies `02-Kubernetes/lab/vclusters/*.yaml` and `manifests/root/05-vclusters`, so the 02 lab's CI tests the same files |
@@ -276,9 +276,9 @@ sudo ./svc.sh install && sudo ./svc.sh start
 
 ### 4.2 Gating merges
 
-In the repo's branch protection, require the `ansible-lab / static` check. Molecule stays manual (it needs the Spark to be online), and hardware validation is part of the release checklist (Step 30).
+In the repo's branch protection, require the `ansible-lab / static` check. Molecule stays manual (it needs the Spark to be online), and hardware validation is part of the release checklist (Chapter 30).
 
-In this lab the gate matters more than usual: Semaphore's repository points at branch `main` (Step 04 §5.4) and clones it at the start of **every** task. Whatever merges to `main` is what the next template run executes against the Sparks. So branch protection is the change control for the controller: a red static job never reaches sema01.
+In this lab the gate matters more than usual: Semaphore's repository points at branch `main` (Chapter 04 §5.4) and clones it at the start of **every** task. Whatever merges to `main` is what the next template run executes against the Sparks. So branch protection is the change control for the controller: a red static job never reaches sema01.
 
 ---
 
@@ -288,9 +288,9 @@ The Kubernetes stage (`kubeadm_cluster`, `cilium`, `metallb`, `gpu_operator`, `v
 
 | Layer | Where | What it proves |
 |---|---|---|
-| Lint + `--syntax-check` | `ansible-lab` workflow (`tests/run-local-checks.sh`) | `05-kubernetes.yml`, `06-gpu-operator.yml`, `06b-vclusters.yml`, `99-reset-kubernetes.yml` parse; production-profile lint on every role |
+| Lint + `--syntax-check` | `ansible-lab` workflow (`tests/run-local-checks.sh`) | `19.1-kubernetes.yml`, `19.2-reset-kubernetes.yml`, `20.1-gpu-operator.yml`, `20.2-vclusters.yml` parse; production-profile lint on every role |
 | Same manifests on kind | `.github/workflows/k8s-lab-ci.yml`, which also triggers on `01-Ansible/lab/roles/**` | A kind cluster renamed to context `spark-root` (fake GB10 node) runs the root budgets, both vClusters from `vclusters/*.yaml`, and the tenant checks: the exact files the `vclusters` role applies |
-| Hardware | `playbooks/30-validate.yml` on the Spark (Step 30) | `k8s_ready_gpu`: the node is `Ready` and advertises `nvidia.com/gpu` > 0 |
+| Hardware | `playbooks/30.1-validate.yml` on the Spark (Chapter 30) | `k8s_ready_gpu`: the node is `Ready` and advertises `nvidia.com/gpu` > 0 |
 
 ### 4.4 What the Semaphore path gets from CI
 
@@ -299,13 +299,13 @@ The management-plane files live in the same `lab/` tree, so the same workflow co
 | File | Layer | What it proves |
 |---|---|---|
 | `playbooks/00-vault-cert.yml` (play 1) | `ansible-lint` (production) + `--syntax-check` | `no_log` on every task that touches the token, certificate or secrets; `check_mode: false` parses; imported cleanly by every playbook that SSHes to the Sparks |
-| `playbooks/00b-semaphore-target.yml` | `ansible-lint` + `--syntax-check` | lint-clean; the sudoers drop-in is written with `validate: visudo -cf %s` and the sshd drop-in with `sshd -t`, so a bad file never lands |
-| `playbooks/08-vault.yml`, `roles/vault_config` | `ansible-lint` + `--syntax-check` | `localhost`-only play; HTTP API calls with `no_log` |
-| `semaphore/docker-compose.override.yml` | `yamllint -s .` | valid YAML that Compose can merge with the Step 01 file |
+| `playbooks/04.1-semaphore-target.yml` | `ansible-lint` + `--syntax-check` | lint-clean; the sudoers drop-in is written with `validate: visudo -cf %s` and the sshd drop-in with `sshd -t`, so a bad file never lands |
+| `playbooks/17.1-vault.yml`, `roles/vault_config` | `ansible-lint` + `--syntax-check` | `localhost`-only play; HTTP API calls with `no_log` |
+| `semaphore/docker-compose.override.yml` | `yamllint -s .` | valid YAML that Compose can merge with the Chapter 01 file |
 | `semaphore/Dockerfile` | not linted yet | it carries a `# hadolint ignore=DL3006` marker, so adding `hadolint` to the static job is a one-line exercise |
-| `tools/fetch-kubeconfig.sh`, `tools/vault-ssh-cert.sh` | `bash -n tools/*.sh` | they parse; their behaviour is proven by the Step 04 Verify steps |
+| `tools/fetch-kubeconfig.sh`, `tools/vault-ssh-cert.sh` | `bash -n tools/*.sh` | they parse; their behaviour is proven by the Chapter 04 Verify steps |
 
-Neither login case of `group_vars/spark.yml` (svc-ansible with `vault_role_id`, nvidia without) is exercised by CI: the syntax check doesn't render inventory variables. The Semaphore case only runs for real on sema01. Its test is the template `00 Ping` (Step 04 §5.6): run it after every change to play 1, `group_vars/spark.yml` or the Semaphore image.
+Neither login case of `group_vars/spark.yml` (svc-ansible with `vault_role_id`, nvidia without) is exercised by CI: the syntax check doesn't render inventory variables. The Semaphore case only runs for real on sema01. Its test is the template `02.1 Ping` (Chapter 04 §5.6): run it after every change to play 1, `group_vars/spark.yml` or the Semaphore image.
 
 ## 5. Troubleshooting & diagnostics
 

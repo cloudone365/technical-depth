@@ -68,7 +68,7 @@
         that: fw_record.driver is version(spark_driver_min_secure, '>=')
         fail_msg: >-
           {{ inventory_hostname }} driver {{ fw_record.driver }} is below the security floor
-          {{ spark_driver_min_secure }} — schedule playbooks/17-dgxos-upgrade.yml
+          {{ spark_driver_min_secure }} — schedule playbooks/10.2-dgxos-upgrade.yml
         success_msg: "driver {{ fw_record.driver }} >= {{ spark_driver_min_secure }}"
       when: spark_driver_min_secure | length > 0
 

@@ -1,11 +1,11 @@
 ---
 # Break-fix practice. Injects ONE reversible fault on ONE Spark; your job is to
 # detect it with the lab's own tools (validate, drift, alerts, logs) and fix it
-# with the normal playbooks. Faults are documented in Step 30 — no peeking at
+# with the normal playbooks. Faults are documented in Chapter 30 — no peeking at
 # the task list until you've found it.
 #
-#   ansible-playbook playbooks/25-chaos.yml -l dgx-spark-2 -K -e chaos_fault=random
-#   ansible-playbook playbooks/25-chaos.yml -l dgx-spark-2 -K -e chaos_fault=3
+#   ansible-playbook playbooks/30.2-chaos.yml -l dgx-spark-2 -K -e chaos_fault=random
+#   ansible-playbook playbooks/30.2-chaos.yml -l dgx-spark-2 -K -e chaos_fault=3
 - name: Short-lived SSH certificate from vault01 (Semaphore runs only)
   ansible.builtin.import_playbook: 00-vault-cert.yml
 

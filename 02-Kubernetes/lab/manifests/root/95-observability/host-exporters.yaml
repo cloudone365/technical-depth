@@ -1,5 +1,5 @@
-# Scrape exporters that run on the Spark host, outside Kubernetes (Step 17):
-#   :9100  prometheus-node-exporter + textfile GPU/UMA/CX-7 metrics (01-Ansible Step 12)
+# Scrape exporters that run on the Spark host, outside Kubernetes (Chapter 17):
+#   :9100  prometheus-node-exporter + textfile GPU/UMA/CX-7 metrics (01-Ansible Chapter 12)
 #   :9400  dcgm-exporter, only if enabled (see addons/dcgm-exporter-values.md)
 # A selector-less Service + EndpointSlice points at the node IPs.
 apiVersion: v1

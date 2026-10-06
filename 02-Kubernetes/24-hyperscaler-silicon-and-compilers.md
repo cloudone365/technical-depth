@@ -1,6 +1,6 @@
-# Step 24 · Hyperscaler Silicon & Compilers: TPU, Trainium, Blackwell, and What Compilers Buy You
+# Chapter 24 · Hyperscaler Silicon & Compilers: TPU, Trainium, Blackwell, and What Compilers Buy You
 
-> **02-Kubernetes · Part VIII — Scale & resilience · Step 24 of 28** · ← [Step 23 · Disaggregated prefill & decode serving](23-disaggregated-prefill-and-decode-serving.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 25 · Ultra-scale cluster resilience & fault tolerance](25-ultra-scale-cluster-resilience-and-fault-tolerance.md) →
+> **02-Kubernetes · Part VIII — Scale & resilience · Chapter 24 of 28** · ← [Chapter 23 · Disaggregated prefill & decode serving](23-disaggregated-prefill-and-decode-serving.md) · [All chapters](00-kubernetes-step-by-step-guide.md) · [Chapter 25 · Ultra-scale cluster resilience & fault tolerance](25-ultra-scale-cluster-resilience-and-fault-tolerance.md) →
 
 | | |
 |---|---|
@@ -31,7 +31,7 @@ Your Spark runs the same software stack as NVIDIA's datacenter systems (CUDA, cu
 
 ### 1.1 Why the benchmark runs on the root
 
-The lab puts hardware benchmarking in the root's `platform-tools` namespace, not in a vCluster. A compiler benchmark measures the *GB10*, and its result is a platform fact (like the baseline TFLOPS in Step 05 §4 Task 6) that every tenant's numbers are compared against. `platform-tools` has no ResourceQuota: the root's share of the Spark (3 CPU, ~9.7 GiB, 2 of the 15 time-slices) is kept by convention and watched by the slice ledger, not enforced. That is the usual platform-team trade — more freedom, more responsibility. Take a 3rd slice and a tenant pod inside llms or dev-lab gets `Insufficient nvidia.com/gpu` from the root scheduler even though its vCluster quota still has room. This Job alone asks for more than that share (4 CPU requested, 16 Gi memory limit, §3.2): CPU can burst into idle cores, but memory can't, so run it while the vClusters' engines and batch jobs are quiet.
+The lab puts hardware benchmarking in the root's `platform-tools` namespace, not in a vCluster. A compiler benchmark measures the *GB10*, and its result is a platform fact (like the baseline TFLOPS in Chapter 05 §4 Task 6) that every tenant's numbers are compared against. `platform-tools` has no ResourceQuota: the root's share of the Spark (3 CPU, ~9.7 GiB, 2 of the 15 time-slices) is kept by convention and watched by the slice ledger, not enforced. That is the usual platform-team trade — more freedom, more responsibility. Take a 3rd slice and a tenant pod inside llms or dev-lab gets `Insufficient nvidia.com/gpu` from the root scheduler even though its vCluster quota still has room. This Job alone asks for more than that share (4 CPU requested, 16 Gi memory limit, §3.2): CPU can burst into idle cores, but memory can't, so run it while the vClusters' engines and batch jobs are quiet.
 
 ---
 
@@ -94,7 +94,7 @@ On a **memory-bandwidth-limited** part like GB10 (≈273 GB/s shared), fusion th
 | script | ConfigMap `gemm-bench` (`gemm_bench.py`, `compile_compare.py`), created by `kubectl --context spark-root apply -k manifests/root/70-gpu` | one ConfigMap for all GPU benchmarks |
 | resources | requests 4 CPU · 8 Gi, limits 16 Gi · `nvidia.com/gpu: 1` | Inductor compiles kernels on the CPU in parallel; max-autotune benchmarks many candidates |
 | `TORCH_LOGS` | empty; set to `output_code` to print the generated Triton kernels | §5.2 |
-| PriorityClass | none → priority 0 (the root has no default PriorityClass, Step 07 §3.1) | a benchmark may be preempted by `spark-serving` |
+| PriorityClass | none → priority 0 (the root has no default PriorityClass, Chapter 07 §3.1) | a benchmark may be preempted by `spark-serving` |
 
 ### 3.3 Scheduling other accelerators in Kubernetes (reference)
 
@@ -129,9 +129,9 @@ The middle row is the nested-cluster version of a cloud fact: device plugins, DR
 ## 4. Integrations
 
 - **Module 06-Gemma** uses JAX/XLA and MaxText on NVIDIA. The XLA:GPU path above runs on your Spark with NVIDIA's JAX containers.
-- **Module 07-Nvidia** goes inside the kernels (SASS, Nsight Compute). Point it at the fused kernels this step generates.
-- **Serving (Steps 20–22)**: vLLM and SGLang already use CUDA graphs and `torch.compile` internally. That's part of their startup time ("Capturing CUDA graphs") and part of why their startup probes allow 30 minutes.
-- **Step 16**: the same ConfigMap drives `gemm-solo` and `gemm-contention`; compare compiled vs eager *under contention* by scaling `gemm-contention` while §5.1 runs.
+- **Module 07-Nvidia** goes inside the kernels (SASS, Nsight Compute). Point it at the fused kernels this chapter generates.
+- **Serving (Chapters 20–22)**: vLLM and SGLang already use CUDA graphs and `torch.compile` internally. That's part of their startup time ("Capturing CUDA graphs") and part of why their startup probes allow 30 minutes.
+- **Chapter 16**: the same ConfigMap drives `gemm-solo` and `gemm-contention`; compare compiled vs eager *under contention* by scaling `gemm-contention` while §5.1 runs.
 
 ---
 
@@ -146,7 +146,7 @@ export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 
 ```bash
 kubectl --context spark-root apply -k manifests/root/70-gpu                 # ConfigMap gemm-bench (+ gemm-contention at 0 replicas)
-kubectl --context spark-root get cm -n platform-tools gpu-slice-ledger -o yaml   # who holds slices right now (Step 06 controller)
+kubectl --context spark-root get cm -n platform-tools gpu-slice-ledger -o yaml   # who holds slices right now (Chapter 06 controller)
 kubectl --context spark-root apply -f manifests/root/70-gpu/compile-compare.yaml
 kubectl --context spark-root -n platform-tools logs -f job/compile-compare
 ```

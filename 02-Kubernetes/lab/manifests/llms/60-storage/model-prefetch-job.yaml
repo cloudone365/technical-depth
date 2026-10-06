@@ -1,5 +1,5 @@
 # Download model weights into the shared model-cache PVC BEFORE any server
-# starts (Step 13 §5.2, Step 20). Serving pods then start in seconds and
+# starts (Chapter 13 §5.2, Chapter 20). Serving pods then start in seconds and
 # never race each other on the same download.
 #   MODEL=Qwen/Qwen2.5-7B-Instruct envsubst < model-prefetch-job.yaml | kubectl apply -f -
 # or edit the env below.

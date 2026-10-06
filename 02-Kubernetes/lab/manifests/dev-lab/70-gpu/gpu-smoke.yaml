@@ -1,4 +1,4 @@
-# Smallest possible proof that scheduling + device plugin + runtime work (Steps 16, 17),
+# Smallest possible proof that scheduling + device plugin + runtime work (Chapters 16, 17),
 # from INSIDE vCluster #1 · dev-lab: tenant pod → dev-lab API → syncer → root
 # scheduler → kubelet → nvidia runtime. If this works, the whole chain works.
 apiVersion: v1

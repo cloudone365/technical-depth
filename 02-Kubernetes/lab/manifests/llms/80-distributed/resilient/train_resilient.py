@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Checkpoint/resume + silent-data-corruption canary (Step 25).
+"""Checkpoint/resume + silent-data-corruption canary (Chapter 25).
 
 - trains a small model on synthetic data (single rank, GPU)
 - async distributed checkpoint (torch.distributed.checkpoint.async_save) every

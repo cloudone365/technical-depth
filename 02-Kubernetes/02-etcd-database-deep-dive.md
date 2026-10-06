@@ -1,6 +1,6 @@
-# Step 02 · etcd Database Deep Dive: Raft, MVCC, Quotas, Backups & Disaster Recovery
+# Chapter 02 · etcd Database Deep Dive: Raft, MVCC, Quotas, Backups & Disaster Recovery
 
-> **02-Kubernetes · Part I — Control plane & the nested lab · Step 02 of 28** · ← [Step 01 · Kubernetes core architecture](01-kubernetes-core-architecture.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 03 · kube-apiserver internals](03-kube-apiserver-internals.md) →
+> **02-Kubernetes · Part I — Control plane & the nested lab · Chapter 02 of 28** · ← [Chapter 01 · Kubernetes core architecture](01-kubernetes-core-architecture.md) · [All chapters](00-kubernetes-step-by-step-guide.md) · [Chapter 03 · kube-apiserver internals](03-kube-apiserver-internals.md) →
 
 | | |
 |---|---|
@@ -63,7 +63,7 @@ flowchart LR
   style VC fill:#f6f8fa,stroke:#57606a,stroke-dasharray: 4 3
 ```
 
-Only the root API server talks to etcd. The vClusters reach it the same way every controller does — through the root API server, as a client — so a busy vCluster shows up as root API load (APF lane `spark-vcluster-syncers`, Step 03 §3.4) and then as etcd writes.
+Only the root API server talks to etcd. The vClusters reach it the same way every controller does — through the root API server, as a client — so a busy vCluster shows up as root API load (APF lane `spark-vcluster-syncers`, Chapter 03 §3.4) and then as etcd writes.
 
 ### 2.1 Raft in one picture
 
@@ -118,7 +118,7 @@ Quorum is ⌊n/2⌋+1. **1 member tolerates 0 failures, 2 members tolerate 0, an
 | `/registry/leases/kube-system/*` | leader-election leases (renewed every ~2 s) |
 | `/registry/leases/kube-node-lease/dgx-spark-1` | node heartbeat (every 10 s) |
 | `/registry/events/…` | Events, with a 1 h TTL. Often the biggest churn |
-| `/registry/resourcequotas/vc-*/vcluster-budget` | the vClusters' budgets — the objects that size dev-lab and llms (Step 04 §3.2) |
+| `/registry/resourcequotas/vc-*/vcluster-budget` | the vClusters' budgets — the objects that size dev-lab and llms (Chapter 04 §3.2) |
 | `/registry/apiextensions.k8s.io/customresourcedefinitions/…` | the **root's** CRDs: Cilium, MetalLB, GPU Operator, Prometheus Operator, Argo CD. Kueue, KEDA, KServe and Traefik CRDs are *not* here — they were installed into llms |
 
 ### 3.3 Health targets on NVMe
@@ -146,13 +146,13 @@ What the syncer copies to the root (pods, Services, PVCs, and the Secrets/Config
 
 | With | How |
 |---|---|
-| Step 03 Secret encryption | Proven in §5.3 by reading the raw key — and shown to stop at the root boundary |
-| Prometheus (Step 17) | kube-prometheus-stack scrapes `kubeEtcd` on port 2381 over plain HTTP ([`addons/kube-prometheus-stack-values.yaml`](lab/addons/kube-prometheus-stack-values.yaml)); two alert rules in [`rules.yaml`](lab/manifests/root/95-observability/rules.yaml) |
-| 01-Ansible `kubeadm_cluster` role | installs `etcdctl`/`etcdutl` matching the etcd image, `/usr/local/sbin/etcd-snapshot`, and the timer. `playbooks/99-reset-kubernetes.yml -e reset_wipe_data=true` deletes `/var/lib/etcd` — your off-box copy (§5.7) is the only way back after that |
-| Off-box backup | §5.7 pulls snapshots + PKI + encryption config to your MacBook (not sema01: it already holds cluster-admin kubeconfigs, so keep the CA keys apart); vault01 KV (01-Ansible Step 18) for the keys. In production, push to object storage (MinIO from module 08 works) from the same timer |
-| vClusters (Step 04) | their state is on PVCs, not in etcd (§3.4, §5.8; Step 04 §6.7) |
-| Storage (Step 13) | fsync latency is a storage QoS problem. The checkpoint-write patterns in Step 13 are what hurt etcd |
-| Controllers (Step 06) | an informer that watches from a compacted revision gets `410 Gone` and must re-list — compaction (§5.5) and restores (§5.6) are where that comes from |
+| Chapter 03 Secret encryption | Proven in §5.3 by reading the raw key — and shown to stop at the root boundary |
+| Prometheus (Chapter 17) | kube-prometheus-stack scrapes `kubeEtcd` on port 2381 over plain HTTP ([`addons/kube-prometheus-stack-values.yaml`](lab/addons/kube-prometheus-stack-values.yaml)); two alert rules in [`rules.yaml`](lab/manifests/root/95-observability/rules.yaml) |
+| 01-Ansible `kubeadm_cluster` role | installs `etcdctl`/`etcdutl` matching the etcd image, `/usr/local/sbin/etcd-snapshot`, and the timer. `playbooks/19.2-reset-kubernetes.yml -e reset_wipe_data=true` deletes `/var/lib/etcd` — your off-box copy (§5.7) is the only way back after that |
+| Off-box backup | §5.7 pulls snapshots + PKI + encryption config to your MacBook (not sema01: it already holds cluster-admin kubeconfigs, so keep the CA keys apart); vault01 KV (01-Ansible Chapter 18) for the keys. In production, push to object storage (MinIO from module 08 works) from the same timer |
+| vClusters (Chapter 04) | their state is on PVCs, not in etcd (§3.4, §5.8; Chapter 04 §6.7) |
+| Storage (Chapter 13) | fsync latency is a storage QoS problem. The checkpoint-write patterns in Chapter 13 are what hurt etcd |
+| Controllers (Chapter 06) | an informer that watches from a compacted revision gets `410 Gone` and must re-list — compaction (§5.5) and restores (§5.6) are where that comes from |
 
 ---
 
@@ -215,7 +215,7 @@ sudo fio --name=etcd-wal --rw=write --ioengine=sync --fdatasync=1 --bs=2300 --si
 sudo rm -rf /var/lib/fio-etcd
 ```
 
-Read the `fsync/fdatasync/sync_file_range` section: **99.00th percentile should be well under 10 ms** (a healthy Gen4/Gen5 NVMe gives tens to hundreds of µs). Now run it again while the Step 13 benchmark writes 1 MiB blocks into a PVC on the same NVMe:
+Read the `fsync/fdatasync/sync_file_range` section: **99.00th percentile should be well under 10 ms** (a healthy Gen4/Gen5 NVMe gives tens to hundreds of µs). Now run it again while the Chapter 13 benchmark writes 1 MiB blocks into a PVC on the same NVMe:
 
 ```bash
 kubectl --context spark-root apply -f manifests/root/60-storage/fio-job.yaml     # platform-tools, 4 CPUs, 64 Gi scratch PVC
@@ -240,7 +240,7 @@ kubectl --context spark-root -n platform-tools create secret generic demo --from
 $E get /registry/secrets/platform-tools/demo --print-value-only | head -c 64 | od -c | head -3
 ```
 
-Expected: the value starts with `k8s:enc:aescbc:v1:key1:` and `hunter2` is nowhere in it. If you see the plaintext password, Secret encryption is off (Step 03 §3.5).
+Expected: the value starts with `k8s:enc:aescbc:v1:key1:` and `hunter2` is nowhere in it. If you see the plaintext password, Secret encryption is off (Chapter 03 §3.5).
 
 **Now follow a tenant's Secret.** A Secret `tenant-alpha/demo` lives in **dev-lab**, so `/registry/secrets/tenant-alpha/demo` doesn't exist in root etcd at all — there is no `tenant-alpha` namespace at the root. Where is it, and is it encrypted there? Create one in dev-lab and mount it into a pod, because vCluster only syncs Secrets that a synced pod uses:
 
@@ -260,7 +260,7 @@ sudo ls -la /data/k8s/vc-dev-lab/data-dev-lab-0/
 sudo grep -rac hunter2 /data/k8s/vc-dev-lab/data-dev-lab-0/ | grep -v ':0$'
 ```
 
-Expected: one or more files report a match. dev-lab's API server stores Secrets unencrypted, so anyone with root on the Spark — or a copy of that PVC — can read every tenant Secret. That's the honest boundary of this design: **encryption at rest is a per-API-server setting**, and the vClusters have their own API servers. To close it, give each vCluster an encryption config (`controlPlane.distro.k8s.apiServer.extraArgs` plus a mounted Secret, like Step 03's audit exercise) — and then that key belongs in your backups too.
+Expected: one or more files report a match. dev-lab's API server stores Secrets unencrypted, so anyone with root on the Spark — or a copy of that PVC — can read every tenant Secret. That's the honest boundary of this design: **encryption at rest is a per-API-server setting**, and the vClusters have their own API servers. To close it, give each vCluster an encryption config (`controlPlane.distro.k8s.apiServer.extraArgs` plus a mounted Secret, like Chapter 03's audit exercise) — and then that key belongs in your backups too.
 
 Answer for Workbook Ex 02: the tenant's Secret is readable in plaintext in dev-lab's database; only its host copy (if a pod uses it) is in root etcd, encrypted.
 
@@ -354,7 +354,7 @@ kubectl --context spark-root -n vc-dev-lab get pods -w                     # wat
 scripts/verify.sh platform vclusters
 ```
 
-The last two lines are where the nesting gets interesting. After the restore, root etcd describes the world as it was at snapshot time, but each vCluster's database describes *now*. The syncer is a controller (Step 06 §5.6): it compares the two and repairs host copies — expect host copies of tenant objects created or deleted since the snapshot to be recreated or removed over the next minute or two. Watch it rather than assume it; anything it can't repair shows up as a sync error event on the object inside the vCluster.
+The last two lines are where the nesting gets interesting. After the restore, root etcd describes the world as it was at snapshot time, but each vCluster's database describes *now*. The syncer is a controller (Chapter 06 §5.6): it compares the two and repairs host copies — expect host copies of tenant objects created or deleted since the snapshot to be recreated or removed over the next minute or two. Watch it rather than assume it; anything it can't repair shows up as a sync error event on the object inside the vCluster.
 
 Workbook Ex 20 asks you to doom a namespace, a ConfigMap and a Kueue LocalQueue. The first two go in the root; a LocalQueue lives in **llms** (Kueue is installed there), so a root restore will *not* remove it. Put the third doomed object in a root CRD instead (for example a `CiliumNetworkPolicy` in `platform-tools`), or restore llms's PVC (§5.8) as well.
 
@@ -364,7 +364,7 @@ Workbook Ex 20 asks you to doom a namespace, a ConfigMap and a Kueue LocalQueue.
 
 ### 5.7 Copy snapshots off the box
 
-A snapshot on the Spark's own NVMe protects you from a bad `kubectl delete`, not from a dead disk or `99-reset-kubernetes.yml -e reset_wipe_data=true`. From your MacBook (as the admin user `dgxadmin` with your own key, the same login as the bootstrap playbooks), pull everything a rebuild on *new* hardware needs in one tarball:
+A snapshot on the Spark's own NVMe protects you from a bad `kubectl delete`, not from a dead disk or `19.2-reset-kubernetes.yml -e reset_wipe_data=true`. From your MacBook (as the admin user `dgxadmin` with your own key, the same login as the bootstrap playbooks), pull everything a rebuild on *new* hardware needs in one tarball:
 
 ```bash
 mkdir -p ~/spark-backups
@@ -380,13 +380,13 @@ tar tzf ~/spark-backups/spark-root-$(date +%F).tgz | head
 | `etc/kubernetes/encryption/config.yaml` | the AES key: without it every Secret in the snapshot is unreadable ciphertext |
 | `etc/kubernetes/kubeadm-config.yaml` | the exact config 01-Ansible ran `kubeadm init` with |
 
-Treat that tarball like a password: it holds the key that decrypts every Secret **and** the CA keys that can mint cluster-admin certificates. Encrypt it at rest (`age`/`gpg`), or store the keys in vault01's KV (01-Ansible Step 18) and only the snapshots on the NAS. Automate it daily (Step 05's operations table) — a `cron`/`launchd` job on the MacBook (or a timer on the NAS) running this `ssh … | …` line is enough.
+Treat that tarball like a password: it holds the key that decrypts every Secret **and** the CA keys that can mint cluster-admin certificates. Encrypt it at rest (`age`/`gpg`), or store the keys in vault01's KV (01-Ansible Chapter 18) and only the snapshots on the NAS. Automate it daily (Chapter 05's operations table) — a `cron`/`launchd` job on the MacBook (or a timer on the NAS) running this `ssh … | …` line is enough.
 
 ### 5.8 Back up a vCluster's own state
 
 None of §5.6–5.7 covers dev-lab's or llms's objects. Each keeps them in SQLite on a `local-nvme` PVC, which local-path-provisioner placed at `/data/k8s/<namespace>/<pvc>` ([`addons/local-path-nvme.yaml`](lab/addons/local-path-nvme.yaml)). The lab supports two ways to back it up:
 
-**PVC copy (what the lab tests, Step 04 §6.7).** Stop the writer, copy the directory, start it again:
+**PVC copy (what the lab tests, Chapter 04 §6.7).** Stop the writer, copy the directory, start it again:
 
 ```bash
 kubectl --context spark-root -n vc-dev-lab scale statefulset dev-lab --replicas=0
@@ -421,11 +421,11 @@ Either way, a *consistent* lab backup is a pair: a root etcd snapshot and both v
 
 | Symptom | Cause | Diagnose | Fix |
 |---|---|---|---|
-| All writes fail: `mvcc: database space exceeded` | Quota hit, NOSPACE alarm | `scripts/etcd-drill.sh status` (alarm list, DB size) | compact → defrag → `alarm disarm` (§5.5). Find the churn (`--keys-only` counts): often Events, a CRD in a hot loop (Step 06), or a vCluster syncer looping on one object (look under `/registry/*/vc-*`) |
+| All writes fail: `mvcc: database space exceeded` | Quota hit, NOSPACE alarm | `scripts/etcd-drill.sh status` (alarm list, DB size) | compact → defrag → `alarm disarm` (§5.5). Find the churn (`--keys-only` counts): often Events, a CRD in a hot loop (Chapter 06), or a vCluster syncer looping on one object (look under `/registry/*/vc-*`) |
 | API latency spikes, `apply request took too long` in the etcd log | fsync slow | `EtcdSlowFsync`, §5.2 fio, `iostat -x 1`, `sudo crictl logs $(sudo crictl ps -q --name '^etcd$') 2>&1 \| grep 'took too long'` | Move bulk writers (checkpoints, fio, image pulls) off peak. `ionice -c3` on batch jobs. Both vClusters' SQLite files suffer the same contention |
 | Leader changes on a single member | not normally possible. Clock jumps or process stalls | `sudo crictl logs <etcd id> 2>&1 \| grep -iE 'leader\|elect'` | check chrony (01-Ansible baseline), CPU starvation (`systemReserved`, a runaway pod without limits on the root) |
 | `kubectl` hangs after a restore, API server crash-loops | etcd didn't come back: wrong `--name`/`--initial-cluster`, or data dir permissions | `sudo crictl ps -a --name etcd`, `sudo crictl logs <id>`; `sudo ls -la /var/lib/etcd/member` | the drill reads name and IP from `etcd.yaml`; if you restored by hand, re-run `etcdutl snapshot restore` with `--name dgx-spark-1 --initial-cluster dgx-spark-1=https://192.168.0.100:2380 --initial-advertise-peer-urls https://192.168.0.100:2380`. Undo: move `/var/lib/etcd.before-restore-<ts>` back |
-| `etcdutl: snapshot file has wrong format` / version errors | `etcdutl` doesn't match the etcd that wrote it | `etcdutl version` vs the image tag in `etcd.yaml` | re-run 01-Ansible `playbooks/05-kubernetes.yml` (downloads the matching tools) |
+| `etcdutl: snapshot file has wrong format` / version errors | `etcdutl` doesn't match the etcd that wrote it | `etcdutl version` vs the image tag in `etcd.yaml` | re-run 01-Ansible `playbooks/19.1-kubernetes.yml` (downloads the matching tools) |
 | Secrets unreadable after restoring on new hardware | encryption config not restored | `kubectl --context spark-root get secret -A` → `Internal error … failed to decrypt` | restore `/etc/kubernetes/encryption/config.yaml` from §5.7 and restart the API server |
 | `etcdctl: context deadline exceeded` | wrong endpoint/certs | run with `--debug` | use the flags from §3.1 (`healthcheck-client`, not the API server's or admin's cert) |
 | DB grows while object count doesn't | no defrag after compaction | `DB SIZE` vs `DB SIZE IN USE` in `endpoint status` | `defrag` (it blocks the member briefly, so do it off-peak) |

@@ -1,4 +1,4 @@
-# Model cache shared by the serving steps (Steps 13, 20). Retain: deleting
+# Model cache shared by the serving chapters (Chapters 13, 20). Retain: deleting
 # the PVC never deletes 60 GB of downloaded weights.
 apiVersion: v1
 kind: PersistentVolumeClaim

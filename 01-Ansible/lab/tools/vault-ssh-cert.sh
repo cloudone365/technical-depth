@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Manual test of vault01's SSH CA (Step 01 §6, Step 04 §3.3): sign a public
+# Manual test of vault01's SSH CA (Chapter 01 §6, Chapter 04 §3.3): sign a public
 # key for the automation account and show the certificate. Run it ON vault01
 # (logged in with `vault login`); Semaphore does the same thing in play 1.
 #   tools/vault-ssh-cert.sh [~/semaphore_lab] [svc-ansible]

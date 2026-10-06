@@ -1,4 +1,4 @@
-# Dedicated-GPU-node pattern (Step 07), applied INSIDE dev-lab (--context dev-lab).
+# Dedicated-GPU-node pattern (Chapter 07), applied INSIDE dev-lab (--context dev-lab).
 # Nodes belong to the root: only the platform admin can taint them, and the
 # vCluster shows the taint through node sync. On a 1-node lab you cannot taint
 # the only node NoSchedule without moving every add-on, so the demo uses

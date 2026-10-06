@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure TTFT with and without a shared prompt prefix (Steps 22, 20).
+"""Measure TTFT with and without a shared prompt prefix (Chapters 22, 20).
 
 Works against any OpenAI-compatible endpoint (vLLM, SGLang, KServe, mock-llm).
   python3 ttft_probe.py --url http://localhost:8000 --model qwen2.5-0.5b

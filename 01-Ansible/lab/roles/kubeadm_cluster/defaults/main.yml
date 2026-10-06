@@ -1,5 +1,5 @@
 ---
-# Root Kubernetes cluster built with kubeadm (Step 19).
+# Root Kubernetes cluster built with kubeadm (Chapter 19).
 # dgx-spark-1 is the control plane AND a worker (no control-plane taint), so one
 # Spark is a complete cluster; dgx-spark-2 (optional) joins as a worker.
 kubeadm_cluster_version: "1.36.5"            # pin! check https://kubernetes.io/releases/
@@ -13,7 +13,7 @@ kubeadm_cluster_name: spark-root
 
 # API/management traffic and the Cilium VXLAN tunnel use the 10GbE mgmt network.
 # Bulk GPU traffic (NCCL/RDMA) uses the 200GbE CX-7 fabric through Multus
-# (playbooks/13-multus-rdma.yml), not the pod network.
+# (playbooks/21.1-multus-rdma.yml), not the pod network.
 kubeadm_cluster_node_ip: "{{ ansible_host }}"
 kubeadm_cluster_api_endpoint: >-
   {{ hostvars[groups[kubeadm_cluster_control_plane_group][0]].ansible_host }}:6443
@@ -46,12 +46,12 @@ kubeadm_cluster_node_labels:
 kubeadm_cluster_containerd_config: /etc/containerd/config.toml
 kubeadm_cluster_default_runtime_nvidia: true  # set false + use runtimeClassName: nvidia for strict multi-tenancy
 
-# API server hardening (02-Kubernetes Step 03): audit log + Secret encryption at rest.
+# API server hardening (02-Kubernetes Chapter 03): audit log + Secret encryption at rest.
 kubeadm_cluster_audit_dir: /etc/kubernetes/audit
 kubeadm_cluster_audit_log_dir: /var/log/kubernetes/audit
 kubeadm_cluster_encryption_dir: /etc/kubernetes/encryption
 
-# etcd: stacked static pod. Snapshots every 6 h, newest 20 kept (02-Kubernetes Step 02).
+# etcd: stacked static pod. Snapshots every 6 h, newest 20 kept (02-Kubernetes Chapter 02).
 kubeadm_cluster_etcd_snapshot_dir: /var/lib/etcd-snapshots
 kubeadm_cluster_etcd_snapshot_calendar: "*-*-* 00/6:00:00"
 kubeadm_cluster_etcd_snapshot_keep: 20

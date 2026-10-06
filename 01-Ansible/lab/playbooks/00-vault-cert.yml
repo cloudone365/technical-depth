@@ -1,5 +1,5 @@
 ---
-# Play 1 of every Semaphore task (Step 01 §8.3, Step 04 §5): log in to
+# Play 1 of every Semaphore task (Chapter 01 §8.3, Chapter 04 §5): log in to
 # vault01 with the Semaphore AppRole and get a 15-minute SSH certificate for
 # svc-ansible. The playbooks that SSH to the Sparks import this file first.
 #
@@ -8,7 +8,7 @@
 # the Sparks are reached with your own key as the admin user (break-glass).
 #
 # Optional: with vault_lab_secrets_enabled=true it also reads the lab secrets
-# from kv/spark-lab/* (08-vault.yml) into hostvars['localhost'].vault_lab_secrets.
+# from kv/spark-lab/* (17.1-vault.yml) into hostvars['localhost'].vault_lab_secrets.
 - name: Get an SSH certificate from Vault
   hosts: localhost
   connection: local

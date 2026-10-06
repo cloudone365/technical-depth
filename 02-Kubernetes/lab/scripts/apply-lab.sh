@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Apply the baseline lab objects in dependency order, cluster by cluster (Steps 05, 04).
+# Apply the baseline lab objects in dependency order, cluster by cluster (Chapters 05, 04).
 #   scripts/apply-lab.sh            # apply
 #   scripts/apply-lab.sh --dry-run  # server-side dry run only (admission + quota checks, nothing persisted)
 #   scripts/apply-lab.sh root       # only one cluster: root | dev-lab | llms

@@ -1,10 +1,10 @@
 ---
 # Spin up N fake nodes (sshd containers) on dgx-spark-1 to practise fleet-scale
-# tuning — forks, pipelining, ControlPersist, strategies, Mitogen (Step 09).
+# tuning — forks, pipelining, ControlPersist, strategies, Mitogen (Chapter 09).
 #
-#   ansible-playbook playbooks/13-fleet-sim.yml -e fleet_size=64 -K
-#   ansible-playbook -i .cache/fleet.ini playbooks/14-fleet-bench.yml -f 50
-#   ansible-playbook playbooks/13-fleet-sim.yml -e fleet_state=absent -K
+#   ansible-playbook playbooks/09.1-fleet-sim.yml -e fleet_size=64 -K
+#   ansible-playbook -i .cache/fleet.ini playbooks/09.2-fleet-bench.yml -f 50
+#   ansible-playbook playbooks/09.1-fleet-sim.yml -e fleet_state=absent -K
 - name: Short-lived SSH certificate from vault01 (Semaphore runs only)
   ansible.builtin.import_playbook: 00-vault-cert.yml
 

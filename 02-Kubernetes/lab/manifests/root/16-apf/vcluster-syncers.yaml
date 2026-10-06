@@ -1,4 +1,4 @@
-# API Priority & Fairness on the ROOT API server (Steps 03, 04).
+# API Priority & Fairness on the ROOT API server (Chapters 03, 04).
 #
 # Every object a tenant creates in a vCluster reaches the root as a request
 # from that vCluster's syncer (ServiceAccount in vc-dev-lab / vc-llms). A

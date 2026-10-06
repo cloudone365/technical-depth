@@ -1,5 +1,5 @@
 ---
-# Cilium as the CNI of the root cluster (Step 19; packet path in 02-Kubernetes Step 08).
+# Cilium as the CNI of the root cluster (Chapter 19; packet path in 02-Kubernetes Chapter 08).
 cilium_chart_version: "1.20.2"               # pin; check `helm search repo cilium/cilium -l`
 cilium_namespace: kube-system
 cilium_kubeconfig: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') }}/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
@@ -8,7 +8,7 @@ cilium_api_host: "{{ hostvars[groups['k8s_control_plane'][0]].ansible_host }}"
 
 cilium_values:
   # kube-proxy stays (iptables mode) so the Service mechanics in 02-Kubernetes
-  # Step 09 can be read with iptables-save. Cilium does pod networking,
+  # Chapter 09 can be read with iptables-save. Cilium does pod networking,
   # NetworkPolicy and Hubble flow visibility.
   kubeProxyReplacement: "false"              # a string: the chart compares it as text
   k8sServiceHost: "{{ cilium_api_host }}"
@@ -18,7 +18,7 @@ cilium_values:
   ipam:
     mode: kubernetes                         # per-node /24 from 10.42.0.0/16 (kube-controller-manager)
   cni:
-    exclusive: false                         # leave room for Multus (playbooks/13-multus-rdma.yml)
+    exclusive: false                         # leave room for Multus (playbooks/21.1-multus-rdma.yml)
   operator:
     replicas: 1                              # one node (two with dgx-spark-2) — no HA needed
     prometheus:

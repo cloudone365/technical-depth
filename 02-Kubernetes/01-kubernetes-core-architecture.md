@@ -1,11 +1,11 @@
-# Step 01 · Kubernetes Core Architecture & Pod Lifecycle on a DGX Spark
+# Chapter 01 · Kubernetes Core Architecture & Pod Lifecycle on a DGX Spark
 
-> **02-Kubernetes · Part I — Control plane & the nested lab · Step 01 of 28** · ← [All steps](00-kubernetes-step-by-step-guide.md) · [Step 02 · etcd database deep dive](02-etcd-database-deep-dive.md) →
+> **02-Kubernetes · Part I — Control plane & the nested lab · Chapter 01 of 28** · ← [All chapters](00-kubernetes-step-by-step-guide.md) · [Chapter 02 · etcd database deep dive](02-etcd-database-deep-dive.md) →
 
 | | |
 |---|---|
 | **You will build** | A mental model you can check against the real processes, sockets and files. You'll read the kubeadm control plane on the Spark, then trace one `kubectl apply` from your laptop to a running container on the GB10 — through a vCluster's API server and the root's — and read each hop's evidence. |
-| **Hardware** | dgx-spark-1 running the kubeadm root cluster from the 01-Ansible lab (`playbooks/05-kubernetes.yml`, `06-gpu-operator.yml`, `06b-vclusters.yml`) |
+| **Hardware** | dgx-spark-1 running the kubeadm root cluster from the 01-Ansible lab (`playbooks/19.1-kubernetes.yml`, `20.1-gpu-operator.yml`, `20.2-vclusters.yml`) |
 | **Time** | 75 min |
 | **Risk** | None. Read-only apart from one test pod |
 | **Clusters** | `spark-root` (the control plane itself) and `dev-lab` (the test pod) |
@@ -23,8 +23,8 @@ On a DGX Spark, four things differ from a textbook cluster:
 |---|---|---|
 | 3+ control-plane VMs, separate workers | **One node** is control plane *and* worker — kubeadm was told not to taint it (`nodeRegistration.taints: []`) | A runaway pod competes with etcd and the API server for CPU, memory and NVMe. Kubelet reservations (§3.3) matter |
 | (same) — kubeadm runs each component as a **static pod** | apiserver, etcd, scheduler and controller-manager are pods the kubelet starts from `/etc/kubernetes/manifests/`; kubelet and containerd are systemd services | The control plane is visible with `kubectl -n kube-system get pods` *and* `crictl ps`. Its pods' requests count against allocatable |
-| One cluster | **Three API servers**: the root, plus vCluster `dev-lab` and `llms` running as pods inside it (Step 04) | A tenant's pod passes through two API servers before the kubelet sees it |
-| GPU memory is separate from host RAM | **128 GB unified memory** shared by CPU and GB10 | A pod's memory limit may not cap its CUDA allocations (Step 14 measures it). Node memory pressure also starves the GPU |
+| One cluster | **Three API servers**: the root, plus vCluster `dev-lab` and `llms` running as pods inside it (Chapter 04) | A tenant's pod passes through two API servers before the kubelet sees it |
+| GPU memory is separate from host RAM | **128 GB unified memory** shared by CPU and GB10 | A pod's memory limit may not cap its CUDA allocations (Chapter 14 measures it). Node memory pressure also starves the GPU |
 | x86-64 | **aarch64** (Grace: 10× Cortex-X925 + 10× Cortex-A725) | Every image needs an `arm64` manifest. `exec format error` means you pulled an amd64-only image |
 
 ---
@@ -99,13 +99,13 @@ Rule of thumb: **only the API server talks to etcd.** Every other component is a
 
 | Component | How it runs | Listens | Key paths / evidence |
 |---|---|---|---|
-| kube-apiserver | static pod `kube-apiserver-dgx-spark-1` | `:6443` (TLS) | manifest `/etc/kubernetes/manifests/kube-apiserver.yaml`, certs `/etc/kubernetes/pki/`, audit log `/var/log/kubernetes/audit/audit.log` (Step 03) |
-| etcd | static pod `etcd-dgx-spark-1` (stacked) | `127.0.0.1:2379`, `:2380`, metrics `:2381` | data `/var/lib/etcd`, certs `/etc/kubernetes/pki/etcd/`, snapshots `/var/lib/etcd-snapshots` (Step 02) |
+| kube-apiserver | static pod `kube-apiserver-dgx-spark-1` | `:6443` (TLS) | manifest `/etc/kubernetes/manifests/kube-apiserver.yaml`, certs `/etc/kubernetes/pki/`, audit log `/var/log/kubernetes/audit/audit.log` (Chapter 03) |
+| etcd | static pod `etcd-dgx-spark-1` (stacked) | `127.0.0.1:2379`, `:2380`, metrics `:2381` | data `/var/lib/etcd`, certs `/etc/kubernetes/pki/etcd/`, snapshots `/var/lib/etcd-snapshots` (Chapter 02) |
 | kube-scheduler | static pod | `:10259` metrics | leader Lease `kube-system/kube-scheduler` |
 | kube-controller-manager | static pod | `:10257` metrics | leader Lease `kube-system/kube-controller-manager`; allocates each node's pod CIDR from `10.42.0.0/16` |
 | kubelet | systemd `kubelet.service` | `:10250` (API), `:10248` healthz | `/var/lib/kubelet/config.yaml` (from the kubeadm config), `/var/lib/kubelet/pods/<uid>/`, `journalctl -u kubelet` |
-| kube-proxy | DaemonSet | `:10249` metrics | ConfigMap `kube-system/kube-proxy` (mode iptables), chains `KUBE-SERVICES`, `KUBE-SVC-*` (Step 09) |
-| Cilium | DaemonSet + operator | `8472/udp` VXLAN, `:9962` metrics | `cilium_host`, `cilium_vxlan`, `lxc*` veths, `/etc/cni/net.d/05-cilium.conflist` (Step 08) |
+| kube-proxy | DaemonSet | `:10249` metrics | ConfigMap `kube-system/kube-proxy` (mode iptables), chains `KUBE-SERVICES`, `KUBE-SVC-*` (Chapter 09) |
+| Cilium | DaemonSet + operator | `8472/udp` VXLAN, `:9962` metrics | `cilium_host`, `cilium_vxlan`, `lxc*` veths, `/etc/cni/net.d/05-cilium.conflist` (Chapter 08) |
 | containerd | systemd `containerd.service` (DGX OS `containerd.io`, shared with Docker) | unix socket | `/run/containerd/containerd.sock`, config `/etc/containerd/config.toml`, `/etc/crictl.yaml` |
 | nvidia runtime | containerd runtime handler | — | `default_runtime_name = "nvidia"` in the containerd config (01-Ansible `nvidia-ctk runtime configure --set-as-default`) |
 | kubeadm config | file | — | `/etc/kubernetes/kubeadm-config.yaml` (what Ansible fed `kubeadm init`), ConfigMap `kube-system/kubeadm-config` |
@@ -121,7 +121,7 @@ Rule of thumb: **only the API server talks to etcd.** Every other component is a
 | `deploy/metrics-server` | `kubectl top`, HPAs (proxied into both vClusters) | `scripts/install-addons.sh metrics-server` |
 | namespaces `metallb-system`, `local-path-storage`, `gpu-operator` | LoadBalancer IPs, local PVs on NVMe, NFD/GFD/device plugin/validator | 01-Ansible (MetalLB, GPU Operator), lab add-ons |
 | `runtimeclass/nvidia` | Explicit GPU runtime | GPU Operator (and `common/runtimeclass` inside each vCluster) |
-| namespaces `vc-dev-lab`, `vc-llms` | the two vClusters and every pod they sync | Step 04 |
+| namespaces `vc-dev-lab`, `vc-llms` | the two vClusters and every pod they sync | Chapter 04 |
 
 ### 3.3 Capacity vs allocatable on a GB10
 
@@ -328,7 +328,7 @@ kubectl --context spark-root -n vc-dev-lab get pod gpu-smoke-x-tenant-beta-x-dev
   | jq '[.metadata.managedFields[].manager], (.metadata.annotations | with_entries(select(.key | startswith("vcluster"))))'
 ```
 
-In dev-lab the managers are `kubectl-client-side-apply` and the syncer (writing status back). On the root they are the **vCluster syncer** and `kubelet`: the tenant never wrote to the root at all. [Step 02](02-etcd-database-deep-dive.md) reads the raw etcd key of the root copy.
+In dev-lab the managers are `kubectl-client-side-apply` and the syncer (writing status back). On the root they are the **vCluster syncer** and `kubelet`: the tenant never wrote to the root at all. [Chapter 02](02-etcd-database-deep-dive.md) reads the raw etcd key of the root copy.
 
 ---
 
@@ -348,16 +348,16 @@ In dev-lab the managers are `kubectl-client-side-apply` and the syncer (writing 
 
 | Symptom | Likely cause | Diagnose | Fix |
 |---|---|---|---|
-| Pod `Pending`, event `0/1 nodes are available: 1 Insufficient nvidia.com/gpu` | All 15 time-slices taken | `kubectl --context spark-root describe node dgx-spark-1 \| grep -A10 'Allocated resources'` | Free a slice, queue with Kueue (Step 07) |
-| Pod `Pending` in a vCluster, **no** scheduler events | the root quota of that vCluster is spent | `kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget` | Step 04 §8; break/fix 02 |
+| Pod `Pending`, event `0/1 nodes are available: 1 Insufficient nvidia.com/gpu` | All 15 time-slices taken | `kubectl --context spark-root describe node dgx-spark-1 \| grep -A10 'Allocated resources'` | Free a slice, queue with Kueue (Chapter 07) |
+| Pod `Pending` in a vCluster, **no** scheduler events | the root quota of that vCluster is spent | `kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget` | Chapter 04 §8; break/fix 02 |
 | Pod `Pending` on the root, **no events at all** | scheduler not running / not leader | `kubectl --context spark-root get lease -n kube-system kube-scheduler -o yaml` (renewTime stale?), `sudo crictl logs $(sudo crictl ps -q --name kube-scheduler)` | fix the manifest in `/etc/kubernetes/manifests/kube-scheduler.yaml`; the kubelet restarts it |
 | `kubectl` hangs / `connection refused :6443` | API server static pod crash-looping (bad flag, cert, etcd down) | `sudo crictl ps -a --name kube-apiserver`, `sudo crictl logs <id>`, `journalctl -u kubelet -n 50` | revert the last edit of `kube-apiserver.yaml`; check etcd first |
-| `ContainerCreating` for minutes | Large image pull (NGC PyTorch ≈ 10 GB) or CNI failure | `kubectl describe pod` → `Pulling` vs `FailedCreatePodSandBox` | Pre-pull (`sudo crictl pull …`), check Cilium (Step 08) |
+| `ContainerCreating` for minutes | Large image pull (NGC PyTorch ≈ 10 GB) or CNI failure | `kubectl describe pod` → `Pulling` vs `FailedCreatePodSandBox` | Pre-pull (`sudo crictl pull …`), check Cilium (Chapter 08) |
 | `exec format error` in logs | amd64-only image on aarch64 | `docker manifest inspect <img> \| jq '.manifests[].platform'` | Use an arm64 or multi-arch tag |
 | Node `NotReady` | kubelet can't reach apiserver, CNI not ready, disk/memory pressure | `kubectl describe node` → Conditions; `journalctl -u kubelet -p err --since -10m` | Fix pressure. `sudo systemctl restart kubelet` |
-| `x509: certificate has expired` | kubeadm certificates expire after 1 year | `sudo kubeadm certs check-expiration` | `sudo kubeadm certs renew all`, restart the static pods, re-run `05-kubernetes.yml` to re-fetch the kubeconfig (a `kubeadm upgrade` also renews them) |
-| `Unable to connect to the server: x509` (new CA) | kubeconfig for an earlier cluster | `kubectl config view --minify` | Re-fetch: 01-Ansible `playbooks/05-kubernetes.yml` (and `06b` for the vCluster contexts) |
-| Everything slow, API timeouts | etcd fsync latency (NVMe saturated by a checkpoint or fio) | `EtcdSlowFsync` alert, Step 02 §7 | Move heavy I/O off peak, `ionice` the job |
+| `x509: certificate has expired` | kubeadm certificates expire after 1 year | `sudo kubeadm certs check-expiration` | `sudo kubeadm certs renew all`, restart the static pods, re-run `19.1-kubernetes.yml` to re-fetch the kubeconfig (a `kubeadm upgrade` also renews them) |
+| `Unable to connect to the server: x509` (new CA) | kubeconfig for an earlier cluster | `kubectl config view --minify` | Re-fetch: 01-Ansible `playbooks/19.1-kubernetes.yml` (and `20.2-vclusters.yml` for the vCluster contexts) |
+| Everything slow, API timeouts | etcd fsync latency (NVMe saturated by a checkpoint or fio) | `EtcdSlowFsync` alert, Chapter 02 §7 | Move heavy I/O off peak, `ionice` the job |
 
 **Drill:** `scripts/breakfix.sh inject 13` taints the node. Work out why new pods stay Pending — in the root *and* in both vClusters — using only `describe` output.
 
@@ -383,7 +383,7 @@ kubectl --context spark-root uncordon dgx-spark-1
 scripts/verify.sh
 ```
 
-Before you start: check that the vCluster release supports the new host version (vCluster's lifecycle table), and that `kubeadm upgrade` keeps your CoreDNS Corefile changes (Step 10 — re-apply `root/30-networking/coredns-corefile.yaml` if not). Then set `kubeadm_cluster_version` in the 01-Ansible role so a rebuild lands on the same version.
+Before you start: check that the vCluster release supports the new host version (vCluster's lifecycle table), and that `kubeadm upgrade` keeps your CoreDNS Corefile changes (Chapter 10 — re-apply `root/30-networking/coredns-corefile.yaml` if not). Then set `kubeadm_cluster_version` in the 01-Ansible role so a rebuild lands on the same version.
 
 ### 8.2 Scale-out
 
@@ -400,9 +400,9 @@ flowchart LR
 
 | Step | What changes | What stays the same |
 |---|---|---|
-| Add dgx-spark-2 | Uncomment `dgx-spark-2` under `k8s_workers` in `inventory/hosts.yml` and re-run `playbooks/05-kubernetes.yml`. Both vClusters see the node at once | All manifests. The scheduler now has 30 GPU slices; budgets stay until you raise them |
+| Add dgx-spark-2 | Uncomment `dgx-spark-2` under `k8s_workers` in `inventory/hosts.yml` and re-run `playbooks/19.1-kubernetes.yml`. Both vClusters see the node at once | All manifests. The scheduler now has 30 GPU slices; budgets stay until you raise them |
 | 3 control planes | `controlPlaneEndpoint` is already in the kubeadm config, so more control planes can `kubeadm join --control-plane` (with `kubeadm init phase upload-certs`). You need three machines for etcd quorum (2 Sparks can't form a safe quorum) | Workloads, vClusters |
-| Datacenter | Control plane on small CPU nodes, GPU nodes tainted `nvidia.com/gpu=present:NoSchedule`, OIDC auth, external etcd, a vCluster per team | The loops, the objects, the debugging method in this step |
+| Datacenter | Control plane on small CPU nodes, GPU nodes tainted `nvidia.com/gpu=present:NoSchedule`, OIDC auth, external etcd, a vCluster per team | The loops, the objects, the debugging method in this chapter |
 
 ---
 

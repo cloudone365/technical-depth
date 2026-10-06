@@ -1,4 +1,4 @@
-# Eager vs torch.compile on one GB10 slice (Step 24 §5.1).
+# Eager vs torch.compile on one GB10 slice (Chapter 24 §5.1).
 apiVersion: batch/v1
 kind: Job
 metadata: {name: compile-compare, namespace: platform-tools}

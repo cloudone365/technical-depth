@@ -1,5 +1,5 @@
 ---
-# vault01 is built and owned by Step 01 (SSH CA, signing role 'ansible',
+# vault01 is built and owned by Chapter 01 (SSH CA, signing role 'ansible',
 # AppRole 'semaphore', audit log). This role only ADDS what the Spark lab needs
 # and never rewrites those: it checks them, then
 #   * mounts a KV v2 engine for lab secrets (NGC key, Grafana password …)

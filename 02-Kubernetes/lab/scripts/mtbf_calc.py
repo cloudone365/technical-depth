@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cluster MTBF, optimal checkpoint interval and goodput (Step 25).
+"""Cluster MTBF, optimal checkpoint interval and goodput (Chapter 25).
 
   python3 mtbf_calc.py --gpus 16384 --gpu-mtbf-h 50000 --ckpt-s 60 --restart-s 600
 Assumes independent failures (exponential): cluster MTBF = component MTBF / N.

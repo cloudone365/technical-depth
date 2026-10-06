@@ -1,4 +1,4 @@
-# Helm values for metrics-server on the ROOT (Steps 14, 17, 20).
+# Helm values for metrics-server on the ROOT (Chapters 14, 17, 20).
 # k3s bundled it; kubeadm doesn't. 'kubectl top', HPAs, and — through
 # integrations.metricsServer in vclusters/*.yaml — 'kubectl top' inside both
 # vClusters depend on it.

@@ -1,4 +1,4 @@
-# Serving budget INSIDE vCluster #2 · llms (Steps 14, 20, 04).
+# Serving budget INSIDE vCluster #2 · llms (Chapters 14, 20, 04).
 #
 #   root   vc-llms      12 CPU · 88 Gi · 11 GPU slices · 800 Gi  ← the real cap
 #   here   llm-serving  10 CPU · 80 Gi · 8 slices · 600 Gi       ← ceiling for model servers
@@ -9,7 +9,7 @@
 # can use most of llms while the other is idle; the root quota, Kueue and
 # PriorityClasses decide who waits. Typical serving set: three 7-8B models side
 # by side at --gpu-memory-utilization 0.20 (3 × 24 Gi), or one 32B FP8 model
-# plus one 7B (Step 20 §2).
+# plus one 7B (Chapter 20 §2).
 apiVersion: v1
 kind: ResourceQuota
 metadata:

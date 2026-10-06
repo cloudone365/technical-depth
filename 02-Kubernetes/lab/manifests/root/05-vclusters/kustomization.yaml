@@ -1,4 +1,4 @@
-# Root-side home of the two vClusters (Step 04). Apply BEFORE installing the
+# Root-side home of the two vClusters (Chapter 04). Apply BEFORE installing the
 # vCluster Helm charts (vclusters/*.yaml): the namespaces must exist and the
 # quotas must be in place before the first pod is created.
 apiVersion: kustomize.config.k8s.io/v1beta1

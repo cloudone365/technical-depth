@@ -1,5 +1,5 @@
 ---
-# Two virtual clusters inside the root cluster (02-Kubernetes Step 04).
+# Two virtual clusters inside the root cluster (02-Kubernetes Chapter 04).
 # The definitions are NOT duplicated here: this role applies the files in the
 # 02-Kubernetes lab, so Ansible and the lab scripts can never drift apart.
 vclusters_lab_dir: "{{ playbook_dir }}/../../../02-Kubernetes/lab"
@@ -15,7 +15,7 @@ vclusters_local_path_version: v0.0.31
 # Root-side objects first: kustomize directories under manifests/root, the same
 # ones scripts/apply-lab.sh applies. 00-platform = platform namespaces and the
 # PriorityClasses (vCluster control planes run at spark-platform; no default
-# class on the root, see 02-Kubernetes Step 07 §3.1); 05-vclusters = the
+# class on the root, see 02-Kubernetes Chapter 07 §3.1); 05-vclusters = the
 # vCluster namespaces, LimitRanges, the budgets (ResourceQuotas) and Cilium policies.
 vclusters_root_manifests:
   - 00-platform

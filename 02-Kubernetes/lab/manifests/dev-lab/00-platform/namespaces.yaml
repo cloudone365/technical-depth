@@ -1,4 +1,4 @@
-# Namespaces INSIDE vCluster #1 · dev-lab (Steps 14, 04). Apply with
+# Namespaces INSIDE vCluster #1 · dev-lab (Chapters 14, 04). Apply with
 # --context dev-lab. Labels drive admission policies, NetworkPolicies and Pod
 # Security Admission — enforced by dev-lab's own API server. On the root these
 # pods all land in host namespace vc-dev-lab (PSA baseline there).

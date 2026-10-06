@@ -1,6 +1,6 @@
-# Step 25 · Ultra-Scale Cluster Resilience & Fault Tolerance: Failure Math, Async Checkpoints, SDC Canaries, Quarantine (Practised Small)
+# Chapter 25 · Ultra-Scale Cluster Resilience & Fault Tolerance: Failure Math, Async Checkpoints, SDC Canaries, Quarantine (Practised Small)
 
-> **02-Kubernetes · Part VIII — Scale & resilience · Step 25 of 28** · ← [Step 24 · Hyperscaler silicon & compilers](24-hyperscaler-silicon-and-compilers.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 26 · Cluster diagnostics & failure scenarios](26-cluster-diagnostics-and-failure-scenarios.md) →
+> **02-Kubernetes · Part VIII — Scale & resilience · Chapter 25 of 28** · ← [Chapter 24 · Hyperscaler silicon & compilers](24-hyperscaler-silicon-and-compilers.md) · [All chapters](00-kubernetes-step-by-step-guide.md) · [Chapter 26 · Cluster diagnostics & failure scenarios](26-cluster-diagnostics-and-failure-scenarios.md) →
 
 | | |
 |---|---|
@@ -108,24 +108,24 @@ flowchart TB
 | Resume | newest `step-*/COMPLETE` on start | + elastic re-sharding when world size changes |
 | Retry policy | `backoffLimit: 6`. `DisruptionTarget` (drain/preemption) **ignored** | job-level restarts without rescheduling (hot spares) |
 | SDC | deterministic FP32 GEMM checksum vs reference, every 25 steps → exit 86 → `FailJob` | per-node burn-in, cross-replica gradient checksums, loss-spike detectors |
-| Quarantine | manual taint on the root node (§5.4). The Step 06 controller pattern can automate it | remediation controllers + DCGM diag before re-admission |
+| Quarantine | manual taint on the root node (§5.4). The Chapter 06 controller pattern can automate it | remediation controllers + DCGM diag before re-admission |
 
 | Resources (from `resilient-job.yaml`) | Value | Charged to |
 |---|---|---|
 | Job pod | 1 CPU · 6 Gi req / 12 Gi limit · 1 slice, `spark-batch` | `batch` LimitRange (inside llms), then the root `vcluster-budget` on `vc-llms` |
 | PVC `ckpt` | 20 Gi, `local-nvme` (Delete) | `vcluster-budget` `requests.storage` |
-| Kueue | the Job has no `kueue.x-k8s.io/queue-name` label, so Kueue leaves it alone | add `queue-name: train` to run it under `spark-cq` (Step 07) |
+| Kueue | the Job has no `kueue.x-k8s.io/queue-name` label, so Kueue leaves it alone | add `queue-name: train` to run it under `spark-cq` (Chapter 07) |
 
-`spark-batch` has `preemptionPolicy: Never`: the job waits for capacity instead of evicting anyone. vLLM alone leaves plenty of the llms budget (Step 20 §9), but two engines plus other batch jobs can leave less than 1 CPU / 12 Gi; the pod then sits Pending in llms with no scheduler events — the root refused it.
+`spark-batch` has `preemptionPolicy: Never`: the job waits for capacity instead of evicting anyone. vLLM alone leaves plenty of the llms budget (Chapter 20 §9), but two engines plus other batch jobs can leave less than 1 CPU / 12 Gi; the pod then sits Pending in llms with no scheduler events — the root refused it.
 
 ---
 
 ## 4. Integrations
 
-- **Storage (Step 13, module 08)**: checkpoint PVC on `local-nvme`, created by the root's provisioner under the *root* names. Watch the root's etcd fsync (Step 02) while checkpoints write — same NVMe.
-- **Kueue (Step 07)**: `DisruptionTarget` pods (preempted by Kueue or evicted on the root) don't burn retries.
-- **Controllers (Step 06)**: turn §5.4's manual quarantine into a controller on the root that watches for Jobs failing with exit 86 — it has to read the vClusters' Jobs (through their APIs) or the synced pods' exit codes (on the root).
-- **Disruption budgets (Step 12)**: a root `kubectl drain` evicts pods from both vClusters and respects their PDBs (synced to the root).
+- **Storage (Chapter 13, module 08)**: checkpoint PVC on `local-nvme`, created by the root's provisioner under the *root* names. Watch the root's etcd fsync (Chapter 02) while checkpoints write — same NVMe.
+- **Kueue (Chapter 07)**: `DisruptionTarget` pods (preempted by Kueue or evicted on the root) don't burn retries.
+- **Controllers (Chapter 06)**: turn §5.4's manual quarantine into a controller on the root that watches for Jobs failing with exit 86 — it has to read the vClusters' Jobs (through their APIs) or the synced pods' exit codes (on the root).
+- **Disruption budgets (Chapter 12)**: a root `kubectl drain` evicts pods from both vClusters and respects their PDBs (synced to the root).
 - **01-Ansible `node_drain` / `spark_validate`**: the drain → validate → return loop for a quarantined node.
 
 ---
@@ -138,7 +138,7 @@ export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget | grep -E 'requests.cpu|limits.memory|gpu'
 ```
 
-If less than 1 CPU / 12 Gi is free, stop another batch job or park one engine for this step (Step 20 §9).
+If less than 1 CPU / 12 Gi is free, stop another batch job or park one engine for this step (Chapter 20 §9).
 
 ### 5.1 Start the resilient job
 
@@ -149,8 +149,8 @@ kubectl --context llms -n batch logs -f job/resilient-train
 
 ```text
 canary reference recorded: 4ecd9864353a5b02
-step 25 loss … canary 4ecd9864353a5b02 OK
-step 50 checkpoint started (blocking 31 ms)
+chapter 25 loss … canary 4ecd9864353a5b02 OK
+chapter 50 checkpoint started (blocking 31 ms)
 …
 ```
 
@@ -258,12 +258,12 @@ kubectl --context llms delete -k manifests/llms/80-distributed/resilient    # Jo
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Job pod Pending in llms, no scheduler events | root `vcluster-budget` on `vc-llms` spent (engines at 32 Gi each, other batch jobs) | park an engine (Step 20 §9) or wait — `spark-batch` never preempts |
+| Job pod Pending in llms, no scheduler events | root `vcluster-budget` on `vc-llms` spent (engines at 32 Gi each, other batch jobs) | park an engine (Chapter 20 §9) or wait — `spark-batch` never preempts |
 | Job pod Pending with `untolerated taint {spark.lab/sdc: suspect}` | the quarantine from §5.4 is still on | remove it on the root |
 | resume picks a half-written checkpoint | no completion marker | only trust `COMPLETE` (as the script does) |
 | checkpoints fill the disk | no retention | keep-N pruning of complete checkpoints. Alert on PVC usage |
 | each restart burns retries during maintenance | `DisruptionTarget` not ignored, or the condition didn't reach the virtual pod | `podFailurePolicy` rule (lab); `kubectl --context llms -n batch get pod -o jsonpath='{..conditions}'` |
-| eviction returns `429 Too Many Requests` | a PDB covers the pod (synced from a vCluster) | expected behaviour of drain (Step 12 §5.5) |
+| eviction returns `429 Too Many Requests` | a PDB covers the pod (synced from a vCluster) | expected behaviour of drain (Chapter 12 §5.5) |
 | `ls /data/k8s/...` finds nothing | the PV directory uses the root's names | `kubectl --context spark-root get pv <volumeName> -o jsonpath='{.spec.hostPath.path}'` |
 | resumed loss jumps | optimizer/RNG/dataloader state not saved | save optimizer + step (lab), plus RNG and dataloader position in real jobs |
 | async save slows training anyway | NVMe saturated / page cache pressure on UMA | smaller or less frequent checkpoints. `ionice`. Watch `SparkUMAPressure` |

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Watch the unified memory pool while a pod loads a model (Steps 14, 15, 20).
+# Watch the unified memory pool while a pod loads a model (Chapters 14, 15, 20).
 # Shows side by side: host MemAvailable, page cache, and the pod cgroup's
 # memory.current — answering "is GPU memory charged to my pod's limit?".
 #   scripts/uma-watch.sh <namespace> <pod> [context] [interval]   (run ON the Spark)

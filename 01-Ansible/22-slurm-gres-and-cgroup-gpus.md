@@ -1,6 +1,6 @@
-# Step 22 · Slurm: GRES & cgroup GPUs: MUNGE, cgroup v2 Confinement, Health Checks & Two-Node NCCL Jobs
+# Chapter 22 · Slurm: GRES & cgroup GPUs: MUNGE, cgroup v2 Confinement, Health Checks & Two-Node NCCL Jobs
 
-> **01-Ansible · Part IV — Secrets & platforms · Step 22 of 30** · ← [Step 21 · Multus & secondary RDMA networks](21-multus-and-secondary-rdma-networks.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 23 · AWX install & configuration as code](23-awx-install-and-configuration-as-code.md) →
+> **01-Ansible · Part IV — Secrets & platforms · Chapter 22 of 30** · ← [Chapter 21 · Multus & secondary RDMA networks](21-multus-and-secondary-rdma-networks.md) · [All chapters](00-ansible-step-by-step-guide.md) · [Chapter 23 · AWX install & configuration as code](23-awx-install-and-configuration-as-code.md) →
 
 | | |
 |---|---|
@@ -83,7 +83,7 @@ SchedulerType=sched/backfill
 JobAcctGatherType=jobacct_gather/cgroup
 JobAcctGatherFrequency=30
 
-# Health check: drain a node whose GPU stops answering (Step 29)
+# Health check: drain a node whose GPU stops answering (Chapter 29)
 HealthCheckProgram=/usr/local/sbin/spark-slurm-healthcheck.sh
 HealthCheckInterval=120
 HealthCheckNodeState=ANY
@@ -273,7 +273,7 @@ exit 0
 
 Design choices:
 
-- **The munge key is generated with `creates:`** on the controller and never regenerated. A new key on a live cluster would lock out every node. In this lab "the controller" is Semaphore, and the key lives on sema01's state volume. A break-glass run from the MacBook has its own `.cache/` **without** that key, so it would generate a new one and push it to every node. Before running `07-slurm.yml` from the MacBook, copy the key over (`ssh sema01 'cd ~/semaphore && docker compose exec -T semaphore cat /var/lib/spark-lab/cache/munge.key' > .cache/munge.key && chmod 600 .cache/munge.key`), and delete it again afterwards. Keeping a copy in vault01's `kv/spark-lab/` is the production answer.
+- **The munge key is generated with `creates:`** on the controller and never regenerated. A new key on a live cluster would lock out every node. In this lab "the controller" is Semaphore, and the key lives on sema01's state volume. A break-glass run from the MacBook has its own `.cache/` **without** that key, so it would generate a new one and push it to every node. Before running `22.1-slurm.yml` from the MacBook, copy the key over (`ssh sema01 'cd ~/semaphore && docker compose exec -T semaphore cat /var/lib/spark-lab/cache/munge.key' > .cache/munge.key && chmod 600 .cache/munge.key`), and delete it again afterwards. Keeping a copy in vault01's `kv/spark-lab/` is the production answer.
 - **"Resume" is selective.** Nodes drained by `healthcheck:` or `maint:` reasons stay drained. Only nodes down because of the reconfiguration itself get resumed. An automation that blindly resumes everything would undo your own safety net.
 - **Same template, every node.** The role renders `slurm.conf` from inventory, so adding dgx-spark-3 is an inventory edit plus a run.
 
@@ -281,7 +281,7 @@ Design choices:
 
 ## 3. Hands-on
 
-Run the Semaphore template **`07 Slurm`** (break-glass: `ansible-playbook playbooks/07-slurm.yml -l dgx-spark-1,localhost -K`, after copying the munge key as above). Then on the Spark:
+Run the Semaphore template **`22.1 Slurm`** (break-glass: `ansible-playbook playbooks/22.1-slurm.yml -l dgx-spark-1,localhost -K`, after copying the munge key as above). Then on the Spark:
 
 ```bash
 ssh dgxadmin@192.168.0.100
@@ -340,7 +340,7 @@ EOF
 sbatch ~/nccl-2node.sbatch
 ```
 
-(Requires the NCCL build from `10-nccl-test.yml`. Using `mpirun` inside the allocation is the portable approach; `srun --mpi=pmix` works if your Slurm build has PMIx, which you can check with `srun --mpi=list`.)
+(Requires the NCCL build from `14.2-nccl-test.yml`. Using `mpirun` inside the allocation is the portable approach; `srun --mpi=pmix` works if your Slurm build has PMIx, which you can check with `srun --mpi=list`.)
 
 ### 3.4 Watch the health check drain a node
 
@@ -349,9 +349,9 @@ sbatch ~/nccl-2node.sbatch
 sudo sed -i 's/-lt 4 ]/-lt 999 ]/' /usr/local/sbin/spark-slurm-healthcheck.sh
 sleep 130; sinfo -R          # REASON: healthcheck: UMA MemAvailable < 4 GiB
 
-# Semaphore: run the template 07 Slurm again — re-running the role restores the script
+# Semaphore: run the template 22.1 Slurm again — re-running the role restores the script
 # (template drift fixed) and deliberately does NOT resume a node drained with a 'healthcheck:' reason
-#   break-glass: ansible-playbook playbooks/07-slurm.yml -K
+#   break-glass: ansible-playbook playbooks/22.1-slurm.yml -K
 sinfo -R                     # still drained: that's the point
 
 # a human (or a separate, restricted Semaphore template) resumes it after checking
@@ -378,9 +378,9 @@ Does the job get OOM-killed at about 8 GiB, or does it sail past? The answer tel
 
 | System | How |
 |---|---|
-| Telemetry (Step 12) | The health check uses the same signals as the alerts, so scheduler and monitoring agree |
-| Drain (Step 29) | `node_drain` issues `scontrol … DRAIN reason="maint: …"`, and the Slurm role respects `maint:` |
-| NFS (Step 15) | `/mnt/models` present on every compute node, so jobs are location-independent |
+| Telemetry (Chapter 12) | The health check uses the same signals as the alerts, so scheduler and monitoring agree |
+| Drain (Chapter 29) | `node_drain` issues `scontrol … DRAIN reason="maint: …"`, and the Slurm role respects `maint:` |
+| NFS (Chapter 15) | `/mnt/models` present on every compute node, so jobs are location-independent |
 | Semaphore (or AWX) | A template "Slurm: resume node" with a survey (node name) gives operators a safe button, with the task history as the record |
 | Accounting (stretch) | Add `slurmdbd` + MariaDB for `sacct` history and fair-share |
 
@@ -389,9 +389,9 @@ Does the job get OOM-killed at about 8 GiB, or does it sail past? The answer tel
 | Symptom | Diagnose | Fix |
 |---|---|---|
 | `sinfo` shows `down*` | `scontrol show node X \| grep Reason`; `journalctl -u slurmd` | slurmd not running / not reachable on 6818; firewall |
-| `Invalid credential` / `Munge decode failed` | `munge -n \| ssh other unmunge` | Keys differ, or clocks skew > 5 min (chrony! Step 02) |
+| `Invalid credential` / `Munge decode failed` | `munge -n \| ssh other unmunge` | Keys differ, or clocks skew > 5 min (chrony! Chapter 02) |
 | Node `INVAL` / `Low RealMemory` | `slurmd -C` on the node vs `slurm.conf` | RealMemory too high: raise `slurm_cluster_mem_reserve_mb` |
-| `gres/gpu count reported lower than configured` | `slurmd -G` / `slurmd -C` | `File=/dev/nvidia0` missing? The driver isn't loaded at boot → Step 10 |
+| `gres/gpu count reported lower than configured` | `slurmd -G` / `slurmd -C` | `File=/dev/nvidia0` missing? The driver isn't loaded at boot → Chapter 10 |
 | Job runs without `--gres` and still sees the GPU | `cat /sys/fs/cgroup/system.slice/slurmstepd.scope/.../devices` | `ConstrainDevices=yes`, `TaskPlugin=task/cgroup`, cgroup v2 plugin present |
 | `srun: error: ... mpi/pmix` | `srun --mpi=list` | Use `mpirun` in the allocation, or install Slurm with PMIx |
 | Config change ignored | `scontrol show config \| grep -i <key>` | Some keys need `slurmctld` **and** `slurmd` restarts, not `scontrol reconfigure` (the handlers restart both) |

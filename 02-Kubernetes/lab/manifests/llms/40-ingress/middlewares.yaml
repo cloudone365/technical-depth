@@ -1,4 +1,4 @@
-# Traefik middlewares for LLM APIs (Step 11).
+# Traefik middlewares for LLM APIs (Chapter 11).
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata: {name: llm-body-limit, namespace: llm-serving}

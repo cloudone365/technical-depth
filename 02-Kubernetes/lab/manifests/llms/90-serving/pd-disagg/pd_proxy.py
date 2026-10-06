@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal prefill/decode proxy for vLLM NixlConnector (Step 23).
+"""Minimal prefill/decode proxy for vLLM NixlConnector (Chapter 23).
 
 Mirrors vLLM's tests/v1/kv_connector/nixl_integration/toy_proxy_server.py:
  1. send the request to the PREFILL server with max_tokens=1, stream=False and

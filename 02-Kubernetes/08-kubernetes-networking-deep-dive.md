@@ -1,6 +1,6 @@
-# Step 08 · Kubernetes Networking Deep Dive: CNI, Cilium VXLAN & eBPF, NetworkPolicy & Secondary RDMA Networks
+# Chapter 08 · Kubernetes Networking Deep Dive: CNI, Cilium VXLAN & eBPF, NetworkPolicy & Secondary RDMA Networks
 
-> **02-Kubernetes · Part III — Networking · Step 08 of 28** · ← [Step 07 · kube-scheduler & AI batch scheduling](07-kube-scheduler-and-ai-batch-scheduling.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 09 · kube-proxy & ClusterIP mechanics](09-kube-proxy-and-cluster-ip-mechanics.md) →
+> **02-Kubernetes · Part III — Networking · Chapter 08 of 28** · ← [Chapter 07 · kube-scheduler & AI batch scheduling](07-kube-scheduler-and-ai-batch-scheduling.md) · [All chapters](00-kubernetes-step-by-step-guide.md) · [Chapter 09 · kube-proxy & ClusterIP mechanics](09-kube-proxy-and-cluster-ip-mechanics.md) →
 
 | | |
 |---|---|
@@ -23,9 +23,9 @@ The Spark has three very different networks, and Kubernetes only knows about one
 | **Pod overlay** | Cilium (eBPF) on every node; VXLAN between nodes on top of mgmt | pod ↔ pod, Services, DNS — for root pods **and** every vCluster pod | the pod network (10.42.0.0/16) |
 | CX-7 fabric | 2× QSFP 200 GbE, `enp1s0f1np1` / `enP2p1s0f1np1`, RoCE | NCCL, NFS-RDMA, KV-cache transfer | **invisible**, unless you add it with Multus (`net1`) or `hostNetwork` |
 
-The overlay is fine for HTTP. **It's the wrong path for NCCL**: VXLAN adds 50 bytes of header, bypasses RDMA, burns CPU, and in this lab it rides the 10 GbE management link, not the 200 GbE fabric. Step 18 measures the gap.
+The overlay is fine for HTTP. **It's the wrong path for NCCL**: VXLAN adds 50 bytes of header, bypasses RDMA, burns CPU, and in this lab it rides the 10 GbE management link, not the 200 GbE fabric. Chapter 18 measures the gap.
 
-There is one more thing to understand before any of it makes sense: **a vCluster has no network of its own.** When a tenant runs a pod in `dev-lab`, the vCluster syncer creates a real pod in the root namespace `vc-dev-lab`, and *that* pod gets a netns, an `lxc*` veth and a 10.42.x.y address from the root's Cilium. Every packet in this step, tenant or platform, crosses the same root datapath.
+There is one more thing to understand before any of it makes sense: **a vCluster has no network of its own.** When a tenant runs a pod in `dev-lab`, the vCluster syncer creates a real pod in the root namespace `vc-dev-lab`, and *that* pod gets a netns, an `lxc*` veth and a 10.42.x.y address from the root's Cilium. Every packet in this chapter, tenant or platform, crosses the same root datapath.
 
 ---
 
@@ -56,7 +56,7 @@ flowchart LR
     VX --> NIC["mgmt enP7s7<br/>192.168.0.100 · MTU 1500"]
     AG["cilium-agent (DaemonSet)<br/>NetworkPolicy + CiliumNetworkPolicy → eBPF maps"]
     HB["Hubble relay + UI<br/>:31235"]
-    KP["kube-proxy (iptables)<br/>Services — Step 09"]
+    KP["kube-proxy (iptables)<br/>Services — Chapter 09"]
     CX["CX-7 enp1s0f1np1<br/>Multus net1 · RDMA"]
   end
   subgraph S2["dgx-spark-2 · 192.168.0.101 · podCIDR 10.42.1.0/24"]
@@ -95,7 +95,7 @@ With one Spark, pod ↔ pod traffic never leaves the node: Cilium's eBPF program
 |---|---|---|
 | 192.168.0.0/24 | management / node IPs (`dgx-spark-1` .100, `dgx-spark-2` .101) | 01-Ansible inventory |
 | 192.168.0.110–119 | MetalLB L2 pool: .111 dev-lab API, .112 llms API, .115 Traefik in llms | 01-Ansible `roles/metallb` |
-| 192.168.100.0/24, 192.168.101.0/24 | CX-7 point-to-point (one subnet per logical port), Multus NADs `cx7-a` / `cx7-b` | 01-Ansible `host_vars`, `playbooks/13-multus-rdma.yml` |
+| 192.168.100.0/24, 192.168.101.0/24 | CX-7 point-to-point (one subnet per logical port), Multus NADs `cx7-a` / `cx7-b` | 01-Ansible `host_vars`, `playbooks/21.1-multus-rdma.yml` |
 | **10.42.0.0/16** | pods, one /24 per node (`10.42.0.0/24` dgx-spark-1, `10.42.1.0/24` dgx-spark-2). Root pods and synced vCluster pods share it | kubeadm `podSubnet`; kube-controller-manager allocates `node.spec.podCIDR`; Cilium `ipam.mode=kubernetes` uses it |
 | **10.43.0.0/16** | Service ClusterIPs — including every Service a vCluster syncs. Root DNS at **10.43.0.10** | kubeadm `serviceSubnet` |
 
@@ -116,12 +116,12 @@ Cilium detects the MTU from the node's native device. If you raise the mgmt LAN 
 | File / object | Content |
 |---|---|
 | `/etc/cni/net.d/05-cilium.conflist` | written by the Cilium agent; the plugin is `/opt/cni/bin/cilium-cni` |
-| `/etc/cni/net.d/00-multus.conf` | only after `playbooks/13-multus-rdma.yml`: Multus (thick plugin) runs first and delegates `eth0` to Cilium, `net1` to macvlan. `cni.exclusive=false` is what lets the two coexist |
+| `/etc/cni/net.d/00-multus.conf` | only after `playbooks/21.1-multus-rdma.yml`: Multus (thick plugin) runs first and delegates `eth0` to Cilium, `net1` to macvlan. `cni.exclusive=false` is what lets the two coexist |
 | ConfigMap `kube-system/cilium-config` | `routing-mode: tunnel`, `tunnel-protocol: vxlan`, `ipam: kubernetes`, `kube-proxy-replacement: "false"` |
 | eBPF state | `/sys/fs/bpf/tc/globals/cilium_*` maps (endpoints, ipcache, policy, conntrack) |
 | Interfaces | `cilium_host` / `cilium_net` (veth pair, the node's router IP in its podCIDR), `cilium_vxlan` (collect-metadata VXLAN, UDP 8472), one `lxc*` per pod |
 
-Values: 01-Ansible [`roles/cilium/defaults/main.yml`](../01-Ansible/lab/roles/cilium/defaults/main.yml) — Cilium 1.20.2, `kubeProxyReplacement: "false"` (kube-proxy keeps doing Services in iptables, Step 09), Hubble relay + UI on NodePort **31235**.
+Values: 01-Ansible [`roles/cilium/defaults/main.yml`](../01-Ansible/lab/roles/cilium/defaults/main.yml) — Cilium 1.20.2, `kubeProxyReplacement: "false"` (kube-proxy keeps doing Services in iptables, Chapter 09), Hubble relay + UI on NodePort **31235**.
 
 ### 3.4 CNI comparison (why the lab runs Cilium)
 
@@ -157,10 +157,10 @@ A deny always beats an allow in Cilium, so no tenant policy can reopen the bound
 
 ## 4. Integrations
 
-- **Multus + RDMA (01-Ansible `playbooks/13-multus-rdma.yml`)** adds a *second* interface (`net1`) inside selected pods, attached to the CX-7 by macvlan, plus the `rdma/rdma_shared_cx7` resource. NADs are namespaced, so they're created in `platform-tools` and in `vc-llms` — where llms' `batch` pods really run. NCCL uses `net1`, HTTP stays on `eth0`. The NVIDIA Network Operator path is the alternative ([`manifests/root/85-network-operator`](lab/manifests/root/85-network-operator/nicclusterpolicy.yaml), Step 17).
+- **Multus + RDMA (01-Ansible `playbooks/21.1-multus-rdma.yml`)** adds a *second* interface (`net1`) inside selected pods, attached to the CX-7 by macvlan, plus the `rdma/rdma_shared_cx7` resource. NADs are namespaced, so they're created in `platform-tools` and in `vc-llms` — where llms' `batch` pods really run. NCCL uses `net1`, HTTP stays on `eth0`. The NVIDIA Network Operator path is the alternative ([`manifests/root/85-network-operator`](lab/manifests/root/85-network-operator/nicclusterpolicy.yaml), Chapter 17).
 - **hostNetwork** is the zero-dependency alternative for 2-Spark NCCL ([`manifests/llms/80-distributed/two-spark`](lab/manifests/llms/80-distributed/two-spark/kustomization.yaml)). You lose pod network isolation, so reserve it for training pods in llms' `batch` namespace (PSA `privileged` inside llms, and `vc-llms` on the root).
-- **NetworkPolicy + ingress (Step 11)**: `llm-serving` in llms admits only the `ingress` namespace and itself. Prometheus on the root is let in by `vcluster-boundary`, not by the tenant. Break it with `breakfix 06`.
-- **Services (Step 09)**: Cilium moves packets between pod IPs; kube-proxy's iptables rules turn a ClusterIP into a pod IP *before* Cilium sees the packet.
+- **NetworkPolicy + ingress (Chapter 11)**: `llm-serving` in llms admits only the `ingress` namespace and itself. Prometheus on the root is let in by `vcluster-boundary`, not by the tenant. Break it with `breakfix 06`.
+- **Services (Chapter 09)**: Cilium moves packets between pod IPs; kube-proxy's iptables rules turn a ClusterIP into a pod IP *before* Cilium sees the packet.
 
 ---
 
@@ -277,7 +277,7 @@ Apply the tenant policies in both vClusters and the serving tier in llms:
 kubectl --context dev-lab apply -k manifests/dev-lab/10-tenancy
 kubectl --context llms apply -k manifests/llms/00-platform
 kubectl --context llms apply -k manifests/llms/10-tenancy
-scripts/install-addons.sh traefik                                   # Traefik CRDs + controller in llms (Step 11)
+scripts/install-addons.sh traefik                                   # Traefik CRDs + controller in llms (Chapter 11)
 kubectl --context llms apply -k manifests/llms/40-ingress           # mock-llm in llm-serving
 kubectl --context spark-root apply -k manifests/root/05-vclusters   # vcluster-boundary (already there after install-addons.sh vclusters)
 ```
@@ -314,7 +314,7 @@ kubectl --context llms -n llm-serving exec deploy/mock-llm-canary -- \
   python3 -c "import urllib.request;print(urllib.request.urlopen('http://mock-llm:8000/health',timeout=3).status)"   # 200: same namespace
 ```
 
-There's no `mock-llm.llm-serving` name to try from dev-lab: each vCluster has its own DNS (Step 10) and `llm-serving` doesn't exist there. The tenants can only reach each other by IP — and the boundary stops that.
+There's no `mock-llm.llm-serving` name to try from dev-lab: each vCluster has its own DNS (Chapter 10) and `llm-serving` doesn't exist there. The tenants can only reach each other by IP — and the boundary stops that.
 
 **Where is it enforced?** Not in iptables any more:
 
@@ -351,13 +351,13 @@ kubectl --context dev-lab -n lab-tools get pods -l app=echo -o wide        # som
 # capture the *outer* packets on the management NIC (run on dgx-spark-1)
 sudo tcpdump -ni enP7s7 udp port 8472 -c 4 -vv
 kubectl --context spark-root -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg bpf tunnel list   # podCIDR → node IP
-# overlay vs RDMA throughput: iperf3 between two netshoot pods vs ib_write_bw on the hosts (01-Ansible playbooks/11-rdma-perftest.yml)
+# overlay vs RDMA throughput: iperf3 between two netshoot pods vs ib_write_bw on the hosts (01-Ansible playbooks/13.2-rdma-perftest.yml)
 kubectl --context dev-lab -n lab-tools scale deploy echo --replicas=3
 ```
 
 Expected: outer packets `192.168.0.100.<port> > 192.168.0.101.8472: VXLAN, flags [I] (0x08), vni …` with the inner pod-to-pod packet inside. Cilium puts the source's **security identity** in the VNI field, so the receiving node enforces policy without looking up the remote pod's labels.
 
-The gap is large. Pod-to-pod iperf3 over the overlay is capped by the 10 GbE management link (under ~9.4 Gb/s) and costs CPU for encapsulation, while `ib_write_bw` on the CX-7 gets **~185–195 Gb/s at near-zero CPU**. That is why distributed training uses `hostNetwork` or Multus `net1` (Step 18), never `eth0`.
+The gap is large. Pod-to-pod iperf3 over the overlay is capped by the 10 GbE management link (under ~9.4 Gb/s) and costs CPU for encapsulation, while `ib_write_bw` on the CX-7 gets **~185–195 Gb/s at near-zero CPU**. That is why distributed training uses `hostNetwork` or Multus `net1` (Chapter 18), never `eth0`.
 
 ---
 
@@ -369,7 +369,7 @@ The gap is large. Pod-to-pod iperf3 over the overlay is capped by the 10 GbE man
 | Pod route MTU | `ip route` in netshoot (dev-lab) | `mtu 1450` (1500 mgmt LAN) |
 | Cross-tenant | beta → alpha `nc -z :8080` | times out |
 | Cross-vCluster | dev-lab netshoot → Traefik pod IP :8000 | times out; Hubble shows `DROPPED` |
-| Serving isolation | lab-tools → mock-llm pod IP | blocked; Traefik → mock-llm allowed (Step 11 test) |
+| Serving isolation | lab-tools → mock-llm pod IP | blocked; Traefik → mock-llm allowed (Chapter 11 test) |
 | Scripted | `scripts/verify.sh platform tenancy vclusters` | Cilium ready, default-deny policies present, `Cilium vCluster boundary policies` PASS |
 
 ---
@@ -385,8 +385,8 @@ The gap is large. Pod-to-pod iperf3 over the overlay is capped by the 10 GbE man
 | NetworkPolicy written in a vCluster has no effect | policy sync off, or the policy only exists inside the vCluster | `kubectl --context spark-root -n vc-<vc> get netpol` — is the `…-x-<ns>-x-<vc>` copy there? | `sync.toHost.networkPolicies.enabled: true` in `vclusters/<vc>.yaml`, `helm upgrade` |
 | Everything blocked after adding one policy | a policy *selecting* a pod turns on default-deny for that direction | `kubectl --context <vc> get netpol -n X -o yaml`; Hubble `--verdict DROPPED` | add explicit allows (DNS egress too, if you restrict egress) |
 | Prometheus can't scrape a tenant's pod | tenant default-deny, and the root allow missing | Hubble drops from `observability/prometheus-…` | apply `manifests/root/05-vclusters` (`vcluster-boundary` allows `observability`) |
-| One vCluster can reach the other | `vcluster-boundary` missing in one namespace, or traffic was SNATed to the node IP on the way (identity `host`, not `vc-*`) | `kubectl --context spark-root get cnp -A`; Hubble shows the source identity | re-apply the boundary; for LB traffic, see Step 09 §4 |
-| NCCL slow between Sparks | traffic going over the overlay / mgmt 10 GbE | `NCCL_DEBUG=INFO` shows `NET/Socket` instead of `NET/IB` | hostNetwork or Multus + `NCCL_IB_HCA` (Step 18) |
+| One vCluster can reach the other | `vcluster-boundary` missing in one namespace, or traffic was SNATed to the node IP on the way (identity `host`, not `vc-*`) | `kubectl --context spark-root get cnp -A`; Hubble shows the source identity | re-apply the boundary; for LB traffic, see Chapter 09 §4 |
+| NCCL slow between Sparks | traffic going over the overlay / mgmt 10 GbE | `NCCL_DEBUG=INFO` shows `NET/Socket` instead of `NET/IB` | hostNetwork or Multus + `NCCL_IB_HCA` (Chapter 18) |
 
 ---
 
@@ -395,8 +395,8 @@ The gap is large. Pod-to-pod iperf3 over the overlay is capped by the 10 GbE man
 | Lab | Datacenter |
 |---|---|
 | Cilium VXLAN on the mgmt LAN, one flat pod network | Cilium native routing with BGP to the ToRs (no encapsulation), or Calico BGP |
-| kube-proxy in iptables mode, Cilium as CNI only | `kubeProxyReplacement=true`: eBPF socket-LB and Maglev, no per-Service iptables chains (Step 09 §8) |
-| 1 CX-7 cable, Multus macvlan for RDMA | Separate **frontend** (Ethernet, pods/storage) and **backend** (compute fabric: IB or Spectrum-X RoCE, rail-optimised) networks (Step 19) |
+| kube-proxy in iptables mode, Cilium as CNI only | `kubeProxyReplacement=true`: eBPF socket-LB and Maglev, no per-Service iptables chains (Chapter 09 §8) |
+| 1 CX-7 cable, Multus macvlan for RDMA | Separate **frontend** (Ethernet, pods/storage) and **backend** (compute fabric: IB or Spectrum-X RoCE, rail-optimised) networks (Chapter 19) |
 | hostNetwork / Multus for NCCL | NVIDIA Network Operator: SR-IOV VFs or RDMA shared device plugin, `rdma/…` resources, per-rail `NetworkAttachmentDefinition`s |
 | two `CiliumNetworkPolicy` objects for the vCluster boundary | `CiliumClusterwideNetworkPolicy` per tenant class, FQDN egress rules (only `huggingface.co`, `nvcr.io`), Hubble flows exported to Loki/SIEM |
 | vClusters sharing one node's network | separate node pools (or clusters) per trust level; a vCluster can pin its pods with a node selector |

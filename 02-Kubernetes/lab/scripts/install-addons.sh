@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Install the 02 lab add-ons (Steps 05, 04; details in Steps 11, 13, 17, 07, 20, 22).
-# Prerequisite: 01-Ansible playbooks/05-kubernetes.yml + 06-gpu-operator.yml
+# Install the 02 lab add-ons (Chapters 05, 04; details in Chapters 11, 13, 17, 07, 20, 22).
+# Prerequisite: 01-Ansible playbooks/19.1-kubernetes.yml + 20.1-gpu-operator.yml
 # (kubeadm root cluster, Cilium, MetalLB, GPU Operator) and helm on this machine.
 #
 #   On the ROOT cluster (context spark-root):
@@ -8,7 +8,7 @@
 #     scripts/install-addons.sh metrics-server  # kubectl top / HPAs (k3s bundled it, kubeadm doesn't)
 #     scripts/install-addons.sh kps             # Prometheus/Grafana/Alertmanager
 #     scripts/install-addons.sh vclusters       # vCluster dev-lab + llms, budgets, merged kubeconfig
-#     scripts/install-addons.sh argocd          # GitOps (Step 28)
+#     scripts/install-addons.sh argocd          # GitOps (Chapter 28)
 #   Inside vCluster #2 (context llms):
 #     scripts/install-addons.sh traefik         # Gateway API CRDs + Traefik (llms API gateway, 192.168.0.115)
 #     scripts/install-addons.sh kueue           # batch admission

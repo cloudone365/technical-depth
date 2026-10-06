@@ -1,5 +1,5 @@
 # vLLM OpenAI-compatible server on one GB10 time-slice, INSIDE vCluster #2 · llms
-# (Steps 20, 04). Apply with --context llms.
+# (Chapters 20, 04). Apply with --context llms.
 #
 # Two memory budgets, both must hold:
 #   1. vLLM's own: --gpu-memory-utilization is a fraction of the ~119.7 GiB the
@@ -9,13 +9,13 @@
 #      quota on vc-llms; 80 Gi of it for llm-serving). The 32 Gi limit below
 #      leaves room for Traefik, Kueue, KEDA, the control plane and two more
 #      model servers. Whether CUDA memory
-#      is charged to this limit is measured in Step 14 §5.5 — size as if it is.
+#      is charged to this limit is measured in Chapter 14 §5.5 — size as if it is.
 apiVersion: v1
 kind: Secret
 metadata: {name: hf-token, namespace: llm-serving}
 type: Opaque
 stringData:
-  token: "replace-me"                  # or sync from Vault (01-Ansible Step 18)
+  token: "replace-me"                  # or sync from Vault (01-Ansible Chapter 18)
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -33,7 +33,7 @@ spec:
       labels: {app: vllm, model: qwen2-5-0-5b}
     spec:
       priorityClassName: spark-serving
-      terminationGracePeriodSeconds: 120   # longer than the longest expected generation (Step 09 §5.6)
+      terminationGracePeriodSeconds: 120   # longer than the longest expected generation (Chapter 09 §5.6)
       containers:
         - name: vllm
           image: nvcr.io/nvidia/vllm:25.09-py3

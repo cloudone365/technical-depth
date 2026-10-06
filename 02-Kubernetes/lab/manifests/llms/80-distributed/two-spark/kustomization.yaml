@@ -1,4 +1,4 @@
-# Two Sparks over the CX-7 QSFP link (Step 18 §3.3, §5.5). Host networking lets NCCL
+# Two Sparks over the CX-7 QSFP link (Chapter 18 §3.3, §5.5). Host networking lets NCCL
 # see the RoCE devices directly; the pod anti-affinity puts one rank per Spark.
 # Interface/HCA names are from 01-Ansible host_vars — confirm with `ibdev2netdev`.
 apiVersion: kustomize.config.k8s.io/v1beta1

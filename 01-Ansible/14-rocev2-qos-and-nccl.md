@@ -1,10 +1,10 @@
-# Step 14 · RoCEv2, QoS & NCCL: MTU, DSCP/PFC/ECN, and Proving NCCL Uses RDMA Across Sparks
+# Chapter 14 · RoCEv2, QoS & NCCL: MTU, DSCP/PFC/ECN, and Proving NCCL Uses RDMA Across Sparks
 
-> **01-Ansible · Part III — Fabric & storage · Step 14 of 30** · ← [Step 13 · ConnectX-7 fabric & OpenSM](13-connectx7-fabric-and-opensm.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 15 · NFS over RDMA & parallel file systems](15-nfs-rdma-and-parallel-file-systems.md) →
+> **01-Ansible · Part III — Fabric & storage · Chapter 14 of 30** · ← [Chapter 13 · ConnectX-7 fabric & OpenSM](13-connectx7-fabric-and-opensm.md) · [All chapters](00-ansible-step-by-step-guide.md) · [Chapter 15 · NFS over RDMA & parallel file systems](15-nfs-rdma-and-parallel-file-systems.md) →
 
 | | |
 |---|---|
-| **You will build** | A tuned RoCEv2 path (MTU 9000, optional DSCP/PFC/ECN via `12b-roce-qos.yml`), a two-node NCCL build and run (`10-nccl-test.yml`), and the skill to read NCCL logs to prove the data went over RDMA and not TCP sockets |
+| **You will build** | A tuned RoCEv2 path (MTU 9000, optional DSCP/PFC/ECN via `14.1-roce-qos.yml`), a two-node NCCL build and run (`14.2-nccl-test.yml`), and the skill to read NCCL logs to prove the data went over RDMA and not TCP sockets |
 | **Hardware** | 2× DGX Spark, direct cable (switch optional) |
 | **Time** | 90 min (the NCCL build takes about 10 min per node) |
 | **Risk** | Low. QoS settings are runtime-only until you persist them |
@@ -47,7 +47,7 @@ flowchart LR
 ## 2. Host QoS playbook (opt-in)
 
 ```yaml
-# lab/playbooks/12b-roce-qos.yml
+# lab/playbooks/14.1-roce-qos.yml
 ---
 # Host-side RoCEv2 QoS for CX-7 — needed when Sparks share a SWITCH with other
 # traffic (4+ node topology). On a direct cable it is optional (no congestion point).
@@ -57,7 +57,7 @@ flowchart LR
 #   CNP (DCQCN): DSCP 48 → priority 6
 #   ECN        : marked by the switch, reacted to by the NIC (DCQCN)
 #
-#   ansible-playbook playbooks/12b-roce-qos.yml -K [-e roce_qos_pfc=false]   # ECN-only ("lossy RoCE")
+#   ansible-playbook playbooks/14.1-roce-qos.yml -K [-e roce_qos_pfc=false]   # ECN-only ("lossy RoCE")
 - name: RoCEv2 QoS on CX-7 ports
   hosts: spark
   become: true
@@ -147,16 +147,16 @@ flowchart LR
       ansible.builtin.debug:
         msg: >-
           mlnx_qos / sysfs / configfs settings do not survive reboot. Re-run this play from a
-          systemd unit or AWX schedule at boot, or bake it into a oneshot service (exercise in Step 14).
+          systemd unit or AWX schedule at boot, or bake it into a oneshot service (exercise in Chapter 14).
 ```
 
 ```bash
 cd "01-Ansible/lab"
-ansible-playbook playbooks/12b-roce-qos.yml -K
+ansible-playbook playbooks/14.1-roce-qos.yml -K
 ssh dgxadmin@192.168.0.100 'sudo mlnx_qos -i enp1s0f1np1 | sed -n "1,20p"'
 ```
 
-Persist it: create a oneshot systemd unit that runs the same commands at boot. Templating that unit is the exercise at the end of this step. Or have AWX run the play on a boot-triggered webhook.
+Persist it: create a oneshot systemd unit that runs the same commands at boot. Templating that unit is the exercise at the end of this chapter. Or have AWX run the play on a boot-triggered webhook.
 
 ---
 
@@ -179,7 +179,7 @@ NVIDIA's Spark NCCL guide bootstraps over the **management** interface (`NCCL_SO
 ### 3.2 Build and run
 
 ```yaml
-# lab/playbooks/10-nccl-test.yml
+# lab/playbooks/14.2-nccl-test.yml
 ---
 # Builds NCCL + nccl-tests for Blackwell (sm_121) on every Spark, then runs
 # all_gather_perf across the CX-7 link from the first node. Mirrors NVIDIA's
@@ -279,11 +279,11 @@ NVIDIA's Spark NCCL guide bootstraps over the **management** interface (`NCCL_SO
         msg:
           - "Avg bus bandwidth: {{ nccl_busbw }} GB/s"
           - "Transport line   : {{ nccl_transport }}"
-          - "If this says NET/Socket, RDMA isn't in use — see Step 14 troubleshooting."
+          - "If this says NET/Socket, RDMA isn't in use — see Chapter 14 troubleshooting."
 ```
 
 ```bash
-ansible-playbook playbooks/10-nccl-test.yml -K
+ansible-playbook playbooks/14.2-nccl-test.yml -K
 ```
 
 ### 3.3 Prove it used RDMA
@@ -318,12 +318,12 @@ The same variables go into vLLM or TRT-LLM multi-node launches. NVIDIA's vLLM Sp
 
 ## 4. Integrations
 
-| Consumer | Uses from this step |
+| Consumer | Uses from this chapter |
 |---|---|
 | vLLM / TRT-LLM tensor-parallel across 2 Sparks | NCCL env from fabric facts; `--tensor-parallel-size 2` |
-| Slurm (Step 22) | `srun --mpi=pmix` or `mpirun` jobs inherit the same NCCL env via `/etc/profile.d/nccl.sh` (template it) |
-| Kubernetes + Multus (Step 21) | Pods need the RDMA device, plus the same GID/HCA choices |
-| NFS over RDMA (Step 15) | Uses RDMA-CM, so it inherits the ToS set by `12b-roce-qos.yml` |
+| Slurm (Chapter 22) | `srun --mpi=pmix` or `mpirun` jobs inherit the same NCCL env via `/etc/profile.d/nccl.sh` (template it) |
+| Kubernetes + Multus (Chapter 21) | Pods need the RDMA device, plus the same GID/HCA choices |
+| NFS over RDMA (Chapter 15) | Uses RDMA-CM, so it inherits the ToS set by `14.1-roce-qos.yml` |
 
 ## 5. Troubleshooting & diagnostics
 

@@ -1,4 +1,4 @@
-# Sharded preprocessing with an Indexed Job (Step 12): 8 shards, 2 at a time,
+# Sharded preprocessing with an Indexed Job (Chapter 12): 8 shards, 2 at a time,
 # each pod processes shard $JOB_COMPLETION_INDEX. Runs INSIDE dev-lab (--context
 # dev-lab) and fits tenant-alpha's 500m budget (2 × 200m), with per-index retry (backoffLimitPerIndex) so one bad shard doesn't
 # restart the other seven.

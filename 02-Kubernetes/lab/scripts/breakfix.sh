@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Break/fix drills (Steps 26, 27, 04). Inject a fault, diagnose it from symptoms,
+# Break/fix drills (Chapters 26, 27, 04). Inject a fault, diagnose it from symptoms,
 # fix it yourself, then check with `verify`. `hint` and `answer` are there when stuck.
 # Each scenario names the cluster it breaks: spark-root, dev-lab or llms.
 #   scripts/breakfix.sh list
@@ -71,7 +71,7 @@ ANSWER[14]="ReplicaSet FailedCreate: \"ValidatingAdmissionPolicy 'spark-no-lates
 TITLE[15]="Unified-memory pressure (RISKY)";           CTX[15]=spark-root
 SYMPTOM[15]="node MemoryPressure, pods evicted in every cluster, CUDA allocations failing in llms serving pods"
 HINT[15]="kubectl --context spark-root describe node → Conditions; kubectl get events -A | grep -i evict; free -g on the host."
-ANSWER[15]="bf15-uma (root, platform-tools) grabbed ~92 % of MemAvailable. On UMA that is also GPU memory — and the vCluster memory budgets are quotas, not reservations, so they protect nothing against a platform pod. kubelet evicts by QoS/usage once memory.available < eviction-hard (4Gi in 01-Ansible). Mitigations: realistic limits, PriorityClasses (serving outranks preemptible), vLLM --gpu-memory-utilization headroom, and 01-Ansible playbooks/24-uma-relief.yml (drop caches)."
+ANSWER[15]="bf15-uma (root, platform-tools) grabbed ~92 % of MemAvailable. On UMA that is also GPU memory — and the vCluster memory budgets are quotas, not reservations, so they protect nothing against a platform pod. kubelet evicts by QoS/usage once memory.available < eviction-hard (4Gi in 01-Ansible). Mitigations: realistic limits, PriorityClasses (serving outranks preemptible), vLLM --gpu-memory-utilization headroom, and 01-Ansible playbooks/29.2-uma-relief.yml (drop caches)."
 
 inject() {
   local c=${CTX[$1]:-}

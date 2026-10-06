@@ -9,7 +9,7 @@ Check first, on the Spark:
 
 If it does, turn it on (01-Ansible lab):
 
-    ansible-playbook playbooks/06-gpu-operator.yml -e gpu_operator_dcgm_exporter=true   # or: Semaphore template "06 GPU Operator" with that extra variable
+    ansible-playbook playbooks/20.1-gpu-operator.yml -e gpu_operator_dcgm_exporter=true   # or: Semaphore template "20.1 GPU Operator" with that extra variable
 
 then apply manifests/root/95-observability/ (ServiceMonitors + rules + dashboard) with --context spark-root.
 If it does not, the 01-Ansible textfile collector (nvidia-smi → node-exporter)

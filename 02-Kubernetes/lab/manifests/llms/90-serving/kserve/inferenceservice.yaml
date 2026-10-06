@@ -1,5 +1,5 @@
-# KServe in RawDeployment mode INSIDE vCluster #2 · llms (Steps 22, 04).
-# Park vLLM first (llms memory budget; pause its KEDA ScaledObject, Step 20 §9). No Knative, no Istio — KServe
+# KServe in RawDeployment mode INSIDE vCluster #2 · llms (Chapters 22, 04).
+# Park vLLM first (llms memory budget; pause its KEDA ScaledObject, Chapter 20 §9). No Knative, no Istio — KServe
 # creates a plain Deployment + Service + HPA. Requires cert-manager and the
 # KServe controller (scripts/install-addons.sh kserve).
 apiVersion: serving.kserve.io/v1alpha1

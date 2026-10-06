@@ -1,6 +1,6 @@
 ---
 # Jinja2 / data-transform kata using REAL DGX Spark command output.
-# Runs on localhost (no Spark needed):  ansible-playbook playbooks/15-jinja-lab.yml
+# Runs on localhost (no Spark needed):  ansible-playbook playbooks/07.1-jinja-lab.yml
 # Each task transforms raw text → structured data and ASSERTS the result.
 - name: Jinja2 transforms on Spark data
   hosts: localhost

@@ -1,4 +1,4 @@
-# GitOps for the 02 lab with Argo CD (Steps 28, 04).
+# GitOps for the 02 lab with Argo CD (Chapters 28, 04).
 # Argo CD runs on the ROOT and deploys to all three clusters:
 #   in-cluster  https://kubernetes.default.svc   the root (platform layers)
 #   dev-lab     https://192.168.0.111:443        vCluster #1 (tenants, labs)

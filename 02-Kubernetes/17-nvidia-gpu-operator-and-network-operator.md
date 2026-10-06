@@ -1,6 +1,6 @@
-# Step 17 · NVIDIA GPU Operator & Network Operator, with GPU Observability
+# Chapter 17 · NVIDIA GPU Operator & Network Operator, with GPU Observability
 
-> **02-Kubernetes · Part V — GPU platform · Step 17 of 28** · ← [Step 16 · NVIDIA Container Toolkit & GPU virtualization](16-nvidia-container-toolkit-and-gpu-virtualization.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 18 · Distributed AI training & NCCL](18-distributed-ai-training-and-nccl.md) →
+> **02-Kubernetes · Part V — GPU platform · Chapter 17 of 28** · ← [Chapter 16 · NVIDIA Container Toolkit & GPU virtualization](16-nvidia-container-toolkit-and-gpu-virtualization.md) · [All chapters](00-kubernetes-step-by-step-guide.md) · [Chapter 18 · Distributed AI training & NCCL](18-distributed-ai-training-and-nccl.md) →
 
 | | |
 |---|---|
@@ -15,7 +15,7 @@
 
 ## 1. Why this matters on a Spark
 
-The GPU Operator is a controller (Step 06) that turns one `ClusterPolicy` into a set of DaemonSets: feature discovery, device plugin, validator, optionally DCGM and exporters. On DGX OS it runs in **host-driver mode**: DGX OS owns the driver and container toolkit, and the operator must never install its own. Knowing which component does what tells you where to look when `nvidia.com/gpu` goes to 0.
+The GPU Operator is a controller (Chapter 06) that turns one `ClusterPolicy` into a set of DaemonSets: feature discovery, device plugin, validator, optionally DCGM and exporters. On DGX OS it runs in **host-driver mode**: DGX OS owns the driver and container toolkit, and the operator must never install its own. Knowing which component does what tells you where to look when `nvidia.com/gpu` goes to 0.
 
 In this lab the operator is a **root-only** concern. The vClusters run no device plugin, no NFD and no GFD: they see the root's node as it is (labels, `allocatable nvidia.com/gpu: 15`) through node sync, and their GPU pods are scheduled by the root scheduler and handed a slice by the root's device plugin. One operator serves three clusters; one bad ConfigMap breaks GPUs in all of them.
 
@@ -85,7 +85,7 @@ flowchart TB
 
 **Two Prometheuses on purpose.** The 01-Ansible host stack watches the *node* and keeps working when Kubernetes is broken. kps watches the *clusters*. Both scrape the same node-exporter.
 
-**One kps for three clusters.** Tenants can't run a Prometheus Operator inside a vCluster (and it couldn't see the root's metrics anyway). The platform team scrapes the vClusters' workloads from the root, where their pods really run, and hands the result back into `llms` as the Service `default/prometheus` for KEDA (Step 20).
+**One kps for three clusters.** Tenants can't run a Prometheus Operator inside a vCluster (and it couldn't see the root's metrics anyway). The platform team scrapes the vClusters' workloads from the root, where their pods really run, and hands the result back into `llms` as the Service `default/prometheus` for KEDA (Chapter 20).
 
 ---
 
@@ -98,7 +98,7 @@ flowchart TB
 | `driver`, `toolkit` | **disabled** | DGX OS owns them. Two owners would fight on every update |
 | `cdi` | **disabled** | on by default since operator v25.10; this lab injects GPUs through the `nvidia` runtime that the kubeadm role set as containerd's default (`nvidia-ctk runtime configure --set-as-default`) |
 | `operator.defaultRuntime` | `containerd` | the root uses DGX OS's `containerd.io` (shared with Docker) |
-| `devicePlugin` | on, config `time-slicing-config`, `default: any` → **15 replicas**, `failRequestsGreaterThanOne: true` | Step 16. A pod asking for 2 slices is refused: 2 slices of one GPU are not 2 GPUs |
+| `devicePlugin` | on, config `time-slicing-config`, `default: any` → **15 replicas**, `failRequestsGreaterThanOne: true` | Chapter 16. A pod asking for 2 slices is refused: 2 slices of one GPU are not 2 GPUs |
 | `gfd`, `nfd` | on | labels for selectors and Kueue's `gb10` ResourceFlavor (synced into both vClusters) |
 | `validator` | on | the Ansible role waits for it, then asserts every node advertises 15 |
 | `migManager` | off | no MIG on GB10 |
@@ -118,7 +118,7 @@ The 15 slices are split by **root ResourceQuotas**, not by the device plugin:
 |---|---|---|
 | vCluster `dev-lab` | 2 | `vc-dev-lab/vcluster-budget` `requests.nvidia.com/gpu: 2` |
 | vCluster `llms` | 11 | `vc-llms/vcluster-budget` `requests.nvidia.com/gpu: 11` |
-| root (`platform-tools` benchmarks, probes, the Step 14 §5.5 UMA experiment, the preemption-demo filler) | 2 | **nothing** — the root has no quota on itself. It's a convention the platform team keeps |
+| root (`platform-tools` benchmarks, probes, the Chapter 14 §5.5 UMA experiment, the preemption-demo filler) | 2 | **nothing** — the root has no quota on itself. It's a convention the platform team keeps |
 
 A profile switch changes the supply; the quotas don't move. After a switch to `whole-gpu` the budgets still say 2 + 11, but only one GPU exists, and the scheduler's `Insufficient nvidia.com/gpu` becomes the binding limit (§5.3).
 
@@ -163,10 +163,10 @@ The dashboard is *generated* by [`gen_dashboard.py`](lab/manifests/root/95-obser
 
 ## 4. Integrations
 
-- **01-Ansible Step 12 (telemetry)**: provides `spark_gpu_*` and `spark_uma_*` metrics, and the `SparkGpuMetricsStale` rule for a textfile collector that stops updating.
-- **01-Ansible Step 20**: owns the operator's Helm values and the time-slicing ConfigMap. Change replicas/profiles there, then re-run `06-gpu-operator.yml`. If you change the slice count, change the root quotas in `manifests/root/05-vclusters/quotas.yaml` too and run `python3 tests/budget_check.py` — it reads the slice count straight from the role's defaults.
-- **01-Ansible `13-multus-rdma.yml`** is the lighter alternative to the Network Operator in §5.6 (Multus thick v4.3.0 + RDMA shared device plugin + NADs `cx7-a`/`cx7-b` in `platform-tools` and `vc-llms`). Use one of the two, not both.
-- **KEDA (Step 20)** inside `llms` reads the root's Prometheus through `default/prometheus`. The same metrics drive autoscaling and alerts.
+- **01-Ansible Chapter 12 (telemetry)**: provides `spark_gpu_*` and `spark_uma_*` metrics, and the `SparkGpuMetricsStale` rule for a textfile collector that stops updating.
+- **01-Ansible Chapter 20**: owns the operator's Helm values and the time-slicing ConfigMap. Change replicas/profiles there, then re-run `20.1-gpu-operator.yml`. If you change the slice count, change the root quotas in `manifests/root/05-vclusters/quotas.yaml` too and run `python3 tests/budget_check.py` — it reads the slice count straight from the role's defaults.
+- **01-Ansible `21.1-multus-rdma.yml`** is the lighter alternative to the Network Operator in §5.6 (Multus thick v4.3.0 + RDMA shared device plugin + NADs `cx7-a`/`cx7-b` in `platform-tools` and `vc-llms`). Use one of the two, not both.
+- **KEDA (Chapter 20)** inside `llms` reads the root's Prometheus through `default/prometheus`. The same metrics drive autoscaling and alerts.
 - **Alertmanager → your pager**: add a receiver (Slack, e-mail, Webex webhook) in the kps values.
 
 ---
@@ -244,7 +244,7 @@ sleep 45; kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.statu
 
 Use `whole-gpu` for a benchmark or a big single-model run, when you want no one else on the GPU. Running pods keep their allocation. New pods see the new count — in every cluster at once. While the node advertises 1, the vCluster budgets (2 and 11) are promises the hardware can't keep: the first GPU pod wins and every other one, in any cluster, gets `0/1 nodes are available: 1 Insufficient nvidia.com/gpu` from the root scheduler. Quotas cap demand; they never create supply.
 
-> The ConfigMap is owned by the 01-Ansible `gpu_operator` role. A later run of `06-gpu-operator.yml` rewrites it without your `whole-gpu` key. To make the profile permanent, add it to the role's time-slicing ConfigMap task.
+> The ConfigMap is owned by the 01-Ansible `gpu_operator` role. A later run of `20.1-gpu-operator.yml` rewrites it without your `whole-gpu` key. To make the profile permanent, add it to the role's time-slicing ConfigMap task.
 
 ### 5.4 Observability stack
 
@@ -304,8 +304,8 @@ kubectl --context spark-root delete -f manifests/root/12-cgroups/cpu-throttle.ya
 
 ```bash
 ssh dgxadmin@192.168.0.100 'dcgmi discovery -l'        # must list GB10
-# Semaphore: run template "06 GPU Operator" with extra variables {"gpu_operator_dcgm_exporter": true}
-# (break-glass CLI: cd "../../01-Ansible/lab" && ansible-playbook playbooks/06-gpu-operator.yml -l dgx-spark-1,localhost -K -e gpu_operator_dcgm_exporter=true)
+# Semaphore: run template "20.1 GPU Operator" with extra variables {"gpu_operator_dcgm_exporter": true}
+# (break-glass CLI: cd "../../01-Ansible/lab" && ansible-playbook playbooks/20.1-gpu-operator.yml -l dgx-spark-1,localhost -K -e gpu_operator_dcgm_exporter=true)
 kubectl --context spark-root -n gpu-operator port-forward ds/nvidia-dcgm-exporter 9400 & sleep 2
 curl -s localhost:9400/metrics | grep -E '^DCGM_FI_DEV_(GPU_UTIL|GPU_TEMP|POWER_USAGE)' | head; kill %1
 ```
@@ -314,7 +314,7 @@ If `dcgmi` doesn't list the GB10 on your DGX OS release, keep it off. The textfi
 
 ### 5.6 (2 Sparks) Network Operator for RDMA pod networking
 
-Prerequisites: dgx-spark-2 joined the root (Step 05 §9), 01-Ansible `02-fabric.yml` and `11-rdma-perftest.yml` passed, and **01-Ansible `13-multus-rdma.yml` not applied** (both install Multus and an RDMA device plugin).
+Prerequisites: dgx-spark-2 joined the root (Chapter 05 §9), 01-Ansible `13.1-fabric.yml` and `13.2-rdma-perftest.yml` passed, and **01-Ansible `21.1-multus-rdma.yml` not applied** (both install Multus and an RDMA device plugin).
 
 ```bash
 helm repo add nvidia https://helm.ngc.nvidia.com/nvidia && helm repo update
@@ -339,7 +339,7 @@ kubectl --context spark-root -n vc-llms get pod rdma-test-x-batch-x-llms \
 kubectl --context llms -n batch delete pod rdma-test
 ```
 
-Expected: allocatable `rdma/rdma_shared_cx7: 16` per Spark (`rdmaHcaMax: 16`). Inside the pod you'll see `eth0` (Cilium, `10.42.x.x`), `net1` with an address from `192.168.100.100–199` (whereabouts), and the RoCE device(s) in `ibv_devices`. The `network-status` annotation on the root copy is written by Multus and lists both interfaces. The pod's 500m CPU and 4 Gi count against `llms`'s root budget like any other. Step 18 uses this path for NCCL as the alternative to `hostNetwork`.
+Expected: allocatable `rdma/rdma_shared_cx7: 16` per Spark (`rdmaHcaMax: 16`). Inside the pod you'll see `eth0` (Cilium, `10.42.x.x`), `net1` with an address from `192.168.100.100–199` (whereabouts), and the RoCE device(s) in `ibv_devices`. The `network-status` annotation on the root copy is written by Multus and lists both interfaces. The pod's 500m CPU and 4 Gi count against `llms`'s root budget like any other. Chapter 18 uses this path for NCCL as the alternative to `hostNetwork`.
 
 ---
 
@@ -364,19 +364,19 @@ scripts/verify.sh gpu observability
 
 | Symptom | Cause | Diagnose | Fix |
 |---|---|---|---|
-| ClusterPolicy `notReady` | a component DaemonSet not ready | `kubectl --context spark-root -n gpu-operator get pods` → the failing one's logs | most often the validator: host driver/toolkit problem, or containerd lost the `nvidia` runtime (`grep -n nvidia /etc/containerd/config.toml`, Steps 15/16) |
+| ClusterPolicy `notReady` | a component DaemonSet not ready | `kubectl --context spark-root -n gpu-operator get pods` → the failing one's logs | most often the validator: host driver/toolkit problem, or containerd lost the `nvidia` runtime (`grep -n nvidia /etc/containerd/config.toml`, Chapters 15/16) |
 | allocatable `nvidia.com/gpu` 0 or missing | device plugin crashed / wrong config key | `kubectl --context spark-root -n gpu-operator logs ds/nvidia-device-plugin-daemonset` | fix the ConfigMap (YAML inside YAML: indentation!), delete the plugin pod |
 | Allocatable is 15 on the root but 0/stale in a vCluster | node sync lagging or the vCluster control plane down | `kubectl --context spark-root -n vc-<name> logs <name>-0 -c syncer --tail=50` | restart the vCluster pod; `scripts/verify.sh vclusters` |
-| GPU pod in a vCluster `Pending`, no events | root quota on `vc-<name>` spent, not the GPU | `kubectl --context spark-root -n vc-<name> describe resourcequota vcluster-budget` | break/fix 02, Step 04 §8 |
+| GPU pod in a vCluster `Pending`, no events | root quota on `vc-<name>` spent, not the GPU | `kubectl --context spark-root -n vc-<name> describe resourcequota vcluster-budget` | break/fix 02, Chapter 04 §8 |
 | Pod asking `nvidia.com/gpu: 2` fails with `UnexpectedAdmissionError` | `failRequestsGreaterThanOne: true` | pod status message | by design: request 1 slice (tenants are also stopped earlier by CEL `spark-gpu-slice-limits`) |
 | GFD labels missing | GFD not running or NFD disabled | `kubectl --context spark-root -n gpu-operator get pods -l app=gpu-feature-discovery` | re-enable NFD |
-| Operator tries to install a driver | values drift (`driver.enabled` true) | ClusterPolicy spec | re-run 01-Ansible `06-gpu-operator.yml` (the source of truth) |
+| Operator tries to install a driver | values drift (`driver.enabled` true) | ClusterPolicy spec | re-run 01-Ansible `20.1-gpu-operator.yml` (the source of truth) |
 | Prometheus target `spark-host-exporters` down | host node-exporter stopped or the node IP changed | `curl 192.168.0.100:9100/metrics` | `systemctl status prometheus-node-exporter`. Update the EndpointSlice |
 | No `vcluster=…` targets | Service not in the keep-regex, wrong port name, or a policy drop | `kubectl --context spark-root -n vc-llms get svc --show-labels`; `kubectl --context spark-root -n kube-system exec ds/cilium -- hubble observe --from-namespace observability --verdict DROPPED --last 20` | name the port `http`/`metrics`; re-apply `root/05-vclusters` (the boundary policy allows `observability`) |
 | KEDA in `llms` can't reach Prometheus | `default/prometheus` not replicated | `kubectl --context llms -n default get svc prometheus` | check `observability/kps-prometheus` exists on the root, then restart the vCluster pod so the syncer re-reads `networking.replicateServices`: `kubectl --context spark-root -n vc-llms delete pod llms-0` |
 | Two node-exporters fight for :9100 | kps `nodeExporter.enabled` left true | pod in CrashLoop, `bind: address already in use` | keep it false (lab values) |
 | Grafana empty panels | wrong datasource variable / metric names from a different exporter version | Explore → run the panel query | regenerate the dashboard, check metric names |
-| NicClusterPolicy not ready | DOCA/MOFED on the host missing or mismatched; Multus from `13-multus-rdma.yml` already present | `kubectl --context spark-root -n nvidia-network-operator logs …`; `kubectl --context spark-root -n kube-system get ds kube-multus-ds` | DGX OS provides the host driver — never enable `ofedDriver` on Sparks; use one Multus installer |
+| NicClusterPolicy not ready | DOCA/MOFED on the host missing or mismatched; Multus from `21.1-multus-rdma.yml` already present | `kubectl --context spark-root -n nvidia-network-operator logs …`; `kubectl --context spark-root -n kube-system get ds kube-multus-ds` | DGX OS provides the host driver — never enable `ofedDriver` on Sparks; use one Multus installer |
 | `rdma-test` stuck `ContainerCreating`, `cx7-rdma not found` | NAD in the wrong namespace | `kubectl --context spark-root get net-attach-def -A` | it must be in `vc-llms` (the pod's root namespace), not `batch` |
 
 ---
@@ -389,7 +389,7 @@ scripts/verify.sh gpu observability
 | time-slicing profile per node, budgets per vCluster | MIG profiles via `mig.config` labels (MIG Manager) on H100/B200 nodes, time-slicing on dev nodes; per-team quotas or Kueue cohorts on top |
 | textfile + optional DCGM | DCGM everywhere + DCGM health checks + NVIDIA Health Monitoring, feeding node remediation |
 | one kps on the root scraping into vClusters | Prometheus per cluster → Thanos/Mimir, long retention, SLO burn-rate alerts; tenant-facing views via label-based multi-tenancy |
-| Network Operator for 1 link, NAD per tenant namespace | SR-IOV + GPUDirect RDMA per rail, NVIDIA IPAM, `spectrum-x` or IB configurations (Step 19) |
+| Network Operator for 1 link, NAD per tenant namespace | SR-IOV + GPUDirect RDMA per rail, NVIDIA IPAM, `spectrum-x` or IB configurations (Chapter 19) |
 
 ---
 

@@ -1,4 +1,4 @@
-# Triton with an ensemble pipeline (Step 21), INSIDE vCluster #2 · llms.
+# Triton with an ensemble pipeline (Chapter 21), INSIDE vCluster #2 · llms.
 # Scraped by the root's Prometheus (root/95-observability/vcluster-workloads.yaml). Model files come from
 # ConfigMaps (kustomize) and are laid out into a repository by an init container.
 apiVersion: apps/v1
@@ -69,7 +69,7 @@ spec:
     - {name: grpc, port: 8001, targetPort: grpc, appProtocol: kubernetes.io/h2c}
     - {name: metrics, port: 8002, targetPort: metrics}
 ---
-# Load generator (Step 21 lab): perf_analyzer from the SDK image
+# Load generator (Chapter 21 lab): perf_analyzer from the SDK image
 apiVersion: batch/v1
 kind: Job
 metadata: {name: triton-perf, namespace: llm-serving}

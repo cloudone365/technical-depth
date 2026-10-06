@@ -1,4 +1,4 @@
-# Tenant isolation on the pod network INSIDE dev-lab (Steps 08, 04).
+# Tenant isolation on the pod network INSIDE dev-lab (Chapters 08, 04).
 # vCluster syncs these to the root (selectors translated to the host pods in
 # vc-dev-lab) and Cilium enforces them on the node.
 apiVersion: networking.k8s.io/v1

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""slice-ledger: a minimal Kubernetes controller with no dependencies (Step 06).
+"""slice-ledger: a minimal Kubernetes controller with no dependencies (Chapter 06).
 
 It does what every controller does, with nothing hidden behind a library:
   1. LIST pods            → build a local cache + remember resourceVersion

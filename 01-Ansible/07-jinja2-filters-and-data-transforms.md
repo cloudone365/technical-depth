@@ -1,6 +1,6 @@
-# Step 07 · Jinja2 Filters & Data Transforms: Turning Spark Command Output into Decisions
+# Chapter 07 · Jinja2 Filters & Data Transforms: Turning Spark Command Output into Decisions
 
-> **01-Ansible · Part I — Management plane & Ansible foundations · Step 07 of 30** · ← [Step 06 · Inventory: static, dynamic & discovery](06-inventory-static-dynamic-and-discovery.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 08 · Roles, collections & execution environments](08-roles-collections-and-execution-environments.md) →
+> **01-Ansible · Part I — Management plane & Ansible foundations · Chapter 07 of 30** · ← [Chapter 06 · Inventory: static, dynamic & discovery](06-inventory-static-dynamic-and-discovery.md) · [All chapters](00-ansible-step-by-step-guide.md) · [Chapter 08 · Roles, collections & execution environments](08-roles-collections-and-execution-environments.md) →
 
 | | |
 |---|---|
@@ -41,14 +41,14 @@ Run it first, then read each block:
 
 ```bash
 cd "01-Ansible/lab"
-ansible-playbook playbooks/15-jinja-lab.yml        # → "7/7 Jinja katas passed"
+ansible-playbook playbooks/07.1-jinja-lab.yml        # → "7/7 Jinja katas passed"
 ```
 
 ```yaml
-# lab/playbooks/15-jinja-lab.yml
+# lab/playbooks/07.1-jinja-lab.yml
 ---
 # Jinja2 / data-transform kata using REAL DGX Spark command output.
-# Runs on localhost (no Spark needed):  ansible-playbook playbooks/15-jinja-lab.yml
+# Runs on localhost (no Spark needed):  ansible-playbook playbooks/07.1-jinja-lab.yml
 # Each task transforms raw text → structured data and ASSERTS the result.
 - name: Jinja2 transforms on Spark data
   hosts: localhost
@@ -298,7 +298,7 @@ Replace the canned vars with live output:
 | `'dict object' has no attribute 'x'` for a key that exists | Key contains `-` or `.` | Bracket syntax: `item['insecure-registries']` |
 | Comparison of versions is wrong (`580.9 > 580.82`) | String comparison | `is version('580.82', '>=')` |
 | `combine` lost list items | `list_merge` defaults to `replace` | `list_merge='append_rp'` |
-| Output differs between localhost and AWX | Different Jinja/Ansible version in the EE | Pin ansible-core in the EE (Step 08) |
+| Output differs between localhost and AWX | Different Jinja/Ansible version in the EE | Pin ansible-core in the EE (Chapter 08) |
 
 Tools for debugging expressions:
 
@@ -310,7 +310,7 @@ ansible-console localhost      # then: debug msg="{{ ... }}"
 
 ## 5. Validation
 
-- [ ] `15-jinja-lab.yml` passes 7/7.
+- [ ] `07.1-jinja-lab.yml` passes 7/7.
 - [ ] You broke K1 by removing `map('list')` and explained the `null`.
 - [ ] You rewrote one kata against live Spark output.
 - [ ] (Stretch) The `ibdev2netdev` filter plugin exists with a pytest test.

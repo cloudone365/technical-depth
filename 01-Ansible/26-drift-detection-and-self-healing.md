@@ -1,10 +1,10 @@
-# Step 26 · Drift Detection & Self-Healing: Guarded Remediation for DGX Spark
+# Chapter 26 · Drift Detection & Self-Healing: Guarded Remediation for DGX Spark
 
-> **01-Ansible · Part V — Production operations · Step 26 of 30** · ← [Step 25 · Testing, linting & CI](25-testing-linting-and-ci.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 27 · Logging & audit compliance](27-logging-and-audit-compliance.md) →
+> **01-Ansible · Part V — Production operations · Chapter 26 of 30** · ← [Chapter 25 · Testing, linting & CI](25-testing-linting-and-ci.md) · [All chapters](00-ansible-step-by-step-guide.md) · [Chapter 27 · Logging & audit compliance](27-logging-and-audit-compliance.md) →
 
 | | |
 |---|---|
-| **You will build** | A drift loop: check mode + diff against the desired state → machine-readable report (markdown, Prometheus metrics, exit codes, drifted-host list) → metrics on the Grafana dashboard → **auto-heal only safe drift on only the drifted hosts** → re-check. Scheduled nightly as the Semaphore template `20 Drift check` on sema01 (a systemd timer or AWX are the alternatives) |
+| **You will build** | A drift loop: check mode + diff against the desired state → machine-readable report (markdown, Prometheus metrics, exit codes, drifted-host list) → metrics on the Grafana dashboard → **auto-heal only safe drift on only the drifted hosts** → re-check. Scheduled nightly as the Semaphore template `26.1 Drift check` on sema01 (a systemd timer or AWX are the alternatives) |
 | **Hardware** | 1–2× DGX Spark |
 | **Time** | 60 min |
 | **Risk** | Low for detection. Self-healing is deliberately limited to low-risk tags |
@@ -19,19 +19,19 @@
 | Package state | NVIDIA hold removed; tool uninstalled | `apt` check mode; the explicit "missing holds" signal | ✅ (holds only) |
 | Monitoring agent | timer disabled, collector edited | `gpu_telemetry` node tasks | ✅ `telemetry_node` tag |
 | Fabric | netplan edited, MTU changed | `cx7_fabric` template diff | ❌ Notify only: a wrong heal cuts the link |
-| Driver / kernel | DGX Dashboard update moved versions | Step 10 audit (loaded ≠ on-disk = reboot pending) | ❌ Route to the upgrade playbook |
+| Driver / kernel | DGX Dashboard update moved versions | Chapter 10 audit (loaded ≠ on-disk = reboot pending) | ❌ Route to the upgrade playbook |
 | Runtime | `daemon.json` edited, CDI stale | `container_runtime` diff + CDI freshness probe | ⚠️ Only when no containers are running (manual) |
-| Kubernetes host config | `/etc/containerd/config.toml` lost the CRI plugin or `SystemdCgroup = true`; `/etc/kubernetes/kubeadm-config.yaml` edited | **Not** in `20-drift-check.yml`. Run the template `05 Kubernetes` as a dry run (`--check --diff`), or from the MacBook `ansible-playbook playbooks/05-kubernetes.yml --check --diff -l dgx-spark-1,localhost -K`; auditd key `kubernetes` / `container-runtime` shows who did it (Step 27) | ❌ Never: restarting containerd restarts every pod on the node (root *and* both vClusters), and kubeadm doesn't reconcile a running control plane (the role prints the `kubeadm init phase` command instead) |
-| Kubernetes objects | someone `kubectl edit`s the `vc-llms` ResourceQuota | Not Ansible's job: `kubectl --context spark-root diff -k "../02-Kubernetes/lab/manifests/root/05-vclusters"`, or Argo CD in the 02-Kubernetes Step 28 track | Via GitOps, not this loop |
+| Kubernetes host config | `/etc/containerd/config.toml` lost the CRI plugin or `SystemdCgroup = true`; `/etc/kubernetes/kubeadm-config.yaml` edited | **Not** in `26.1-drift-check.yml`. Run the template `19.1 Kubernetes` as a dry run (`--check --diff`), or from the MacBook `ansible-playbook playbooks/19.1-kubernetes.yml --check --diff -l dgx-spark-1,localhost -K`; auditd key `kubernetes` / `container-runtime` shows who did it (Chapter 27) | ❌ Never: restarting containerd restarts every pod on the node (root *and* both vClusters), and kubeadm doesn't reconcile a running control plane (the role prints the `kubeadm init phase` command instead) |
+| Kubernetes objects | someone `kubectl edit`s the `vc-llms` ResourceQuota | Not Ansible's job: `kubectl --context spark-root diff -k "../02-Kubernetes/lab/manifests/root/05-vclusters"`, or Argo CD in the 02-Kubernetes Chapter 28 track | Via GitOps, not this loop |
 
 ```mermaid
 flowchart LR
-  T["Semaphore schedule (nightly)<br/>or systemd timer / AWX"] --> C["20-drift-check.yml<br/>--check --diff, JSON callback"]
+  T["Semaphore schedule (nightly)<br/>or systemd timer / AWX"] --> C["26.1-drift-check.yml<br/>--check --diff, JSON callback"]
   C --> R["spark_drift_report.py<br/>md · prom · hosts · exit code"]
   R -->|"spark_config_drift.prom"| NE["node_exporter textfile<br/>on monitoring host"] --> G["Grafana 'Config drift' stat<br/>+ alert"]
   R -->|exit 0| OK((clean))
-  R -->|exit 3| INC["failures/unreachable →<br/>incident (Step 29)"]
-  R -->|"exit 2 + AUTO_HEAL=1"| H["01-baseline + 04-telemetry<br/>--tags baseline,telemetry_node<br/>--limit drifted hosts"]
+  R -->|exit 3| INC["failures/unreachable →<br/>incident (Chapter 29)"]
+  R -->|"exit 2 + AUTO_HEAL=1"| H["02.2-baseline + 12.1-telemetry<br/>--tags baseline,telemetry_node<br/>--limit drifted hosts"]
   H --> C2["re-check"] --> R2{"still drift?"}
   R2 -->|yes| TKT["notify: human needed"]
   R2 -->|no| OK
@@ -48,7 +48,7 @@ Drift detection is only as good as your roles' behaviour under `--check`. Three 
 | **Read-only probes run in check mode too:** `check_mode: false` on `command`/`shell` tasks with `changed_when: false` | Otherwise they're *skipped*, their registered vars are empty, and later tasks error or evaluate wrongly | every probe task in every role |
 | **Surface skipped actions as `changed`** | `command` tasks that *would* act are reported as skipped, not changed, so the drift is invisible | "Report missing holds…" (`spark_baseline`), "Report a stale CDI spec…" (`container_runtime`), "Report runtime drift…" (`cx7_fabric`) |
 | **Compare runtime state, not only files** | A perfect netplan file says nothing about a live `ip link set mtu 1500` | `cx7_fabric` reads live MTU and re-applies netplan when it diverges |
-| **Idempotence = zero noise** | A task that's always `changed` makes every run look drifted | Molecule idempotence step (Step 25) |
+| **Idempotence = zero noise** | A task that's always `changed` makes every run look drifted | Molecule idempotence step (Chapter 25) |
 
 ```yaml
 # pattern 1 — probe must run under --check
@@ -71,10 +71,10 @@ Drift detection is only as good as your roles' behaviour under `--check`. Three 
 ## 3. The pieces
 
 ```yaml
-# lab/playbooks/20-drift-check.yml
+# lab/playbooks/26.1-drift-check.yml
 ---
 # Drift = what WOULD change if we applied desired state now.
-#   ANSIBLE_STDOUT_CALLBACK=ansible.posix.json ansible-playbook playbooks/20-drift-check.yml \
+#   ANSIBLE_STDOUT_CALLBACK=ansible.posix.json ansible-playbook playbooks/26.1-drift-check.yml \
 #     > .cache/drift.json; python3 tools/spark_drift_report.py .cache/drift.json
 - name: Short-lived SSH certificate from vault01 (Semaphore runs only)
   ansible.builtin.import_playbook: 00-vault-cert.yml
@@ -104,7 +104,7 @@ spark_drift_report.py — turn an Ansible check-mode run into a drift report.
 
 Usage:
   ANSIBLE_STDOUT_CALLBACK=ansible.posix.json \
-    ansible-playbook playbooks/20-drift-check.yml > .cache/drift.json
+    ansible-playbook playbooks/26.1-drift-check.yml > .cache/drift.json
   python3 tools/spark_drift_report.py .cache/drift.json [--markdown out.md] [--prom out.prom]
 
 Exit codes (so cron / AWX / CI can act on it):
@@ -231,7 +231,7 @@ if __name__ == "__main__":
 #   tools/drift-cycle.sh                 # detect + report only (exit 0 clean, 2 drift, 3 failures)
 #   AUTO_HEAL=1 tools/drift-cycle.sh     # also re-apply safe tags on drifted hosts only
 #
-# Run from cron/systemd on the control node, or as an AWX job (Step 24).
+# Run from cron/systemd on the control node, or as an AWX job (Chapter 24).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 export ANSIBLE_CONFIG=$PWD/ansible.cfg
@@ -242,7 +242,7 @@ BECOME_ARGS=${BECOME_ARGS:-}                          # e.g. "--become-password-
 
 run_check() {
   ANSIBLE_STDOUT_CALLBACK=ansible.posix.json ANSIBLE_CALLBACKS_ENABLED= \
-    ansible-playbook playbooks/20-drift-check.yml $BECOME_ARGS > "$OUT/$1.json" 2> "$OUT/$1.stderr"
+    ansible-playbook playbooks/26.1-drift-check.yml $BECOME_ARGS > "$OUT/$1.json" 2> "$OUT/$1.stderr"
   python3 tools/spark_drift_report.py "$OUT/$1.json" \
     --markdown "$OUT/$1.md" --prom "$OUT/spark_config_drift.prom" --drifted-hosts "$OUT/$1.hosts"
 }
@@ -250,7 +250,7 @@ run_check() {
 run_check "check-$TS"; rc=$?
 echo "drift check exit=$rc  report=$OUT/check-$TS.md"
 
-# Publish metrics to the monitoring host's textfile collector (Step 12 dashboard shows it)
+# Publish metrics to the monitoring host's textfile collector (Chapter 12 dashboard shows it)
 ansible monitoring -b -m ansible.builtin.copy \
   -a "src=$OUT/spark_config_drift.prom dest=/var/lib/prometheus/node-exporter/spark_config_drift.prom mode=0644" \
   $BECOME_ARGS >/dev/null || echo "WARN: could not publish drift metrics"
@@ -258,7 +258,7 @@ ansible monitoring -b -m ansible.builtin.copy \
 if [[ $rc -eq 2 && "${AUTO_HEAL:-0}" == "1" ]]; then
   HOSTS=$(cat "$OUT/check-$TS.hosts")
   echo "auto-heal: tags=$SAFE_TAGS hosts=$HOSTS"
-  ansible-playbook playbooks/01-baseline.yml playbooks/04-telemetry.yml \
+  ansible-playbook playbooks/02.2-baseline.yml playbooks/12.1-telemetry.yml \
     --limit "$HOSTS" --tags "$SAFE_TAGS" $BECOME_ARGS > "$OUT/heal-$TS.log" 2>&1
   run_check "recheck-$TS"; rc=$?
   echo "post-heal exit=$rc  report=$OUT/recheck-$TS.md"
@@ -274,7 +274,7 @@ exit $rc
 
 Two ways to run the same check:
 
-- **Semaphore template `20 Drift check`** (`20-drift-check.yml`, check mode built in, CLI args `--limit dgx-spark-1,localhost` while there's one Spark). Play 1 gets the certificate; the host play changes nothing. The task log shows drift as `changed=N` in the recap, and `--diff` shows the lines. This is what runs every night (§4.4).
+- **Semaphore template `26.1 Drift check`** (`26.1-drift-check.yml`, check mode built in, CLI args `--limit dgx-spark-1,localhost` while there's one Spark). Play 1 gets the certificate; the host play changes nothing. The task log shows drift as `changed=N` in the recap, and `--diff` shows the lines. This is what runs every night (§4.4).
 - **`tools/drift-cycle.sh`** wraps the same playbook with the JSON callback, the report, the Prometheus metric and the guarded heal. It runs `ansible-playbook` itself, so it runs where you have the repository and a login: your MacBook (as `dgxadmin`, pass `BECOME_ARGS=-K`). Its output goes to `$SPARK_LAB_CACHE/drift`, or `.cache/drift` when that's unset. The script has no limit option: with one Spark, add the limit through `BECOME_ARGS`, which it passes to every Ansible command: `BECOME_ARGS="-K -l dgx-spark-1,localhost" tools/drift-cycle.sh`.
 
 ```bash
@@ -302,7 +302,7 @@ Expected report (abridged):
 - DRIFT `Report missing holds as drift in check mode` (…)
 ```
 
-The Grafana "Config drift (tasks)" stat on the overview dashboard (Step 12) turns orange for dgx-spark-2.
+The Grafana "Config drift (tasks)" stat on the overview dashboard (Chapter 12) turns orange for dgx-spark-2.
 
 ### 4.3 Heal (safe tags only) and confirm
 
@@ -312,7 +312,7 @@ AUTO_HEAL=1 tools/drift-cycle.sh; echo "exit=$?"     # → heal on dgx-spark-2 o
 
 ### 4.4 Schedule it
 
-**In Semaphore (this lab):** open the template `20 Drift check` → **Schedules** → add a cron expression such as `30 2 * * *` (nightly). It needs no extra permissions: it runs in check mode as `svc-ansible` with a fresh certificate each night. Semaphore marks the run **failed** only on task failures or unreachable hosts, so add a project alert (Step 04 §9) and read the recap's `changed=` count for drift. If you want drift itself to page you, keep the metric path: run `tools/drift-cycle.sh` and alert on `spark_config_drift_tasks > 0` (§5). Never schedule `01 Baseline` as an "auto-heal" template: healing stays the guarded, tag-limited step below, or a human click.
+**In Semaphore (this lab):** open the template `26.1 Drift check` → **Schedules** → add a cron expression such as `30 2 * * *` (nightly). It needs no extra permissions: it runs in check mode as `svc-ansible` with a fresh certificate each night. Semaphore marks the run **failed** only on task failures or unreachable hosts, so add a project alert (Chapter 04 §9) and read the recap's `changed=` count for drift. If you want drift itself to page you, keep the metric path: run `tools/drift-cycle.sh` and alert on `spark_config_drift_tasks > 0` (§5). Never schedule `02.2 Baseline` as an "auto-heal" template: healing stays the guarded, tag-limited step below, or a human click.
 
 **Alternative: a systemd timer** on a Linux machine with the repository and a login to the Sparks:
 
@@ -338,7 +338,7 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-Or use AWX: the Step 24 workflow (drift → **approval** → remediate) adds what Semaphore lacks, an approval step, once more than one person operates the lab and a human must approve anything beyond the safe tags.
+Or use AWX: the Chapter 24 workflow (drift → **approval** → remediate) adds what Semaphore lacks, an approval step, once more than one person operates the lab and a human must approve anything beyond the safe tags.
 
 ---
 
@@ -346,11 +346,11 @@ Or use AWX: the Step 24 workflow (drift → **approval** → remediate) adds wha
 
 | System | Role |
 |---|---|
-| Prometheus/Grafana (Step 12) | `spark_config_drift_tasks`, `spark_config_drift_failures` per host; alert on `> 0 for 2h` |
-| Semaphore (Step 04 §9) | Nightly schedule on `20 Drift check`; task history is the audit trail of every check |
-| AWX (Step 24) | Alternative: schedules plus an approval workflow; job history is the audit trail |
-| Logging (Step 27) | Reports and heal logs in `drift/` of the state folder; `ansible.log` records every run (on sema01: the state volume) |
-| Upgrades (Step 10) | Driver/kernel drift routes here rather than to self-heal |
+| Prometheus/Grafana (Chapter 12) | `spark_config_drift_tasks`, `spark_config_drift_failures` per host; alert on `> 0 for 2h` |
+| Semaphore (Chapter 04 §9) | Nightly schedule on `26.1 Drift check`; task history is the audit trail of every check |
+| AWX (Chapter 24) | Alternative: schedules plus an approval workflow; job history is the audit trail |
+| Logging (Chapter 27) | Reports and heal logs in `drift/` of the state folder; `ansible.log` records every run (on sema01: the state volume) |
+| Upgrades (Chapter 10) | Driver/kernel drift routes here rather than to self-heal |
 
 ## 6. Troubleshooting & diagnostics
 

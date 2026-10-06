@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""BF16 GEMM throughput + UMA facts (Steps 15, 16, 17; Step 27 ex. 19).
+"""BF16 GEMM throughput + UMA facts (Chapters 15, 16, 17; Chapter 27 ex. 19).
 
 Prints one JSON line per run so results can be grepped / compared:
   {"pod": ..., "tflops": ..., "mem_total_gib": ..., "cc": "12.1"}

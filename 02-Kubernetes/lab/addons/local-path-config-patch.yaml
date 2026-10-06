@@ -1,4 +1,4 @@
-# Merge-patch for local-path-provisioner's ConfigMap (Step 13): root every
+# Merge-patch for local-path-provisioner's ConfigMap (Chapter 13): root every
 # volume at /data/k8s on the NVMe instead of /opt/local-path-provisioner.
 # Applied by scripts/install-addons.sh storage (and the 01-Ansible vclusters
 # role) with:  kubectl -n local-path-storage patch configmap local-path-config \

@@ -1,5 +1,5 @@
 ---
-# Two virtual clusters inside the root cluster (02-Kubernetes Step 04):
+# Two virtual clusters inside the root cluster (02-Kubernetes Chapter 04):
 #   vCluster #1 dev-lab : 2 CPU · 8 Gi · 2 GPU slices     → https://192.168.0.111
 #   vCluster #2 llms    : 12 CPU · 88 Gi · 11 GPU slices  → https://192.168.0.112
 # The root keeps the rest (3 CPU · ~10 GiB · 2 slices, after the kubelet's
@@ -8,7 +8,7 @@
 # Definitions come from "02-Kubernetes/lab/vclusters" and
 # "02-Kubernetes/lab/manifests/root/05-vclusters" — edit them there.
 #
-#   ansible-playbook playbooks/06b-vclusters.yml
+#   ansible-playbook playbooks/20.2-vclusters.yml
 - name: VClusters dev-lab and llms
   hosts: localhost
   connection: local

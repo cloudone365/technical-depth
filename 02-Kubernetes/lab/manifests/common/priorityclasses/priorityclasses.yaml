@@ -1,4 +1,4 @@
-# Who wins when the single Spark is full (Step 07).
+# Who wins when the single Spark is full (Chapter 07).
 # Order: platform > serving > interactive > batch > preemptible.
 #
 # The root and both vClusters create these same classes (this file is included
@@ -6,7 +6,7 @@
 # to the root with translated names, so ONE scheduler — the root's — compares pods from both
 # vClusters and the platform. A pod at spark-serving in llms can preempt a
 # spark-preemptible pod in dev-lab. That is the point of a shared GPU, and the
-# reason tenants must not be allowed to create PriorityClasses (Step 07 §7).
+# reason tenants must not be allowed to create PriorityClasses (Chapter 07 §7).
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata: {name: spark-platform}

@@ -1,4 +1,4 @@
-# One benchmark run on one time-slice: the baseline for Step 16's contention lab.
+# One benchmark run on one time-slice: the baseline for Chapter 16's contention lab.
 apiVersion: batch/v1
 kind: Job
 metadata: {name: gemm-solo, namespace: platform-tools}

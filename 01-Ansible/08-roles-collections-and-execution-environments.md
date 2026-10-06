@@ -1,6 +1,6 @@
-# Step 08 · Roles, Collections & Execution Environments for the Spark Lab
+# Chapter 08 · Roles, Collections & Execution Environments for the Spark Lab
 
-> **01-Ansible · Part I — Management plane & Ansible foundations · Step 08 of 30** · ← [Step 07 · Jinja2 filters & data transforms](07-jinja2-filters-and-data-transforms.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 09 · Performance at scale: SSH mux & Mitogen](09-performance-at-scale-ssh-mux-and-mitogen.md) →
+> **01-Ansible · Part I — Management plane & Ansible foundations · Chapter 08 of 30** · ← [Chapter 07 · Jinja2 filters & data transforms](07-jinja2-filters-and-data-transforms.md) · [All chapters](00-ansible-step-by-step-guide.md) · [Chapter 09 · Performance at scale: SSH mux & Mitogen](09-performance-at-scale-ssh-mux-and-mitogen.md) →
 
 | | |
 |---|---|
@@ -39,7 +39,7 @@ flowchart LR
 
 **Why three layers?** Roles are the unit of **logic**. Collections are the unit of **versioning and distribution**. EEs are the unit of **runtime**, which ends "works on my laptop" because the Python, collection and binary versions are frozen together in one image.
 
-**This lab's runtime today is simpler.** Semaphore on `sema01` runs the playbooks straight from its git checkout of the repository (roles via `ANSIBLE_CONFIG="01-Ansible/lab/ansible.cfg"`), in an image built from [`lab/semaphore/Dockerfile`](lab/semaphore/Dockerfile): the stock `semaphoreui/semaphore` plus kubectl, helm, the Python libraries in `requirements-semaphore.txt` and the collections in `requirements.yml` ([Step 04 §4](04-dgx-spark-as-semaphore-target.md)). It is the same idea as an EE, frozen tools in one image, without ansible-builder. The collection and the EE below are what you'd ship when other teams, AWX or CI consume the lab.
+**This lab's runtime today is simpler.** Semaphore on `sema01` runs the playbooks straight from its git checkout of the repository (roles via `ANSIBLE_CONFIG="01-Ansible/lab/ansible.cfg"`), in an image built from [`lab/semaphore/Dockerfile`](lab/semaphore/Dockerfile): the stock `semaphoreui/semaphore` plus kubectl, helm, the Python libraries in `requirements-semaphore.txt` and the collections in `requirements.yml` ([Chapter 04 §4](04-dgx-spark-as-semaphore-target.md)). It is the same idea as an EE, frozen tools in one image, without ansible-builder. The collection and the EE below are what you'd ship when other teams, AWX or CI consume the lab.
 
 ---
 
@@ -151,7 +151,7 @@ rm -rf "$OUT" && mkdir -p "$OUT"/{roles,plugins/inventory,playbooks,meta}
 cp -r "$LAB"/roles/* "$OUT/roles/"
 find "$OUT/roles" -type d -name molecule -prune -exec rm -rf {} +
 cp "$LAB"/inventory_plugins/spark_mdns.py "$OUT/plugins/inventory/"
-cp "$LAB"/playbooks/{01-baseline,02-fabric,03-containers,20-drift-check,21-emergency-drain,30-validate}.yml "$OUT/playbooks/"
+cp "$LAB"/playbooks/{02.2-baseline,13.1-fabric,11.1-containers,26.1-drift-check,29.1-emergency-drain,30.1-validate}.yml "$OUT/playbooks/"
 # roles referenced by short name inside playbooks resolve inside the collection namespace
 sed -i 's/- role: \([a-z_]*\)/- role: cloudone.spark.\1/' "$OUT"/playbooks/*.yml
 cat > "$OUT/galaxy.yml" <<YML
@@ -250,7 +250,7 @@ docker buildx build --platform linux/arm64,linux/amd64 -t ghcr.io/cloudone365/sp
 Run playbooks through the EE, exactly as AWX will:
 
 ```bash
-ansible-navigator run playbooks/30-validate.yml --eei spark-ee:1.0 --mode stdout \
+ansible-navigator run playbooks/30.1-validate.yml --eei spark-ee:1.0 --mode stdout \
   --pae false -i inventory --become-password-file <(echo "$SUDO_PW")
 ```
 
@@ -270,9 +270,9 @@ Freeze what actually ran: `pip freeze > .cache/pip.lock` and `ansible-galaxy col
 
 ## 4. Integrations
 
-- **Semaphore (Step 04):** after changing `requirements.yml` or `requirements-semaphore.txt`, rebuild the image on sema01 (`git -C ~/technical-depth pull && docker compose build semaphore && docker compose up -d`). Pin the base tag there the way you pin the EE digest.
-- **AWX (Steps 23, 24):** set `spark-ee:1.0` as the org's default EE. The job pods then have every collection the lab needs.
-- **CI (Step 25):** the same EE image runs lint, syntax-check and Molecule, so CI and prod can't drift.
+- **Semaphore (Chapter 04):** after changing `requirements.yml` or `requirements-semaphore.txt`, rebuild the image on sema01 (`git -C ~/technical-depth pull && docker compose build semaphore && docker compose up -d`). Pin the base tag there the way you pin the EE digest.
+- **AWX (Chapters 23, 24):** set `spark-ee:1.0` as the org's default EE. The job pods then have every collection the lab needs.
+- **CI (Chapter 25):** the same EE image runs lint, syntax-check and Molecule, so CI and prod can't drift.
 - **Release flow:** tag → build the collection → build the EE with that collection → AWX points at the EE digest.
 
 ## 5. Troubleshooting & diagnostics

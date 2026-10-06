@@ -1,5 +1,5 @@
 # In-process admission with CEL — no webhook server to run or to time out
-# (Step 03). admissionregistration.k8s.io/v1 is GA since Kubernetes 1.30.
+# (Chapter 03). admissionregistration.k8s.io/v1 is GA since Kubernetes 1.30.
 #
 # P1  no ':latest' / untagged images in tenant namespaces
 # P2  at most one GPU slice per container (the API server itself already

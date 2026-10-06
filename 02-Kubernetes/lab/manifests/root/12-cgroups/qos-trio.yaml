@@ -1,4 +1,4 @@
-# Three pods, three QoS classes (Step 14 §5.2), on the ROOT in platform-tools.
+# Three pods, three QoS classes (Chapter 14 §5.2), on the ROOT in platform-tools.
 # Compare their cgroups with
 #   scripts/cgroup-inspect.sh platform-tools qos-guaranteed   (… -burstable, -besteffort)
 # Why not in a vCluster? A memory quota (the root quota on every vc-* namespace)

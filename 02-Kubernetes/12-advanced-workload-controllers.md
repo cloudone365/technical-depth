@@ -1,6 +1,6 @@
-# Step 12 · Advanced Workload Controllers: StatefulSets, DaemonSets, Indexed Jobs & Disruption Budgets for AI
+# Chapter 12 · Advanced Workload Controllers: StatefulSets, DaemonSets, Indexed Jobs & Disruption Budgets for AI
 
-> **02-Kubernetes · Part IV — Workloads, storage & tenancy · Step 12 of 28** · ← [Step 11 · Ingress controllers & Gateway API](11-ingress-controllers-and-gateway-api.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 13 · Storage, CSI & high-performance volumes](13-storage-csi-and-high-performance-volumes.md) →
+> **02-Kubernetes · Part IV — Workloads, storage & tenancy · Chapter 12 of 28** · ← [Chapter 11 · Ingress controllers & Gateway API](11-ingress-controllers-and-gateway-api.md) · [All chapters](00-kubernetes-step-by-step-guide.md) · [Chapter 13 · Storage, CSI & high-performance volumes](13-storage-csi-and-high-performance-volumes.md) →
 
 | | |
 |---|---|
@@ -110,7 +110,7 @@ flowchart TB
 | `updateStrategy.rollingUpdate.partition` | 0 | raise it to canary a new version on the highest ordinal only |
 | probes | `/readyz`, `/livez` | |
 | PDB `qdrant` | `maxUnavailable: 0` | one replica = only copy. Drain must stop |
-| PDB `mock-llm` | `minAvailable: 1` | the 2-replica mock API (Step 11) keeps one pod through a drain |
+| PDB `mock-llm` | `minAvailable: 1` | the 2-replica mock API (Chapter 11) keeps one pod through a drain |
 
 ### 3.2 Node probe DaemonSet (root)
 
@@ -119,7 +119,7 @@ flowchart TB
 | namespace | `platform-tools` on the **root** (PSA `privileged`: hostPath). `vc-dev-lab` enforces `baseline`, which forbids hostPath, so node-level tools can't live in a vCluster here |
 | `nodeSelector` | `spark.lab/gpu: gb10` (set by the 01-Ansible `kubeadm_cluster` role's kubelet node labels; lab-owned, so GFD's `-SHARED` renaming can't break it) |
 | tolerations | `operator: Exists` (runs on cordoned/tainted GPU nodes too) |
-| GPU access | env `NVIDIA_VISIBLE_DEVICES=all`: *observe* without consuming one of the 15 slices — it works because containerd's default runtime is `nvidia` (Step 16 §3) |
+| GPU access | env `NVIDIA_VISIBLE_DEVICES=all`: *observe* without consuming one of the 15 slices — it works because containerd's default runtime is `nvidia` (Chapter 16 §3) |
 | output | `spark_probe_gpu_temp_celsius`, `spark_probe_mem_available_bytes` into the host textfile dir the 01-Ansible `gpu_telemetry` role created |
 | priority | `spark-platform` |
 | resources | 10m · 16 Mi request, 64 Mi limit |
@@ -152,11 +152,11 @@ Long names are shortened with a hash, so find a host copy through the annotation
 
 ## 4. Integrations
 
-- **Storage (Step 13)**: `local-nvme-retain` comes from the root (synced into llms with `sync.fromHost.storageClasses`). Qdrant's data ends up at `/data/k8s/retain/vc-llms/data-qdrant-0-x-llm-serving-x-llms` on the NVMe — the path uses the *root* namespace and PVC name, because the root's provisioner is the one that created it.
+- **Storage (Chapter 13)**: `local-nvme-retain` comes from the root (synced into llms with `sync.fromHost.storageClasses`). Qdrant's data ends up at `/data/k8s/retain/vc-llms/data-qdrant-0-x-llm-serving-x-llms` on the NVMe — the path uses the *root* namespace and PVC name, because the root's provisioner is the one that created it.
 - **RAG (modules 03 and 04)**: their retrieval services use `http://qdrant.llm-serving:6333` — a name that only resolves inside llms. From dev-lab the root's Cilium `vcluster-boundary` policy drops the connection anyway.
-- **Observability (Step 17)**: the probe metrics appear next to the 01-Ansible `spark_gpu_*` metrics (scraped through `observability/spark-host-exporters`), and the Grafana dashboard uses both.
-- **Kueue (Step 07)**: the tokenizer job can be queued too — in llms, not dev-lab (Kueue is installed only there). Add `kueue.x-k8s.io/queue-name: train` and move it to `batch`.
-- **01-Ansible**: `playbooks/21-emergency-drain.yml` (role `node_drain`) automates cordon → capture → stop → reboot → validate → return for a root node.
+- **Observability (Chapter 17)**: the probe metrics appear next to the 01-Ansible `spark_gpu_*` metrics (scraped through `observability/spark-host-exporters`), and the Grafana dashboard uses both.
+- **Kueue (Chapter 07)**: the tokenizer job can be queued too — in llms, not dev-lab (Kueue is installed only there). Add `kueue.x-k8s.io/queue-name: train` and move it to `batch`.
+- **01-Ansible**: `playbooks/29.1-emergency-drain.yml` (role `node_drain`) automates cordon → capture → stop → reboot → validate → return for a root node.
 
 ---
 
@@ -326,7 +326,7 @@ vc-llms     mock-llm-x-llm-serving-x-llms    1               N/A               1
 vc-llms     qdrant-x-llm-serving-x-llms      N/A             0                 0
 ```
 
-(`mock-llm` appears once Step 11's `llms/40-ingress` is applied.) The syncer copied them because [`vclusters/llms.yaml`](lab/vclusters/llms.yaml) sets `sync.toHost.podDisruptionBudgets.enabled: true`, and rewrote their selectors to match the host copies of the pods. Now ask the root what a drain would do:
+(`mock-llm` appears once Chapter 11's `llms/40-ingress` is applied.) The syncer copied them because [`vclusters/llms.yaml`](lab/vclusters/llms.yaml) sets `sync.toHost.podDisruptionBudgets.enabled: true`, and rewrote their selectors to match the host copies of the pods. Now ask the root what a drain would do:
 
 ```bash
 scripts/breakfix.sh inject 11          # (re)applies llms/50-workloads and prints the drain command
@@ -385,10 +385,10 @@ Note who does what: the *tenant* (llms admin) scales Qdrant; the *platform* (roo
 | Symptom | Cause | Diagnose | Fix |
 |---|---|---|---|
 | StatefulSet stuck at `qdrant-0` Pending | PVC can't bind (StorageClass missing on the root, or node-affinity of an old PV) | `kubectl --context llms -n llm-serving describe pvc data-qdrant-0` (events copied from the root PVC) | `scripts/install-addons.sh storage`. Delete a stale PV on the root only if you mean to lose data |
-| `qdrant-0` Pending in llms with a sync error, no scheduler events | root quota on `vc-llms` spent (memory or `requests.storage`) | `kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget` | free capacity in llms or resize the vCluster (Step 04 §6.5) |
+| `qdrant-0` Pending in llms with a sync error, no scheduler events | root quota on `vc-llms` spent (memory or `requests.storage`) | `kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget` | free capacity in llms or resize the vCluster (Chapter 04 §6.5) |
 | Rolling update stuck on the highest ordinal | new pod never Ready (bad image/config), and OrderedReady waits forever | `kubectl --context llms -n llm-serving rollout status sts/qdrant`, pod events | fix the spec, then **delete the stuck pod** (StatefulSets don't auto-replace a broken new revision) |
 | Data "lost" after `kubectl delete sts` | you also deleted PVCs, or reclaimPolicy was Delete | `kubectl --context spark-root get pv \| grep qdrant` | use `local-nvme-retain` + retention policy Retain (as in the lab) |
-| DaemonSet `DESIRED 0` | nodeSelector label missing (node joined without the role's kubelet labels) | `kubectl --context spark-root get nodes -L spark.lab/gpu` | re-run `05-kubernetes.yml`, or `kubectl --context spark-root label node dgx-spark-1 spark.lab/gpu=gb10` |
+| DaemonSet `DESIRED 0` | nodeSelector label missing (node joined without the role's kubelet labels) | `kubectl --context spark-root get nodes -L spark.lab/gpu` | re-run `19.1-kubernetes.yml`, or `kubectl --context spark-root label node dgx-spark-1 spark.lab/gpu=gb10` |
 | DaemonSet pod rejected by PSA | applied into a `baseline` namespace (e.g. a vCluster) | the `FailedCreate` event names `hostPath` | node-level tools go in root `platform-tools` |
 | Job creates fewer pods than `parallelism` | tenant quota inside dev-lab | `kubectl --context dev-lab -n tenant-alpha get events` → `exceeded quota: tenant-budget` | lower parallelism or requests; the quota is the platform team's (dev-lab/10-tenancy) |
 | Job `BackoffLimitExceeded` | one bad shard exhausted a job-wide `backoffLimit` | `kubectl --context dev-lab -n tenant-alpha describe job tokenize-shards` | `backoffLimitPerIndex` + `podFailurePolicy` |

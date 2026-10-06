@@ -4,8 +4,8 @@
 # This is what the DGX Dashboard "Update" button does, wrapped in the safety
 # steps a shared/multi-node lab needs.
 #
-#   ansible-playbook playbooks/17-dgxos-upgrade.yml -l dgx-spark-2 -K
-#   ansible-playbook playbooks/17-dgxos-upgrade.yml -K -e upgrade_dry_run=true   # show what would change
+#   ansible-playbook playbooks/10.2-dgxos-upgrade.yml -l dgx-spark-2 -K
+#   ansible-playbook playbooks/10.2-dgxos-upgrade.yml -K -e upgrade_dry_run=true   # show what would change
 - name: Short-lived SSH certificate from vault01 (Semaphore runs only)
   ansible.builtin.import_playbook: 00-vault-cert.yml
 
@@ -17,7 +17,7 @@
   vars:
     upgrade_dry_run: false
     upgrade_reboot: true
-    upgrade_firmware: false          # fwupd capsules (UEFI/EC/SoC/PD/VBIOS) — see Step 28
+    upgrade_firmware: false          # fwupd capsules (UEFI/EC/SoC/PD/VBIOS) — see Chapter 28
   pre_tasks:
     - name: What would be upgraded  # noqa: command-instead-of-module (apt module has no simulate-output mode)
       ansible.builtin.command: apt-get -s full-upgrade

@@ -9,7 +9,7 @@
     that: not kubeadm_cluster_k3s.stat.exists
     fail_msg: >-
       k3s is still installed on {{ inventory_hostname }}. Back up anything you need, then run
-      ansible-playbook playbooks/99-reset-kubernetes.yml -e reset_remove_k3s=true
+      ansible-playbook playbooks/19.2-reset-kubernetes.yml -e reset_remove_k3s=true
     quiet: true
 
 - name: Sanity — nvidia-container-runtime must exist for GPU pods

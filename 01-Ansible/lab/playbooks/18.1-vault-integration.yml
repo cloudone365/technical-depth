@@ -1,13 +1,13 @@
 ---
 # HashiCorp Vault ↔ Ansible, the production pattern, run as a Semaphore task
-# (01-Ansible Step 18, Step 04 §6):
+# (01-Ansible Chapter 18, Chapter 04 §6):
 #   1. Semaphore's variable group holds the AppRole role_id + secret_id (encrypted)
 #   2. play 1 (00-vault-cert.yml) logs in → short-lived token (10 min, policies
 #      semaphore-ssh + spark-lab-read) and gets a 15-minute SSH certificate
 #   3. with vault_lab_secrets_enabled=true the same token reads kv/spark-lab/*
 #   4. the secrets are used on the Sparks — never written to the repo or the task log
 #
-# Semaphore template "19 Vault integration" (variable group vault-approle,
+# Semaphore template "18.1 Vault integration" (variable group vault-approle,
 # extra variable vault_lab_secrets_enabled=true). From the MacBook there is no
 # AppRole, so the play below stops with an explanation.
 - name: Short-lived SSH certificate from vault01 (Semaphore runs only)
@@ -25,7 +25,7 @@
           - vault_lab_secrets_enabled | bool
         fail_msg: >-
           Run it from Semaphore with the vault-approle variable group and
-          vault_lab_secrets_enabled=true (Step 04 §6). 08-vault.yml must have run once.
+          vault_lab_secrets_enabled=true (Chapter 04 §6). 17.1-vault.yml must have run once.
         quiet: true
 
     - name: What we got (no secret values)

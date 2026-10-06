@@ -1,7 +1,7 @@
 ---
 # Loaded after hosts.yml (alphabetical). Builds groups from *facts* — including
 # the custom ansible_local.spark facts — read from the fact cache.
-# Run any play with facts once (e.g. 00-ping.yml) to populate the cache.
+# Run any play with facts once (e.g. 02.1-ping.yml) to populate the cache.
 plugin: ansible.builtin.constructed
 strict: false
 groups:

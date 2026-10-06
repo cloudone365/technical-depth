@@ -4,7 +4,7 @@
 # Cilium was installed with cni.exclusive=false (roles/cilium) so it leaves Multus's
 # config alone in /etc/cni/net.d.
 #
-#   ansible-playbook playbooks/13-multus-rdma.yml
+#   ansible-playbook playbooks/21.1-multus-rdma.yml
 - name: Multus + RDMA on the root cluster
   hosts: localhost
   connection: local
@@ -73,7 +73,7 @@
               spark.lab/tier: platform
               pod-security.kubernetes.io/enforce: privileged
 
-    - name: Which NAD namespaces exist (vc-llms appears once playbook 06b has run)?
+    - name: Which NAD namespaces exist (vc-llms appears once playbook 20.2 has run)?
       kubernetes.core.k8s_info:
         kind: Namespace
       register: multus_ns

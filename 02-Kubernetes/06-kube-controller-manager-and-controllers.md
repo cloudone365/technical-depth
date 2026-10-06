@@ -1,6 +1,6 @@
-# Step 06 · kube-controller-manager & Controllers: Reconciliation Loops, Informers, Leader Election & Writing Your Own
+# Chapter 06 · kube-controller-manager & Controllers: Reconciliation Loops, Informers, Leader Election & Writing Your Own
 
-> **02-Kubernetes · Part II — Controllers & scheduling · Step 06 of 28** · ← [Step 05 · DGX Spark datacenter simulation lab](05-dgx-spark-datacenter-simulation-lab.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 07 · kube-scheduler & AI batch scheduling](07-kube-scheduler-and-ai-batch-scheduling.md) →
+> **02-Kubernetes · Part II — Controllers & scheduling · Chapter 06 of 28** · ← [Chapter 05 · DGX Spark datacenter simulation lab](05-dgx-spark-datacenter-simulation-lab.md) · [All chapters](00-kubernetes-step-by-step-guide.md) · [Chapter 07 · kube-scheduler & AI batch scheduling](07-kube-scheduler-and-ai-batch-scheduling.md) →
 
 | | |
 |---|---|
@@ -50,7 +50,7 @@ flowchart LR
 Three properties make this robust, and each one is a debugging clue:
 
 1. **Level-triggered, not edge-triggered.** `reconcile(key)` looks at the *current* state and makes it right, whatever event arrived. Missing an event is harmless. The next resync fixes it.
-2. **Idempotent writes.** Writing the same desired state twice changes nothing. A controller that writes on every loop is a *hot loop*, and it shows up as etcd churn (Step 02) and API load (Step 03 APF) — at the root even when the loop is inside a vCluster, because the syncer forwards every pod change.
+2. **Idempotent writes.** Writing the same desired state twice changes nothing. A controller that writes on every loop is a *hot loop*, and it shows up as etcd churn (Chapter 02) and API load (Chapter 03 APF) — at the root even when the loop is inside a vCluster, because the syncer forwards every pod change.
 3. **One active leader.** Two copies of the same controller fighting over an object is the classic "flapping" bug. Leases prevent it.
 
 ### 2.1 Who reconciles what in the nested lab
@@ -100,11 +100,11 @@ A tenant's Deployment never reaches the root. Its **ReplicaSet and Pods are crea
 | Job (+ Indexed) | kube-controller-manager | each | Jobs, Pods | Pods, Job status | `JOB_COMPLETION_INDEX`, `backoffLimitPerIndex` |
 | ResourceQuota | kube-controller-manager | **both layers**: dev-lab computes `tenant-budget`, the root computes `vcluster-budget` | quota'd objects | `status.used` | §5.3 |
 | Garbage collector | kube-controller-manager | each | everything with `ownerReferences` | deletes | cascade vs orphan (§5.4) |
-| Node lifecycle, node IPAM | kube-controller-manager | **root only** (vClusters have no real nodes) | Nodes, Leases in `kube-node-lease` | taints `not-ready`/`unreachable`, `spec.podCIDR` | Step 26, Step 08 |
-| PV binder | kube-controller-manager | **root only** (a tenant PVC is bound as its host copy) | PVCs, PVs | bindings | Step 13 |
+| Node lifecycle, node IPAM | kube-controller-manager | **root only** (vClusters have no real nodes) | Nodes, Leases in `kube-node-lease` | taints `not-ready`/`unreachable`, `spec.podCIDR` | Chapter 26, Chapter 08 |
+| PV binder | kube-controller-manager | **root only** (a tenant PVC is bound as its host copy) | PVCs, PVs | bindings | Chapter 13 |
 | vCluster syncer | `dev-lab-0` / `llms-0` pods | vCluster ⇄ root | pods, Services, PVCs, Secrets, ConfigMaps, NetworkPolicies, PriorityClasses, PDBs (virtual); nodes, StorageClasses, pod status (host) | host copies; virtual status/events | §5.6 |
-| NVIDIA GPU Operator | `gpu-operator` ns | root | ClusterPolicy, Nodes | DaemonSets, labels | Step 17 |
-| Kueue | `kueue-system` ns | **llms** | Jobs, Workloads, ClusterQueues | `suspend`, admission | Step 07 |
+| NVIDIA GPU Operator | `gpu-operator` ns | root | ClusterPolicy, Nodes | DaemonSets, labels | Chapter 17 |
+| Kueue | `kueue-system` ns | **llms** | Jobs, Workloads, ClusterQueues | `suspend`, admission | Chapter 07 |
 | **slice-ledger** (ours) | `platform-tools` ns | root | Pods (all namespaces, including `vc-*`) | one ConfigMap | §5.5 |
 
 ### 3.2 Leases
@@ -122,7 +122,7 @@ A tenant's Deployment never reaches the root. Its **ReplicaSet and Pods are crea
 |---|---|
 | Where | the **root**, Deployment `platform-tools/slice-ledger`: only the root sees every pod that holds a slice (a vCluster only sees its own) |
 | Informer | raw `LIST /api/v1/pods` + `WATCH ?resourceVersion=…&allowWatchBookmarks=true` |
-| 410 Gone | re-LIST (the resourceVersion was compacted, Step 02 §5.5) |
+| 410 Gone | re-LIST (the resourceVersion was compacted, Chapter 02 §5.5) |
 | Desired state | ConfigMap `platform-tools/gpu-slice-ledger`: one key per node (`used`/`capacity` + holders, with the virtual name of synced pods) and `by-namespace` (compare `vc-dev-lab`/`vc-llms` with their root quotas of 2 / 8) |
 | Capacity | `SLICES_PER_NODE=15` (GPU Operator time-slicing) |
 | Idempotency | compares with last write, so there's no write when nothing changed |
@@ -133,11 +133,11 @@ A tenant's Deployment never reaches the root. Its **ReplicaSet and Pods are crea
 
 ## 4. Integrations
 
-- **Kueue (Step 07)** is the same pattern at production quality, inside llms. It watches Jobs, keeps its own cache of quota usage, and flips `spec.suspend`. Its pods then go through the syncer like any other.
-- **The GPU Operator (Step 17)** reconciles a single `ClusterPolicy` into about ten DaemonSets on the root. When a DaemonSet is deleted by hand, it comes back. That's the controller doing its job.
-- **The vCluster syncer (Step 04)** is a controller pair: virtual → host for workloads, host → virtual for status, events and nodes. It writes to the root through APF lane `spark-vcluster-syncers` (Step 03 §3.4).
-- **Grafana (Step 17)** can show the ledger's numbers without the ConfigMap: kube-state-metrics' `kube_pod_container_resource_limits{resource="nvidia_com_gpu"}` by namespace. The ledger exists to *teach* the pattern.
-- **etcd (Step 02)**: compaction is why a watch can get `410 Gone`; an etcd restore is why every controller's view must be rebuilt (Step 02 §5.6).
+- **Kueue (Chapter 07)** is the same pattern at production quality, inside llms. It watches Jobs, keeps its own cache of quota usage, and flips `spec.suspend`. Its pods then go through the syncer like any other.
+- **The GPU Operator (Chapter 17)** reconciles a single `ClusterPolicy` into about ten DaemonSets on the root. When a DaemonSet is deleted by hand, it comes back. That's the controller doing its job.
+- **The vCluster syncer (Chapter 04)** is a controller pair: virtual → host for workloads, host → virtual for status, events and nodes. It writes to the root through APF lane `spark-vcluster-syncers` (Chapter 03 §3.4).
+- **Grafana (Chapter 17)** can show the ledger's numbers without the ConfigMap: kube-state-metrics' `kube_pod_container_resource_limits{resource="nvidia_com_gpu"}` by namespace. The ledger exists to *teach* the pattern.
+- **etcd (Chapter 02)**: compaction is why a watch can get `410 Gone`; an etcd restore is why every controller's view must be rebuilt (Chapter 02 §5.6).
 
 ---
 
@@ -174,7 +174,7 @@ for p in $(pgrep kube-controller); do echo "== $p"; tr '\0' '\n' < /proc/$p/cmdl
 kubectl --context dev-lab -n kube-system get lease
 ```
 
-What to look for: the root's has `--allocate-node-cidrs=true --cluster-cidr=10.42.0.0/16` (node IPAM, Step 08) and leader election on. The vClusters' point their `--kubeconfig` at their own API server, and their `--controllers=` list should switch off the node-facing controllers (look for `-nodelifecycle`, `-nodeipam`, `-attachdetach` and the persistent-volume ones): a vCluster has no real nodes or volumes of its own — those jobs belong to the root. Whether there's a controller-manager Lease inside dev-lab tells you whether leader election is on for a single replica; explain what you see from the `--leader-elect` flag.
+What to look for: the root's has `--allocate-node-cidrs=true --cluster-cidr=10.42.0.0/16` (node IPAM, Chapter 08) and leader election on. The vClusters' point their `--kubeconfig` at their own API server, and their `--controllers=` list should switch off the node-facing controllers (look for `-nodelifecycle`, `-nodeipam`, `-attachdetach` and the persistent-volume ones): a vCluster has no real nodes or volumes of its own — those jobs belong to the root. Whether there's a controller-manager Lease inside dev-lab tells you whether leader election is on for a single replica; explain what you see from the `--leader-elect` flag.
 
 ### 5.2 Watch the Deployment → ReplicaSet → Pod chain react (in dev-lab)
 
@@ -335,7 +335,7 @@ kubectl --context spark-root -n vc-dev-lab get pods -o json | jq -r '.items[] | 
 kubectl --context spark-root get --raw /metrics | grep -E 'apiserver_flowcontrol_dispatched_requests_total\{.*spark-vcluster-syncers' | head -3
 ```
 
-Two managers on every host pod: the syncer (spec, labels, annotations) and the kubelet (status). The syncer's requests flow through the root's APF lane `spark-vcluster-syncers` — a hot loop inside a vCluster is throttled there before it can hurt the root (Step 03 §5 Task 6).
+Two managers on every host pod: the syncer (spec, labels, annotations) and the kubelet (status). The syncer's requests flow through the root's APF lane `spark-vcluster-syncers` — a hot loop inside a vCluster is throttled there before it can hurt the root (Chapter 03 §5 Task 6).
 
 ---
 
@@ -357,7 +357,7 @@ Two managers on every host pod: the syncer (spec, labels, annotations) and the k
 | Symptom | Cause | Diagnose | Fix |
 |---|---|---|---|
 | Root objects don't reconcile: deleted platform pods not replaced, root quotas never release | root controller-manager not running or not leader | Lease `renewTime` stale. `sudo crictl ps -a --name kube-controller-manager`, `sudo crictl logs <id>` | fix `/etc/kubernetes/manifests/kube-controller-manager.yaml` (the kubelet restarts it). Check CPU starvation of the node |
-| A vCluster's Deployments/Jobs don't reconcile, root is fine | that vCluster's control-plane pod is down or crash-looping | `kubectl --context spark-root -n vc-dev-lab get pods`; `kubectl --context spark-root -n vc-dev-lab logs dev-lab-0` | Step 04 §8. Its memory limit (1 Gi in [`vclusters/dev-lab.yaml`](lab/vclusters/dev-lab.yaml)) counts against the vCluster's own budget |
+| A vCluster's Deployments/Jobs don't reconcile, root is fine | that vCluster's control-plane pod is down or crash-looping | `kubectl --context spark-root -n vc-dev-lab get pods`; `kubectl --context spark-root -n vc-dev-lab logs dev-lab-0` | Chapter 04 §8. Its memory limit (1 Gi in [`vclusters/dev-lab.yaml`](lab/vclusters/dev-lab.yaml)) counts against the vCluster's own budget |
 | Pod exists in a vCluster, never appears at the root; sync error event | the syncer's write was refused by the root (quota, PSA, LimitRange) | `kubectl --context dev-lab -n <ns> describe pod <p>` → events | free budget or fix the spec (break/fix 02) |
 | Object flips between two states every few seconds | two controllers own the same field (HPA **and** you both set `replicas`; KEDA **and** Argo CD in llms) | `kubectl get <obj> -o yaml --show-managed-fields` shows two managers on the same field | give the field one owner (drop `replicas` from Git when an autoscaler owns it) |
 | Hand edit of a host copy at the root keeps reverting | the syncer owns those fields; the virtual object is the source of truth | `managedFields` on the host object | edit the object inside the vCluster |
@@ -373,9 +373,9 @@ Two managers on every host pod: the syncer (spec, labels, annotations) and the k
 | Lab | At scale |
 |---|---|
 | 1 root controller-manager (static pod) | 3 control-plane nodes, one leader, two hot standbys. Failover takes one lease duration (15 s) |
-| 1 controller-manager per vCluster, one replica | vCluster HA: several control-plane replicas with leader election, backed by etcd (Step 02 §8) — and a root with more than one node to spread them over |
+| 1 controller-manager per vCluster, one replica | vCluster HA: several control-plane replicas with leader election, backed by etcd (Chapter 02 §8) — and a root with more than one node to spread them over |
 | Python stdlib controller | Go + controller-runtime (Kubebuilder) or Python kopf. Shared informers, metrics, `MaxConcurrentReconciles`, finalizers, and a CRD for its own desired state |
-| ConfigMap ledger | A CRD `GpuSliceClaim` with a status subresource. Or use Kubernetes Dynamic Resource Allocation (DRA, Step 07 §8), which makes GPU claims first-class objects |
+| ConfigMap ledger | A CRD `GpuSliceClaim` with a status subresource. Or use Kubernetes Dynamic Resource Allocation (DRA, Chapter 07 §8), which makes GPU claims first-class objects |
 | One syncer per vCluster, its own APF lane | per-tenant-cluster lanes sized from `apiserver_flowcontrol_*` history; syncer QPS limits tuned per vCluster |
 
 ---

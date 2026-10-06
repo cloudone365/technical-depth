@@ -1,12 +1,12 @@
 ---
-# Lab secrets in vault01 (Step 04 §6). vault01 itself — install, TLS, unseal,
-# SSH CA, AppRole 'semaphore', audit — is built by hand in Step 01 and
+# Lab secrets in vault01 (Chapter 04 §6). vault01 itself — install, TLS, unseal,
+# SSH CA, AppRole 'semaphore', audit — is built by hand in Chapter 01 and
 # stays outside the Spark lab. This playbook only adds the KV engine, a
 # read-only policy, and attaches it to the 'semaphore' AppRole.
 #
 # Needs an admin token, so run it from your MacBook (not from Semaphore):
 #   export VAULT_TOKEN=<admin token>          # on vault01: vault login, then copy the token
-#   ansible-playbook playbooks/08-vault.yml
+#   ansible-playbook playbooks/17.1-vault.yml
 #   vault kv put kv/spark-lab/ngc api_key=<your NGC key>
 # Then set vault_lab_secrets_enabled=true in Semaphore's vault-approle variable group.
 - name: Lab secrets on vault01 (KV engine, policy, AppRole attachment)

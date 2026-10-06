@@ -1,10 +1,10 @@
-# Step 13 · ConnectX-7 Fabric & OpenSM: RDMA over Converged Ethernet, Topologies & Verification (with the InfiniBand Mapping)
+# Chapter 13 · ConnectX-7 Fabric & OpenSM: RDMA over Converged Ethernet, Topologies & Verification (with the InfiniBand Mapping)
 
-> **01-Ansible · Part III — Fabric & storage · Step 13 of 30** · ← [Step 12 · GPU telemetry & alerting](12-gpu-telemetry-and-alerting.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 14 · RoCEv2, QoS & NCCL](14-rocev2-qos-and-nccl.md) →
+> **01-Ansible · Part III — Fabric & storage · Chapter 13 of 30** · ← [Chapter 12 · GPU telemetry & alerting](12-gpu-telemetry-and-alerting.md) · [All chapters](00-ansible-step-by-step-guide.md) · [Chapter 14 · RoCEv2, QoS & NCCL](14-rocev2-qos-and-nccl.md) →
 
 | | |
 |---|---|
-| **You will build** | Addressed, verified CX-7 links between Sparks (`02-fabric.yml`), RDMA bandwidth and latency measurements (`11-rdma-perftest.yml`), and the mental model to carry this to InfiniBand clusters |
+| **You will build** | Addressed, verified CX-7 links between Sparks (`13.1-fabric.yml`), RDMA bandwidth and latency measurements (`13.2-rdma-perftest.yml`), and the mental model to carry this to InfiniBand clusters |
 | **Hardware** | 2× DGX Spark + 1 QSFP cable (direct-attach copper for 200G, or an AOC). 3–4 Sparks need a ring or a switch (§2.3) |
 | **Time** | 90 min |
 | **Risk** | Medium. Network reconfiguration, but only on CX-7 interfaces; management stays on `enP7s7` |
@@ -92,7 +92,7 @@ Use the **same cage number** on both Sparks. It keeps the config symmetric, and 
 ---
 # Everything lives in fabric.yml. We use a conditional include instead of
 # `meta: end_host`: end_host would end the host for the WHOLE play, silently
-# skipping any roles that follow this one (e.g. in 20-drift-check.yml).
+# skipping any roles that follow this one (e.g. in 26.1-drift-check.yml).
 - name: Configure and verify CX-7 fabric
   ansible.builtin.include_tasks: fabric.yml
   when: cx7_fabric_interfaces | length > 0
@@ -305,7 +305,7 @@ Use the **same cage number** on both Sparks. It keeps the config symmetric, and 
 
 ```bash
 cd "01-Ansible/lab"
-ansible-playbook playbooks/02-fabric.yml -K
+ansible-playbook playbooks/13.1-fabric.yml -K
 ```
 
 Expected tail:
@@ -324,11 +324,11 @@ TASK [Print NCCL environment derived from the fabric]
 ### 3.3 Measure RDMA
 
 ```yaml
-# lab/playbooks/11-rdma-perftest.yml
+# lab/playbooks/13.2-rdma-perftest.yml
 ---
 # RDMA verbs bandwidth/latency between two Sparks over CX-7 (RoCEv2).
 # Server side runs on the 2nd Spark (async), client on the 1st.
-#   ansible-playbook playbooks/11-rdma-perftest.yml -K [-e perftest_port_idx=1] [-e perftest_qps=4]
+#   ansible-playbook playbooks/13.2-rdma-perftest.yml -K [-e perftest_port_idx=1] [-e perftest_qps=4]
 - name: RDMA perftest (ib_write_bw / ib_write_lat)
   hosts: spark
   become: true
@@ -423,9 +423,9 @@ TASK [Print NCCL environment derived from the fabric]
 ```
 
 ```bash
-ansible-playbook playbooks/11-rdma-perftest.yml -K                       # port idx 0
-ansible-playbook playbooks/11-rdma-perftest.yml -K -e perftest_port_idx=1
-ansible-playbook playbooks/11-rdma-perftest.yml -K -e perftest_qps=1     # see why QPs matter
+ansible-playbook playbooks/13.2-rdma-perftest.yml -K                       # port idx 0
+ansible-playbook playbooks/13.2-rdma-perftest.yml -K -e perftest_port_idx=1
+ansible-playbook playbooks/13.2-rdma-perftest.yml -K -e perftest_qps=1     # see why QPs matter
 ```
 
 Manual equivalents, for when you're debugging by hand:
@@ -449,11 +449,11 @@ show_gids | grep -E 'rocep1s0f1|v2'          # which index is RoCE v2 + IPv4
 | Addressing | IP → GID (RoCEv2 IPv4-mapped GID; pick the index) | LID (+ GID for routing across subnets) |
 | Isolation | VLAN / subnet | P_Key partitions (configured on the SM) |
 | IP over the fabric | Native IP | IPoIB (`ib0`, datagram vs connected mode) |
-| Congestion / loss | ECN/DCQCN; PFC on switches (Step 14) | Credit-based link-level flow control (lossless by design) |
+| Congestion / loss | ECN/DCQCN; PFC on switches (Chapter 14) | Credit-based link-level flow control (lossless by design) |
 | Health tools | `ibv_devinfo`, `ethtool -S`, `rdma link` | `ibstat`, `iblinkinfo`, `ibdiagnet`, `perfquery` |
 | Ansible's job | netplan, MTU, verify, publish NCCL env | Install DOCA-OFED, configure the SM(s) (HA priority), P_Keys, IPoIB, verify `ibdiagnet` |
 
-What stays the same, and what this step trains: **inventory-driven addressing, pre-flight existence checks, link assertions, peer reachability, and publishing derived facts for NCCL.**
+What stays the same, and what this chapter trains: **inventory-driven addressing, pre-flight existence checks, link assertions, peer reachability, and publishing derived facts for NCCL.**
 
 ---
 
@@ -465,11 +465,11 @@ What stays the same, and what this step trains: **inventory-driven addressing, p
 | Role asserts: `configured interface not found` | Names in host_vars vs `ibdev2netdev` | Fix host_vars; names differ between cages |
 | Speed `100000` instead of `200000` | `ethtool enp1s0f1np1 \| grep -E 'Speed\|Link'` | Cable rated for 100G; or a switch port autonegotiating: force 200G on the switch |
 | `ping -M do -s 8972` fails, plain ping works | MTU mismatch somewhere | Both ends 9000 (`ip link show`); on a switch, the port MTU must be ≥ 9000 plus headers |
-| Ping works on `.100`, not on `.101` | Second logical interface not addressed on one side | Both netdevs per cage need IPs; re-run `02-fabric.yml` |
+| Ping works on `.100`, not on `.101` | Second logical interface not addressed on one side | Both netdevs per cage need IPs; re-run `13.1-fabric.yml` |
 | `PORT_ACTIVE` but perftest `Couldn't connect` | Wrong GID index (a RoCE v1 or link-local GID) | `show_gids`; use the RoCE v2 IPv4 index; pass `-x` |
 | perftest reports roughly half the expected rate | Only one logical interface, or `-q 1` | Test both netdevs concurrently; raise `-q` to 4–8 |
-| Random loss under load (switch topology) | `ethtool -S enp1s0f1np1 \| grep -E 'discard\|pause\|ecn'` | Congestion: Step 14 (ECN/PFC) |
-| Netplan apply cut the mgmt link | You put the mgmt NIC in `40-cx7.yaml` | Never. Mgmt lives in `30-mgmt.yaml` (Step 03) |
+| Random loss under load (switch topology) | `ethtool -S enp1s0f1np1 \| grep -E 'discard\|pause\|ecn'` | Congestion: Chapter 14 (ECN/PFC) |
+| Netplan apply cut the mgmt link | You put the mgmt NIC in `40-cx7.yaml` | Never. Mgmt lives in `30-mgmt.yaml` (Chapter 03) |
 
 Fast triage bundle:
 
@@ -483,6 +483,6 @@ ip -s link show enp1s0f1np1
 
 ## 6. Validation
 
-- [ ] `02-fabric.yml`: all asserts pass and jumbo pings succeed on both subnets.
-- [ ] `11-rdma-perftest.yml` results recorded for idx 0, idx 1 and `-q 1` vs `-q 4`.
+- [ ] `13.1-fabric.yml`: all asserts pass and jumbo pings succeed on both subnets.
+- [ ] `13.2-rdma-perftest.yml` results recorded for idx 0, idx 1 and `-q 1` vs `-q 4`.
 - [ ] You can explain why the Spark needs no subnet manager, and what OpenSM would do on an IB cluster.

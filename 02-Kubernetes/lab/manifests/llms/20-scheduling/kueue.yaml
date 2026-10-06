@@ -1,5 +1,5 @@
 # Kueue INSIDE vCluster #2 · llms: quota-aware job queueing + all-or-nothing
-# admission (Steps 07, 04). Kueue works on Jobs, which only exist in the
+# admission (Chapters 07, 04). Kueue works on Jobs, which only exist in the
 # vCluster, so it runs in the vCluster (scripts/install-addons.sh kueue).
 #
 #   ResourceFlavor  gb10          "what kind of capacity" (node labels, synced from the root)

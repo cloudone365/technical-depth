@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Support bundle (Step 26 §1): everything you need to debug the lab offline,
+# Support bundle (Chapter 26 §1): everything you need to debug the lab offline,
 # from all three API servers (root, dev-lab, llms).
 #   scripts/collect-diag.sh [root-namespace...]   → ./diag-<timestamp>.tar.gz
 source "$(dirname "$0")/lib.sh"

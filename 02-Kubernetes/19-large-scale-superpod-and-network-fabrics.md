@@ -1,6 +1,6 @@
-# Step 19 · Large-Scale SuperPOD & Network Fabrics: From Two Sparks to a SuperPOD, Rails, RoCE vs InfiniBand, Fabric Health
+# Chapter 19 · Large-Scale SuperPOD & Network Fabrics: From Two Sparks to a SuperPOD, Rails, RoCE vs InfiniBand, Fabric Health
 
-> **02-Kubernetes · Part VI — Distributed training & fabrics · Step 19 of 28** · ← [Step 18 · Distributed AI training & NCCL](18-distributed-ai-training-and-nccl.md) · [All steps](00-kubernetes-step-by-step-guide.md) · [Step 20 · vLLM high-throughput LLM serving](20-vllm-high-throughput-llm-serving.md) →
+> **02-Kubernetes · Part VI — Distributed training & fabrics · Chapter 19 of 28** · ← [Chapter 18 · Distributed AI training & NCCL](18-distributed-ai-training-and-nccl.md) · [All chapters](00-kubernetes-step-by-step-guide.md) · [Chapter 20 · vLLM high-throughput LLM serving](20-vllm-high-throughput-llm-serving.md) →
 
 | | |
 |---|---|
@@ -9,7 +9,7 @@
 | **Hardware** | 1 Spark for §5.1–5.2 and §5.5. 2 Sparks + QSFP cable for §5.3–5.4 |
 | **Time** | 75 min |
 | **Risk** | Low. §5.4 takes one logical CX-7 port down for a minute |
-| **Lab files** | [`scripts/fabric_calc.py`](lab/scripts/fabric_calc.py), [`manifests/llms/80-distributed/two-spark/`](lab/manifests/llms/80-distributed/two-spark/kustomization.yaml). 01-Ansible `playbooks/02-fabric.yml`, `11-rdma-perftest.yml`, `12b-roce-qos.yml` |
+| **Lab files** | [`scripts/fabric_calc.py`](lab/scripts/fabric_calc.py), [`manifests/llms/80-distributed/two-spark/`](lab/manifests/llms/80-distributed/two-spark/kustomization.yaml). 01-Ansible `playbooks/13.1-fabric.yml`, `13.2-rdma-perftest.yml`, `14.1-roce-qos.yml` |
 
 ---
 
@@ -23,9 +23,9 @@ You won't cable 1,000 GPUs at home. You *will* meet every concept in a SuperPOD 
 | Rails (GPU *i* of every node on the same leaf) | 1 GPU/node → 1 rail |
 | Frontend network (storage, management, users) | the 10 GbE `enP7s7` |
 | Out-of-band management (BMC) | none on the Spark. The 01-Ansible Redfish lab simulates it |
-| Lossless Ethernet (PFC/ECN) or InfiniBand credit flow control | RoCE QoS settings from 01-Ansible `12b-roce-qos.yml` |
+| Lossless Ethernet (PFC/ECN) or InfiniBand credit flow control | RoCE QoS settings from 01-Ansible `14.1-roce-qos.yml` |
 | Link flaps, symbol errors, degraded lanes | `ethtool -S` counters, a downed logical port |
-| Frontend vs backend inside Kubernetes | pod network = Cilium VXLAN over `enP7s7`; a second pod interface `net1` on the CX-7 via Multus (Step 17 §5.6) or `hostNetwork` |
+| Frontend vs backend inside Kubernetes | pod network = Cilium VXLAN over `enP7s7`; a second pod interface `net1` on the CX-7 via Multus (Chapter 17 §5.6) or `hostNetwork` |
 | Many tenants on one shared fabric | both vClusters' pods run on the root's nodes and share the same NICs and cable; the fabric is a **root** concern no tenant can see or configure |
 | Fabric-aware admission (health gates, topology) | a node condition or taint on the root, synced into both vClusters; the root scheduler enforces it for everyone |
 
@@ -139,8 +139,8 @@ A tenant can't tell a degraded rail from a slow job. The platform team's health 
 
 ## 4. Integrations
 
-- **01-Ansible** owns the link: `cx7_fabric` role (netplan, MTU, GIDs), `12b-roce-qos.yml` (PFC/ECN trust, DSCP), `11-rdma-perftest.yml` (the ≥ 180 Gb/s gate).
-- **Step 18** puts NCCL on this link from inside the `llms` vCluster. **Step 17 §5.6** can hand it to pods via the Network Operator (NAD in `vc-llms`).
+- **01-Ansible** owns the link: `cx7_fabric` role (netplan, MTU, GIDs), `14.1-roce-qos.yml` (PFC/ECN trust, DSCP), `13.2-rdma-perftest.yml` (the ≥ 180 Gb/s gate).
+- **Chapter 18** puts NCCL on this link from inside the `llms` vCluster. **Chapter 17 §5.6** can hand it to pods via the Network Operator (NAD in `vc-llms`).
 - **Module 07-Nvidia** (NVLink/NVSwitch, Quantum/Spectrum, UFM) and **module 08-Storage** (RoCE for storage traffic) go deeper on the same fabric ideas.
 
 ---
@@ -157,7 +157,7 @@ rdma link show
 sudo lspci -d 15b3: -nn                    # Mellanox/NVIDIA devices and PCIe IDs
 ```
 
-Note that one physical QSFP cage shows up as **two** netdevs and two RDMA devices, one per PCIe root. You need both to reach 200 Gb/s (01-Ansible Step 13 explains why).
+Note that one physical QSFP cage shows up as **two** netdevs and two RDMA devices, one per PCIe root. You need both to reach 200 Gb/s (01-Ansible Chapter 13 explains why).
 
 ### 5.2 Size real fabrics
 
@@ -174,11 +174,11 @@ Exercise: how many optical transceivers does the 127-node design need, if every 
 ### 5.3 (2 Sparks) Baseline and counters
 
 ```bash
-# host RDMA baseline: Semaphore template for playbooks/11-rdma-perftest.yml (two Sparks, so no --limit)
+# host RDMA baseline: Semaphore template for playbooks/13.2-rdma-perftest.yml (two Sparks, so no --limit)
 ssh dgxadmin@192.168.0.100 'ethtool -S enp1s0f1np1 | grep -E "crc|symbol|discard|pause|cnp|link_down" | grep -v ": 0$"'
 ```
 
-Then run the NCCL job (Step 18 §5.5) and diff the counters before and after. PFC pause counters rising only during the run, and discards staying at 0, is healthy lossless behaviour.
+Then run the NCCL job (Chapter 18 §5.5) and diff the counters before and after. PFC pause counters rising only during the run, and discards staying at 0, is healthy lossless behaviour.
 
 ### 5.4 (2 Sparks) Degrade the fabric and watch NCCL
 
@@ -246,8 +246,8 @@ The tenant sees the reason in its own events (`1 node(s) had untolerated taint {
 |---|---|---|---|
 | Link `Up` but ~100 Gb/s | only one logical half in use | NCCL log device list, `rdma link` | list both HCAs. Both IPs configured |
 | CRC/symbol errors increasing | cable/optic/dirty connector | `ethtool -S` twice, 60 s apart | reseat, clean, replace the DAC/AOC |
-| Throughput collapses under load, pause counters huge | PFC storm / mismatched QoS | `rx_pause_ctrl_phy`, `mlnx_qos -i <if>` | align trust mode + PFC priority both ends (01-Ansible `12b-roce-qos.yml`) |
-| RDMA works host-to-host, NCCL in pods uses sockets | pod can't see RDMA devices | `kubectl --context llms -n batch exec <pod> -- ibv_devices` | hostNetwork / Network Operator; the NAD must be in `vc-llms` (Step 17 §5.6, Step 18 §3.3) |
+| Throughput collapses under load, pause counters huge | PFC storm / mismatched QoS | `rx_pause_ctrl_phy`, `mlnx_qos -i <if>` | align trust mode + PFC priority both ends (01-Ansible `14.1-roce-qos.yml`) |
+| RDMA works host-to-host, NCCL in pods uses sockets | pod can't see RDMA devices | `kubectl --context llms -n batch exec <pod> -- ibv_devices` | hostNetwork / Network Operator; the NAD must be in `vc-llms` (Chapter 17 §5.6, Chapter 18 §3.3) |
 | Link flaps | thermal/power, bad cable | `link_down_events_phy`, `dmesg \| grep mlx5` | replace the cable. Check airflow |
 
 ---

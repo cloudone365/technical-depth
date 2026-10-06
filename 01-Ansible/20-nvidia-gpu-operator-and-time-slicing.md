@@ -1,17 +1,17 @@
-# Step 20 · NVIDIA GPU Operator & Time-Slicing: Host-Driver Mode, 15 Slices, Budgets per vCluster, Validation & Secrets for Pods
+# Chapter 20 · NVIDIA GPU Operator & Time-Slicing: Host-Driver Mode, 15 Slices, Budgets per vCluster, Validation & Secrets for Pods
 
-> **01-Ansible · Part IV — Secrets & platforms · Step 20 of 30** · ← [Step 19 · Kubernetes: kubeadm root cluster & vClusters](19-kubernetes-kubeadm-root-cluster-and-vclusters.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 21 · Multus & secondary RDMA networks](21-multus-and-secondary-rdma-networks.md) →
+> **01-Ansible · Part IV — Secrets & platforms · Chapter 20 of 30** · ← [Chapter 19 · Kubernetes: kubeadm root cluster & vClusters](19-kubernetes-kubeadm-root-cluster-and-vclusters.md) · [All chapters](00-ansible-step-by-step-guide.md) · [Chapter 21 · Multus & secondary RDMA networks](21-multus-and-secondary-rdma-networks.md) →
 >
-> Deep dive: [02-Kubernetes Step 17 · NVIDIA GPU Operator & Network Operator](../02-Kubernetes/17-nvidia-gpu-operator-and-network-operator.md)
+> Deep dive: [02-Kubernetes Chapter 17 · NVIDIA GPU Operator & Network Operator](../02-Kubernetes/17-nvidia-gpu-operator-and-network-operator.md)
 
 | | |
 |---|---|
 | **You will build** | The GPU Operator v26.7.1 deployed by Ansible with Helm in **host-driver mode** (DGX OS owns the driver and toolkit; the operator's driver, toolkit and CDI are off), NFD/GFD labels, the GB10 time-sliced into **15** `nvidia.com/gpu`, an automated validator gate and a GPU smoke pod. Then you watch the 15 slices split 2 / 2 / 11 between the root and the two vClusters |
-| **Hardware** | The root cluster from Step 19 (Semaphore template `05 Kubernetes`); §4.2 also needs the vClusters (`06b vClusters`). The operator itself is the template `06 GPU Operator` |
+| **Hardware** | The root cluster from Chapter 19 (Semaphore template `19.1 Kubernetes`); §4.2 also needs the vClusters (`20.2 vClusters`). The operator itself is the template `20.1 GPU Operator` |
 | **Time** | 45 min |
 | **Risk** | Low. `atomic: true` rolls back a failed Helm upgrade |
 | **Clusters** | `spark-root` (the operator, §4.1), `llms` and `dev-lab` (§4.2) |
-| **Lab files** | [`roles/gpu_operator`](lab/roles/gpu_operator), [`playbooks/06-gpu-operator.yml`](lab/playbooks/06-gpu-operator.yml), 02-Kubernetes [`manifests/root/05-vclusters/quotas.yaml`](../02-Kubernetes/lab/manifests/root/05-vclusters/quotas.yaml) |
+| **Lab files** | [`roles/gpu_operator`](lab/roles/gpu_operator), [`playbooks/20.1-gpu-operator.yml`](lab/playbooks/20.1-gpu-operator.yml), 02-Kubernetes [`manifests/root/05-vclusters/quotas.yaml`](../02-Kubernetes/lab/manifests/root/05-vclusters/quotas.yaml) |
 
 ---
 
@@ -20,20 +20,20 @@
 | Operator component | Default job | On DGX Spark |
 |---|---|---|
 | `driver` DaemonSet | Builds and loads the NVIDIA driver in a container | **Disabled.** DGX OS ships and updates the driver; two owners would fight |
-| `toolkit` DaemonSet | Installs nvidia-container-toolkit and edits the containerd config | **Disabled.** The host toolkit exists, and Step 19's `kubeadm_cluster` role already registered `nvidia` as containerd's default runtime with `nvidia-ctk` |
+| `toolkit` DaemonSet | Installs nvidia-container-toolkit and edits the containerd config | **Disabled.** The host toolkit exists, and Chapter 19's `kubeadm_cluster` role already registered `nvidia` as containerd's default runtime with `nvidia-ctk` |
 | CDI | On by default since operator v25.10: GPUs injected as CDI devices | **Disabled.** This lab injects GPUs through the `nvidia` runtime that DGX OS's toolkit configured. Mixing both paths makes "who gave this container the GPU?" hard to answer |
 | `devicePlugin` | Advertises `nvidia.com/gpu` to kubelet | **On**, with a time-slicing config |
 | `gfd` + `nfd` | Labels nodes (`nvidia.com/gpu.product`, `.memory`, `.compute.major/minor`, …) | On |
-| `dcgmExporter` | Metrics | Off by default (`gpu_operator_dcgm_exporter`); Step 12's host collector covers the GB10 |
+| `dcgmExporter` | Metrics | Off by default (`gpu_operator_dcgm_exporter`); Chapter 12's host collector covers the GB10 |
 | `migManager` | MIG partitioning | **Off.** GB10 has no MIG |
 | `validator` | Proves driver + toolkit + CUDA workloads function | On, and our Ansible gate waits for it |
 
 ```mermaid
 flowchart LR
-  subgraph HOST["DGX OS on dgx-spark-1 (Steps 10, 11, 19)"]
+  subgraph HOST["DGX OS on dgx-spark-1 (Chapters 10, 11, 19)"]
     DRV["driver 580.x"] --- TK["nvidia-container-toolkit"] --- RT["containerd<br/>default runtime 'nvidia'"]
   end
-  subgraph OP["spark-root · namespace gpu-operator (this step)"]
+  subgraph OP["spark-root · namespace gpu-operator (this chapter)"]
     NFD["node-feature-discovery"] --> GFD["gpu-feature-discovery"]
     DP["device-plugin<br/>time-slicing: 15 replicas"]
     VAL["operator-validator"]
@@ -79,7 +79,7 @@ A slice is a **ticket to the scheduler**, not a fraction of the GPU. The number 
 |---|---|---|
 | vCluster `llms` | 11 | root ResourceQuota `vcluster-budget` in `vc-llms` (`requests.nvidia.com/gpu: "11"`) |
 | vCluster `dev-lab` | 2 | root ResourceQuota `vcluster-budget` in `vc-dev-lab` (`"2"`) |
-| root (`platform-tools`: GPU probes, the 02-Kubernetes Step 14 §5.5 UMA experiment, the preemption demo's 2 filler replicas; `default` smoke tests) | 2 | what is left: 15 − 11 − 2 |
+| root (`platform-tools`: GPU probes, the 02-Kubernetes Chapter 14 §5.5 UMA experiment, the preemption demo's 2 filler replicas; `default` smoke tests) | 2 | what is left: 15 − 11 − 2 |
 
 The root quotas live in the 02-Kubernetes lab ([`quotas.yaml`](../02-Kubernetes/lab/manifests/root/05-vclusters/quotas.yaml)), and its `tests/budget_check.py` checks that they add up to `gpu_operator_timeslice_replicas`. Change the replica count here and you must change the quotas there, or one side lies.
 
@@ -229,11 +229,11 @@ Key automation moves:
 
 ### 4.1 The operator on the root
 
-The role runs on the **controller**: in this lab the Semaphore container on sema01, which has `helm`, `kubectl` and `kubernetes.core` in its image and reads the kubeconfig from its state volume (Step 19 §2.5). Run the template **`06 GPU Operator`** (break-glass: `ansible-playbook playbooks/06-gpu-operator.yml` from the MacBook, against its own `.cache/` kubeconfig). The play only talks to the Kubernetes API, so it needs no SSH certificate. Then check from the MacBook:
+The role runs on the **controller**: in this lab the Semaphore container on sema01, which has `helm`, `kubectl` and `kubernetes.core` in its image and reads the kubeconfig from its state volume (Chapter 19 §2.5). Run the template **`20.1 GPU Operator`** (break-glass: `ansible-playbook playbooks/20.1-gpu-operator.yml` from the MacBook, against its own `.cache/` kubeconfig). The play only talks to the Kubernetes API, so it needs no SSH certificate. Then check from the MacBook:
 
 ```bash
 cd "01-Ansible/lab"
-tools/fetch-kubeconfig.sh sema01                     # same contexts as after 05; refresh after every cluster task
+tools/fetch-kubeconfig.sh sema01                     # same contexts as after 19.1; refresh after every cluster task
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
 kubectl --context spark-root -n gpu-operator get pods
 kubectl --context spark-root get node dgx-spark-1 -o json \
@@ -242,11 +242,11 @@ kubectl --context spark-root logs cuda-smoke     # → GPU 0: NVIDIA GB10 (UUID:
 helm --kube-context spark-root -n gpu-operator get values gpu-operator | grep -A1 -E '^(driver|toolkit|cdi):'
 ```
 
-Expected: allocatable `"15"`, `nvidia.com/gpu.replicas: "15"` and a `nvidia.com/gpu.sharing-strategy` label from GFD, and `enabled: false` under `driver`, `toolkit` and `cdi`. There is no driver or toolkit DaemonSet in the namespace. Look closely at `nvidia.com/gpu.product`: GFD writes it from what the driver reports, and with time-slicing it adds a `-SHARED` suffix. That is why the lab never selects on it — Step 19's kubelet flags set the lab-owned `spark.lab/gpu=gb10` at registration, and every 02 lab selector (node-probe, dev-lab affinity, Kueue's ResourceFlavor, `verify.sh`) uses that.
+Expected: allocatable `"15"`, `nvidia.com/gpu.replicas: "15"` and a `nvidia.com/gpu.sharing-strategy` label from GFD, and `enabled: false` under `driver`, `toolkit` and `cdi`. There is no driver or toolkit DaemonSet in the namespace. Look closely at `nvidia.com/gpu.product`: GFD writes it from what the driver reports, and with time-slicing it adds a `-SHARED` suffix. That is why the lab never selects on it — Chapter 19's kubelet flags set the lab-owned `spark.lab/gpu=gb10` at registration, and every 02 lab selector (node-probe, dev-lab affinity, Kueue's ResourceFlavor, `verify.sh`) uses that.
 
 ### 4.2 Fifteen slices, three budgets
 
-Build the vClusters if you haven't (template `06b vClusters`, then `tools/fetch-kubeconfig.sh sema01` for the `dev-lab` and `llms` contexts). First, what a tenant sees:
+Build the vClusters if you haven't (template `20.2 vClusters`, then `tools/fetch-kubeconfig.sh sema01` for the `dev-lab` and `llms` contexts). First, what a tenant sees:
 
 ```bash
 kubectl --context llms get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'   # 15
@@ -295,11 +295,11 @@ Same exercise in `dev-lab`: the 3rd GPU pod stays Pending. And on the root, `pla
 kubectl --context llms delete -f ts-demo.yaml
 ```
 
-> **Always set a `memory` limit on GPU pods on a Spark.** Kubernetes can't account for GPU memory on a time-sliced UMA GPU, but the container memory limit plus the kubelet reserve from Step 19 bound how much of the shared pool a pod's host-side allocations take. In the vClusters it is also mandatory: the root quota caps `limits.memory`, so the root's LimitRange fills in a default (512Mi in `vc-llms`) for pods that set none, and a CUDA process will exceed that. Whether CUDA allocations count against the pod's cgroup is something to verify on your node with the probe from Step 11. Treat it as an experiment, not an assumption.
+> **Always set a `memory` limit on GPU pods on a Spark.** Kubernetes can't account for GPU memory on a time-sliced UMA GPU, but the container memory limit plus the kubelet reserve from Chapter 19 bound how much of the shared pool a pod's host-side allocations take. In the vClusters it is also mandatory: the root quota caps `limits.memory`, so the root's LimitRange fills in a default (512Mi in `vc-llms`) for pods that set none, and a CUDA process will exceed that. Whether CUDA allocations count against the pod's cgroup is something to verify on your node with the probe from Chapter 11. Treat it as an experiment, not an assumption.
 
 ### 4.3 Secrets for GPU workloads (NGC, Hugging Face) from Vault
 
-The Vault is **vault01** (192.168.0.211), outside the Spark, where `08-vault.yml` created the `kv/` engine and the `kv/spark-lab/*` paths. Pods need their own way in: a Kubernetes auth method on vault01 for the cluster that runs the injector or operator, and a policy of their own. Don't reuse Semaphore's AppRole `semaphore`: it is the automation's identity, not a workload's. Two production-grade options (details in Step 18). With nested clusters there is one extra rule: **install the injector or operator in the cluster where the pod is created.** Each vCluster has its own API server and its own admission chain, so for tenant workloads that means inside `llms` (`helm --kube-context llms …`), not on the root.
+The Vault is **vault01** (192.168.0.211), outside the Spark, where `17.1-vault.yml` created the `kv/` engine and the `kv/spark-lab/*` paths. Pods need their own way in: a Kubernetes auth method on vault01 for the cluster that runs the injector or operator, and a policy of their own. Don't reuse Semaphore's AppRole `semaphore`: it is the automation's identity, not a workload's. Two production-grade options (details in Chapter 18). With nested clusters there is one extra rule: **install the injector or operator in the cluster where the pod is created.** Each vCluster has its own API server and its own admission chain, so for tenant workloads that means inside `llms` (`helm --kube-context llms …`), not on the root.
 
 ```yaml
 # Option A — Vault Agent Injector annotations on the pod (injector running in the same cluster)
@@ -325,7 +325,7 @@ spec:
       remoteRef: { key: kv/spark-lab/huggingface, property: token }
 ```
 
-With option B the Secret exists twice. The original is in the vCluster's SQLite database on its PVC. The synced copy is in `vc-llms` in the root's etcd, where Step 19's `aescbc` encryption applies. The root's EncryptionConfiguration does not cover the vCluster's own store, so protect the PVC (`/data/k8s` on the node) accordingly.
+With option B the Secret exists twice. The original is in the vCluster's SQLite database on its PVC. The synced copy is in `vc-llms` in the root's etcd, where Chapter 19's `aescbc` encryption applies. The root's EncryptionConfiguration does not cover the vCluster's own store, so protect the PVC (`/data/k8s` on the node) accordingly.
 
 ---
 
@@ -333,13 +333,13 @@ With option B the Secret exists twice. The original is in the vCluster's SQLite 
 
 | System | Note |
 |---|---|
-| Root cluster (Step 19) | Needs containerd's default runtime `nvidia`; the operator never edits containerd here (toolkit off) |
-| vClusters (Step 19 §3.4, 02-Kubernetes Step 04) | Consume slices through the root scheduler; budgets in `manifests/root/05-vclusters/quotas.yaml` must sum with the root's 2 to `gpu_operator_timeslice_replicas` |
-| DGX OS upgrades (Step 10) | After a driver update, restart the device-plugin and validator pods (or reboot); the upgrade playbook's drain/uncordon covers it |
-| Telemetry (Step 12) | Choose either host dcgm-exporter **or** the operator's, not both |
-| Multus/RDMA (Step 21) | Same pod requests `nvidia.com/gpu` + `rdma/rdma_shared_cx7` |
-| 02-Kubernetes Step 17 | Switching a node between time-sliced and whole-GPU profiles, the Network Operator alternative |
-| Semaphore (Step 04) | The lab's controller: template `06 GPU Operator`, run from the lab image (`kubernetes.core` + helm) |
+| Root cluster (Chapter 19) | Needs containerd's default runtime `nvidia`; the operator never edits containerd here (toolkit off) |
+| vClusters (Chapter 19 §3.4, 02-Kubernetes Chapter 04) | Consume slices through the root scheduler; budgets in `manifests/root/05-vclusters/quotas.yaml` must sum with the root's 2 to `gpu_operator_timeslice_replicas` |
+| DGX OS upgrades (Chapter 10) | After a driver update, restart the device-plugin and validator pods (or reboot); the upgrade playbook's drain/uncordon covers it |
+| Telemetry (Chapter 12) | Choose either host dcgm-exporter **or** the operator's, not both |
+| Multus/RDMA (Chapter 21) | Same pod requests `nvidia.com/gpu` + `rdma/rdma_shared_cx7` |
+| 02-Kubernetes Chapter 17 | Switching a node between time-sliced and whole-GPU profiles, the Network Operator alternative |
+| Semaphore (Chapter 04) | The lab's controller: template `20.1 GPU Operator`, run from the lab image (`kubernetes.core` + helm) |
 | AWX | Alternative controller: can run the Helm role from a job template (the EE includes `kubernetes.core` + helm) |
 
 ## 6. Troubleshooting & diagnostics
@@ -347,11 +347,11 @@ With option B the Secret exists twice. The original is in the vCluster's SQLite 
 | Symptom | Diagnose | Fix |
 |---|---|---|
 | Validator stuck `Init` | `kubectl --context spark-root -n gpu-operator logs <validator> -c driver-validation` | Host driver not found: make sure `driver.enabled=false` (operator expects the host driver) and `nvidia-smi` works on the host |
-| `toolkit-validation` fails | Container logs; `grep default_runtime_name /etc/containerd/config.toml` on the node | containerd has no `nvidia` runtime (DGX OS update replaced `config.toml`?). Re-run the template `05 Kubernetes`; its `nvidia-ctk runtime configure` task restores it |
-| Template fails: `Could not find … kubeconfig-spark-lab.yaml` | the state volume has no kubeconfig (`SPARK_LAB_CACHE` unset, or 05 ran from the MacBook) | Step 04 §4 Verify; run `05 Kubernetes` from Semaphore first |
+| `toolkit-validation` fails | Container logs; `grep default_runtime_name /etc/containerd/config.toml` on the node | containerd has no `nvidia` runtime (DGX OS update replaced `config.toml`?). Re-run the template `19.1 Kubernetes`; its `nvidia-ctk runtime configure` task restores it |
+| Template fails: `Could not find … kubeconfig-spark-lab.yaml` | the state volume has no kubeconfig (`SPARK_LAB_CACHE` unset, or 19.1 ran from the MacBook) | Chapter 04 §4 Verify; run `19.1 Kubernetes` from Semaphore first |
 | Allocatable `nvidia.com/gpu` = 1, not 15 | `kubectl --context spark-root -n gpu-operator get cm time-slicing-config -o yaml`; device-plugin logs | ConfigMap name/key must match `devicePlugin.config.name/default`; restart the device-plugin DS |
 | Root pod `Pending: Insufficient nvidia.com/gpu` | `kubectl --context spark-root describe node dgx-spark-1 \| grep -A8 'Allocated resources'` | All 15 slices in use (count the `vc-*` pods too), or `failRequestsGreaterThanOne` rejected a request for > 1 |
-| vCluster pod `Pending`, no scheduler events | `kubectl --context <vc> describe pod …` events; `kubectl --context spark-root -n vc-<vc> describe quota vcluster-budget` | Root budget spent (§4.2). Free slices in that vCluster or raise its quota (02-Kubernetes Step 04 §6.5) |
+| vCluster pod `Pending`, no scheduler events | `kubectl --context <vc> describe pod …` events; `kubectl --context spark-root -n vc-<vc> describe quota vcluster-budget` | Root budget spent (§4.2). Free slices in that vCluster or raise its quota (02-Kubernetes Chapter 04 §6.5) |
 | Tenant pod rejected: "at most 1 nvidia.com/gpu" | Message from the vCluster's API server | The 02 lab's CEL policy `spark-gpu-slice-limits`: a slice is not more GPU, request 1 |
 | `ImagePullBackOff` on operator pods | `kubectl --context spark-root -n gpu-operator describe pod <p>` | Check the chart version supports arm64 for every component; pin a release that does |
 | Helm upgrade rolled back (`atomic`) | `helm --kube-context spark-root -n gpu-operator history gpu-operator` | Read `helm status`; fix values; re-run |
@@ -359,7 +359,7 @@ With option B the Secret exists twice. The original is in the vCluster's SQLite 
 
 ## 7. Validation
 
-- [ ] `06-gpu-operator.yml` finishes with the validator Running and the allocatable assertion green (15 per node).
+- [ ] `20.1-gpu-operator.yml` finishes with the validator Running and the allocatable assertion green (15 per node).
 - [ ] No driver or toolkit DaemonSet in `gpu-operator`; `cdi.enabled: false` in the release values.
 - [ ] NFD/GFD labels present (`nvidia.com/gpu.product`, `nvidia.com/gpu.compute.major=12`).
 - [ ] In `llms`, 11 GPU pods run and the 12th is refused by the root quota, while the node still shows free slices.

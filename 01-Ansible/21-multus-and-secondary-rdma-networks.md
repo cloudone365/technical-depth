@@ -1,8 +1,8 @@
-# Step 21 · Multus & Secondary RDMA Networks: the CX-7 Fabric Inside Kubernetes, Chained with Cilium, Reachable from a vCluster
+# Chapter 21 · Multus & Secondary RDMA Networks: the CX-7 Fabric Inside Kubernetes, Chained with Cilium, Reachable from a vCluster
 
-> **01-Ansible · Part IV — Secrets & platforms · Step 21 of 30** · ← [Step 20 · NVIDIA GPU Operator & time-slicing](20-nvidia-gpu-operator-and-time-slicing.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 22 · Slurm: GRES & cgroup GPUs](22-slurm-gres-and-cgroup-gpus.md) →
+> **01-Ansible · Part IV — Secrets & platforms · Chapter 21 of 30** · ← [Chapter 20 · NVIDIA GPU Operator & time-slicing](20-nvidia-gpu-operator-and-time-slicing.md) · [All chapters](00-ansible-step-by-step-guide.md) · [Chapter 22 · Slurm: GRES & cgroup GPUs](22-slurm-gres-and-cgroup-gpus.md) →
 >
-> Requires: [Step 19 · Kubernetes: kubeadm root cluster & vClusters](19-kubernetes-kubeadm-root-cluster-and-vclusters.md).
+> Requires: [Chapter 19 · Kubernetes: kubeadm root cluster & vClusters](19-kubernetes-kubeadm-root-cluster-and-vclusters.md).
 
 | | |
 |---|---|
@@ -11,13 +11,13 @@
 | **Time** | 60–90 min |
 | **Risk** | Low–medium. Adds a CNI meta-plugin in front of Cilium; the pod network itself is untouched |
 | **Clusters** | `spark-root` (Multus, device plugin, NADs, test pods in `platform-tools`), `llms` (§3.3, a pod in `batch`) |
-| **Lab files** | [`playbooks/13-multus-rdma.yml`](lab/playbooks/13-multus-rdma.yml), [`playbooks/templates/rdma-shared-dp.yaml.j2`](lab/playbooks/templates/rdma-shared-dp.yaml.j2), [`roles/cilium`](lab/roles/cilium) (`cni.exclusive=false`), 02-Kubernetes [`manifests/llms/85-network-operator/`](../02-Kubernetes/lab/manifests/llms/85-network-operator) (the Network Operator alternative) |
+| **Lab files** | [`playbooks/21.1-multus-rdma.yml`](lab/playbooks/21.1-multus-rdma.yml), [`playbooks/templates/rdma-shared-dp.yaml.j2`](lab/playbooks/templates/rdma-shared-dp.yaml.j2), [`roles/cilium`](lab/roles/cilium) (`cni.exclusive=false`), 02-Kubernetes [`manifests/llms/85-network-operator/`](../02-Kubernetes/lab/manifests/llms/85-network-operator) (the Network Operator alternative) |
 
 ---
 
 ## 1. Why pods need a second network
 
-Cilium gives every pod an overlay IP (VXLAN over the 10GbE mgmt link, Step 19 §2.1). That's fine for APIs and Ray control traffic, but **it can't carry RDMA**: verbs need direct access to the NIC's RDMA device and a GID on the physical fabric. Distributed training and multi-node inference pods therefore need:
+Cilium gives every pod an overlay IP (VXLAN over the 10GbE mgmt link, Chapter 19 §2.1). That's fine for APIs and Ray control traffic, but **it can't carry RDMA**: verbs need direct access to the NIC's RDMA device and a GID on the physical fabric. Distributed training and multi-node inference pods therefore need:
 
 1. a **second interface** on the CX-7 fabric (Multus + macvlan/host-device/SR-IOV), and
 2. **access to the RDMA device** (`/dev/infiniband/*`), handed out as a schedulable resource by a device plugin, and
@@ -64,7 +64,7 @@ flowchart TB
 | Component | Choice in this lab | Production alternative |
 |---|---|---|
 | Multus | Upstream **thick plugin** v4.3.0: the release's `deployments/multus-daemonset-thick.yml`, applied unchanged. DaemonSet `kube-system/kube-multus-ds`, a small `multus-shim` binary in `/opt/cni/bin`, the real work in the per-node daemon | NVIDIA **Network Operator** (bundles Multus, IPAM, RDMA/SR-IOV device plugins). The 02 lab ships a `NicClusterPolicy` for it ([`root/85-network-operator`](../02-Kubernetes/lab/manifests/root/85-network-operator/nicclusterpolicy.yaml)); use **one** of the two |
-| Chaining with Cilium | Multus auto-generates `00-multus.conf` from the first config it finds (`05-cilium.conflist`) and makes Cilium the default network. Works because Step 19 installed Cilium with `cni.exclusive=false` | Same |
+| Chaining with Cilium | Multus auto-generates `00-multus.conf` from the first config it finds (`05-cilium.conflist`) and makes Cilium the default network. Works because Chapter 19 installed Cilium with `cni.exclusive=false` | Same |
 | Secondary CNI | `macvlan` bridge mode, master = CX-7 netdev, MTU 9000 | `host-device` (a whole netdev per pod), or SR-IOV VFs (one VF per pod, hardware isolation) |
 | IPAM | `static`, IP given per pod in the annotation (deterministic for a lab) | `whereabouts` (cluster-wide ranges), as in the Network Operator path |
 | RDMA exposure | `k8s-rdma-shared-dev-plugin`, selecting netdevs `enp1s0f1np1`, `enP2p1s0f1np1`, up to 64 pods per device (`rdmaHcaMax`) | SR-IOV network device plugin (exclusive VFs) |
@@ -82,7 +82,7 @@ For a pod in the `llms` vCluster, that namespace is not `batch`:
 ```text
 inside llms:   batch / rdma-llms                    annotation k8s.v1.cni.cncf.io/networks: [{"name":"cx7-a",…}]
 on the root:   vc-llms / rdma-llms-x-batch-x-llms   same annotation, copied unchanged by the syncer
-Multus:        NAD vc-llms/cx7-a                    ← created by playbook 13 on the root
+Multus:        NAD vc-llms/cx7-a                    ← created by playbook 21.1 on the root
 ```
 
 So the playbook creates the NADs in `vc-llms`, where the llms pods really run. Tenants can't create them: NetworkAttachmentDefinition is a CRD on the root, and the vCluster neither has it nor syncs it. The platform team decides which fabrics a vCluster may use by deciding which NADs exist in its host namespace. `dev-lab` gets none, so a dev-lab pod that asks for `cx7-a` stays in `ContainerCreating` with a Multus "NAD not found" error.
@@ -101,14 +101,14 @@ What this does **not** give you, and what to add for real tenants:
 ## 3. Hands-on
 
 ```yaml
-# lab/playbooks/13-multus-rdma.yml
+# lab/playbooks/21.1-multus-rdma.yml
 ---
 # Secondary CX-7 networks for pods: Multus + macvlan (static IPAM) + RDMA shared device plugin.
 # Result: a pod gets eth0 (Cilium) AND net1 on the 200G fabric with RDMA verbs access.
 # Cilium was installed with cni.exclusive=false (roles/cilium) so it leaves Multus's
 # config alone in /etc/cni/net.d.
 #
-#   ansible-playbook playbooks/13-multus-rdma.yml
+#   ansible-playbook playbooks/21.1-multus-rdma.yml
 - name: Multus + RDMA on the root cluster
   hosts: localhost
   connection: local
@@ -177,7 +177,7 @@ What this does **not** give you, and what to add for real tenants:
               spark.lab/tier: platform
               pod-security.kubernetes.io/enforce: privileged
 
-    - name: Which NAD namespaces exist (vc-llms appears once playbook 06b has run)?
+    - name: Which NAD namespaces exist (vc-llms appears once playbook 20.2 has run)?
       kubernetes.core.k8s_info:
         kind: Namespace
       register: multus_ns
@@ -273,7 +273,7 @@ What this does **not** give you, and what to add for real tenants:
 Things worth noticing:
 
 - **`module_defaults` pins the cluster.** Every `kubernetes.core` task gets `context: spark-root` from the action group, so none of them can land in a vCluster even though the lab kubeconfig's other contexts are one typo away.
-- **The NAD namespaces are discovered, not assumed.** Run 13 before 06b and you get NADs in `platform-tools` only. Run it again after 06b and `vc-llms` gets its pair. `product()` builds the namespace × fabric matrix in one loop.
+- **The NAD namespaces are discovered, not assumed.** Run 21.1 before 20.2 and you get NADs in `platform-tools` only. Run it again after 20.2 and `vc-llms` gets its pair. `product()` builds the namespace × fabric matrix in one loop.
 - **The test pods live in `platform-tools`** (privileged PSA). It is the root namespace for the platform team's node-level tools, and it holds no tenant workloads.
 - **Pin what you download.** The playbook pins the *manifest* to the `v4.3.0` tag, but check the image tag inside `.cache/multus-v4.3.0.yml` (`grep image:`). Upstream manifests have pointed at a moving `snapshot` tag before; replace it with the release tag if so. The RDMA device plugin is on `:latest` until you pin it.
 
@@ -335,8 +335,8 @@ spec:
 ```bash
 cd "01-Ansible/lab"
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
-ansible-playbook playbooks/13-multus-rdma.yml
-kubectl --context spark-root get net-attach-def -A                  # cx7-a, cx7-b in platform-tools (and vc-llms after 06b)
+ansible-playbook playbooks/21.1-multus-rdma.yml
+kubectl --context spark-root get net-attach-def -A                  # cx7-a, cx7-b in platform-tools (and vc-llms after 20.2)
 kubectl --context spark-root get nodes -o custom-columns=NAME:.metadata.name,RDMA:.status.allocatable.rdma/rdma_shared_cx7,GPU:.status.allocatable.nvidia\\.com/gpu
 ssh dgxadmin@192.168.0.100 'ls /etc/cni/net.d; ls /opt/cni/bin | grep -E "multus|macvlan|static|cilium"'
 ```
@@ -351,7 +351,7 @@ sleep 3
 kubectl --context spark-root -n platform-tools exec rdma-test-dgx-spark-1 -- ib_write_bw -d rocep1s0f1 -q 4 -D 10 --report_gbits -F 192.168.100.202
 ```
 
-Inside the pods, `ibv_devices` shows the host's RDMA devices, because the shared plugin exposes them (not isolated). The traffic's source address is the pod's macvlan IP, `.201`/`.202`. Compare the number with the host-level perftest from Step 13: it should be within a few percent. On a single Spark both pods sit on dgx-spark-1 and the test runs through the NIC's internal switch; the number says nothing about the cable.
+Inside the pods, `ibv_devices` shows the host's RDMA devices, because the shared plugin exposes them (not isolated). The traffic's source address is the pod's macvlan IP, `.201`/`.202`. Compare the number with the host-level perftest from Chapter 13: it should be within a few percent. On a single Spark both pods sit on dgx-spark-1 and the test runs through the NIC's internal switch; the number says nothing about the cable.
 
 Multus also records what it did, on the root object:
 
@@ -422,20 +422,20 @@ The ping shows the §2.3 gap. A pod in `llms` reaches a `platform-tools` pod on 
 
 | With | Note |
 |---|---|
-| Root cluster (Step 19) | Cilium `cni.exclusive=false`; Multus uses the standard kubeadm CNI paths |
-| GPU Operator (Step 20) | Independent: GPU via `nvidia.com/gpu`, RDMA via `rdma/*`. Both limits go on the same container |
-| Time-slicing (Step 20) | Several pods can share the GPU **and** the shared RDMA device. Neither is isolated, and that's fine for a lab |
-| vClusters (Step 19 §3.4) | NADs in `vc-llms` only; tenants consume them by name, never create them |
-| Slurm (Step 22) | Bare-metal jobs don't need any of this; it's the Kubernetes equivalent |
-| Network Operator | For production, one Helm chart replaces §3: `NicClusterPolicy` with `rdmaSharedDevicePlugin`, `secondaryNetwork.multus`, `ipamPlugin` (02-Kubernetes Step 17 §5.6) |
+| Root cluster (Chapter 19) | Cilium `cni.exclusive=false`; Multus uses the standard kubeadm CNI paths |
+| GPU Operator (Chapter 20) | Independent: GPU via `nvidia.com/gpu`, RDMA via `rdma/*`. Both limits go on the same container |
+| Time-slicing (Chapter 20) | Several pods can share the GPU **and** the shared RDMA device. Neither is isolated, and that's fine for a lab |
+| vClusters (Chapter 19 §3.4) | NADs in `vc-llms` only; tenants consume them by name, never create them |
+| Slurm (Chapter 22) | Bare-metal jobs don't need any of this; it's the Kubernetes equivalent |
+| Network Operator | For production, one Helm chart replaces §3: `NicClusterPolicy` with `rdmaSharedDevicePlugin`, `secondaryNetwork.multus`, `ipamPlugin` (02-Kubernetes Chapter 17 §5.6) |
 
 ## 5. Troubleshooting & diagnostics
 
 | Symptom | Diagnose | Fix |
 |---|---|---|
 | Pod stuck `ContainerCreating`: `failed to find plugin "macvlan"` | `ls /opt/cni/bin` on the node | Reference plugins missing: `sudo apt-get install kubernetes-cni` (from pkgs.k8s.io; keep it at the version kubeadm pulled in) |
-| Multus DS ready, but pods have no `net1` | `kubectl --context spark-root describe pod …` events; `ls /etc/cni/net.d` | `00-multus.conf` gone: Cilium renamed it (`cni.exclusive` not `false`; re-run 05). Or an annotation typo |
-| vCluster pod: `cannot find a network-attachment-definition (cx7-a) in namespace (vc-llms)` | `kubectl --context spark-root -n vc-llms get net-attach-def` | Playbook 13 ran before 06b. Run it again |
+| Multus DS ready, but pods have no `net1` | `kubectl --context spark-root describe pod …` events; `ls /etc/cni/net.d` | `00-multus.conf` gone: Cilium renamed it (`cni.exclusive` not `false`; re-run 19.1). Or an annotation typo |
+| vCluster pod: `cannot find a network-attachment-definition (cx7-a) in namespace (vc-llms)` | `kubectl --context spark-root -n vc-llms get net-attach-def` | Playbook 21.1 ran before 20.2. Run it again |
 | Tenant used `batch/cx7-a` in the annotation | Same error, namespace `batch` | `batch` doesn't exist on the root. Use the bare name |
 | All pods stuck `ContainerCreating` after installing Multus | `kubectl --context spark-root -n kube-system logs ds/kube-multus-ds` | The daemon can't reach the API server or read `05-cilium.conflist`. Fix and restart the DS. Every pod's CNI ADD now passes through it |
 | `net1` exists, ping to the other pod fails | `ip -d link show net1` in the pod; host `ip link show enp1s0f1np1` | Master netdev down or wrong; macvlan can't reach **its own host** (a known macvlan property). Test pod-to-pod across nodes |

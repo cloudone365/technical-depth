@@ -1,14 +1,14 @@
 ---
-# Wipe Kubernetes from the Sparks so you can rebuild from scratch (Step 19 §8).
+# Wipe Kubernetes from the Sparks so you can rebuild from scratch (Chapter 19 §8).
 # The DGX itself is your playground: break the cluster, learn, reset, rebuild.
 # Docker, the NVIDIA driver/toolkit, Slurm and everything outside Kubernetes
 # are left alone.
 #
-#   ansible-playbook playbooks/99-reset-kubernetes.yml                       # kubeadm cluster only
-#   ansible-playbook playbooks/99-reset-kubernetes.yml -e reset_remove_k3s=true   # also uninstall an old k3s
-#   ansible-playbook playbooks/99-reset-kubernetes.yml -e reset_wipe_data=true    # also delete PV data in /data/k8s
+#   ansible-playbook playbooks/19.2-reset-kubernetes.yml                       # kubeadm cluster only
+#   ansible-playbook playbooks/19.2-reset-kubernetes.yml -e reset_remove_k3s=true   # also uninstall an old k3s
+#   ansible-playbook playbooks/19.2-reset-kubernetes.yml -e reset_wipe_data=true    # also delete PV data in /data/k8s
 #
-# Then rebuild: playbooks/05-kubernetes.yml → 06-gpu-operator.yml → 06b-vclusters.yml
+# Then rebuild: playbooks/19.1-kubernetes.yml → 20.1-gpu-operator.yml → 20.2-vclusters.yml
 - name: Short-lived SSH certificate from vault01 (Semaphore runs only)
   ansible.builtin.import_playbook: 00-vault-cert.yml
 

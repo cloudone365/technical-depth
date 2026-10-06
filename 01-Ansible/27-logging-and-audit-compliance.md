@@ -1,6 +1,6 @@
-# Step 27 · Logging & Audit Compliance: Who Changed What, When, and Through Which Automation
+# Chapter 27 · Logging & Audit Compliance: Who Changed What, When, and Through Which Automation
 
-> **01-Ansible · Part V — Production operations · Step 27 of 30** · ← [Step 26 · Drift detection & self-healing](26-drift-detection-and-self-healing.md) · [All steps](00-ansible-step-by-step-guide.md) · [Step 28 · Firmware lifecycle & vulnerability patching](28-firmware-lifecycle-and-vulnerability-patching.md) →
+> **01-Ansible · Part V — Production operations · Chapter 27 of 30** · ← [Chapter 26 · Drift detection & self-healing](26-drift-detection-and-self-healing.md) · [All chapters](00-ansible-step-by-step-guide.md) · [Chapter 28 · Firmware lifecycle & vulnerability patching](28-firmware-lifecycle-and-vulnerability-patching.md) →
 
 | | |
 |---|---|
@@ -17,13 +17,13 @@
 | Question | Layer that answers it |
 |---|---|
 | "Which playbook run changed `/etc/sysctl.d/90-spark.conf` on dgx-spark-2 last Tuesday, and with what diff?" | **ARA** (+ `ansible.log`) |
-| "Did someone edit netplan by hand outside Ansible?" | **auditd** key `network` + drift (Step 26) |
+| "Did someone edit netplan by hand outside Ansible?" | **auditd** key `network` + drift (Chapter 26) |
 | "What did the kernel say about the GPU right before the job died?" | **Loki**: `{host="dgx-spark-2"} \|= "NVRM: Xid"` |
-| "Who read the NGC key?" | **vault01's audit log**, `/var/log/vault_audit.log` on vault01 (Step 01 §3.5): the `kv/data/spark-lab/ngc` read by the `semaphore` AppRole token, or by an admin |
-| "Who ran `21 Emergency drain` on Saturday, with which extra variables, and did it succeed?" | **Semaphore task history** on sema01 (task log, user, start/end, status), kept in its PostgreSQL |
+| "Who read the NGC key?" | **vault01's audit log**, `/var/log/vault_audit.log` on vault01 (Chapter 01 §3.5): the `kv/data/spark-lab/ngc` read by the `semaphore` AppRole token, or by an admin |
+| "Who ran `29.1 Emergency drain` on Saturday, with which extra variables, and did it succeed?" | **Semaphore task history** on sema01 (task log, user, start/end, status), kept in its PostgreSQL |
 | "Which credential did that run log in with?" | **sshd** on the Spark: `Accepted publickey for svc-ansible … ED25519-CERT ID vault-… serial N CA …`, matched by time to the `sign/ansible` entry in vault01's audit log |
 | "Who raised the `vc-llms` GPU quota, and what did the request body say?" | **Kubernetes API audit log** on dgx-spark-1, `/var/log/kubernetes/audit/audit.log` (written by the root kube-apiserver; §4.5) |
-| "Who launched the remediation job and who approved it?" | **Semaphore** task history (this lab); **AWX** activity stream + job history if you run AWX (Step 24) |
+| "Who launched the remediation job and who approved it?" | **Semaphore** task history (this lab); **AWX** activity stream + job history if you run AWX (Chapter 24) |
 
 ## 2. Architecture
 
@@ -54,7 +54,7 @@ flowchart LR
   class CN,VA mgmt
 ```
 
-vault01's audit file and Semaphore's history stay on their own machines: the lab ships neither to Loki. That's deliberate for a lab (the management plane doesn't depend on the Spark it manages), and the first thing a production design would change: forward both to a SIEM (Step 01 §11).
+vault01's audit file and Semaphore's history stay on their own machines: the lab ships neither to Loki. That's deliberate for a lab (the management plane doesn't depend on the Spark it manages), and the first thing a production design would change: forward both to a SIEM (Chapter 01 §11).
 
 | Component | Image / package | Config |
 |---|---|---|
@@ -180,12 +180,12 @@ compactor:
 ```
 
 ```yaml
-# lab/playbooks/23-logging-audit.yml
+# lab/playbooks/27.1-logging-audit.yml
 ---
 # Audit & logging stack:
 #   * auditd rules on every Spark (who changed sudoers, sshd, netplan, docker, kubernetes, slurm, vault…)
 #   * Loki on the monitoring host + Grafana Alloy on every Spark shipping the journal
-#   * Loki datasource in the Step 12 Grafana
+#   * Loki datasource in the Chapter 12 Grafana
 #   * ARA API server recording every ansible-playbook run
 - name: Short-lived SSH certificate from vault01 (Semaphore runs only)
   ansible.builtin.import_playbook: 00-vault-cert.yml
@@ -264,7 +264,7 @@ compactor:
       retries: 30
       delay: 3
 
-    - name: Loki datasource for Grafana (Step 12 stack)
+    - name: Loki datasource for Grafana (Chapter 12 stack)
       ansible.builtin.copy:
         dest: /opt/spark-monitoring/grafana/provisioning/datasources/loki.yml
         mode: "0644"
@@ -379,7 +379,7 @@ compactor:
 
 ### 4.1 Deploy
 
-Run the Semaphore template **`23 Logging audit`** (break-glass: `ansible-playbook playbooks/23-logging-audit.yml -l dgx-spark-1,localhost -K`), then:
+Run the Semaphore template **`27.1 Logging audit`** (break-glass: `ansible-playbook playbooks/27.1-logging-audit.yml -l dgx-spark-1,localhost -K`), then:
 
 ```bash
 curl -s http://192.168.0.100:3100/ready                        # ready
@@ -394,16 +394,16 @@ The ARA callback runs on the **controller**. The lab's Semaphore image doesn't i
 pip install "ara>=1.7"                                       # client side, on the controller (here: the MacBook)
 export ANSIBLE_CALLBACK_PLUGINS=$(python3 -m ara.setup.callback_plugins)
 export ARA_API_CLIENT=http ARA_API_SERVER=http://192.168.0.100:8000
-ansible-playbook playbooks/01-baseline.yml -l dgx-spark-1,localhost -K
+ansible-playbook playbooks/02.2-baseline.yml -l dgx-spark-1,localhost -K
 ara playbook list --limit 5
 ara result list --playbook <id> --changed      # every changed task, with the diff
 ```
 
-To record the **Semaphore** runs too, add `ara` to [`semaphore/requirements-semaphore.txt`](lab/semaphore/requirements-semaphore.txt), rebuild the image (Step 04 §4), and put the three variables in the variable group's environment. Semaphore's task history already answers "who ran what, when"; ARA adds per-task results and diffs you can query. For AWX, install `ara` into the EE (Step 08) and set the variables in the job template environment (Step 24).
+To record the **Semaphore** runs too, add `ara` to [`semaphore/requirements-semaphore.txt`](lab/semaphore/requirements-semaphore.txt), rebuild the image (Chapter 04 §4), and put the three variables in the variable group's environment. Semaphore's task history already answers "who ran what, when"; ARA adds per-task results and diffs you can query. For AWX, install `ara` into the EE (Chapter 08) and set the variables in the job template environment (Chapter 24).
 
 ### 4.2b The management-plane trail: Semaphore, vault01, sshd
 
-One template run leaves three matching records. Run `00 Ping` in Semaphore, then:
+One template run leaves three matching records. Run `02.1 Ping` in Semaphore, then:
 
 ```bash
 # sema01: the task, who ran it, its status (also in the UI: project spark-lab → Task history)
@@ -437,8 +437,8 @@ ssh dgxadmin@192.168.0.101 'sudo sed -i "s/mtu: 9000/mtu: 1500/" /etc/netplan/40
 ssh dgxadmin@192.168.0.101 'sudo ausearch -k network -i --start recent | tail -20'
 # → type=SYSCALL ... comm="sed" ... auid=nvidia ... key="network"
 tools/drift-cycle.sh      # drift reports the fabric template (and doesn't auto-heal it)
-# a human puts it back: Semaphore template 02 Fabric with --limit dgx-spark-2,localhost
-#   (break-glass: ansible-playbook playbooks/02-fabric.yml -K -l dgx-spark-2,localhost)
+# a human puts it back: Semaphore template 13.1 Fabric with --limit dgx-spark-2,localhost
+#   (break-glass: ansible-playbook playbooks/13.1-fabric.yml -K -l dgx-spark-2,localhost)
 ```
 
 ### 4.5 The Kubernetes API audit log: root vs vCluster
@@ -463,7 +463,7 @@ kubectl --context dev-lab -n default delete configmap audit-probe
 
 So "which tenant did this?" has to be answered from the vCluster's own audit trail, not the root's. That is the same split a hosting provider has between its own audit log and a customer's.
 
-The 4-layer stack above does **not** ship this file yet: Alloy tails `/var/log/audit/audit.log` only, and the `alloy` container doesn't mount `/var/log/kubernetes`. Exercise: add a second `local.file_match` for `/var/log/kubernetes/audit/audit.log` (label `job="kube-audit"`) to `alloy.river.j2`, add the read-only mount to the `Alloy container` task in `23-logging-audit.yml`, and filter by `objectRef.namespace` in LogQL with `| json`, never as a label.
+The 4-layer stack above does **not** ship this file yet: Alloy tails `/var/log/audit/audit.log` only, and the `alloy` container doesn't mount `/var/log/kubernetes`. Exercise: add a second `local.file_match` for `/var/log/kubernetes/audit/audit.log` (label `job="kube-audit"`) to `alloy.river.j2`, add the read-only mount to the `Alloy container` task in `27.1-logging-audit.yml`, and filter by `objectRef.namespace` in LogQL with `| json`, never as a label.
 
 ---
 
@@ -482,12 +482,12 @@ The 4-layer stack above does **not** ship this file yet: Alloy tails `/var/log/a
 
 | System | Hook |
 |---|---|
-| Alerting (Step 12) | Loki ruler or Grafana alert on the Xid-rate query, complementing the Prometheus `SparkGPUXid` alert |
-| Drift (Step 26) | The auditd `key` explains *who/what* caused the drift the playbook found |
-| Drain (Step 29) | The incident bundle captures local logs; Loki keeps them after the node is re-imaged |
+| Alerting (Chapter 12) | Loki ruler or Grafana alert on the Xid-rate query, complementing the Prometheus `SparkGPUXid` alert |
+| Drift (Chapter 26) | The auditd `key` explains *who/what* caused the drift the playbook found |
+| Drain (Chapter 29) | The incident bundle captures local logs; Loki keeps them after the node is re-imaged |
 | Semaphore (sema01) | Task history in its database; `ansible.log` on the state volume. Neither is shipped to Loki by default |
-| vault01 | `/var/log/vault_audit.log`; forward it to a SIEM in production (Step 01 §11) |
-| AWX (Step 24) | External logging → Loki (`Settings → Logging`), so job events sit next to host logs |
+| vault01 | `/var/log/vault_audit.log`; forward it to a SIEM in production (Chapter 01 §11) |
+| AWX (Chapter 24) | External logging → Loki (`Settings → Logging`), so job events sit next to host logs |
 
 ## 7. Troubleshooting & diagnostics
 

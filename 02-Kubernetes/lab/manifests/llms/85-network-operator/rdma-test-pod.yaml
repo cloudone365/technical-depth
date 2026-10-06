@@ -1,4 +1,4 @@
-# Verify the secondary RDMA interface from inside a pod (Step 17 §5.6), INSIDE
+# Verify the secondary RDMA interface from inside a pod (Chapter 17 §5.6), INSIDE
 # vCluster #2 · llms. The pod is synced to the root namespace vc-llms with this
 # annotation unchanged, so Multus looks up NetworkAttachmentDefinition cx7-rdma
 # in vc-llms — that is where root/85-network-operator puts it.

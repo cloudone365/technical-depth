@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Eager vs compiled: what a compiler buys you on the GB10 (Step 24).
+"""Eager vs compiled: what a compiler buys you on the GB10 (Chapter 24).
 
 Runs one transformer-style MLP block (GEMM → GELU → GEMM + residual + RMSNorm)
 three ways and prints ms/iter:

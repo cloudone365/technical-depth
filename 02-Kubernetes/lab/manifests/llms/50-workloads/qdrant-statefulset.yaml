@@ -1,4 +1,4 @@
-# Vector DB as a StatefulSet (Step 12), INSIDE vCluster #2 · llms: stable name
+# Vector DB as a StatefulSet (Chapter 12), INSIDE vCluster #2 · llms: stable name
 # qdrant-0, stable DNS qdrant-0.qdrant-headless.llm-serving.svc (in the vCluster's
 # DNS), and a PVC that follows the pod (synced to the root as a real local-nvme PV).
 apiVersion: v1
@@ -27,7 +27,7 @@ kind: StatefulSet
 metadata: {name: qdrant, namespace: llm-serving}
 spec:
   serviceName: qdrant-headless
-  replicas: 1                          # 3 when you have 3 nodes; see Step 12 §8
+  replicas: 1                          # 3 when you have 3 nodes; see Chapter 12 §8
   podManagementPolicy: OrderedReady
   updateStrategy:
     type: RollingUpdate
@@ -74,7 +74,7 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata: {name: qdrant, namespace: llm-serving}
 spec:
-  maxUnavailable: 0                    # single replica: `kubectl drain` must stop and ask (Step 12 §5)
+  maxUnavailable: 0                    # single replica: `kubectl drain` must stop and ask (Chapter 12 §5)
   selector: {matchLabels: {app: qdrant}}
 ---
 apiVersion: policy/v1

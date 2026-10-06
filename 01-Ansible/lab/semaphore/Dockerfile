@@ -1,6 +1,6 @@
-# Semaphore UI image for the DGX Spark lab (Step 04 §4).
+# Semaphore UI image for the DGX Spark lab (Chapter 04 §4).
 # The stock semaphoreui/semaphore image runs Ansible but has no Kubernetes
-# tooling. The lab's playbooks 05/06/06b/13/21/99 run kubectl, helm and the
+# tooling. The lab's playbooks 19.1/19.2/20.1/20.2/21.1/29.1 run kubectl, helm and the
 # kubernetes.core modules ON THE CONTROLLER — here, inside this container.
 #
 # Built on sema01 by docker compose (docker-compose.override.yml), with the

@@ -1,4 +1,4 @@
-# Helm values for kube-prometheus-stack on the ROOT cluster (Steps 17, 26).
+# Helm values for kube-prometheus-stack on the ROOT cluster (Chapters 17, 26).
 # Prometheus Operator + Prometheus + Alertmanager + Grafana, sized for one Spark:
 # 15d retention, 50Gi on local NVMe. Installed by scripts/install-addons.sh kps:
 #   helm upgrade --install kps prometheus-community/kube-prometheus-stack \
@@ -63,7 +63,7 @@ alertmanager:
     priorityClassName: spark-platform
     resources: {limits: {memory: 256Mi}}
 grafana:
-  adminPassword: change-me      # replace from Vault (01-Ansible Step 18)
+  adminPassword: change-me      # replace from Vault (01-Ansible Chapter 18)
   sidecar:
     dashboards:
       enabled: true

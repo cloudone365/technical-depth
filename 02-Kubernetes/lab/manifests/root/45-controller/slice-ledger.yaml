@@ -1,4 +1,4 @@
-# Deploys slice_ledger.py (Step 06 §5.5) on the ROOT: least-privilege RBAC —
+# Deploys slice_ledger.py (Chapter 06 §5.5) on the ROOT: least-privilege RBAC —
 # read pods everywhere (including the pods both vClusters synced), write
 # exactly one ConfigMap in platform-tools.
 apiVersion: v1

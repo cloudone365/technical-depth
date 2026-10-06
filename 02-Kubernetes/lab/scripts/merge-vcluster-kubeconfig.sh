@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copy a vCluster's exported kubeconfig (Secret vc-<name> in the root) into
-# $KUBECONFIG as context <name> (Step 04). kubectl only — no YAML tooling.
+# $KUBECONFIG as context <name> (Chapter 04). kubectl only — no YAML tooling.
 # Cluster, user and context are all renamed to <name>, so two vClusters can
 # never overwrite each other's entries when merged into one file.
 #   scripts/merge-vcluster-kubeconfig.sh dev-lab vc-dev-lab

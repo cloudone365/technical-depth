@@ -1,4 +1,4 @@
-# Serving INSIDE llms (Steps 08, 11, 04): only the ingress controller (Traefik,
+# Serving INSIDE llms (Chapters 08, 11, 04): only the ingress controller (Traefik,
 # namespace 'ingress' in this vCluster) and pods in llm-serving may connect.
 # Prometheus runs on the ROOT, in a namespace this vCluster can't see; it is
 # allowed by the root's CiliumNetworkPolicy vcluster-boundary

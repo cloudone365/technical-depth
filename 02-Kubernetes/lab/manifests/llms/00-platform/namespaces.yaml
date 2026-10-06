@@ -1,4 +1,4 @@
-# Namespaces INSIDE vCluster #2 · llms (Steps 20, 04). Apply with --context llms.
+# Namespaces INSIDE vCluster #2 · llms (Chapters 20, 04). Apply with --context llms.
 # On the root these pods all land in host namespace vc-llms.
 apiVersion: v1
 kind: Namespace
@@ -19,7 +19,7 @@ metadata:
     kueue.x-k8s.io/managed: "true"
     # Multi-node NCCL needs hostNetwork or IPC_LOCK (RDMA pinned memory), which
     # baseline forbids. Enforce privileged, but WARN at baseline so anything
-    # unusual is visible on every apply (Step 18). The root's vc-llms
+    # unusual is visible on every apply (Chapter 18). The root's vc-llms
     # namespace is privileged for the same reason.
     pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/warn: baseline

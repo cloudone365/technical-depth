@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-capstone_scorecard.py — grade the 01-Ansible capstone (Step 30) from EVIDENCE in lab/.cache/.
+capstone_scorecard.py — grade the 01-Ansible capstone (Chapter 30) from EVIDENCE in lab/.cache/.
 Each challenge passes only if the artifact produced by the real run exists and says so.
 
   python3 tools/capstone_scorecard.py            # table
@@ -43,9 +43,9 @@ def read(path):
 CHECKS = []
 
 
-def check(step, title):
+def check(chapter, title):
     def deco(fn):
-        CHECKS.append((step, title, fn))
+        CHECKS.append((chapter, title, fn))
         return fn
     return deco
 
@@ -126,18 +126,18 @@ def main():
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
     results = []
-    for step, title, fn in CHECKS:
+    for chapter, title, fn in CHECKS:
         try:
             ok, detail = fn()
         except Exception as e:  # noqa: BLE001 — scorecard must never crash
             ok, detail = False, f"error: {e}"
-        results.append({"step": step, "challenge": title, "pass": bool(ok), "evidence": detail})
+        results.append({"chapter": chapter, "challenge": title, "pass": bool(ok), "evidence": detail})
     score = sum(r["pass"] for r in results)
     if a.json:
         print(json.dumps({"score": score, "total": len(results), "results": results}, indent=2))
     else:
         for r in results:
-            print(f"[{'PASS' if r['pass'] else 'FAIL'}] Step {r['step']:<6} {r['challenge']}\n         evidence: {r['evidence']}")
+            print(f"[{'PASS' if r['pass'] else 'FAIL'}] Chapter {r['chapter']:<6} {r['challenge']}\n         evidence: {r['evidence']}")
         print(f"\nScore: {score}/{len(results)}")
     raise SystemExit(0 if score == len(results) else 1)
 
