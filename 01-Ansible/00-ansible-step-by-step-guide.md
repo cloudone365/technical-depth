@@ -116,6 +116,8 @@ tests/run-local-checks.sh              # proves your toolchain before touching h
 ansible-inventory --graph              # the inventory as Ansible sees it (Chapter 02 §3.3)
 ```
 
+Every new terminal: `source ~/.venvs/spark-ansible/bin/activate` first (the prompt then starts with `(spark-ansible)`); without it, `yamllint`, `ansible` and friends are "command not found".
+
 The MacBook needs this toolchain only for the bootstrap playbooks, `17.1-vault.yml` and break-glass runs; Semaphore brings its own (Chapter 04 §4).
 
 ✅ **Done when** `tests/run-local-checks.sh` prints `ALL LOCAL CHECKS PASSED` and `ansible-inventory --graph` shows `dgx-spark-1` under `@spark`.

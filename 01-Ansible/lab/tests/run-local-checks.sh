@@ -9,6 +9,15 @@ python3 -c 'import os
 for fd in (0, 1, 2):
     try: os.set_blocking(fd, True)
     except OSError: pass'
+# The tools come from the lab's virtual environment (Chapter 02 §3.1). A new
+# terminal doesn't have it active: say so instead of "command not found".
+for t in yamllint ansible-lint ansible-playbook ansible-inventory; do
+  command -v "$t" >/dev/null || {
+    echo "$t not found. Activate the lab's virtual environment first:"
+    echo "  source ~/.venvs/spark-ansible/bin/activate"
+    echo "(not created yet? see Chapter 02 §3.1: python3 -m venv …, pip install -r requirements.txt)"
+    exit 1; }
+done
 echo "== yamllint";      yamllint -s .
 # Plain syntax-check BEFORE ansible-lint: ansible-lint only says "Unexpected error
 # code 1" — this prints ansible's own message (and a GitHub annotation in CI).
