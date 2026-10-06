@@ -92,7 +92,7 @@ flowchart LR
   A -- "HTTPS :3000" --> SEMA
   SEMA -- "play 1: AppRole + sign" --> VAULT
   SEMA -- "SSH 22 as svc-ansible (15-min cert) · :6443" --> MGMT
-  A -. "break-glass: SSH as nvidia" .-> MGMT
+  A -. "break-glass: SSH as dgxadmin" .-> MGMT
   MGMT --- S1
   MGMT --- S2
   S1 <== "QSFP · CX-7 200GbE RoCE<br/>192.168.100.0/24 (enp1s0f1np1)<br/>192.168.101.0/24 (enP2p1s0f1np1)" ==> S2
@@ -147,7 +147,7 @@ ansible-galaxy collection install -r requirements.yml -p ./collections
 
 # 2. Edit inventory/hosts.yml (IPs) and host_vars/*.yml (CX-7 names from `ibdev2netdev`), push
 #    Fresh from the first-boot wizard? Use playbooks/00-bootstrap.yml (Step 03).
-ssh-copy-id nvidia@192.168.0.100     # and .101
+ssh-copy-id dgxadmin@192.168.0.100     # and .101
 
 # 3. Make the Spark a Semaphore target (Step 04: ../04-dgx-spark-as-semaphore-target.md), from the MacBook
 scp vault01:~/vault-ca.crt .cache/vault-ca.crt
@@ -169,7 +169,7 @@ tools/fetch-kubeconfig.sh sema01                                 # after 05 / 06
 tools/drift-cycle.sh                                             # what drifted? (exit 0/2/3)
 python3 tools/capstone_scorecard.py                              # evidence-based progress (Step 30 §1.3)
 
-# Break-glass, when sema01 or vault01 is down: same playbooks, as nvidia with your key
+# Break-glass, when sema01 or vault01 is down: same playbooks, as dgxadmin with your key
 ansible-playbook playbooks/21-emergency-drain.yml -l dgx-spark-1,localhost -K
 ```
 

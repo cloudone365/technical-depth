@@ -162,7 +162,7 @@ All commands run on the Spark, from a checkout of this repo, in `02 Kubernetes/l
 
 ```bash
 # on your MacBook (after 01 Ansible/lab/tools/fetch-kubeconfig.sh sema01)
-scp "01 Ansible/lab/.cache/kubeconfig-spark-lab.yaml" nvidia@192.168.0.100:.kube/spark-lab.yaml
+scp "01 Ansible/lab/.cache/kubeconfig-spark-lab.yaml" dgxadmin@192.168.0.100:.kube/spark-lab.yaml
 # on the Spark
 export KUBECONFIG=~/.kube/spark-lab.yaml
 kubectl config get-contexts -o name          # spark-root, dev-lab, llms
@@ -364,11 +364,11 @@ Workbook Ex 20 asks you to doom a namespace, a ConfigMap and a Kueue LocalQueue.
 
 ### 5.7 Copy snapshots off the box
 
-A snapshot on the Spark's own NVMe protects you from a bad `kubectl delete`, not from a dead disk or `99-reset-kubernetes.yml -e reset_wipe_data=true`. From your MacBook (as the admin user `nvidia` with your own key, the same login as the bootstrap playbooks), pull everything a rebuild on *new* hardware needs in one tarball:
+A snapshot on the Spark's own NVMe protects you from a bad `kubectl delete`, not from a dead disk or `99-reset-kubernetes.yml -e reset_wipe_data=true`. From your MacBook (as the admin user `dgxadmin` with your own key, the same login as the bootstrap playbooks), pull everything a rebuild on *new* hardware needs in one tarball:
 
 ```bash
 mkdir -p ~/spark-backups
-ssh nvidia@192.168.0.100 'sudo tar czf - -C / var/lib/etcd-snapshots etc/kubernetes/pki etc/kubernetes/encryption/config.yaml \
+ssh dgxadmin@192.168.0.100 'sudo tar czf - -C / var/lib/etcd-snapshots etc/kubernetes/pki etc/kubernetes/encryption/config.yaml \
   etc/kubernetes/kubeadm-config.yaml' > ~/spark-backups/spark-root-$(date +%F).tgz
 tar tzf ~/spark-backups/spark-root-$(date +%F).tgz | head
 ```

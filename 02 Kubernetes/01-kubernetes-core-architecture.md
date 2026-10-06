@@ -168,7 +168,7 @@ sequenceDiagram
   box rgb(230,244,245) Node · dgx-spark-1
     participant K as kubelet
     participant C as containerd
-    participant N as nvidia runtime + runc
+    participant N as dgxadmin runtime + runc
   end
   U->>V: POST /api/v1/namespaces/tenant-beta/pods
   V->>V: authn → RBAC → admission (PSA restricted, CEL, tenant quota) → SQLite
@@ -226,7 +226,7 @@ Expected (abridged):
 ### Task 2 · See the control plane as static pods
 
 ```bash
-ssh nvidia@192.168.0.100
+ssh dgxadmin@192.168.0.100
 ls /etc/kubernetes/manifests/
 sudo crictl ps --name 'kube-|etcd' -o table
 sudo ss -ltnp | grep -E ':(6443|10250|10257|10259|2379|2381) '

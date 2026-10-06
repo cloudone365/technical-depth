@@ -12,8 +12,8 @@
       ansible.builtin.file:
         path: "{{ nfs_rdma_export_path }}"
         state: directory
-        owner: "{{ spark_admin_user | default('nvidia') }}"
-        group: "{{ spark_admin_user | default('nvidia') }}"
+        owner: "{{ spark_admin_user | default('dgxadmin') }}"
+        group: "{{ spark_admin_user | default('dgxadmin') }}"
         mode: "0775"
 
     - name: Enable RDMA listener + thread count in /etc/nfs.conf

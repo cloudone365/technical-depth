@@ -128,7 +128,7 @@ export KUBECONFIG="$PWD/../../01 Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 ### 5.1 Inspect the toolkit, containerd and CDI on the host
 
 ```bash
-ssh nvidia@192.168.0.100
+ssh dgxadmin@192.168.0.100
 nvidia-ctk --version
 sudo nvidia-ctk cdi list
 grep -nE 'default_runtime_name|runtimes.\W?nvidia|BinaryName|SystemdCgroup' /etc/containerd/config.toml

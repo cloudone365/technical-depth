@@ -89,8 +89,8 @@ nfs_rdma_tcp_fallback: true
       ansible.builtin.file:
         path: "{{ nfs_rdma_export_path }}"
         state: directory
-        owner: "{{ spark_admin_user | default('nvidia') }}"
-        group: "{{ spark_admin_user | default('nvidia') }}"
+        owner: "{{ spark_admin_user | default('dgxadmin') }}"
+        group: "{{ spark_admin_user | default('dgxadmin') }}"
         mode: "0775"
 
     - name: Enable RDMA listener + thread count in /etc/nfs.conf
@@ -197,7 +197,7 @@ nfs_rdma_tcp_fallback: true
 ```bash
 cd "01 Ansible/lab"
 ansible-playbook playbooks/09-nfs-rdma.yml -K
-ssh nvidia@192.168.0.101 'nfsstat -m | grep -A1 /mnt/models; cat /proc/fs/nfsd/portlist 2>/dev/null'
+ssh dgxadmin@192.168.0.101 'nfsstat -m | grep -A1 /mnt/models; cat /proc/fs/nfsd/portlist 2>/dev/null'
 # Expect: proto=rdma,port=20049 on the client; "rdma 20049" in the server portlist
 ```
 

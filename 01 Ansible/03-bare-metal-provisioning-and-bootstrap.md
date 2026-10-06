@@ -64,7 +64,7 @@ flowchart LR
 
 ```mermaid
 sequenceDiagram
-  participant A as Ansible (MacBook, as nvidia)
+  participant A as Ansible (MacBook, as dgxadmin)
   participant S as Spark (old IP, DHCP)
   participant T as systemd timer
   A->>S: back up /etc/netplan → /root/netplan.pre-bootstrap
@@ -91,13 +91,13 @@ The same pattern protects **any** change that can cut your own access: sshd conf
 
 1. Connect the 10GbE port to your management LAN (recommended over Wi-Fi for everything that follows).
 2. Power on. Either use a monitor and keyboard, or join the setup hotspot from a laptop and open the URL on the Quick Start Guide sticker.
-3. Create the user. Use **the same username on every Spark** (`nvidia` in this lab); NVIDIA's multi-node playbooks and MPI depend on it.
+3. Create the user. Use **the same username on every Spark** (`dgxadmin` in this lab); NVIDIA's multi-node playbooks and MPI depend on it.
 4. Let the updates finish, including the reboot.
 5. Find its DHCP address from your router, or with `avahi-browse -rt _ssh._tcp` from a Linux machine on the same LAN (Step 06).
 
 ### 3.2 Day 1: bootstrap with Ansible
 
-This is one of the few playbooks that runs **from your MacBook**, not from Semaphore: the Spark has no `svc-ansible` account and doesn't trust vault01's CA yet, so Semaphore can't log in. You connect as `nvidia` with a password (`-k`), and the play installs your key.
+This is one of the few playbooks that runs **from your MacBook**, not from Semaphore: the Spark has no `svc-ansible` account and doesn't trust vault01's CA yet, so Semaphore can't log in. You connect as `dgxadmin` with a password (`-k`), and the play installs your key.
 
 ```yaml
 # lab/playbooks/00-bootstrap.yml

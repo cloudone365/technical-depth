@@ -159,7 +159,7 @@ The **blocking** time is what the training loop pays per checkpoint. With async 
 ```bash
 kubectl --context llms -n batch get pvc ckpt                                   # Bound, local-nvme
 kubectl --context spark-root -n vc-llms get pvc ckpt-x-batch-x-llms -o jsonpath='{.spec.volumeName}{"\n"}'
-ssh nvidia@192.168.0.100 'ls /data/k8s/vc-llms/ckpt-x-batch-x-llms/'           # step-* + canary.json
+ssh dgxadmin@192.168.0.100 'ls /data/k8s/vc-llms/ckpt-x-batch-x-llms/'           # step-* + canary.json
 ```
 
 ### 5.2 Kill it mid-run and watch it resume
@@ -197,7 +197,7 @@ Corrupt the stored reference (a stand-in for the GPU computing a different answe
 
 ```bash
 kubectl --context llms -n batch delete job resilient-train
-ssh nvidia@192.168.0.100 "echo '{\"sha\": \"deadbeefdeadbeef\"}' | sudo tee /data/k8s/vc-llms/ckpt-x-batch-x-llms/canary.json"
+ssh dgxadmin@192.168.0.100 "echo '{\"sha\": \"deadbeefdeadbeef\"}' | sudo tee /data/k8s/vc-llms/ckpt-x-batch-x-llms/canary.json"
 kubectl --context llms apply -k manifests/llms/80-distributed/resilient
 kubectl --context llms -n batch logs -f job/resilient-train | grep -E 'canary|SDC'
 kubectl --context llms -n batch get job resilient-train -o jsonpath='{.status.conditions[?(@.type=="Failed")].reason}{"\n"}'   # PodFailurePolicy
@@ -217,7 +217,7 @@ Both vClusters show the taint because they sync the real node from the root. Nei
 After investigation (DCGM diag / vendor) — and restoring the real reference:
 
 ```bash
-ssh nvidia@192.168.0.100 'sudo rm /data/k8s/vc-llms/ckpt-x-batch-x-llms/canary.json'
+ssh dgxadmin@192.168.0.100 'sudo rm /data/k8s/vc-llms/ckpt-x-batch-x-llms/canary.json'
 kubectl --context spark-root taint node dgx-spark-1 spark.lab/sdc-
 kubectl --context spark-root annotate node dgx-spark-1 spark.lab/quarantine-reason-
 ```

@@ -178,13 +178,13 @@ export CONTROLLER_PASSWORD=$(kubectl --context spark-root -n awx get secret awx-
     - name: Organization
       awx.awx.organization: { name: "{{ org }}", state: present }
 
-    - name: Machine credential (SSH key for the nvidia user)
+    - name: Machine credential (SSH key for the dgxadmin user)
       awx.awx.credential:
         name: spark-ssh
         organization: "{{ org }}"
         credential_type: Machine
         inputs:
-          username: nvidia
+          username: dgxadmin
           ssh_key_data: "{{ lookup('file', '~/.ssh/id_ed25519') }}"
           become_method: sudo
           become_password: "{{ spark_become_password }}"   # pass with -e @vault.yml
@@ -242,9 +242,9 @@ export CONTROLLER_PASSWORD=$(kubectl --context spark-root -n awx get secret awx-
         state: present
 ```
 
-This machine credential is the **simple** version: your own `nvidia` key, stored in AWX. It is exactly the long-lived key the Semaphore path avoids. The production version is a *HashiCorp Vault Signed SSH* credential against vault01 for `svc-ansible` (Step 24 §2.2), AWX's counterpart of Semaphore's play 1. Two lab details when you switch:
+This machine credential is the **simple** version: your own `dgxadmin` key, stored in AWX. It is exactly the long-lived key the Semaphore path avoids. The production version is a *HashiCorp Vault Signed SSH* credential against vault01 for `svc-ansible` (Step 24 §2.2), AWX's counterpart of Semaphore's play 1. Two lab details when you switch:
 
-- `group_vars/spark.yml` sets `ansible_user` to `nvidia` whenever `vault_role_id` is undefined, which it is in AWX, and an inventory variable beats the credential's username. Give the job templates the extra variable `ansible_user: svc-ansible`.
+- `group_vars/spark.yml` sets `ansible_user` to `dgxadmin` whenever `vault_role_id` is undefined, which it is in AWX, and an inventory variable beats the credential's username. Give the job templates the extra variable `ansible_user: svc-ansible`.
 - Play 1 (`00-vault-cert.yml`) is skipped in AWX for the same reason, so it doesn't conflict with the credential plugin.
 
 ```bash

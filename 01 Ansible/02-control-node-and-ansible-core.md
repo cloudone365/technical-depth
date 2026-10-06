@@ -58,8 +58,8 @@ Ansible is **agentless**. Nothing runs on the Spark between plays. Each task is 
 
 | Item | Value in this lab | Why |
 |---|---|---|
-| Managed-node user | `svc-ansible` with a 15-minute vault01 certificate under Semaphore; `nvidia` (same on every Spark, your own key) for bootstrap and break-glass | `group_vars/spark.yml` switches on `vault_role_id` (§3.3). NVIDIA's multi-Spark playbooks and MPI assume identical usernames, which both accounts are |
-| Privilege | `become: true` via `sudo` (group_vars/spark.yml); NOPASSWD for `svc-ansible`, `-K` for `nvidia` | Everything we configure is root-owned |
+| Managed-node user | `svc-ansible` with a 15-minute vault01 certificate under Semaphore; `dgxadmin` (same on every Spark, your own key) for bootstrap and break-glass | `group_vars/spark.yml` switches on `vault_role_id` (§3.3). NVIDIA's multi-Spark playbooks and MPI assume identical usernames, which both accounts are |
+| Privilege | `become: true` via `sudo` (group_vars/spark.yml); NOPASSWD for `svc-ansible`, `-K` for `dgxadmin` | Everything we configure is root-owned |
 | Python on target | `/usr/bin/python3` pinned in `ansible.cfg` | Avoids interpreter discovery warnings; DGX OS ships 3.12 |
 | Mgmt network | `enP7s7` 10GbE, `192.168.0.0/24` | Ansible/SSH traffic never rides the CX-7 fabric |
 | Fabric | CX-7 `enp1s0f1np1` / `enP2p1s0f1np1`, `192.168.100/101.0/24` | Workload traffic only (NCCL, NFS/RDMA, Multus `net1` for RDMA pods); the Kubernetes API and Cilium VXLAN stay on mgmt |
@@ -119,7 +119,7 @@ inventory               = ./inventory
 inventory_plugins       = ./inventory_plugins
 roles_path              = ./roles
 collections_path        = ./collections:~/.ansible/collections
-remote_user             = nvidia
+remote_user             = dgxadmin
 forks                   = 10
 interpreter_python      = /usr/bin/python3
 host_key_checking       = True
@@ -162,14 +162,14 @@ context                 = 3
 
 ```bash
 ssh-keygen -t ed25519 -C "ansible@control"          # if you don't have a key
-ssh-copy-id nvidia@192.168.0.100
-ssh-copy-id nvidia@192.168.0.101                        # second Spark, if any
-ssh nvidia@192.168.0.100 'hostname; uname -m; cat /etc/dgx-release | head -3'
+ssh-copy-id dgxadmin@192.168.0.100
+ssh-copy-id dgxadmin@192.168.0.101                        # second Spark, if any
+ssh dgxadmin@192.168.0.100 'hostname; uname -m; cat /etc/dgx-release | head -3'
 ```
 
 Expected: `aarch64` and a `DGX_*` release line. If `/etc/dgx-release` is missing, you're not on DGX OS. The lab still runs, but the version checks in `spark_validate` will warn.
 
-This key is **your** key, for the `nvidia` admin user. It is what the MacBook uses for the bootstrap and break-glass paths. Semaphore never sees it: it logs in as `svc-ansible` with a certificate, after `00b-semaphore-target.yml` has made the Spark trust vault01's CA.
+This key is **your** key, for the `dgxadmin` admin user. It is what the MacBook uses for the bootstrap and break-glass paths. Semaphore never sees it: it logs in as `svc-ansible` with a certificate, after `00b-semaphore-target.yml` has made the Spark trust vault01's CA.
 
 ### 3.3 How the login switches between Semaphore and the MacBook
 
@@ -177,12 +177,12 @@ One variable decides who Ansible logs in as. The Semaphore variable group `vault
 
 | Variable | Semaphore (`vault_role_id` defined) | MacBook (not defined) |
 |---|---|---|
-| `ansible_user` | `svc-ansible` (`vault_ssh_principal`) | `nvidia` (`spark_admin_user`) |
+| `ansible_user` | `svc-ansible` (`vault_ssh_principal`) | `dgxadmin` (`spark_admin_user`) |
 | `ansible_ssh_private_key_file` | `/tmp/lab_ssh/id_ed25519`; ssh picks up `id_ed25519-cert.pub` next to it | empty: your agent / `~/.ssh` key |
 | `ansible_ssh_common_args` | `-o StrictHostKeyChecking=accept-new` (the container starts with an empty `known_hosts`; a *changed* key is still refused) | empty: your `known_hosts` |
 | sudo | NOPASSWD (`/etc/sudoers.d/90-svc-ansible`) | `-K` |
 
-The key and certificate in `/tmp/lab_ssh` come from **play 1**, `playbooks/00-vault-cert.yml`, which every playbook that SSHes to the Sparks imports first. On the MacBook play 1 is skipped (`when: vault_role_id is defined`), so the same playbook runs as `nvidia`. That is the break-glass path ([Step 04 §10](04-dgx-spark-as-semaphore-target.md)). `remote_user = nvidia` in `ansible.cfg` is only the fallback; the inventory variable wins.
+The key and certificate in `/tmp/lab_ssh` come from **play 1**, `playbooks/00-vault-cert.yml`, which every playbook that SSHes to the Sparks imports first. On the MacBook play 1 is skipped (`when: vault_role_id is defined`), so the same playbook runs as `dgxadmin`. That is the break-glass path ([Step 04 §10](04-dgx-spark-as-semaphore-target.md)). `remote_user = dgxadmin` in `ansible.cfg` is only the fallback; the inventory variable wins.
 
 **ControlPersist and the 15-minute certificate.** sshd checks a certificate's validity window only when a connection **authenticates**. With `ControlPersist=600s`, Ansible opens one master connection per host and runs every later task through it, so a task that is still running at minute 20 keeps working: its master connection authenticated at minute 1. What fails is a **new** connection after the certificate has expired, for example a master that closed because the host rebooted (`reboot` module in `17-dgxos-upgrade.yml`, `21-emergency-drain.yml -e node_drain_reboot=true`) or because it sat idle for more than 600 s. Two more details:
 
@@ -196,7 +196,7 @@ So keep long or rebooting Semaphore tasks to one host per task (`--limit`), and 
 Find the real CX-7 interface names **on each Spark** before editing host_vars:
 
 ```bash
-ssh nvidia@192.168.0.100 ibdev2netdev
+ssh dgxadmin@192.168.0.100 ibdev2netdev
 # rocep1s0f0 port 1 ==> enp1s0f0np0 (Down)
 # rocep1s0f1 port 1 ==> enp1s0f1np1 (Up)       <- cable is in this cage
 # roceP2p1s0f0 port 1 ==> enP2p1s0f0np0 (Down)
@@ -358,7 +358,7 @@ ansible -m debug -a "var=cx7_interfaces" spark           # per-host value
 
 ### 3.5 First contact
 
-> **Order:** §3.1–3.4 come before Steps 03 and 04; this section comes after them. Before running it, complete [Step 04 · Add dgx-spark-1 as a Semaphore target](04-dgx-spark-as-semaphore-target.md): the Spark trusts vault01 and Semaphore has the project `spark-lab` with the template `00 Ping`. Haven't done Step 04 yet? The MacBook form below works already, because it logs in as `nvidia` with your own key.
+> **Order:** §3.1–3.4 come before Steps 03 and 04; this section comes after them. Before running it, complete [Step 04 · Add dgx-spark-1 as a Semaphore target](04-dgx-spark-as-semaphore-target.md): the Spark trusts vault01 and Semaphore has the project `spark-lab` with the template `00 Ping`. Haven't done Step 04 yet? The MacBook form below works already, because it logs in as `dgxadmin` with your own key.
 
 ```yaml
 # lab/playbooks/00-ping.yml
@@ -399,7 +399,7 @@ ok: [dgx-spark-1] => msg: dgx-spark-1 aarch64 20 cores 119.6 GiB Ubuntu 24.04 ke
 
 > The reported memory is slightly under 128 GB: firmware and carve-outs take some. The `spark_expected.mem_total_gib_min: 110` guard allows for that.
 
-Ad-hoc commands are how you poke a box without writing a playbook. Semaphore runs playbooks, not ad-hoc commands, so these run **from your MacBook** as `nvidia` (no Semaphore variable group → your own key). Name the host instead of the group `spark` while the optional dgx-spark-2 isn't there:
+Ad-hoc commands are how you poke a box without writing a playbook. Semaphore runs playbooks, not ad-hoc commands, so these run **from your MacBook** as `dgxadmin` (no Semaphore variable group → your own key). Name the host instead of the group `spark` while the optional dgx-spark-2 isn't there:
 
 ```bash
 ansible dgx-spark-1 -m command -a "nvidia-smi --query-gpu=name,driver_version --format=csv"
@@ -741,10 +741,10 @@ ansible-playbook playbooks/01-baseline.yml -l dgx-spark-1,localhost -K          
 
 | Symptom | Likely cause | Diagnose | Fix |
 |---|---|---|---|
-| `UNREACHABLE! ... Permission denied (publickey)` | Key not on the Spark, or the wrong user | `ssh -v nvidia@192.168.0.100` | `ssh-copy-id`; check `remote_user` in `ansible.cfg` |
-| `Missing sudo password` | MacBook run (`nvidia`) without `-K` | — | Add `-K`; Semaphore runs as `svc-ansible` with NOPASSWD |
+| `UNREACHABLE! ... Permission denied (publickey)` | Key not on the Spark, or the wrong user | `ssh -v dgxadmin@192.168.0.100` | `ssh-copy-id`; check `remote_user` in `ansible.cfg` |
+| `Missing sudo password` | MacBook run (`dgxadmin`) without `-K` | — | Add `-K`; Semaphore runs as `svc-ansible` with NOPASSWD |
 | Semaphore: `Permission denied (publickey)` for `svc-ansible` | Spark doesn't trust vault01's CA yet, or the certificate expired before a reconnect (§3.3) | `sudo journalctl -u ssh \| grep svc-ansible` on the Spark | Run `00b-semaphore-target.yml`; run the template again for a fresh certificate |
-| Semaphore run tries to log in as `nvidia` | Template has no variable group, so `vault_role_id` is undefined | Task log: play 1 tasks *skipped* | Attach `vault-approle` to the template (Step 04 §12) |
+| Semaphore run tries to log in as `dgxadmin` | Template has no variable group, so `vault_role_id` is undefined | Task log: play 1 tasks *skipped* | Attach `vault-approle` to the template (Step 04 §12) |
 | `Timeout (12s) waiting for privilege escalation prompt` | sudo is slow because of a DNS lookup of the hostname | `time sudo true` on the Spark | Add the hostname to `/etc/hosts` |
 | `/usr/bin/python3: not found` | Minimal image, or a container target | `ansible host -m raw -a 'which python3'` | Bootstrap with the `raw` module (see the Molecule `prepare.yml`) |
 | `ansible_local` is empty | Fact file not executable, or it printed non-JSON | `sudo /etc/ansible/facts.d/spark.fact \| jq .` | `chmod 755`; the script must print a single JSON object |

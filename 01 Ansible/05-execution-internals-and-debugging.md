@@ -28,13 +28,13 @@ sequenceDiagram
   C->>C: changed_when / failed_when / register / notify handlers
 ```
 
-Under Semaphore the SSH user is `svc-ansible` (15-minute certificate from play 1, NOPASSWD sudo, so `sudo -n` succeeds without a prompt); from the MacBook it is `nvidia` with your key and `-K` ([Step 02 §3.3](02-control-node-and-ansible-core.md)). Everything below is the same for both.
+Under Semaphore the SSH user is `svc-ansible` (15-minute certificate from play 1, NOPASSWD sudo, so `sudo -n` succeeds without a prompt); from the MacBook it is `dgxadmin` with your key and `-K` ([Step 02 §3.3](02-control-node-and-ansible-core.md)). Everything below is the same for both.
 
 With **pipelining** on (our `ansible.cfg`), steps 3–4 are a single SSH round-trip and nothing is written to `/tmp` on the Spark. Without it you get `mkdir` → `sftp put` → `chmod` → `exec` → `rm`, which is five round-trips per task.
 
 ### 1.1 See it for yourself
 
-These are interactive experiments, so run them from your **MacBook** (the break-glass login: `nvidia`, your key). In Semaphore you'd get the same `-vvvv` output by adding `-vvvv` to a template's CLI args, but you can't then `ssh` in as `svc-ansible` to read the payload: only Semaphore holds its certificate, and that's the point.
+These are interactive experiments, so run them from your **MacBook** (the break-glass login: `dgxadmin`, your key). In Semaphore you'd get the same `-vvvv` output by adding `-vvvv` to a template's CLI args, but you can't then `ssh` in as `svc-ansible` to read the payload: only Semaphore holds its certificate, and that's the point.
 
 ```bash
 cd "01 Ansible/lab"
@@ -47,10 +47,10 @@ Now switch pipelining off and keep the payload on the Spark so you can read it:
 
 ```bash
 ANSIBLE_PIPELINING=0 ANSIBLE_KEEP_REMOTE_FILES=1 \
-  ansible dgx-spark-1 -m ansible.builtin.stat -a path=/etc/dgx-release -vvv 2>&1 | grep -o '/home/nvidia/.ansible/tmp/[^ /]*' | head -1
-# → /home/nvidia/.ansible/tmp/ansible-tmp-1727630000.12-4242-1234
+  ansible dgx-spark-1 -m ansible.builtin.stat -a path=/etc/dgx-release -vvv 2>&1 | grep -o '/home/dgxadmin/.ansible/tmp/[^ /]*' | head -1
+# → /home/dgxadmin/.ansible/tmp/ansible-tmp-1727630000.12-4242-1234
 
-ssh nvidia@192.168.0.100
+ssh dgxadmin@192.168.0.100
 cd ~/.ansible/tmp/ansible-tmp-*/
 python3 AnsiballZ_stat.py explode        # unpacks the module into ./debug_dir
 ls debug_dir/ansible/modules/            # stat.py — the real module source
@@ -129,7 +129,7 @@ Fire-and-forget with a later join:
   async: 7200
   poll: 0
   register: dl_job
-  become_user: nvidia
+  become_user: dgxadmin
 
 # ... other tasks run meanwhile ...
 
@@ -140,7 +140,7 @@ Fire-and-forget with a later join:
   until: dl.finished
   retries: 240
   delay: 30
-  become_user: nvidia
+  become_user: dgxadmin
 ```
 
 > **Gotcha:** `async_status` must use the same `become_user` as the async task. The job file lives in that user's `~/.ansible_async/`.

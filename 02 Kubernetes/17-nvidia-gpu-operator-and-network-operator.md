@@ -303,7 +303,7 @@ kubectl --context spark-root delete -f manifests/root/12-cgroups/cpu-throttle.ya
 ### 5.5 DCGM exporter (when supported)
 
 ```bash
-ssh nvidia@192.168.0.100 'dcgmi discovery -l'        # must list GB10
+ssh dgxadmin@192.168.0.100 'dcgmi discovery -l'        # must list GB10
 # Semaphore: run template "06 GPU Operator" with extra variables {"gpu_operator_dcgm_exporter": true}
 # (break-glass CLI: cd "../../01 Ansible/lab" && ansible-playbook playbooks/06-gpu-operator.yml -l dgx-spark-1,localhost -K -e gpu_operator_dcgm_exporter=true)
 kubectl --context spark-root -n gpu-operator port-forward ds/nvidia-dcgm-exporter 9400 & sleep 2

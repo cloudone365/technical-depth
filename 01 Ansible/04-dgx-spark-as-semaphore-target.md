@@ -35,7 +35,7 @@ Each step has a **Why**, then commands with a comment on every line, then a **Ve
 | Run from | `ansible_user` | Credential | Used for |
 |---|---|---|---|
 | Semaphore (normal) | `svc-ansible` | 15-minute certificate from play 1 | every template from `00 Ping` on |
-| MacBook (bootstrap, break-glass) | `nvidia` (the admin user) | your own SSH key, sudo password with `-K` | `00-bootstrap.yml`, `00b-semaphore-target.yml`, `08-vault.yml`, and emergencies when sema01 or vault01 is down (§10) |
+| MacBook (bootstrap, break-glass) | `dgxadmin` (the admin user) | your own SSH key, sudo password with `-K` | `00-bootstrap.yml`, `00b-semaphore-target.yml`, `08-vault.yml`, and emergencies when sema01 or vault01 is down (§10) |
 
 > **Why the controller is outside the Spark.** `99-reset-kubernetes.yml` deletes everything Kubernetes runs; a rebuild of DGX OS deletes everything on the box. A Semaphore running *on* the Spark would delete itself halfway through its own job, and a broken cluster would take away the tool you need to fix it. With the management plane outside — like out-of-band management in a datacenter — the Spark can break freely.
 
@@ -75,7 +75,7 @@ cd ~/technical-depth/"01 Ansible/lab"                       # the lab folder; ev
 mkdir -p .cache && chmod 700 .cache                          # local state folder (git-ignored)
 scp vault01:~/vault-ca.crt .cache/vault-ca.crt               # vault01 TLS certificate (the copy you made in Step 01 §3.3)
 curl --cacert .cache/vault-ca.crt https://192.168.0.211:8200/v1/sys/health   # JSON = the MacBook trusts vault01's TLS
-ssh -t nvidia@192.168.0.100 'hostname; sudo -v && echo sudo-ok'   # admin login + sudo (-t: a terminal, so sudo can ask for the password)
+ssh -t dgxadmin@192.168.0.100 'hostname; sudo -v && echo sudo-ok'   # admin login + sudo (-t: a terminal, so sudo can ask for the password)
 ```
 
 **Verify 2:**
@@ -83,12 +83,12 @@ ssh -t nvidia@192.168.0.100 'hostname; sudo -v && echo sudo-ok'   # admin login 
 ```bash
 ls -l .cache/vault-ca.crt                                    # the certificate is there
 curl -s --cacert .cache/vault-ca.crt https://192.168.0.211:8200/v1/ssh-client-signer/public_key | cut -c1-20   # expect: ssh-rsa AAAA… (public, no token)
-ansible -m ping dgx-spark-1 -K                              # expect: pong (as nvidia, your key)
+ansible -m ping dgx-spark-1 -K                              # expect: pong (as dgxadmin, your key)
 ```
 
 ### 2.1 Fresh DGX OS only: bootstrap
 
-Skip this if the Spark is already named `dgx-spark-1`, sits on 192.168.0.100 and takes your key as `nvidia` (the last command in Verify 2 answers `pong`). On a Spark that has just finished the first-boot wizard (password login, DHCP address), `00-bootstrap.yml` sets the hostname, installs your key for `nvidia` and, on the second run, moves it to the static IP. A dead-man timer rolls the network back if Ansible can't reconnect.
+Skip this if the Spark is already named `dgx-spark-1`, sits on 192.168.0.100 and takes your key as `dgxadmin` (the last command in Verify 2 answers `pong`). On a Spark that has just finished the first-boot wizard (password login, DHCP address), `00-bootstrap.yml` sets the hostname, installs your key for `dgxadmin` and, on the second run, moves it to the static IP. A dead-man timer rolls the network back if Ansible can't reconnect.
 
 ```bash
 ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-1 -k -K -e bootstrap_current_ip=<its DHCP IP>                              # -k: SSH password, still on
@@ -109,7 +109,7 @@ Then repeat Verify 2. Details: [Step 03](03-bare-metal-provisioning-and-bootstra
 - adds `/etc/ssh/sshd_config.d/10-vault-ca.conf`, which trusts the CA and allows `svc-ansible` only key or certificate logins (checked with `sshd -t`);
 - reloads sshd.
 
-Your `nvidia` login is untouched, so you can't lock yourself out.
+Your `dgxadmin` login is untouched, so you can't lock yourself out.
 
 ### 3.1 Run it
 

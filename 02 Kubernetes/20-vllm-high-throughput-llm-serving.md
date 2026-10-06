@@ -160,7 +160,7 @@ kubectl --context llms -n llm-serving create secret generic hf-token --from-lite
   --dry-run=client -o yaml | kubectl --context llms apply -f -
 kubectl --context llms apply -f manifests/llms/60-storage/model-prefetch-job.yaml
 kubectl --context llms -n llm-serving wait --for=condition=complete job/model-prefetch --timeout=30m
-ssh nvidia@192.168.0.100 "sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'"   # start the load with a clean page cache
+ssh dgxadmin@192.168.0.100 "sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'"   # start the load with a clean page cache
 kubectl --context llms apply -k manifests/llms/90-serving/vllm
 kubectl --context llms -n llm-serving logs -f deploy/vllm | grep -E 'Loading|weights|KV cache|blocks|CUDA graph|Uvicorn|ERROR'
 ```

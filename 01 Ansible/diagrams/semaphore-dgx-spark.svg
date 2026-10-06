@@ -90,7 +90,7 @@
 <path d="M670 326 L715 326 L715 372 L940 372 L940 398" fill="none" stroke="#8c959f" stroke-width="1.5" marker-end="url(#m8c959f)"/>
 <text x="840" y="388" font-size="10.5" fill="#57606a" text-anchor="middle">SSH (project lab)</text>
 <path d="M70 94 L70 462 L198 462" fill="none" stroke="#24292f" stroke-width="1.3" stroke-dasharray="2 3" marker-end="url(#m24292f)"/>
-<text x="76" y="430" font-size="10.5" fill="#24292f" text-anchor="start" font-weight="600">ssh as nvidia</text>
+<text x="76" y="430" font-size="10.5" fill="#24292f" text-anchor="start" font-weight="600">ssh as dgxadmin</text>
 <text x="76" y="444" font-size="10" fill="#1f2328" text-anchor="start">bootstrap,</text>
 <text x="76" y="457" font-size="10" fill="#1f2328" text-anchor="start">break-glass</text>
 <path d="M40 94 L40 618 L198 618" fill="none" stroke="#24292f" stroke-width="1.3" stroke-dasharray="5 3" marker-end="url(#m24292f)"/>

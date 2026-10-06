@@ -71,7 +71,7 @@
         - /sys/fs/bpf/cilium
         - /etc/kubernetes/kubeadm-config.yaml
         - /root/.kube
-        - "/home/{{ spark_admin_user | default('nvidia') }}/.kube"
+        - "/home/{{ spark_admin_user | default('dgxadmin') }}/.kube"
 
     - name: Delete Cilium network interfaces
       ansible.builtin.command: ip link delete {{ item }}

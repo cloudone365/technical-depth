@@ -7,7 +7,7 @@ spark_baseline_sysctls: "{{ spark_sysctls | default({}) }}"
 spark_baseline_timezone: "{{ lab_timezone | default('UTC') }}"
 spark_baseline_ntp_servers: "{{ ntp_servers | default(['pool.ntp.org']) }}"
 
-spark_baseline_admin_user: "{{ spark_admin_user | default('nvidia') }}"
+spark_baseline_admin_user: "{{ spark_admin_user | default('dgxadmin') }}"
 spark_baseline_admin_pubkeys: "{{ spark_admin_pubkeys | default([]) }}"
 
 # SSH hardening (keys only). Leave false until you've proven key login works!

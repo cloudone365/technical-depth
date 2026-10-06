@@ -241,7 +241,7 @@ ansible-playbook playbooks/03-containers.yml -l dgx-spark-1,localhost -K \
 Check the result:
 
 ```bash
-ssh nvidia@192.168.0.100 'docker info --format "{{.DefaultRuntime}} {{json .Runtimes}}"; nvidia-ctk cdi list'
+ssh dgxadmin@192.168.0.100 'docker info --format "{{.DefaultRuntime}} {{json .Runtimes}}"; nvidia-ctk cdi list'
 # nvidia {"nvidia":{"path":"nvidia-container-runtime"},"runc":{...}}
 # INFO[0000] Found 2 CDI devices
 # nvidia.com/gpu=0
@@ -454,7 +454,7 @@ Automate it with a weekly systemd timer from Ansible (exercise), but **never** p
 ## 6. Validation
 
 ```bash
-# MacBook (as nvidia); in Semaphore, run 18 CUDA smoke instead of the second line
+# MacBook (as dgxadmin); in Semaphore, run 18 CUDA smoke instead of the second line
 ansible dgx-spark-1 -b -K -m command -a "docker run --rm --device nvidia.com/gpu=all nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04 nvidia-smi -L"
 ansible-playbook playbooks/18-cuda-smoke.yml -l dgx-spark-1,localhost -K
 ```

@@ -40,7 +40,7 @@ flowchart LR
   SEMA -- "AppRole login · sign/ansible" --> VAULT
   SEMA -- "SSH as svc-ansible (15-min cert) · mgmt 10GbE" --> S1 & S2
   SEMA -- "kubectl/helm :6443" --> S1A
-  ANS -. "break-glass: SSH as nvidia" .-> S1
+  ANS -. "break-glass: SSH as dgxadmin" .-> S1
   S1A --> S1V
   S1 <== "QSFP · CX-7 200GbE RoCEv2<br/>192.168.100.0/24 · 192.168.101.0/24" ==> S2
   classDef mgmt fill:#fff3e6,stroke:#fb8500,color:#000
@@ -51,7 +51,7 @@ One Spark is the default. `dgx-spark-2` is commented out in [`lab/inventory/host
 
 The Kubernetes end-state is one **kubeadm** root cluster (`spark-root`) with two **vClusters** inside it, `dev-lab` and `llms`. Ansible builds it in three stages: `05-kubernetes.yml` (kubeadm, Cilium, MetalLB) → `06-gpu-operator.yml` (15 GPU time-slices) → `06b-vclusters.yml` (the two vClusters, applied from the [02 Kubernetes lab](../02%20Kubernetes/lab/README.md)). All three contexts land in one file, `kubeconfig-spark-lab.yaml`, on sema01's state volume; `lab/tools/fetch-kubeconfig.sh sema01` copies it to `lab/.cache/` on your MacBook, where the 02 Kubernetes labs expect it.
 
-> **Convention used in every step.** "**Semaphore:** `NN Name`" means run that template in project `spark-lab`; template names follow the playbook names (`05 Kubernetes` ↔ `05-kubernetes.yml`). The same playbook from the MacBook, `ansible-playbook playbooks/NN-….yml -K` in `01 Ansible/lab`, is the **break-glass** path: without the Semaphore variable group, play 1 is skipped and you log in as `nvidia` with your own key ([Step 04 §10](04-dgx-spark-as-semaphore-target.md)). Only `00-bootstrap.yml`, `00b-semaphore-target.yml` and `08-vault.yml` run from the MacBook as the normal path. Playbook numbers are code and don't follow the step numbers: **Step 05** is a document, **`05 Kubernetes`** is a template.
+> **Convention used in every step.** "**Semaphore:** `NN Name`" means run that template in project `spark-lab`; template names follow the playbook names (`05 Kubernetes` ↔ `05-kubernetes.yml`). The same playbook from the MacBook, `ansible-playbook playbooks/NN-….yml -K` in `01 Ansible/lab`, is the **break-glass** path: without the Semaphore variable group, play 1 is skipped and you log in as `dgxadmin` with your own key ([Step 04 §10](04-dgx-spark-as-semaphore-target.md)). Only `00-bootstrap.yml`, `00b-semaphore-target.yml` and `08-vault.yml` run from the MacBook as the normal path. Playbook numbers are code and don't follow the step numbers: **Step 05** is a document, **`05 Kubernetes`** is a template.
 
 ## Start here
 
@@ -146,7 +146,7 @@ flowchart TB
 
 | Skill | Practise with | Checkpoint (you can…) |
 |---|---|---|
-| Inventory, ad-hoc, playbook runs | Semaphore templates `00 Ping`, `01 Baseline`; the same playbooks from the MacBook ([Step 02](02-control-node-and-ansible-core.md)) | explain every line of `ansible.cfg` and `hosts.yml`, and why `group_vars/spark.yml` logs in as `svc-ansible` in Semaphore but `nvidia` from the MacBook |
+| Inventory, ad-hoc, playbook runs | Semaphore templates `00 Ping`, `01 Baseline`; the same playbooks from the MacBook ([Step 02](02-control-node-and-ansible-core.md)) | explain every line of `ansible.cfg` and `hosts.yml`, and why `group_vars/spark.yml` logs in as `svc-ansible` in Semaphore but `dgxadmin` from the MacBook |
 | Check/diff, tags, limits | `01 Baseline` as a dry run: `--check --diff --tags sysctl` (if you add `--limit`, keep `localhost`) | predict what a run will change before it runs |
 | Reading failures | [Step 05](05-execution-internals-and-debugging.md) | tell whether a failure is SSH, sudo, Python, module, or logic from the error alone |
 
@@ -167,7 +167,7 @@ flowchart TB
 | Vault operations | vault01 ([Step 01](01-management-plane-semaphore-and-vault.md), [Step 17](17-vault-server-deep-dive.md)) | init/unseal/snapshot/restore from memory; explain seal vs unseal and what a sealed vault01 does to every Semaphore task |
 | Policies & KV v2 paths | `vault_config` role (`08-vault.yml` from the MacBook: `spark-lab-read`, [Step 04 §6](04-dgx-spark-as-semaphore-target.md)) | write a least-privilege policy first time (remember `kv/data/` vs `kv/metadata/`) |
 | AppRole + short-lived tokens | play 1 `00-vault-cert.yml`, `19-vault-integration.yml` ([Step 18](18-vault-approle-secrets-and-ssh-certificates.md)) | run automation with no static secrets on disk: Semaphore holds only the AppRole |
-| SSH certificates | `00b-semaphore-target.yml`, `tools/vault-ssh-cert.sh` ([Step 04](04-dgx-spark-as-semaphore-target.md)) | retire static keys safely, with a break-glass path (`nvidia` + your key from the MacBook) |
+| SSH certificates | `00b-semaphore-target.yml`, `tools/vault-ssh-cert.sh` ([Step 04](04-dgx-spark-as-semaphore-target.md)) | retire static keys safely, with a break-glass path (`dgxadmin` + your key from the MacBook) |
 | Secret hygiene | `no_log`, `.gitignore`, audit log ([Step 18](18-vault-approle-secrets-and-ssh-certificates.md)) | prove a secret never reached `ansible.log`, a Semaphore task log, AWX output, or ARA |
 
 ### Level 4 · Platform (week 4)

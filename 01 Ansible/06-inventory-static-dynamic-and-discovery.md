@@ -269,7 +269,7 @@ ansible-inventory -i inventory-examples/spark.mdns.yml --graph
 ansible-inventory -i inventory -i inventory-examples/spark.mdns.yml --graph   # merged with static
 ```
 
-A MacBook has no `avahi-browse` (macOS uses `dns-sd`). Take the capture on a Spark instead (`ssh nvidia@192.168.0.100 'avahi-browse -p -r -t _ssh._tcp' > .cache/mdns.txt`, after `sudo apt install avahi-utils` there) and point the plugin at it with `from_file: .cache/mdns.txt`.
+A MacBook has no `avahi-browse` (macOS uses `dns-sd`). Take the capture on a Spark instead (`ssh dgxadmin@192.168.0.100 'avahi-browse -p -r -t _ssh._tcp' > .cache/mdns.txt`, after `sudo apt install avahi-utils` there) and point the plugin at it with `from_file: .cache/mdns.txt`.
 
 The plugin accepts `from_file:` so you can unit-test it against a saved capture without any Sparks on the network. That's how it was validated for this lab:
 

@@ -75,7 +75,7 @@ flowchart LR
 ### 2.1 Make dgx-spark-2 an execution node
 
 1. In AWX: **Instances → Add** → hostname `dgx-spark-2`, node type **execution**, listener port `27199`, peers from control. Save and **download the install bundle** (`dgx-spark-2_install_bundle.tar.gz`).
-2. From your MacBook (as `nvidia`, the bootstrap path):
+2. From your MacBook (as `dgxadmin`, the bootstrap path):
 
 ```bash
 mkdir -p .cache/receptor && tar xzf ~/Downloads/dgx-spark-2_install_bundle.tar.gz -C .cache/receptor
@@ -153,7 +153,7 @@ The Vault is **vault01**, the same one Semaphore uses. Give AWX its **own** AppR
 
 Each job now gets a freshly signed certificate with the signing role's lifetime (15 minutes on vault01). AWX stores **no** usable long-term access on its own: the private key alone won't pass sshd without a valid certificate.
 
-Two lab details. `group_vars/spark.yml` picks `ansible_user` from `vault_role_id`, which AWX doesn't define, so it would say `nvidia` and override the credential's username: give the job templates the extra variable `ansible_user: svc-ansible`. And play 1 (`00-vault-cert.yml`) skips itself for the same reason, so it never competes with the credential plugin.
+Two lab details. `group_vars/spark.yml` picks `ansible_user` from `vault_role_id`, which AWX doesn't define, so it would say `dgxadmin` and override the credential's username: give the job templates the extra variable `ansible_user: svc-ansible`. And play 1 (`00-vault-cert.yml`) skips itself for the same reason, so it never competes with the credential plugin.
 
 ### 2.3 Workflow: drift → approval → remediate → validate
 

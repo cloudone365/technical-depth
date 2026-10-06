@@ -78,7 +78,7 @@ To model a ring in this lab, give each host **two** `cx7_interfaces` groups on d
 ### 3.1 Cable and discover
 
 ```bash
-ssh nvidia@192.168.0.100 ibdev2netdev
+ssh dgxadmin@192.168.0.100 ibdev2netdev
 # rocep1s0f1 port 1 ==> enp1s0f1np1 (Up)
 # roceP2p1s0f1 port 1 ==> enP2p1s0f1np1 (Up)
 ```

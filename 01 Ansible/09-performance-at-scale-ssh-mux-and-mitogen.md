@@ -11,7 +11,7 @@
 
 You only own one or two Sparks, but the problems you'll meet on a 256-node DGX cluster (fork exhaustion, SSH storms, fact-gathering minutes) only show up with many hosts. The Spark has enough cores and RAM to fake that fleet.
 
-> **Run this step from your MacBook, not from Semaphore.** The benchmark measures *a controller*, so you want one whose CPU you can watch. And the fake nodes trust **your** key: `13-fleet-sim.yml` copies `spark_admin_pubkeys` (your `~/.ssh/id_ed25519.pub`) into them and the generated `fleet.ini` logs in as `nvidia`. Semaphore's container has no such key; its only credential is the certificate for `svc-ansible`, which the fake nodes don't trust. So `13-fleet-sim.yml` and `14-fleet-bench.yml` use the CLI form (the break-glass path of the [README convention](README.md)). §4.6 carries the results over to Semaphore on sema01.
+> **Run this step from your MacBook, not from Semaphore.** The benchmark measures *a controller*, so you want one whose CPU you can watch. And the fake nodes trust **your** key: `13-fleet-sim.yml` copies `spark_admin_pubkeys` (your `~/.ssh/id_ed25519.pub`) into them and the generated `fleet.ini` logs in as `dgxadmin`. Semaphore's container has no such key; its only credential is the certificate for `svc-ansible`, which the fake nodes don't trust. So `13-fleet-sim.yml` and `14-fleet-bench.yml` use the CLI form (the break-glass path of the [README convention](README.md)). §4.6 carries the results over to Semaphore on sema01.
 
 ---
 
@@ -61,11 +61,11 @@ RUN apt-get update \
       openssh-server python3 sudo iproute2 \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /run/sshd \
- && useradd -m -s /bin/bash nvidia \
- && echo 'nvidia ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/nvidia \
+ && useradd -m -s /bin/bash dgxadmin \
+ && echo 'dgxadmin ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/dgxadmin \
  && sed -i 's/^#\?MaxStartups.*/MaxStartups 200:30:400/' /etc/ssh/sshd_config
-COPY authorized_keys /home/nvidia/.ssh/authorized_keys
-RUN chown -R nvidia:nvidia /home/nvidia/.ssh && chmod 700 /home/nvidia/.ssh && chmod 600 /home/nvidia/.ssh/authorized_keys
+COPY authorized_keys /home/dgxadmin/.ssh/authorized_keys
+RUN chown -R dgxadmin:dgxadmin /home/dgxadmin/.ssh && chmod 700 /home/dgxadmin/.ssh && chmod 600 /home/dgxadmin/.ssh/authorized_keys
 EXPOSE 22
 CMD ["/usr/sbin/sshd", "-D", "-e"]
 ```

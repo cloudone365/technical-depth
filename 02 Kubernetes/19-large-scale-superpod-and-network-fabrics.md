@@ -150,7 +150,7 @@ A tenant can't tell a degraded rail from a slow job. The platform team's health 
 ### 5.1 Inventory the CX-7 (1 Spark)
 
 ```bash
-ssh nvidia@192.168.0.100
+ssh dgxadmin@192.168.0.100
 ibdev2netdev                               # rocep1s0f1 port 1 ==> enp1s0f1np1 (Up) …
 for i in enp1s0f1np1 enP2p1s0f1np1; do ethtool $i | grep -E 'Speed|Link detected'; ip -br link show $i; done
 rdma link show
@@ -175,7 +175,7 @@ Exercise: how many optical transceivers does the 127-node design need, if every 
 
 ```bash
 # host RDMA baseline: Semaphore template for playbooks/11-rdma-perftest.yml (two Sparks, so no --limit)
-ssh nvidia@192.168.0.100 'ethtool -S enp1s0f1np1 | grep -E "crc|symbol|discard|pause|cnp|link_down" | grep -v ": 0$"'
+ssh dgxadmin@192.168.0.100 'ethtool -S enp1s0f1np1 | grep -E "crc|symbol|discard|pause|cnp|link_down" | grep -v ": 0$"'
 ```
 
 Then run the NCCL job (Step 18 §5.5) and diff the counters before and after. PFC pause counters rising only during the run, and discards staying at 0, is healthy lossless behaviour.
@@ -184,11 +184,11 @@ Then run the NCCL job (Step 18 §5.5) and diff the counters before and after. PF
 
 ```bash
 # take ONE logical half down on dgx-spark-2 for the duration of a run
-ssh nvidia@192.168.0.101 'sudo ip link set enP2p1s0f1np1 down'
+ssh dgxadmin@192.168.0.101 'sudo ip link set enP2p1s0f1np1 down'
 kubectl --context llms delete -k manifests/llms/80-distributed/two-spark --ignore-not-found
 kubectl --context llms apply -k manifests/llms/80-distributed/two-spark
 kubectl --context llms -n batch logs -l job-name=ddp --prefix | grep -E 'NET/IB|busbw|1073741824|WARN' | head
-ssh nvidia@192.168.0.101 'sudo ip link set enP2p1s0f1np1 up'
+ssh dgxadmin@192.168.0.101 'sudo ip link set enP2p1s0f1np1 up'
 kubectl --context llms delete -k manifests/llms/80-distributed/two-spark
 ```
 

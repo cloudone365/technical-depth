@@ -284,7 +284,7 @@ Design choices:
 Run the Semaphore template **`07 Slurm`** (break-glass: `ansible-playbook playbooks/07-slurm.yml -l dgx-spark-1,localhost -K`, after copying the munge key as above). Then on the Spark:
 
 ```bash
-ssh nvidia@192.168.0.100
+ssh dgxadmin@192.168.0.100
 sinfo -N -o "%N %T %G %m %c"          # dgx-spark-1 idle gpu:gb10:1 106496 20
 scontrol show node dgx-spark-1 | grep -E 'Gres|RealMemory|State'
 ```

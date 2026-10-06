@@ -433,8 +433,8 @@ Line the three up by time: the Semaphore task's start, the `sign/ansible` reques
 ### 4.4 auditd: prove it catches a manual change
 
 ```bash
-ssh nvidia@192.168.0.101 'sudo sed -i "s/mtu: 9000/mtu: 1500/" /etc/netplan/40-cx7.yaml'
-ssh nvidia@192.168.0.101 'sudo ausearch -k network -i --start recent | tail -20'
+ssh dgxadmin@192.168.0.101 'sudo sed -i "s/mtu: 9000/mtu: 1500/" /etc/netplan/40-cx7.yaml'
+ssh dgxadmin@192.168.0.101 'sudo ausearch -k network -i --start recent | tail -20'
 # → type=SYSCALL ... comm="sed" ... auid=nvidia ... key="network"
 tools/drift-cycle.sh      # drift reports the fabric template (and doesn't auto-heal it)
 # a human puts it back: Semaphore template 02 Fabric with --limit dgx-spark-2,localhost
@@ -451,12 +451,12 @@ The nesting adds one twist. Each vCluster has its **own** API server. A tenant's
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
 # 1. A platform change on the root: who touched the llms budget?
 kubectl --context spark-root -n vc-llms annotate resourcequota vcluster-budget spark.lab/audit-test="$(date +%s)" --overwrite
-ssh nvidia@192.168.0.100 "sudo tail -n 2000 /var/log/kubernetes/audit/audit.log | jq -c 'select(.objectRef.resource==\"resourcequotas\" and .verb==\"patch\") | {user: .user.username, verb, ns: .objectRef.namespace, name: .objectRef.name}' | tail -1"
+ssh dgxadmin@192.168.0.100 "sudo tail -n 2000 /var/log/kubernetes/audit/audit.log | jq -c 'select(.objectRef.resource==\"resourcequotas\" and .verb==\"patch\") | {user: .user.username, verb, ns: .objectRef.namespace, name: .objectRef.name}' | tail -1"
 # → {"user":"kubernetes-admin","verb":"patch","ns":"vc-llms","name":"vcluster-budget"}
 
 # 2. A tenant write inside dev-lab: the root logs the syncer, not the tenant
 kubectl --context dev-lab -n default create configmap audit-probe --from-literal=k=v
-ssh nvidia@192.168.0.100 "sudo tail -n 2000 /var/log/kubernetes/audit/audit.log | jq -c 'select(.objectRef.namespace==\"vc-dev-lab\" and .objectRef.resource==\"configmaps\" and .verb==\"create\") | {user: .user.username, name: .objectRef.name}' | tail -1"
+ssh dgxadmin@192.168.0.100 "sudo tail -n 2000 /var/log/kubernetes/audit/audit.log | jq -c 'select(.objectRef.namespace==\"vc-dev-lab\" and .objectRef.resource==\"configmaps\" and .verb==\"create\") | {user: .user.username, name: .objectRef.name}' | tail -1"
 # → user is a ServiceAccount in vc-dev-lab (system:serviceaccount:vc-dev-lab:…), name audit-probe-x-default-x-dev-lab
 kubectl --context dev-lab -n default delete configmap audit-probe
 ```

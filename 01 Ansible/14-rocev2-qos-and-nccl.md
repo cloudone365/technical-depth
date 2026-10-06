@@ -153,7 +153,7 @@ flowchart LR
 ```bash
 cd "01 Ansible/lab"
 ansible-playbook playbooks/12b-roce-qos.yml -K
-ssh nvidia@192.168.0.100 'sudo mlnx_qos -i enp1s0f1np1 | sed -n "1,20p"'
+ssh dgxadmin@192.168.0.100 'sudo mlnx_qos -i enp1s0f1np1 | sed -n "1,20p"'
 ```
 
 Persist it: create a oneshot systemd unit that runs the same commands at boot. Templating that unit is the exercise at the end of this step. Or have AWX run the play on a boot-triggered webhook.

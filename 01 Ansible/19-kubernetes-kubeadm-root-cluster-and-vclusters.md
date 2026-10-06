@@ -446,7 +446,7 @@ Expected: `dgx-spark-1` `Ready` with role `control-plane`, `ARCH` column `arm64`
 On the Spark itself:
 
 ```bash
-ssh nvidia@192.168.0.100
+ssh dgxadmin@192.168.0.100
 ls /etc/kubernetes/manifests                       # etcd.yaml kube-apiserver.yaml kube-controller-manager.yaml kube-scheduler.yaml
 sudo crictl ps --name kube-apiserver               # CRI view, through /etc/crictl.yaml
 sudo ctr namespaces ls                             # k8s.io (kubelet) and moby (Docker): one containerd
@@ -471,7 +471,7 @@ It prints the GB10, but Kubernetes has no idea a GPU was used: no `nvidia.com/gp
 ```bash
 kubectl --context spark-root -n kube-system exec ds/cilium -- cilium-dbg status --brief    # OK
 kubectl --context spark-root -n kube-system exec ds/cilium -- cilium-dbg status | grep -E 'KubeProxyReplacement|Routing|IPAM'
-ssh nvidia@192.168.0.100 'ip -d link show cilium_vxlan | grep -o "vxlan.*dstport [0-9]*"; ls /etc/cni/net.d'
+ssh dgxadmin@192.168.0.100 'ip -d link show cilium_vxlan | grep -o "vxlan.*dstport [0-9]*"; ls /etc/cni/net.d'
 kubectl --context spark-root -n metallb-system get ipaddresspool,l2advertisement
 ```
 
@@ -503,7 +503,7 @@ Expect a little under 10 Gb/s: VXLAN over the mgmt link. That is by design. The 
 
 ```bash
 kubectl --context spark-root -n default create secret generic enc-demo --from-literal=k=v
-ssh nvidia@192.168.0.100
+ssh dgxadmin@192.168.0.100
 sudo etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt \
   --cert=/etc/kubernetes/pki/etcd/healthcheck-client.crt --key=/etc/kubernetes/pki/etcd/healthcheck-client.key \
   get /registry/secrets/default/enc-demo | hexdump -C | head -5      # … k8s:enc:aescbc:v1:key1: …
@@ -541,11 +541,11 @@ The host copy carries `requests` and `limits` that you never wrote. They come fr
 
 ### 4.6 Upgrade the root
 
-kubeadm upgrades go one minor at a time: control plane first, then kubelets. The full procedure is in 02 Kubernetes Step 01 §8.1. The `ssh` and `kubectl` steps below run from your MacBook (as `nvidia`, with the fetched kubeconfig); the converge step is the `05 Kubernetes` template. What matters for Ansible is **order**. Don't bump `kubeadm_cluster_version` and re-run `05-kubernetes.yml` first. `packages.yml` would install the new **kubelet** on a control plane that still runs the old API server, and a kubelet newer than its API server is outside Kubernetes' version-skew policy.
+kubeadm upgrades go one minor at a time: control plane first, then kubelets. The full procedure is in 02 Kubernetes Step 01 §8.1. The `ssh` and `kubectl` steps below run from your MacBook (as `dgxadmin`, with the fetched kubeconfig); the converge step is the `05 Kubernetes` template. What matters for Ansible is **order**. Don't bump `kubeadm_cluster_version` and re-run `05-kubernetes.yml` first. `packages.yml` would install the new **kubelet** on a control plane that still runs the old API server, and a kubelet newer than its API server is outside Kubernetes' version-skew policy.
 
 ```bash
 # Patch release inside v1.36 (same pkgs.k8s.io repo):
-ssh nvidia@192.168.0.100
+ssh dgxadmin@192.168.0.100
 sudo apt-mark unhold kubeadm && sudo apt-get install -y kubeadm=1.36.X-1.1 && sudo apt-mark hold kubeadm
 sudo kubeadm upgrade plan
 sudo kubeadm upgrade apply v1.36.X            # static pods one by one; extraArgs come from ConfigMap kube-system/kubeadm-config
@@ -555,7 +555,7 @@ kubectl --context spark-root drain dgx-spark-1 --ignore-daemonsets --delete-empt
 # Break-glass equivalent:
 ansible-playbook playbooks/05-kubernetes.yml -l dgx-spark-1,localhost -K -e kubeadm_cluster_version=1.36.X --check --diff   # shows kubelet/kubectl moving
 ansible-playbook playbooks/05-kubernetes.yml -l dgx-spark-1,localhost -K -e kubeadm_cluster_version=1.36.X                  # converges + re-holds
-ssh nvidia@192.168.0.100 'sudo systemctl daemon-reload && sudo systemctl restart kubelet'
+ssh dgxadmin@192.168.0.100 'sudo systemctl daemon-reload && sudo systemctl restart kubelet'
 kubectl --context spark-root uncordon dgx-spark-1
 ```
 

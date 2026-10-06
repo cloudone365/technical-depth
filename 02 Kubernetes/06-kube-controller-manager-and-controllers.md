@@ -148,7 +148,7 @@ cd "02 Kubernetes/lab"
 export KUBECONFIG="$PWD/../../01 Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 ```
 
-The `sudo` lines run on the Spark (`ssh nvidia@192.168.0.100`).
+The `sudo` lines run on the Spark (`ssh dgxadmin@192.168.0.100`).
 
 ### 5.1 Who is leader, and is it renewing? Three controller-managers on one node
 

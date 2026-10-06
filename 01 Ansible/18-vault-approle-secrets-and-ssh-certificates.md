@@ -101,7 +101,7 @@ vault_kv_prefix: spark-lab
 vault_lab_secrets_enabled: false         # set true (Semaphore variable group) once 08-vault.yml has run
 ```
 
-and [`group_vars/spark.yml`](lab/inventory/group_vars/spark.yml) switches the login on `vault_role_id`: `svc-ansible` + `/tmp/lab_ssh/id_ed25519` (+ cert) from Semaphore, the admin user `nvidia` with your own key from the MacBook (Step 04 §1).
+and [`group_vars/spark.yml`](lab/inventory/group_vars/spark.yml) switches the login on `vault_role_id`: `svc-ansible` + `/tmp/lab_ssh/id_ed25519` (+ cert) from Semaphore, the admin user `dgxadmin` with your own key from the MacBook (Step 04 §1).
 
 > **KV v2 path gotcha:** the API path for *reading* is `kv/data/<path>`, for *listing* `kv/metadata/<path>`. Policies and `uri` calls must use those exact prefixes; the CLI (`vault kv get kv/spark-lab/ngc`) hides the `data/` segment from you.
 
@@ -144,7 +144,7 @@ Every playbook that SSHes to the Sparks starts with `import_playbook: 00-vault-c
   check_mode: false                       # must really run, even for a --check dry run
   tasks:
     - name: Semaphore run (vault01 AppRole attached)
-      when: vault_role_id is defined      # MacBook runs skip the whole block (break-glass as nvidia)
+      when: vault_role_id is defined      # MacBook runs skip the whole block (break-glass as dgxadmin)
       block:
         - name: Generate the SSH key pair once
           ansible.builtin.command: ssh-keygen -t ed25519 -N "" -f {{ vault_ssh_key_dir }}/id_ed25519
@@ -329,7 +329,7 @@ ansible-vault encrypt_string --vault-password-file tools/vault-pass.sh \
 ansible localhost -m ansible.builtin.debug -a 'msg={{ ngc_api_key[:6] }}' \
   -e @.cache/ngc.vault.yml --vault-password-file tools/vault-pass.sh          # the first characters of your key = decryption works
 ansible-playbook playbooks/03-containers.yml -l dgx-spark-1,localhost -K \
-  -e @.cache/ngc.vault.yml --vault-password-file tools/vault-pass.sh          # break-glass run as nvidia, NGC key from ansible-vault
+  -e @.cache/ngc.vault.yml --vault-password-file tools/vault-pass.sh          # break-glass run as dgxadmin, NGC key from ansible-vault
 ```
 
 Two limits to understand:
@@ -407,7 +407,7 @@ And the expiry test of Step 04 §8: 16 minutes after a task, `docker compose exe
 
 **Revocation.** A signed certificate can't be recalled by Vault. The controls are the short TTL, a `RevokedKeys` KRL in sshd for an emergency, and CA rotation (re-run `00b-semaphore-target.yml` after `vault write ssh-client-signer/config/ca generate_signing_key=true`, which invalidates every outstanding certificate at once).
 
-**Static keys.** `svc-ansible` never had an `authorized_keys` file: certificate or nothing. The `nvidia` admin account keeps your own key; that's the break-glass path (Step 04 §10), so protect it (passphrase, MacBook only) rather than removing it. Keep console access too: if vault01 is sealed, certificate logins stop as soon as the current ones expire.
+**Static keys.** `svc-ansible` never had an `authorized_keys` file: certificate or nothing. The `dgxadmin` admin account keeps your own key; that's the break-glass path (Step 04 §10), so protect it (passphrase, MacBook only) rather than removing it. Keep console access too: if vault01 is sealed, certificate logins stop as soon as the current ones expire.
 
 ---
 

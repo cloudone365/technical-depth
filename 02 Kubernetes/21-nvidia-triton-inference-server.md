@@ -176,7 +176,7 @@ Expected: `{"name":"SCORE","datatype":"FP32","shape":[2,1],"data":[0.5…,0.4…
 Confirm the scorer really runs on the GPU, and that the GPU process belongs to the root pod the syncer created:
 
 ```bash
-ssh nvidia@192.168.0.100 'for p in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader); do
+ssh dgxadmin@192.168.0.100 'for p in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader); do
   echo "$p $(cat /proc/$p/comm) $(grep -o "pod[0-9a-f_-]*" /proc/$p/cgroup | head -1)"; done'
 kubectl --context spark-root -n vc-llms get pods -o custom-columns=UID:.metadata.uid,NAME:.metadata.name | grep triton
 ```

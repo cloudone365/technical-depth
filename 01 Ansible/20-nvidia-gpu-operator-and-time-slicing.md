@@ -284,7 +284,7 @@ kubectl --context llms scale deploy ts-demo --replicas=9
 kubectl --context llms get pods -l app=ts-demo | grep Pending         # the 9th
 kubectl --context llms describe pod "$(kubectl --context llms get pods -l app=ts-demo --field-selector=status.phase=Pending -o name | head -1)" | sed -n '/Events/,$p'
 kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget | grep nvidia   # requests.nvidia.com/gpu  8  8
-ssh nvidia@192.168.0.100 nvidia-smi                                   # 8 python processes on one GB10
+ssh dgxadmin@192.168.0.100 nvidia-smi                                   # 8 python processes on one GB10
 ```
 
 The 9th pod is `Pending` **inside** `llms`, but no scheduler ever looked at it. The vCluster's own API server accepted it (its `default` namespace has no quota), and the syncer's attempt to create the host copy in `vc-llms` was refused by the root quota. The events show the syncer's error, quoting `exceeded quota: vcluster-budget` and `requests.nvidia.com/gpu`, and there are no `FailedScheduling` events. Root slices are still free (15 − 8 = 7), yet `llms` can't have them. That is the budget working.

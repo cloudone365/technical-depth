@@ -16,7 +16,7 @@ This page is the build order for the whole module. Each section below is one ste
 
 `sema01` and `vault01` stay outside the Spark, so resetting or re-imaging the Spark never takes the tool that rebuilds it with it.
 
-**How to read a step.** "**Semaphore:** `NN Name`" means run that template. The `ansible-playbook playbooks/NN-….yml -K` line under it is the break-glass form from the MacBook, in `01 Ansible/lab`: without the Semaphore variable group, play 1 (the certificate) is skipped and you log in as `nvidia` with your own key ([Step 04 §10](04-dgx-spark-as-semaphore-target.md)). Note the two kinds of numbers: **Step 05** is a document; **`05 Kubernetes`** is a playbook template. Playbook numbers are code and do not follow the step numbers.
+**How to read a step.** "**Semaphore:** `NN Name`" means run that template. The `ansible-playbook playbooks/NN-….yml -K` line under it is the break-glass form from the MacBook, in `01 Ansible/lab`: without the Semaphore variable group, play 1 (the certificate) is skipped and you log in as `dgxadmin` with your own key ([Step 04 §10](04-dgx-spark-as-semaphore-target.md)). Note the two kinds of numbers: **Step 05** is a document; **`05 Kubernetes`** is a playbook template. Playbook numbers are code and do not follow the step numbers.
 
 **One Spark, no `--limit`.** With `dgx-spark-2` commented out, templates and break-glass runs need no `--limit`. If you do limit a run, always keep `localhost` in it (`-l dgx-spark-1,localhost`): play 1 and the Kubernetes plays run there.
 
@@ -31,7 +31,7 @@ Times are rough working times for one Spark, not counting reading.
 | **Part I** | **Management plane & Ansible foundations** | | | |
 | 01 | [Management plane: Semaphore + Vault](01-management-plane-semaphore-and-vault.md) | Build `vault01` and `sema01` by hand | ½ day | A Semaphore task logs in to a test target as `svc-ansible` with a certificate |
 | 02 | [Control node & Ansible core](02-control-node-and-ansible-core.md) | MacBook toolchain, SSH trust, inventory; later first contact, facts, baseline | 30 min + 30 min | `ALL LOCAL CHECKS PASSED`; later `01 Baseline` twice, second run `changed=0` |
-| 03 | [Bare-metal provisioning & bootstrap](03-bare-metal-provisioning-and-bootstrap.md) | Fresh DGX OS only: bootstrap name, key, static IP | 30 min | `ssh nvidia@192.168.0.100 hostname` → `dgx-spark-1` |
+| 03 | [Bare-metal provisioning & bootstrap](03-bare-metal-provisioning-and-bootstrap.md) | Fresh DGX OS only: bootstrap name, key, static IP | 30 min | `ssh dgxadmin@192.168.0.100 hostname` → `dgx-spark-1` |
 | 04 | [The Spark as a Semaphore target](04-dgx-spark-as-semaphore-target.md) | `svc-ansible` + CA trust, lab image on sema01, project `spark-lab`, lab secrets | 60–90 min | sshd log: `Accepted publickey for svc-ansible … ED25519-CERT` |
 | 05 | [Execution internals & debugging](05-execution-internals-and-debugging.md) | Study: watch a module run, explode an AnsiballZ payload | 45 min | You can name the failing layer from an error alone |
 | 06 | [Inventory: static, dynamic, discovery](06-inventory-static-dynamic-and-discovery.md) | Study: fact-driven groups, mDNS plugin | 45 min | `ansible-inventory --graph` shows `gpu_ready` |
@@ -106,7 +106,7 @@ Build `vault01` (192.168.0.211: SSH CA `ssh-client-signer`, signing role `ansibl
 
 Step 02 has two halves, and only the first can be done now:
 
-- **Now: Step 02 §3.1–3.4** — the MacBook toolchain, SSH trust to `nvidia@dgx-spark-1`, how the login switches between Semaphore and the MacBook, and the inventory.
+- **Now: Step 02 §3.1–3.4** — the MacBook toolchain, SSH trust to `dgxadmin@dgx-spark-1`, how the login switches between Semaphore and the MacBook, and the inventory.
 - **After Step 04: Step 02 §3.5–3.7** — first contact, custom facts and the OS baseline. They run from Semaphore, which can reach the Spark only once Step 04 is done.
 
 **Now (MacBook):**
@@ -118,17 +118,17 @@ python3 -m venv ~/.venvs/spark-ansible && source ~/.venvs/spark-ansible/bin/acti
 pip install -r requirements.txt
 ansible-galaxy collection install -r requirements.yml -p ./collections
 tests/run-local-checks.sh              # proves your toolchain before touching hardware
-ssh-copy-id nvidia@192.168.0.100       # SSH trust (Step 02 §3.2); fresh DGX OS? do Step 03 first
+ssh-copy-id dgxadmin@192.168.0.100       # SSH trust (Step 02 §3.2); fresh DGX OS? do Step 03 first
 ```
 
 The MacBook needs this toolchain only for the bootstrap playbooks, `08-vault.yml` and break-glass runs; Semaphore brings its own (Step 04 §4).
 
-✅ **Done when (now)** `tests/run-local-checks.sh` prints `ALL LOCAL CHECKS PASSED` and `ssh nvidia@192.168.0.100 hostname` answers without a password. Continue with Step 03 and Step 04, then come back for the second half.
+✅ **Done when (now)** `tests/run-local-checks.sh` prints `ALL LOCAL CHECKS PASSED` and `ssh dgxadmin@192.168.0.100 hostname` answers without a password. Continue with Step 03 and Step 04, then come back for the second half.
 
 **After Step 04 — first contact (Step 02 §3.5).** **Semaphore:** `00 Ping`. The log shows play 1 (*Get an SSH certificate from Vault*), then *Connectivity and identity check* on `dgx-spark-1`. Try the ad-hoc commands of §3.5 from the MacBook: Semaphore runs playbooks, not ad-hoc commands.
 
 ```bash
-ansible-playbook playbooks/00-ping.yml -K      # break-glass (MacBook, as nvidia)
+ansible-playbook playbooks/00-ping.yml -K      # break-glass (MacBook, as dgxadmin)
 ```
 
 **After Step 04 — custom facts and baseline (Step 02 §3.6–3.7).** **Semaphore:** `01 Baseline`, twice.
@@ -141,7 +141,7 @@ ansible-playbook playbooks/01-baseline.yml -K  # break-glass
 
 ## Step 03 · Bare-metal provisioning & bootstrap → [document](03-bare-metal-provisioning-and-bootstrap.md)
 
-**Fresh DGX OS only.** Skip the bootstrap if the Spark is already named `dgx-spark-1`, sits on 192.168.0.100 and accepts your key as `nvidia`. Otherwise, after the first-boot wizard (Step 03 §3.1), from the MacBook (Step 03 §3.2, Step 04 §2.1):
+**Fresh DGX OS only.** Skip the bootstrap if the Spark is already named `dgx-spark-1`, sits on 192.168.0.100 and accepts your key as `dgxadmin`. Otherwise, after the first-boot wizard (Step 03 §3.1), from the MacBook (Step 03 §3.2, Step 04 §2.1):
 
 ```bash
 ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-1 -k -K -e bootstrap_current_ip=<dhcp-ip>
@@ -150,7 +150,7 @@ ansible-playbook playbooks/00-bootstrap.yml -l dgx-spark-1 -K -e bootstrap_curre
 
 The second run moves the Spark to its static address behind a dead-man switch: if the new address doesn't answer, the change rolls back by itself. Redfish and PXE (Step 03 §4–5) are practice for data-centre nodes; the Redfish mockup runs later as template `12 Redfish practice`, once Step 04 is done.
 
-✅ **Done when** `ssh nvidia@192.168.0.100 hostname` prints `dgx-spark-1` without a password.
+✅ **Done when** `ssh dgxadmin@192.168.0.100 hostname` prints `dgx-spark-1` without a password.
 
 ## Step 04 · The Spark as a Semaphore target → [document](04-dgx-spark-as-semaphore-target.md)
 
@@ -174,7 +174,7 @@ Work through Step 04 from top to bottom (MacBook, sema01 and the Semaphore UI). 
    ```
 5. **Create the remaining templates** from the table in Step 04 §7.1.
 
-These playbooks run from the MacBook as `nvidia` with your own key, because the Spark doesn't trust vault01 until item 1 is done ([`group_vars/spark.yml`](lab/inventory/group_vars/spark.yml) picks that login whenever no `vault_role_id` is set).
+These playbooks run from the MacBook as `dgxadmin` with your own key, because the Spark doesn't trust vault01 until item 1 is done ([`group_vars/spark.yml`](lab/inventory/group_vars/spark.yml) picks that login whenever no `vault_role_id` is set).
 
 ✅ **Done when** dgx-spark-1's sshd log shows `Accepted publickey for svc-ansible … ED25519-CERT` after a Semaphore run of `00 Ping`. **Now go back and finish Step 02** (first contact, facts, baseline), then continue with Step 05.
 
@@ -185,7 +185,7 @@ Study step, nothing new to build. **What to try** (MacBook, break-glass login, S
 ```bash
 ansible dgx-spark-1 -m ping -vvvv 2>&1 | grep -E 'ESTABLISH|SSH: EXEC|PUT|<dgx-spark-1> (EXEC|SSH)'
 ANSIBLE_PIPELINING=0 ANSIBLE_KEEP_REMOTE_FILES=1 \
-  ansible dgx-spark-1 -m ansible.builtin.stat -a path=/etc/dgx-release -vvv 2>&1 | grep -o '/home/nvidia/.ansible/tmp/[^ /]*' | head -1
+  ansible dgx-spark-1 -m ansible.builtin.stat -a path=/etc/dgx-release -vvv 2>&1 | grep -o '/home/dgxadmin/.ansible/tmp/[^ /]*' | head -1
 ```
 
 ✅ **Done when** you have run `AnsiballZ_stat.py explode` and `execute` on the Spark and can tell from an error alone whether a failure is SSH, sudo, Python, module or logic.
@@ -282,7 +282,7 @@ Steps 13–15 need `dgx-spark-2` and a QSFP cable. Uncomment `dgx-spark-2` in `i
 
 ## Step 13 · ConnectX-7 fabric & OpenSM → [document](13-connectx7-fabric-and-opensm.md)
 
-Confirm the CX-7 names with `ssh nvidia@192.168.0.100 ibdev2netdev`, put them in `host_vars/dgx-spark-N.yml`, push. **Semaphore:** `02 Fabric`, then `11 RDMA perftest`.
+Confirm the CX-7 names with `ssh dgxadmin@192.168.0.100 ibdev2netdev`, put them in `host_vars/dgx-spark-N.yml`, push. **Semaphore:** `02 Fabric`, then `11 RDMA perftest`.
 
 ```bash
 # break-glass (MacBook), both Sparks
@@ -373,7 +373,7 @@ kubectl --context spark-root -n kube-system get pods     # static-pod control pl
 
 Break-glass: `ansible-playbook playbooks/05-kubernetes.yml -K` writes the kubeconfig straight to the MacBook's `.cache/`. The vClusters come in Step 20, after the GPU Operator, because their budgets count GPU slices (Step 19 §4.5).
 
-✅ **Done when** `dgx-spark-1` is `Ready`, `kubectl --context spark-root -n kube-system exec ds/cilium -- cilium-dbg status --brief` prints `OK`, and `ssh nvidia@192.168.0.100 sudo crictl ps` lists the control-plane containers. Broke it while learning? Run the template `99 Reset Kubernetes` (extra variable `reset_confirm: RESET`, Step 04 §7.3; break-glass: `ansible-playbook playbooks/99-reset-kubernetes.yml -K` and type `RESET`) and run Step 19 again.
+✅ **Done when** `dgx-spark-1` is `Ready`, `kubectl --context spark-root -n kube-system exec ds/cilium -- cilium-dbg status --brief` prints `OK`, and `ssh dgxadmin@192.168.0.100 sudo crictl ps` lists the control-plane containers. Broke it while learning? Run the template `99 Reset Kubernetes` (extra variable `reset_confirm: RESET`, Step 04 §7.3; break-glass: `ansible-playbook playbooks/99-reset-kubernetes.yml -K` and type `RESET`) and run Step 19 again.
 
 ## Step 20 · GPU Operator & time-slicing → [document](20-nvidia-gpu-operator-and-time-slicing.md)
 

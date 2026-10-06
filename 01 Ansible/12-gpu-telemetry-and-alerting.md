@@ -364,7 +364,7 @@ Run the Semaphore template **`04 Telemetry`** (break-glass: `ansible-playbook pl
 ```bash
 cd "01 Ansible/lab"
 # node side
-ssh nvidia@192.168.0.100 'cat /var/lib/prometheus/node-exporter/spark_gpu.prom; curl -s localhost:9100/metrics | grep ^spark_ | head'
+ssh dgxadmin@192.168.0.100 'cat /var/lib/prometheus/node-exporter/spark_gpu.prom; curl -s localhost:9100/metrics | grep ^spark_ | head'
 # stack
 curl -s http://192.168.0.100:9090/api/v1/targets | jq -r '.data.activeTargets[] | "\(.labels.host) \(.health)"'
 curl -s http://192.168.0.100:9090/api/v1/rules | jq -r '.data.groups[].rules[].name'

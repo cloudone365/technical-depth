@@ -93,10 +93,10 @@
 # ---- kubectl for the admin user on the Spark itself
 - name: Kube config directory for the admin user
   ansible.builtin.file:
-    path: "/home/{{ spark_admin_user | default('nvidia') }}/.kube"
+    path: "/home/{{ spark_admin_user | default('dgxadmin') }}/.kube"
     state: directory
-    owner: "{{ spark_admin_user | default('nvidia') }}"
-    group: "{{ spark_admin_user | default('nvidia') }}"
+    owner: "{{ spark_admin_user | default('dgxadmin') }}"
+    group: "{{ spark_admin_user | default('dgxadmin') }}"
     mode: "0700"
 
 - name: Read admin.conf
@@ -111,9 +111,9 @@
     content: >-
       {{ kubeadm_cluster_admin_slurp.content | b64decode
          | regex_replace('kubernetes-admin@' ~ kubeadm_cluster_name, kubeadm_cluster_context) }}
-    dest: "/home/{{ spark_admin_user | default('nvidia') }}/.kube/config"
-    owner: "{{ spark_admin_user | default('nvidia') }}"
-    group: "{{ spark_admin_user | default('nvidia') }}"
+    dest: "/home/{{ spark_admin_user | default('dgxadmin') }}/.kube/config"
+    owner: "{{ spark_admin_user | default('dgxadmin') }}"
+    group: "{{ spark_admin_user | default('dgxadmin') }}"
     mode: "0600"
 
 # ---- kubeconfig on the control node: context 'spark-root', merged with any vCluster contexts

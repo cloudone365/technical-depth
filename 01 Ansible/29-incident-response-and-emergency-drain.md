@@ -36,7 +36,7 @@ tools/fetch-kubeconfig.sh sema01 || true          # if sema01 still answers; oth
 ansible-playbook playbooks/21-emergency-drain.yml -l dgx-spark-2,localhost -K -e node_drain_reboot=true
 ```
 
-Without the Semaphore variable group, play 1 is skipped and the play logs in as `nvidia` with your key; the kubeconfig and the incident bundle are read from and written to the MacBook's `.cache/`. Afterwards, re-run the template in Semaphore so the record and the state are back on sema01.
+Without the Semaphore variable group, play 1 is skipped and the play logs in as `dgxadmin` with your key; the kubeconfig and the incident bundle are read from and written to the MacBook's `.cache/`. Afterwards, re-run the template in Semaphore so the record and the state are back on sema01.
 
 > **The 15-minute certificate and the reboot.** Under Semaphore, play 1's certificate covers new logins for 15 minutes. The drain, the evidence and the containers use the already-open ControlPersist connection, but the reconnect **after** the reboot is a new login. With `node_drain_bug_report=true` (minutes of `nvidia-bug-report.sh`) plus a slow boot you can pass 15 minutes, and the reconnect fails with `Permission denied (publickey)`. Nothing is lost: the node is up and still drained. Run the template again with `node_drain_reboot=false node_drain_undrain_after=true`; play 1 issues a fresh certificate and the role validates and returns the node.
 
