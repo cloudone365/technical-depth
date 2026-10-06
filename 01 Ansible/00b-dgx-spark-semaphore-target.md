@@ -43,12 +43,35 @@ Each step has a **Why**, then commands with a comment on every line, then a **Ve
 
 **Why:** the bootstrap playbooks run once from your MacBook, and they need the lab repository, a working Ansible, SSH as the admin user, and vault01's TLS certificate.
 
-On your MacBook (the repository and Ansible come from the [00 guide Step 0](00-ansible-step-by-step-guide.md)):
+**Two one-time settings on the MacBook first.**
+
+- **zsh and `#` comments.** macOS's zsh does **not** treat `#` as a comment when you type or paste commands: everything after it becomes arguments (errors like `zsh: unknown group`, `No such file or directory`, or a hanging quote from an apostrophe). The commented command blocks in these guides need it switched on:
+  ```bash
+  setopt interactivecomments                                   # this shell
+  echo 'setopt interactivecomments' >> ~/.zshrc                # every new shell
+  ```
+- **SSH names for the management plane**, so `vault01` and `sema01` in the commands below resolve to the right address and user. Your login user on vault01 is the one from 00a (`vault01` in its examples); put your own sema01 user in place of `<your-user>`:
+  ```bash
+  cat >> ~/.ssh/config <<'EOF'
+  Host vault01
+    HostName 192.168.0.211
+    User vault01
+  Host sema01
+    HostName 192.168.0.210
+    User <your-user>
+  Host dgx-spark-01
+    HostName 192.168.0.100
+    User nvidia
+  EOF
+  ssh vault01 hostname && ssh sema01 hostname                  # both answer
+  ```
+
+Then, on your MacBook (the repository and Ansible come from the [00 guide Step 0](00-ansible-step-by-step-guide.md)):
 
 ```bash
 cd ~/technical-depth/"01 Ansible/lab"                       # the lab folder; every relative path below starts here
 mkdir -p .cache && chmod 700 .cache                          # local state folder (git-ignored)
-scp vault01:~/vault-ca.crt .cache/vault-ca.crt               # vault01's TLS certificate (the copy you made in 00a §3.3)
+scp vault01:~/vault-ca.crt .cache/vault-ca.crt               # vault01 TLS certificate (the copy you made in 00a §3.3)
 curl --cacert .cache/vault-ca.crt https://192.168.0.211:8200/v1/sys/health   # JSON = the MacBook trusts vault01's TLS
 ssh nvidia@192.168.0.100 'hostname; sudo -v && echo sudo-ok'   # admin login + sudo work on the Spark
 ```
@@ -367,6 +390,8 @@ State then goes to the MacBook's `.cache/` instead of sema01's volume. After the
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `zsh: unknown group`, `No such file or directory` for words from a comment, or a `quote>` prompt | zsh on macOS doesn't treat `#` as a comment | `setopt interactivecomments` (and add it to `~/.zshrc`), §2 |
+| `ssh: Could not resolve hostname vault01` / wrong user on vault01 or sema01 | no SSH names on the MacBook | `~/.ssh/config` entries, §2 |
 | `Permission denied (publickey)` for svc-ansible | sshd doesn't trust vault01's CA, or the certificate expired | §3.2 fingerprints; run the task again for a fresh certificate; check clocks (00a §10.2) |
 | A long task fails after a reboot or a long pause: `Permission denied` / `UNREACHABLE` halfway | the 15-minute certificate expired; the open SSH connection kept working, the new one after the reboot is refused | template extra variable `vault_ssh_cert_ttl: 1h` (the vault01 role's `max_ttl`) |
 | Play 1 skipped and then `Permission denied` for **nvidia** | the template has no variable group, so the lab thinks it's a MacBook run | attach `vault-approle` to the template |

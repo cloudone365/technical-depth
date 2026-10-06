@@ -39,6 +39,7 @@ Build `vault01` (192.168.0.211: SSH CA `ssh-client-signer`, signing role `ansibl
 ## Step 0 · MacBook toolchain and SSH trust (30 min) → [01A](01-ansible-core-deep-dive.md) Steps 1–3
 
 ```bash
+setopt interactivecomments; echo 'setopt interactivecomments' >> ~/.zshrc   # macOS zsh: let "# comments" in pasted commands be comments
 git clone https://github.com/cloudone365/technical-depth.git && cd "technical-depth/01 Ansible/lab"
 python3 -m venv ~/.venvs/spark-ansible && source ~/.venvs/spark-ansible/bin/activate
 pip install -r requirements.txt
@@ -61,7 +62,7 @@ Follow the 00b guide from top to bottom. In short:
    ```
 2. **Trust vault01 on the Spark**, from the MacBook (00b §2–3):
    ```bash
-   scp vault01:~/vault-ca.crt .cache/vault-ca.crt                 # vault01's TLS certificate
+   scp vault01:~/vault-ca.crt .cache/vault-ca.crt                 # vault01 TLS certificate (SSH names vault01/sema01: 00b §2)
    ansible-playbook playbooks/00b-semaphore-target.yml -K         # svc-ansible, NOPASSWD sudo, trust vault01's CA
    ```
 3. **On sema01**, build the lab's Semaphore image and state volume from [`lab/semaphore/`](lab/semaphore/) (00b §4).
