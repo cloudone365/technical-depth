@@ -3,7 +3,7 @@
 # or scripts/install-addons.sh vclusters.
 #
 # Budget (enforced by the ROOT ResourceQuota in manifests/root/05-vclusters/quotas.yaml):
-#   4 CPU (requests) · 48 Gi memory (requests = limits) · 8 GPU time-slices · 500 Gi storage
+#   12 CPU (requests) · 88 Gi memory (requests = limits) · 11 GPU time-slices · 800 Gi storage
 # Everything below — this control plane, CoreDNS, Traefik, Kueue, KEDA, every
 # model server — counts against it.
 #

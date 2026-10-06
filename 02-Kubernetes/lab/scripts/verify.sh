@@ -26,7 +26,7 @@ fi
 
 if want vclusters; then
   echo "── vclusters"
-  declare -A WANT_CPU=([dev-lab]=2 [llms]=4) WANT_MEM=([dev-lab]=8Gi [llms]=48Gi) WANT_GPU=([dev-lab]=2 [llms]=8)
+  declare -A WANT_CPU=([dev-lab]=2 [llms]=12) WANT_MEM=([dev-lab]=8Gi [llms]=88Gi) WANT_GPU=([dev-lab]=2 [llms]=11)
   for v in "$DEV_CTX" "$LLM_CTX"; do
     kr -n "vc-$v" get statefulset "$v" -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -q '^1' \
       && ok "$v control plane Running in vc-$v" || bad "$v control plane not ready (kubectl --context $ROOT_CTX -n vc-$v get pods)"
@@ -73,7 +73,7 @@ if want gpu; then
   node=$(gpu_node)
   [[ -n "$node" ]] && ok "GB10 node: $node" || bad "no node labelled spark.lab/gpu=gb10"
   alloc=$(kr get node "$node" -o jsonpath='{.status.allocatable.nvidia\.com/gpu}')
-  [[ ${alloc:-0} -eq 15 ]] && ok "allocatable nvidia.com/gpu=$alloc (root 5 · dev-lab 2 · llms 8)" \
+  [[ ${alloc:-0} -eq 15 ]] && ok "allocatable nvidia.com/gpu=$alloc (root 2 · dev-lab 2 · llms 11)" \
     || { [[ ${alloc:-0} -ge 1 ]] && warn "allocatable nvidia.com/gpu=$alloc (budgets assume 15)" || bad "no GPU allocatable"; }
   kr -n gpu-operator get pods -l app=nvidia-operator-validator --no-headers 2>/dev/null | grep -q Running && ok "operator-validator Running" || warn "operator-validator not Running"
   info "gpu-smoke from INSIDE dev-lab (tenant-beta → syncer → root scheduler → nvidia runtime)"

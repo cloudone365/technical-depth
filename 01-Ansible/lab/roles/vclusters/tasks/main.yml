@@ -56,7 +56,7 @@
   kubernetes.core.k8s:
     kubeconfig: "{{ vclusters_kubeconfig }}"
     context: "{{ vclusters_root_context }}"
-    src: "{{ vclusters_lab_dir }}/manifests/root/{{ item }}"
+    definition: "{{ lookup('kubernetes.core.kustomize', dir=vclusters_lab_dir ~ '/manifests/root/' ~ item) }}"
     state: present
     apply: true
     server_side_apply:

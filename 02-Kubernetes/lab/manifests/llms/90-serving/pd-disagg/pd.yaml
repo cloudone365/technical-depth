@@ -1,6 +1,7 @@
 # Disaggregated prefill/decode (Step 23) — ADVANCED / EXPERIMENTAL.
-# INSIDE vCluster #2 · llms. Park vLLM first (pause its KEDA ScaledObject, Step 20 §9): prefill + decode
-# take 2 slices and 40 Gi of the llms vCluster's 48 Gi memory budget.
+# INSIDE vCluster #2 · llms. Prefill + decode take 2 slices and 40 Gi of limits: they fit next to vLLM
+# in serving-budget (80 Gi), and their util 0.15 + 0.15 plus vLLM's 0.20 stays under the ~0.70 that llms
+# can hold (Step 20 §2). Park vLLM (pause its KEDA ScaledObject, Step 20 §9) only if a bigger model runs.
 # One Spark: both roles share the GB10 via time-slicing (2 slices), so this
 # demonstrates the *mechanics* (KV handoff over NIXL/UCX, routing, metrics),
 # not a speed-up. On two Sparks, pin prefill to dgx-spark-1 and decode to

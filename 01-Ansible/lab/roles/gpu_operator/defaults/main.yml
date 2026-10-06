@@ -30,6 +30,6 @@ gpu_operator_values:
     enabled: true
 
 # Time-slicing: advertise N logical GPUs per physical GB10 (no memory isolation!).
-# 15 slices: the root keeps 5, vCluster dev-lab gets 2, vCluster llms gets 8
+# 15 slices: the root keeps 2, vCluster dev-lab gets 2, vCluster llms gets 11
 # (quotas in "02-Kubernetes/lab/manifests/root/05-vclusters").
 gpu_operator_timeslice_replicas: 15

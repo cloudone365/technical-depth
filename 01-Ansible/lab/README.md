@@ -130,7 +130,8 @@ Start over with the template `99 Reset Kubernetes` (extra variable
 Never schedule it. Break-glass from the MacBook:
 `ansible-playbook playbooks/99-reset-kubernetes.yml -l dgx-spark-1,localhost -K` (type `RESET`).
 
-`06b-vclusters.yml` applies the vCluster values and root budgets from
+`06b-vclusters.yml` applies the vCluster values and the root kustomize directories
+`manifests/root/00-platform` and `manifests/root/05-vclusters` (budgets included) from
 [`../../02-Kubernetes/lab`](../../02-Kubernetes/lab/README.md), so that lab must
 be checked out next to this one. It also writes `kubeconfig-dev-lab.yaml`
 and `kubeconfig-llms.yaml` to the state folder for anyone who should only see one vCluster.

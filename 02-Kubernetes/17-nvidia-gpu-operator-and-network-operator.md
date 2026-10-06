@@ -117,10 +117,10 @@ The 15 slices are split by **root ResourceQuotas**, not by the device plugin:
 | Who | Slices | Enforced by |
 |---|---|---|
 | vCluster `dev-lab` | 2 | `vc-dev-lab/vcluster-budget` `requests.nvidia.com/gpu: 2` |
-| vCluster `llms` | 8 | `vc-llms/vcluster-budget` `requests.nvidia.com/gpu: 8` |
-| root (`platform-tools` benchmarks, probes) | 5 | **nothing** — the root has no quota on itself. It's a convention the platform team keeps |
+| vCluster `llms` | 11 | `vc-llms/vcluster-budget` `requests.nvidia.com/gpu: 11` |
+| root (`platform-tools` benchmarks, probes, the Step 14 §5.5 UMA experiment, the preemption-demo filler) | 2 | **nothing** — the root has no quota on itself. It's a convention the platform team keeps |
 
-A profile switch changes the supply; the quotas don't move. After a switch to `whole-gpu` the budgets still say 2 + 8, but only one GPU exists, and the scheduler's `Insufficient nvidia.com/gpu` becomes the binding limit (§5.3).
+A profile switch changes the supply; the quotas don't move. After a switch to `whole-gpu` the budgets still say 2 + 11, but only one GPU exists, and the scheduler's `Insufficient nvidia.com/gpu` becomes the binding limit (§5.3).
 
 ### 3.3 Alert rules ([`rules.yaml`](lab/manifests/root/95-observability/rules.yaml))
 
@@ -217,7 +217,7 @@ Then prove the full chain from a tenant namespace:
 scripts/verify.sh gpu          # applies manifests/dev-lab/70-gpu/gpu-smoke.yaml in dev-lab/tenant-beta
 ```
 
-Expected: `[PASS] allocatable nvidia.com/gpu=15 (root 5 · dev-lab 2 · llms 8)`, `[PASS] operator-validator Running`, and `[PASS] gpu-smoke: GPU 0: NVIDIA GB10 (UUID: GPU-…)`. That pod went dev-lab API → syncer → root quota → root scheduler → device plugin → nvidia runtime.
+Expected: `[PASS] allocatable nvidia.com/gpu=15 (root 2 · dev-lab 2 · llms 11)`, `[PASS] operator-validator Running`, and `[PASS] gpu-smoke: GPU 0: NVIDIA GB10 (UUID: GPU-…)`. That pod went dev-lab API → syncer → root quota → root scheduler → device plugin → nvidia runtime.
 
 ### 5.3 Switch a node to "whole GPU" and back
 
@@ -242,7 +242,7 @@ kubectl --context spark-root label node dgx-spark-1 nvidia.com/device-plugin.con
 sleep 45; kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'                                     # 15
 ```
 
-Use `whole-gpu` for a benchmark or a big single-model run, when you want no one else on the GPU. Running pods keep their allocation. New pods see the new count — in every cluster at once. While the node advertises 1, the vCluster budgets (2 and 8) are promises the hardware can't keep: the first GPU pod wins and every other one, in any cluster, gets `0/1 nodes are available: 1 Insufficient nvidia.com/gpu` from the root scheduler. Quotas cap demand; they never create supply.
+Use `whole-gpu` for a benchmark or a big single-model run, when you want no one else on the GPU. Running pods keep their allocation. New pods see the new count — in every cluster at once. While the node advertises 1, the vCluster budgets (2 and 11) are promises the hardware can't keep: the first GPU pod wins and every other one, in any cluster, gets `0/1 nodes are available: 1 Insufficient nvidia.com/gpu` from the root scheduler. Quotas cap demand; they never create supply.
 
 > The ConfigMap is owned by the 01-Ansible `gpu_operator` role. A later run of `06-gpu-operator.yml` rewrites it without your `whole-gpu` key. To make the profile permanent, add it to the role's time-slicing ConfigMap task.
 
@@ -292,7 +292,7 @@ kubectl --context spark-root -n platform-tools set resources deploy slice-hog --
 kubectl --context spark-root -n platform-tools get pods -l app=slice-hog | grep -c Pending        # 1
 ```
 
-`platform-tools` has no quota, so the root can take every slice — including the ones dev-lab and llms are "budgeted". The root's 5 slices are a convention, not a control. After 10 minutes `PodsPendingOnGPU` fires for `platform-tools`. Clean up:
+`platform-tools` has no quota, so the root can take every slice — including the ones dev-lab and llms are "budgeted". The root's 2 slices are a convention, not a control. After 10 minutes `PodsPendingOnGPU` fires for `platform-tools`. Clean up:
 
 ```bash
 kubectl --context spark-root -n platform-tools delete deploy slice-hog

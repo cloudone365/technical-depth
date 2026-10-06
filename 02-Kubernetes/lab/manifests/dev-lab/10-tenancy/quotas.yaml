@@ -1,7 +1,7 @@
 # Tenant budgets INSIDE vCluster #1 · dev-lab (Steps 14, 04).
 #
 # Two layers of quota:
-#   root   vc-dev-lab  2 CPU · 8 Gi · 2 GPU slices · 300 Gi   ← the real cap (manifests/root/05-vclusters)
+#   root   vc-dev-lab  2 CPU · 8 Gi · 2 GPU slices · 200 Gi   ← the real cap (manifests/root/05-vclusters)
 #   here   per tenant  500m · 2 Gi · 1 slice · 100 Gi          ← ceilings enforced by dev-lab's own API server
 #
 # Inner quotas are ceilings, not reservations: alpha + beta + lab-tools may add

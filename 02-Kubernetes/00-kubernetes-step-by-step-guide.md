@@ -14,7 +14,7 @@ This page is the build order for the whole module. Each section below is one ste
 |---|---|---|
 | `spark-root` | kubeadm root, `https://192.168.0.100:6443`: the node, etcd, Cilium, MetalLB, storage, GPU Operator, observability | platform team |
 | `dev-lab` | vCluster #1, `https://192.168.0.111`, root namespace `vc-dev-lab`: 2 CPU · 8 Gi · 2 GPU slices | tenants and labs |
-| `llms` | vCluster #2, `https://192.168.0.112`, root namespace `vc-llms`: 4 CPU · 48 Gi · 8 GPU slices | serving and training |
+| `llms` | vCluster #2, `https://192.168.0.112`, root namespace `vc-llms`: 12 CPU · 88 Gi · 11 GPU slices | serving and training |
 
 ![DGX Spark nested Kubernetes lab: your MacBook as a client, sema01 (Semaphore) and vault01 outside the Spark, a kubeadm root cluster on the Spark, and the dev-lab and llms vClusters inside it](diagrams/nested-lab-architecture.svg)
 
@@ -22,7 +22,7 @@ This page is the build order for the whole module. Each section below is one ste
 
 **One Spark or two?** Everything works on one. Steps marked **(2×)** have an optional part that needs `dgx-spark-2` and the QSFP cable.
 
-**One 32 Gi engine at a time.** `serving-budget` in llms (36 Gi of limits) holds one large engine. From Step 20 on, vLLM runs under KEDA; before Triton, SGLang, KServe or the prefill/decode split, **park** vLLM by pausing its ScaledObject (`autoscaling.keda.sh/paused-replicas=0`), not by scaling the Deployment, which KEDA's `minReplicaCount: 1` would undo ([Step 20 §9](20-vllm-high-throughput-llm-serving.md)).
+**Two engines side by side; memory is the real limit.** `serving-budget` in llms (80 Gi of limits) holds two of the lab's 32 Gi engines, or vLLM next to Triton or the prefill/decode pair. What decides is unified memory: the `--gpu-memory-utilization` values of all models running at the same time should add up to ≲ 0.70 (about 84 GiB of the ~119.7 GiB pool, [Step 20 §2](20-vllm-high-throughput-llm-serving.md)). From Step 20 on, vLLM runs under KEDA; when a bigger model would push the sum over, **park** vLLM by pausing its ScaledObject (`autoscaling.keda.sh/paused-replicas=0`), not by scaling the Deployment, which KEDA's `minReplicaCount: 1` would undo ([Step 20 §9](20-vllm-high-throughput-llm-serving.md)).
 
 **The Spark is your playground.** Every step can be undone: `scripts/breakfix.sh reset all` for drills, and for a full rebuild the Semaphore templates `99 Reset Kubernetes` (extra variable `reset_confirm: RESET`) → `05 Kubernetes` → `06 GPU Operator` → `06b vClusters`, then `fetch-kubeconfig.sh sema01` again. Semaphore and Vault live outside the Spark, so nothing you break here can take them with it. Breaking things on purpose is part of the course.
 
@@ -207,7 +207,7 @@ scripts/verify.sh vclusters
 
 Then look around, follow one pod through both clusters and spend a budget (Step 04 §6.2–6.4).
 
-✅ **Done when** the contexts are `spark-root`, `dev-lab` and `llms`, `verify.sh vclusters` prints `dev-lab root budget: 2 8Gi 2` and `llms root budget: 4 48Gi 8`, and Grafana answers on `http://192.168.0.100:32000`.
+✅ **Done when** the contexts are `spark-root`, `dev-lab` and `llms`, `verify.sh vclusters` prints `dev-lab root budget: 2 8Gi 2` and `llms root budget: 12 88Gi 11`, and Grafana answers on `http://192.168.0.100:32000`.
 
 ## Step 05 · The DGX Spark datacenter simulation → [document](05-dgx-spark-datacenter-simulation-lab.md)
 
@@ -422,22 +422,21 @@ scripts/verify.sh serving
 
 ## Step 21 · Triton Inference Server → [document](21-nvidia-triton-inference-server.md)
 
-`serving-budget` holds **one 32 Gi engine at a time** ([Step 20 §9](20-vllm-high-throughput-llm-serving.md)), so park vLLM first. Define the two helpers once; Steps 22 and 23 use them too:
+`serving-budget` (80 Gi) holds Triton's 12 Gi beside vLLM's 32 Gi, and Triton's small models add little to vLLM's 0.20 of the pool, so vLLM keeps running ([Step 20 §9](20-vllm-high-throughput-llm-serving.md)). Define the two helpers once anyway; you need them whenever a bigger model would push the sum of util values over ~0.70:
 
 ```bash
 park()   { kubectl --context llms -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite; }
 unpark() { kubectl --context llms -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas-; }
-park
 kubectl --context llms apply -k manifests/llms/90-serving/triton
 # … Step 21 §5.2–5.5, then
 kubectl --context llms delete -k manifests/llms/90-serving/triton
 ```
 
-✅ **Done when** Triton's batch size is > 1 under load, and its rollout ran alone in `serving-budget` (no `exceeded quota` event).
+✅ **Done when** Triton's batch size is > 1 under load, and its rollout ran beside vLLM in `serving-budget` (no `exceeded quota` event).
 
 ## Step 22 · SGLang, TensorRT-LLM & KServe → [document](22-llm-inference-alternatives-and-kserve.md)
 
-vLLM stays parked. Measure the prefix cache on a second engine, then KServe (Step 22 §5.1–5.4):
+vLLM keeps running: SGLang (`--mem-fraction-static=0.20`) beside it is 0.40 of the pool and 64 Gi of the 80 Gi. Run SGLang and the KServe predictor one after the other, because three 32 Gi engines (96 Gi) don't fit `serving-budget`. Measure the prefix cache on a second engine, then KServe (Step 22 §5.1–5.4):
 
 ```bash
 kubectl --context llms apply -k manifests/llms/90-serving/sglang && kubectl --context llms -n llm-serving scale deploy sglang --replicas=1
@@ -447,24 +446,22 @@ kubectl --context llms -n llm-serving scale deploy sglang --replicas=0
 scripts/install-addons.sh kserve                        # cert-manager + KServe inside llms
 ```
 
-✅ **Done when** you have measured the prefix-cache speed-up on two engines, every engine ran alone in `serving-budget` (36 Gi), and the root's `vcluster-budget` (48 Gi) never refused a pod.
+✅ **Done when** you have measured the prefix-cache speed-up on two engines, each ran beside vLLM inside `serving-budget` (80 Gi), and the root's `vcluster-budget` (88 Gi) never refused a pod.
 
 ## Step 23 · Disaggregated prefill & decode → [document](23-disaggregated-prefill-and-decode-serving.md)
 
-Prefill + decode need 40 Gi of limits, more than the 36 Gi ceiling: Step 23 §5.2 checks the root has room and lifts `serving-budget` to 44 Gi for the run.
+Prefill + decode need about 40 Gi of limits. Beside vLLM's 32 Gi and the always-on pods that is still inside `serving-budget`'s 80 Gi (with SGLang and KServe scaled down), so no quota changes. Their memory is 0.15 + 0.15 of the pool, 0.50 with vLLM's 0.20; `park` vLLM first only if you load bigger models and the sum would pass ~0.70.
 
 ```bash
-kubectl --context llms -n llm-serving patch resourcequota serving-budget --type merge -p '{"spec":{"hard":{"limits.memory":"44Gi"}}}'
 kubectl --context llms apply -k manifests/llms/90-serving/pd-disagg
 # … afterwards
 kubectl --context llms delete -k manifests/llms/90-serving/pd-disagg
-kubectl --context llms apply -k manifests/llms/10-tenancy                     # serving-budget back to 36 Gi
-unpark                                                                         # vLLM returns
+unpark                                                                         # only if you parked vLLM
 ```
 
 (2×) Prefill on dgx-spark-1, decode on dgx-spark-2 (Step 23 §5.5).
 
-✅ **Done when** responses carry the `X-Prefill-Ms` header, the decode log shows NIXL activity, and vLLM is back with `serving-budget` at 36 Gi.
+✅ **Done when** responses carry the `X-Prefill-Ms` header, the decode log shows NIXL activity, and vLLM served throughout (or is back, if you parked it) with no `exceeded quota` event.
 
 ---
 

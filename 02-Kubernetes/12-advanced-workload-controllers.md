@@ -101,7 +101,7 @@ flowchart TB
 
 | Field | Value | Why |
 |---|---|---|
-| namespace | `llm-serving` in vCluster `llms` | counts against `serving-budget` (2500m · 36 Gi · 400 Gi) and the root `vcluster-budget` on `vc-llms` |
+| namespace | `llm-serving` in vCluster `llms` | counts against `serving-budget` (10 CPU · 80 Gi · 600 Gi) and the root `vcluster-budget` on `vc-llms` |
 | `serviceName` | `qdrant-headless` (`publishNotReadyAddresses: true`) | stable DNS per pod, answered by **llms's own CoreDNS**. Peers must find each other before they're ready |
 | image | `qdrant/qdrant:v1.13.4-unprivileged`, UID 1000 | runs non-root; passes PSA `baseline` (llm-serving) and the root's `privileged` on `vc-llms` |
 | resources | requests 250m · 1 Gi, limit 2 Gi | Burstable; the memory limit is what the root quota counts |

@@ -160,11 +160,11 @@ Argo CD on the root noticed a change inside dev-lab's own API server and reverte
 
 | Step | Change in Git | Gate |
 |---|---|---|
-| budget | does the canary fit? Two 32 Gi engines don't fit `llm-serving` (Step 20 §9): raise `serving-budget` and the llms `vcluster-budget` in the same PR, or canary a smaller engine | `budget_check.py` in CI |
+| budget | does the canary fit? Two 32 Gi engines fit `llm-serving` (Step 20 §9), so old and new can run side by side if their util sum stays ≲ 0.70 (Step 20 §2). If a second engine is already running, park it, or raise `serving-budget` and the llms `vcluster-budget` in the same PR | `budget_check.py` in CI |
 | prefetch | `model-prefetch-job.yaml` `MODEL=`/`REVISION=` new revision (in llms) | Job completes |
 | canary | a second Deployment (e.g. `vllm-canary`) + HTTPRoute weight 10 on `lab-gateway` | `vllm bench serve` (Step 20 §5.5) + TTFT/TPOT alerts quiet for 1 h, filtered by `vcluster="llms"` |
 | ramp | weights 50/50, then 0/100 | same |
-| cleanup | delete the old Deployment, shrink the budgets back | `verify.sh serving` |
+| cleanup | delete the old Deployment (and shrink the budgets back, if you raised them) | `verify.sh serving` |
 
 Pin every image by tag (the admission policy forbids `:latest`). For immutable promotion, pin by digest (`image@sha256:…`), which the policy allows.
 

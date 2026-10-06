@@ -6,4 +6,4 @@ metadata: {name: model-cache, namespace: llm-serving}
 spec:
   storageClassName: local-nvme-retain
   accessModes: [ReadWriteOnce]
-  resources: {requests: {storage: 300Gi}}   # fits serving-budget (400Gi) next to Qdrant, and vc-llms (500Gi)
+  resources: {requests: {storage: 300Gi}}   # fits serving-budget (600Gi) next to Qdrant, and vc-llms (800Gi)

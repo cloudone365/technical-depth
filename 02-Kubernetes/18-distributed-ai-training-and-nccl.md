@@ -23,14 +23,14 @@ In this lab, training is a tenant workload. It runs in `llms` → `batch`, is ad
 
 Training memory ≈ weights + gradients + optimizer state + activations. For mixed precision with Adam:
 
-| Method | Bytes per parameter (approx.) | 7B model | 32B model | Fits one Spark (~105.7 GiB allocatable)? | Fits `llms` batch (spark-cq 24 Gi; ≤ 40 Gi per container at the root)? |
+| Method | Bytes per parameter (approx.) | 7B model | 32B model | Fits one Spark (~105.7 GiB allocatable)? | Fits `llms` batch (spark-cq 80 Gi; ≤ 40 Gi per container at the root)? |
 |---|---|---|---|---|---|
 | Full fine-tune, BF16 + FP32 Adam | ~16 | ~112 GB + activations | ~512 GB | 7B: no. 32B: no | no |
-| Full fine-tune, 8-bit Adam | ~10 | ~70 GB | ~320 GB | 7B: yes. 32B: no | no |
-| LoRA on BF16 base | ~2 (+ small adapter) | ~15 GB | ~65 GB | yes / yes | 7B: yes (tight with activations). 32B: no |
-| QLoRA on 4-bit base | ~0.6 (+ adapter) | ~5 GB | ~20 GB | yes / yes | yes / yes (32B tight) |
+| Full fine-tune, 8-bit Adam | ~10 | ~70 GB | ~320 GB | 7B: yes. 32B: no | no — 7B fits spark-cq, not one 40 Gi container |
+| LoRA on BF16 base | ~2 (+ small adapter) | ~15 GB | ~65 GB | yes / yes | 7B: yes. 32B: no — fits spark-cq, not one 40 Gi container |
+| QLoRA on 4-bit base | ~0.6 (+ adapter) | ~5 GB | ~20 GB | yes / yes | yes / yes |
 
-The Spark has ~119.7 GiB of unified memory, ~105.7 GiB allocatable after reservations (Step 01 §3.3), and that is CPU *and* GPU memory. The `llms` vCluster gets 48 Gi of it (requests = limits), `spark-cq` hands batch 24 Gi of that, and the root LimitRange on `vc-llms` caps one container at 40 Gi. A bigger job is a decision for the platform team: resize `llms` (Step 04 §6.5) or run it as a root job in `platform-tools`. Two Sparks with FSDP/ZeRO-3 shard weights, gradients and optimizer state, which roughly halves the per-node figure (modules 03 and 05 go deep).
+The Spark has ~119.7 GiB of unified memory, ~105.7 GiB allocatable after reservations (Step 01 §3.3), and that is CPU *and* GPU memory. The `llms` vCluster gets 88 Gi of it (requests = limits), `spark-cq` lets batch use up to 80 Gi of that while serving is idle, and the root LimitRange on `vc-llms` caps one container at 40 Gi (`root/05-vclusters/limitranges.yaml`; the LimitRanges inside llms set defaults only, no max). Running models count against the same 88 Gi and the same UMA pool (Step 20 §2), so a big training job and a full serving tier don't run together. A bigger job is a decision for the platform team: resize `llms` (Step 04 §6.5) or run it as a root job in `platform-tools`. Two Sparks with FSDP/ZeRO-3 shard weights, gradients and optimizer state, which roughly halves the per-node figure (modules 03 and 05 go deep).
 
 ---
 
@@ -40,10 +40,10 @@ The Spark has ~119.7 GiB of unified memory, ~105.7 GiB allocatable after reserva
 flowchart LR
   subgraph LLMS["vCluster llms · batch"]
     direction TB
-    WL["Kueue Workload ddp<br/>spark-cq: 2 CPU · 24 Gi · 4 slices<br/>job: 2 × (1 CPU · 6 Gi · 1 slice)"]
+    WL["Kueue Workload ddp<br/>spark-cq: 10 CPU · 80 Gi · 3 slices<br/>job: 2 × (1 CPU · 6 Gi · 1 slice)"]
     HS["headless Service ddp-workers<br/>ddp-0.ddp-workers.batch.svc"]
   end
-  RQ["root quota vc-llms/vcluster-budget<br/>4 CPU · 48 Gi · 8 slices<br/>(shared with serving, Traefik, Kueue, KEDA, control plane)"]
+  RQ["root quota vc-llms/vcluster-budget<br/>12 CPU · 88 Gi · 11 slices<br/>(shared with serving, Traefik, Kueue, KEDA, control plane)"]
   subgraph ONE["1 Spark — BACKEND=gloo"]
     R0["ddp-0 · rank 0<br/>MASTER :29500"] <-->|"TCP over the pod network<br/>(Cilium lxc veths, same node)"| R1["ddp-1 · rank 1"]
     R0 & R1 --> G1["GB10 (shared slices)"]
@@ -87,7 +87,7 @@ flowchart LR
 | Pod DNS | `subdomain: ddp-workers` → `ddp-<i>.ddp-workers.batch.svc.cluster.local` | stable rendezvous address, answered by **llms's own CoreDNS** |
 | Service | headless, `publishNotReadyAddresses: true` | rank 1 can resolve rank 0 before readiness. Synced to `vc-llms`, so the root's Cilium routes to the same pod IPs |
 | Kueue | label `kueue.x-k8s.io/queue-name: train`, `suspend: true` | both ranks or neither — *inside spark-cq* (Step 07) |
-| Resources per rank | requests = limits: `cpu: 1`, `memory: 6Gi`, `nvidia.com/gpu: 1` | gang total 2 CPU · 12 Gi · 2 slices; spark-cq's CPU is then full |
+| Resources per rank | requests = limits: `cpu: 1`, `memory: 6Gi`, `nvidia.com/gpu: 1` | gang total 2 CPU · 12 Gi · 2 slices; spark-cq then has 1 slice left, so a second 2-slice gang waits |
 | Priority | `spark-batch` | below `spark-serving`: the root scheduler preempts training before serving |
 | `/dev/shm` | `emptyDir: {medium: Memory, sizeLimit: 2Gi}` | NCCL/gloo and DataLoader workers use shared memory. The 64 MiB default breaks them. On UMA it's also GPU-side memory, so keep it sized |
 | `TORCH_NCCL_ASYNC_ERROR_HANDLING=1` | turns a hung collective into an exception after the timeout | hangs become failures you can see |
@@ -96,14 +96,14 @@ flowchart LR
 
 | Consumer in `llms` | CPU req | Memory limit | Slices | Source |
 |---|---|---|---|---|
-| root budget `vc-llms` | **4** | **48 Gi** | **8** | `root/05-vclusters/quotas.yaml` |
+| root budget `vc-llms` | **12** | **88 Gi** | **11** | `root/05-vclusters/quotas.yaml` |
 | vCluster control plane `llms-0` | 250m | 1536Mi | — | `vclusters/llms.yaml` |
 | Traefik, Kueue, KEDA, CoreDNS, mock-llm, Qdrant | read it live | read it live | — | `kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget` |
 | `ddp` gang (this step) | 2 | 12 Gi | 2 | `80-distributed/base` |
 | `resilient-train` (Step 25) | 1 | 12 Gi | 1 | `80-distributed/resilient` |
 | `vllm` (Step 20) | 1500m | 32 Gi | 1 | `90-serving/vllm/vllm.yaml` |
 
-Add the rows you plan to run together before you start. The `ddp` gang and `vllm` alone ask for 3.5 CPU and 44 Gi out of 4 and 48, before the platform pieces inside `llms`. Whatever doesn't fit is refused by the root, one pod at a time.
+Add the rows you plan to run together before you start. The `ddp` gang and `vllm` together ask for 3.5 CPU, 12 + 32 Gi and 3 slices out of 12, 88 and 11, before the platform pieces inside `llms` (≈1 CPU · 4 Gi). Two more 32 Gi engines next to them would not fit. Whatever doesn't fit is refused by the root, one pod at a time.
 
 ### 3.3 NCCL environment (two-spark overlay)
 
@@ -226,7 +226,7 @@ kubectl --context llms -n batch get workloads -o wide                    # ADMIT
 kubectl --context llms -n batch get pods -l job-name=ddp                 # still one Running, one Pending
 ```
 
-Kueue admitted the gang: `spark-cq` had 4 free slices, 2 CPU and 24 Gi on its books. It has no idea that the filler (outside any LocalQueue) or the serving tier spent the root budget. The syncer then created rank 0, the root quota let it in, and refused rank 1. **Kueue's all-or-nothing guarantee only holds when the root has room for the whole gang.** Three ways to make that true:
+Kueue admitted the gang: `spark-cq` had 3 free slices, 10 CPU and 80 Gi on its books; the gang needs 2 slices, 2 CPU and 12 Gi. It has no idea that the filler (outside any LocalQueue) or the serving tier spent the root budget. The syncer then created rank 0, the root quota let it in, and refused rank 1. **Kueue's all-or-nothing guarantee only holds when the root has room for the whole gang.** Three ways to make that true:
 
 1. Size `spark-cq` from what the root leaves after serving's *guaranteed* share, not from the inner `serving-budget` ceiling.
 2. Keep everything that uses GPU slices in `llms` under Kueue (serving included), so there is one ledger.

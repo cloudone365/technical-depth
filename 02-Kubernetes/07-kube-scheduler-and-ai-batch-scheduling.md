@@ -19,7 +19,7 @@ One GB10 split into 15 time-slices is a **small, contended resource** shared by 
 
 - **Serving vs. experiments.** A notebook must not block the production endpoint → *priority + preemption*.
 - **Distributed jobs.** A 2-rank job that gets only 1 slice holds it forever waiting for its peer → *gang admission (Kueue)*.
-- **Shared capacity between teams.** "Batch may use 4 of llms's 8 slices, serving keeps the rest" → *ClusterQueues, cohorts, borrowing*.
+- **Shared capacity between teams.** "Batch may use 3 of llms's 11 slices, serving keeps the other 8" → *ClusterQueues, cohorts, borrowing*.
 
 And one fact shapes everything in this step: **only the root runs a scheduler.** The vClusters have API servers and controller-managers but no kube-scheduler (vCluster's default); their syncers copy pods to the root, and the root's kube-scheduler binds them to a node. So a pod's *placement* — priority, preemption, taints, affinity — is always decided at the root, using the PriorityClasses and node labels the vClusters sync. What a vCluster *can* decide is *whether a pod exists yet*: its own quotas, and in llms, Kueue.
 
@@ -33,7 +33,7 @@ flowchart LR
     J["Job in batch<br/>label kueue.x-k8s.io/queue-name: train"]
     D["Deployment in llm-serving"]
     subgraph KQ["Kueue · kueue-system (inside llms)"]
-      LQ["LocalQueue<br/>batch/train"] --> CQ["ClusterQueue spark-cq<br/>2 CPU · 24Gi · 4 slices"]
+      LQ["LocalQueue<br/>batch/train"] --> CQ["ClusterQueue spark-cq<br/>10 CPU · 80Gi · 3 slices"]
       CQ --> RF["ResourceFlavor gb10<br/>nodeLabels: GB10"]
       CQ --> ADM{"whole workload fits?"}
     end
@@ -81,8 +81,8 @@ For a GPU pod in `llms/batch` that's three gates, each with its own number:
 
 | Gate | Cluster | Limit | Refusal looks like |
 |---|---|---|---|
-| Kueue `spark-cq` | llms | 4 slices for batch | Job stays `suspend: true`, Workload not admitted, **no pods** |
-| Root `vcluster-budget` on `vc-llms` | root (admission) | 8 slices for all of llms | pod `Pending` in llms with a sync error, **no scheduler events** |
+| Kueue `spark-cq` | llms | 3 slices for batch | Job stays `suspend: true`, Workload not admitted, **no pods** |
+| Root `vcluster-budget` on `vc-llms` | root (admission) | 11 slices for all of llms | pod `Pending` in llms with a sync error, **no scheduler events** |
 | Node allocatable | root (scheduler) | 15 slices on dgx-spark-1, for everyone | `0/1 nodes are available: 1 Insufficient nvidia.com/gpu`, then maybe preemption |
 
 ---
@@ -112,11 +112,11 @@ The vCluster control planes run at `spark-platform` (`controlPlane.statefulSet.s
 | Object | Name | Key fields |
 |---|---|---|
 | ResourceFlavor | `gb10` | `nodeLabels: {spark.lab/gpu: gb10}` — a lab-owned label the kubelet sets on the root node, visible in llms through node sync |
-| ClusterQueue | `spark-cq` | `cpu 2`, `memory 24Gi`, `nvidia.com/gpu 4`, `BestEffortFIFO`, preempt `LowerPriority` within the queue |
+| ClusterQueue | `spark-cq` | `cpu 10`, `memory 80Gi`, `nvidia.com/gpu 3`, `BestEffortFIFO`, preempt `LowerPriority` within the queue |
 | LocalQueue | `batch/train` | → `spark-cq` |
 | WorkloadPriorityClass | `urgent` 1000, `routine` 100 | ordering *inside* Kueue, independent of the pod PriorityClass |
 
-Why only 4 slices in the ClusterQueue? llms has 8 in total (its root budget), and serving keeps the rest. `llm-serving`'s own quota is a ceiling of 6, so the two add up to more than 8 on purpose (Step 14): the root quota, Kueue and PriorityClasses decide who waits. Kueue only knows about llms; it can't see what dev-lab or the platform use. Its numbers must therefore fit *inside* the root budget, not the node.
+Why only 3 slices in the ClusterQueue? llms has 11 in total (its root budget), and `llm-serving`'s own quota is a ceiling of 8: 3 + 8 = 11 fills llms exactly, so batch and serving can't both claim the same slice. CPU and memory are different: `spark-cq` (10 CPU · 80 Gi) and `serving-budget` (10 CPU · 80 Gi) add up to more than llms's 12 CPU · 88 Gi on purpose (Step 14). Either side can use most of llms while the other is idle; the root quota, Kueue and PriorityClasses decide who waits. Kueue only knows about llms; it can't see what dev-lab or the platform use. Its numbers must therefore fit *inside* the root budget, not the node.
 
 ### 3.3 Scheduler messages you must recognise
 
@@ -222,7 +222,7 @@ kubectl --context spark-root -n platform-tools get events --field-selector reaso
 kubectl --context spark-root -n vc-llms get pods -o custom-columns=NAME:.metadata.name,CLASS:.spec.priorityClassName,PRIO:.spec.priority | grep urgent
 ```
 
-Expected: a filler pod in the **root's** `platform-tools` is preempted to make room for a pod created in llms. The host copy shows which class name the syncer gave it at the root and the same priority value, 50000. llms's quota and the root's `vcluster-budget` both had room (1 slice of 8), so the only contest left was on the node — and there, one ladder rules.
+Expected: a filler pod in the **root's** `platform-tools` is preempted to make room for a pod created in llms. The host copy shows which class name the syncer gave it at the root and the same priority value, 50000. llms's quota and the root's `vcluster-budget` both had room (1 slice of 11), so the only contest left was on the node — and there, one ladder rules.
 
 Clean up:
 
@@ -266,7 +266,7 @@ kubectl --context dev-lab delete -f manifests/dev-lab/20-scheduling/no-kueue-dea
 
 ### 5.5 Fix it with Kueue gang admission (in llms)
 
-`gang-a` and `gang-b` each need 3 slices; `spark-cq` allows 4. Either fits, both don't:
+`gang-a` and `gang-b` each need 3 slices; `spark-cq` allows 3. Either fits, both don't:
 
 ```bash
 kubectl --context llms apply -f manifests/llms/20-scheduling/gang-demo-jobs.yaml
@@ -300,7 +300,7 @@ kubectl --context llms -n batch get workloads -o custom-columns=NAME:.metadata.n
 
 When `gang-a` completes, `gang-c` (priority 1000) is admitted before `gang-b` (100). Clean up: `kubectl --context llms -n batch delete jobs gang-a gang-b gang-c --ignore-not-found`.
 
-Exercise: why didn't Kueue's 4 slices collide with the root? Add up `spark-cq` (4) + what `llm-serving` is using now, and compare with `kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget`. If serving were already at 6 slices, Kueue would admit `gang-a` and the root would refuse its third pod — a partial gang again, one layer down. Kueue's quota has to be sized for what the *root* will give it.
+Exercise: why didn't Kueue's 3 slices collide with the root? Add up `spark-cq` (3) + `llm-serving`'s ceiling (8): exactly llms's 11, so on slices they can't. Now do the same for memory with `kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget`: 80 Gi for batch plus 80 Gi for serving is more than 88 Gi. If serving already held its full 80 Gi of limits, the llms control plane and add-ons (≈4 Gi) plus `gang-a`'s 3 × 2 Gi would pass 88 Gi: Kueue would admit `gang-a` and the root would refuse its third pod — a partial gang again, one layer down. Kueue's quota has to be sized for what the *root* will give it.
 
 ### 5.6 Taints and affinity (ready for dgx-spark-2)
 
@@ -363,7 +363,7 @@ Drill: `scripts/breakfix.sh inject 02` (a vCluster's GPU budget spent) and `inje
 
 ```mermaid
 flowchart LR
-  A["1 Spark<br/>Kueue in llms: 4 slices for batch<br/>root: 15 slices for everyone"] --> B["2 Sparks<br/>30 slices at the root<br/>raise vcluster-budget, then spark-cq<br/>topology-aware: 1 rank per node"]
+  A["1 Spark<br/>Kueue in llms: 3 slices for batch<br/>root: 15 slices for everyone"] --> B["2 Sparks<br/>30 slices at the root<br/>raise vcluster-budget, then spark-cq<br/>topology-aware: 1 rank per node"]
   B --> C["Teams<br/>cohort 'spark'<br/>cq-alpha / cq-beta<br/>borrowingLimit / lendingLimit"]
   C --> D["Datacenter<br/>flavors per GPU type<br/>MultiKueue across clusters<br/>TAS on rack/spine topology"]
   classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff

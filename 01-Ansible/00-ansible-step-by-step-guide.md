@@ -360,7 +360,7 @@ The end state of Steps 19–20 is **one kubeadm root cluster with two vClusters 
 |---|---|---|
 | `spark-root` | kubeadm v1.36.5, `dgx-spark-1` is control plane *and* worker (no taint), `dgx-spark-2` joins as a worker if present; Cilium (VXLAN, kube-proxy kept), MetalLB L2 pool `192.168.0.110–119` | `https://192.168.0.100:6443` |
 | `dev-lab` | vCluster #1 in root namespace `vc-dev-lab`: 2 CPU · 8 Gi · 2 GPU slices | `https://192.168.0.111` |
-| `llms` | vCluster #2 in root namespace `vc-llms`: 4 CPU · 48 Gi · 8 GPU slices | `https://192.168.0.112` |
+| `llms` | vCluster #2 in root namespace `vc-llms`: 12 CPU · 88 Gi · 11 GPU slices | `https://192.168.0.112` |
 
 **Semaphore:** `05 Kubernetes` (kubeadm_cluster on the Spark, then cilium + metallb from the Semaphore container; the kubeconfig lands on sema01's state volume). Then, on the MacBook:
 
@@ -377,7 +377,7 @@ Break-glass: `ansible-playbook playbooks/05-kubernetes.yml -K` writes the kubeco
 
 ## Step 20 · GPU Operator & time-slicing → [document](20-nvidia-gpu-operator-and-time-slicing.md)
 
-**Semaphore:** `06 GPU Operator`, then `06b vClusters` (the two vClusters from Step 19 §3.4 and §4.5; adds the `dev-lab` and `llms` contexts on sema01's state volume). `06b vClusters` needs the [02-Kubernetes lab](../02-Kubernetes/lab/README.md) in the same repository checkout: the `vclusters` role applies its `vclusters/*.yaml` values and `manifests/root/05-vclusters` budgets rather than keeping a copy. Then, on the MacBook:
+**Semaphore:** `06 GPU Operator`, then `06b vClusters` (the two vClusters from Step 19 §3.4 and §4.5; adds the `dev-lab` and `llms` contexts on sema01's state volume). `06b vClusters` needs the [02-Kubernetes lab](../02-Kubernetes/lab/README.md) in the same repository checkout: the `vclusters` role applies its `vclusters/*.yaml` values and the kustomize directories `manifests/root/00-platform` and `manifests/root/05-vclusters` (namespaces, PriorityClasses, budgets) rather than keeping a copy. Then, on the MacBook:
 
 ```bash
 tools/fetch-kubeconfig.sh sema01                 # now with all three contexts

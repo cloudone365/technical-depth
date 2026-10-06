@@ -395,27 +395,23 @@ The vCluster definitions are **not** duplicated in Ansible. The role applies the
 # lab/roles/vclusters/defaults/main.yml (excerpt)
 vclusters_lab_dir: "{{ playbook_dir }}/../../../02-Kubernetes/lab"
 vclusters_chart_version: "0.37.1"            # standard Kubernetes distro (vCluster ≥ 0.33 has no K3s)
-vclusters_root_manifests:
-  - 00-platform/namespaces.yaml
-  - 00-platform/priorityclasses.yaml
-  - 05-vclusters/namespaces.yaml
-  - 05-vclusters/limitranges.yaml
-  - 05-vclusters/quotas.yaml
-  - 05-vclusters/cilium-policies.yaml
+vclusters_root_manifests:                    # kustomize directories under manifests/root
+  - 00-platform                              # platform namespaces, PriorityClasses (no default class on the root)
+  - 05-vclusters                             # vc-* namespaces, LimitRanges, budgets, Cilium policies
 vclusters_list:
-  - { name: dev-lab, namespace: vc-dev-lab }   # 2 CPU · 8 Gi · 2 GPU slices
-  - { name: llms, namespace: vc-llms }         # 4 CPU · 48 Gi · 8 GPU slices
+  - { name: dev-lab, namespace: vc-dev-lab }   # vCluster #1 — 2 CPU · 8 Gi · 2 GPU slices
+  - { name: llms, namespace: vc-llms }         # vCluster #2 — 12 CPU · 88 Gi · 11 GPU slices
 ```
 
 | Step | What | Why first |
 |---|---|---|
 | 1 | local-path-provisioner v0.0.31, volumes under `/data/k8s`, StorageClasses `local-nvme`, `local-nvme-retain`, `local-path` as default | Each vCluster keeps its SQLite database on a `local-nvme` PVC |
-| 2 | Root manifests above (server-side apply, field manager `ansible-vclusters`) | Namespaces `vc-*`, PriorityClass `spark-platform`, the **budgets** (`vcluster-budget` ResourceQuota + LimitRange) and the Cilium `vcluster-boundary` policies must exist before any vCluster pod |
+| 2 | Root kustomize directories above, rendered with the `kubernetes.core.kustomize` lookup and applied server-side (field manager `ansible-vclusters`): the same directories `scripts/apply-lab.sh` applies | Namespaces `vc-*`, PriorityClass `spark-platform` (the root has no default PriorityClass; 02-Kubernetes Step 07 §3.1), the **budgets** (`vcluster-budget` ResourceQuota + LimitRange) and the Cilium `vcluster-boundary` policies must exist before any vCluster pod |
 | 3 | `helm upgrade --install` chart `loft/vcluster` with [`vclusters/dev-lab.yaml`](../02-Kubernetes/lab/vclusters/dev-lab.yaml), [`llms.yaml`](../02-Kubernetes/lab/vclusters/llms.yaml) | API exposed as LoadBalancer `.111` / `.112` |
 | 4 | Read Secret `vc-<name>` (written by `exportKubeConfig`), write `.cache/kubeconfig-<name>.yaml`, merge contexts `dev-lab`, `llms` | §2.5 |
 | 5 | `k8s_info` on Namespace `default` **through each new context** | Proves the MetalLB IP, the certificate SAN and the credentials together |
 
-Budgets, sync rules and naming are taught in 02-Kubernetes [Step 04](../02-Kubernetes/04-nested-clusters-with-vcluster.md). The one rule to keep in mind here: the root keeps 14 CPU, ~64 GiB and 5 GPU slices; `dev-lab` gets 2 / 8 Gi / 2 and `llms` 4 / 48 Gi / 8, enforced by the **root's** ResourceQuota on each `vc-*` namespace.
+Budgets, sync rules and naming are taught in 02-Kubernetes [Step 04](../02-Kubernetes/04-nested-clusters-with-vcluster.md). The one rule to keep in mind here: of the 17 CPU, ~105.7 GiB and 15 GPU slices left after the kubelet reservations (§2.4: 3 CPU, 14 GiB including the 4 GiB eviction threshold), `dev-lab` gets 2 / 8 Gi / 2 and `llms` 12 / 88 Gi / 11, and the root keeps 3 CPU, ~9.7 GiB and 2 slices for its platform. The **root's** ResourceQuota on each `vc-*` namespace enforces it. Memory is never overcommitted (on unified memory it is GPU memory too); CPU may burst into idle cores.
 
 ### 3.5 Things worth noticing
 

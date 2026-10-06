@@ -100,7 +100,7 @@ kubeadm ships no storage at all (K3s used to bundle local-path). `scripts/instal
 | `dataloader-randread-128k` | random read, 128 KiB, QD64 × 4 | shuffled WebDataset shards |
 | `small-randread-4k` | random read, 4 KiB, QD128 × 4 | metadata, tokenizer files, many small files |
 
-All use `direct=1` to measure the device, not the page cache. The Job runs on the root in `platform-tools` and requests 4 CPUs — more than the whole llms vCluster's CPU budget, which is exactly why benchmarks are a platform job.
+All use `direct=1` to measure the device, not the page cache. The Job runs on the root in `platform-tools` and requests 4 CPUs — twice dev-lab's whole CPU budget, which is exactly why benchmarks are a platform job.
 
 ### 3.3 Paths & facts
 
@@ -117,10 +117,10 @@ All use `direct=1` to measure the device, not the page cache. The Job runs on th
 
 | Layer | Object | `requests.storage` | Also counts |
 |---|---|---|---|
-| inside llms | ResourceQuota `llm-serving/serving-budget` | 400 Gi | only PVCs in `llm-serving` |
-| root | ResourceQuota `vc-llms/vcluster-budget` | 500 Gi | **every** PVC of the vCluster: its own `data-llms-0` (5 Gi), Qdrant's `data-qdrant-0` (20 Gi), `model-cache`, anything in `batch` |
+| inside llms | ResourceQuota `llm-serving/serving-budget` | 600 Gi | only PVCs in `llm-serving` |
+| root | ResourceQuota `vc-llms/vcluster-budget` | 800 Gi | **every** PVC of the vCluster: its own `data-llms-0` (5 Gi), Qdrant's `data-qdrant-0` (20 Gi), `model-cache`, anything in `batch` |
 | inside dev-lab | `tenant-budget` per tenant | 100 Gi (+ LimitRange max 50 Gi per PVC) | |
-| root | `vc-dev-lab/vcluster-budget` | 300 Gi | `data-dev-lab-0` (5 Gi) and all tenant PVCs |
+| root | `vc-dev-lab/vcluster-budget` | 200 Gi | `data-dev-lab-0` (5 Gi) and all tenant PVCs |
 
 A PVC has to fit **both**. The inner refusal comes from the vCluster's API server, so the PVC is never created. The root refusal comes later: the PVC exists in the vCluster but stays `Pending`, and the syncer reports that the root quota refused its copy. §5.1 checks both before anything is created.
 
@@ -166,7 +166,7 @@ kubectl --context llms -n llm-serving describe resourcequota serving-budget | gr
 kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget | grep storage
 ```
 
-Do the arithmetic yourself: the PVC's request must be ≤ what's left of `serving-budget` (400 Gi) *and* ≤ what's left of the root's 500 Gi after the vCluster's own 5 Gi PVC and Qdrant's 20 Gi. `model-cache` asks for 300 Gi: 300 + 20 (Qdrant) fits the 400 Gi inner ceiling, and 5 + 300 + 20 + 20 (`ckpt` in `batch`) fits the root's 500 Gi — and 300 Gi still holds a few quantised 70B-class checkpoints. Change the size and the dry run tells you which layer says no (`exceeded quota: serving-budget, …` is the inner one; a root refusal shows up as a syncer event). Then:
+Do the arithmetic yourself: the PVC's request must be ≤ what's left of `serving-budget` (600 Gi) *and* ≤ what's left of the root's 800 Gi after the vCluster's own 5 Gi PVC and Qdrant's 20 Gi. `model-cache` asks for 300 Gi: 300 + 20 (Qdrant) fits the 600 Gi inner ceiling, and 5 + 300 + 20 + 20 (`ckpt` in `batch`) = 345 Gi fits the root's 800 Gi — and 300 Gi still holds a few quantised 70B-class checkpoints. Change the size and the dry run tells you which layer says no (`exceeded quota: serving-budget, …` is the inner one; a root refusal shows up as a syncer event). Then:
 
 ```bash
 kubectl --context llms apply -k manifests/llms/60-storage
@@ -272,7 +272,7 @@ kubectl --context llms -n llm-serving rollout restart deploy/vllm
 sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'; kubectl --context llms -n llm-serving rollout restart deploy/vllm
 ```
 
-The restart creates a new pod, so re-run terminal A with the new name once it's scheduled. Watch the `Cached` column climb by roughly the model size while `MemAvailable` falls by about twice that during load. The page cache is reclaimable, and it isn't charged to anyone's quota: neither llms's 48 Gi budget nor any pod limit sees it. A CUDA allocation that arrives while the cache is full can still fail before the kernel reclaims. The 01-Ansible `playbooks/24-uma-relief.yml -e uma_drop_caches=true` automates the cache drop for big-model starts.
+The restart creates a new pod, so re-run terminal A with the new name once it's scheduled. Watch the `Cached` column climb by roughly the model size while `MemAvailable` falls by about twice that during load. The page cache is reclaimable, and it isn't charged to anyone's quota: neither llms's 88 Gi budget nor any pod limit sees it. A CUDA allocation that arrives while the cache is full can still fail before the kernel reclaims. The 01-Ansible `playbooks/24-uma-relief.yml -e uma_drop_caches=true` automates the cache drop for big-model starts.
 
 ---
 

@@ -392,7 +392,7 @@ spec:
           memory: 16Gi                                         # the root quota caps limits.memory; set it yourself
 ```
 
-Every limit on this pod is checked in a different place. `nvidia.com/gpu: 1` passes the llms CEL policy (at most one slice) and is then charged against `vc-llms`'s 8 slices by the root quota. `memory: 16Gi` counts against the 48 Gi budget. `rdma/rdma_shared_cx7` is checked by nobody until the kubelet's device plugin, which is the quota gap from §2.3.
+Every limit on this pod is checked in a different place. `nvidia.com/gpu: 1` passes the llms CEL policy (at most one slice) and is then charged against `vc-llms`'s 11 slices by the root quota. `memory: 16Gi` counts against the 88 Gi budget. `rdma/rdma_shared_cx7` is checked by nobody until the kubelet's device plugin, which is the quota gap from §2.3.
 
 ### 3.3 Follow the annotation from the vCluster to the NIC
 

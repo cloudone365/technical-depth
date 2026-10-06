@@ -12,17 +12,15 @@ vclusters_root_context: spark-root
 # "02-Kubernetes/lab/scripts/install-addons.sh storage".
 vclusters_local_path_version: v0.0.31
 
-# Root-side objects first (paths under manifests/root): platform namespaces and
-# PriorityClasses (the vCluster control planes run at spark-platform), then the
-# vCluster namespaces and the budgets they live in.
+# Root-side objects first: kustomize directories under manifests/root, the same
+# ones scripts/apply-lab.sh applies. 00-platform = platform namespaces and the
+# PriorityClasses (vCluster control planes run at spark-platform; no default
+# class on the root, see 02-Kubernetes Step 07 §3.1); 05-vclusters = the
+# vCluster namespaces, LimitRanges, the budgets (ResourceQuotas) and Cilium policies.
 vclusters_root_manifests:
-  - 00-platform/namespaces.yaml
-  - 00-platform/priorityclasses.yaml
-  - 05-vclusters/namespaces.yaml
-  - 05-vclusters/limitranges.yaml
-  - 05-vclusters/quotas.yaml
-  - 05-vclusters/cilium-policies.yaml
+  - 00-platform
+  - 05-vclusters
 
 vclusters_list:
   - { name: dev-lab, namespace: vc-dev-lab }   # vCluster #1 — 2 CPU · 8 Gi · 2 GPU slices
-  - { name: llms, namespace: vc-llms }         # vCluster #2 — 4 CPU · 48 Gi · 8 GPU slices
+  - { name: llms, namespace: vc-llms }         # vCluster #2 — 12 CPU · 88 Gi · 11 GPU slices

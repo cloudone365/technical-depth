@@ -116,7 +116,7 @@ flowchart TB
 | PVC `ckpt` | 20 Gi, `local-nvme` (Delete) | `vcluster-budget` `requests.storage` |
 | Kueue | the Job has no `kueue.x-k8s.io/queue-name` label, so Kueue leaves it alone | add `queue-name: train` to run it under `spark-cq` (Step 07) |
 
-`spark-batch` has `preemptionPolicy: Never`: the job waits for capacity instead of evicting anyone. With vLLM running (Step 20) the llms budget may not have 1 CPU / 12 Gi left; the pod then sits Pending in llms with no scheduler events — the root refused it.
+`spark-batch` has `preemptionPolicy: Never`: the job waits for capacity instead of evicting anyone. vLLM alone leaves plenty of the llms budget (Step 20 §9), but two engines plus other batch jobs can leave less than 1 CPU / 12 Gi; the pod then sits Pending in llms with no scheduler events — the root refused it.
 
 ---
 
@@ -138,7 +138,7 @@ export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget | grep -E 'requests.cpu|limits.memory|gpu'
 ```
 
-If less than 1 CPU / 12 Gi is free, park vLLM for this step (Step 20 §9).
+If less than 1 CPU / 12 Gi is free, stop another batch job or park one engine for this step (Step 20 §9).
 
 ### 5.1 Start the resilient job
 
@@ -258,7 +258,7 @@ kubectl --context llms delete -k manifests/llms/80-distributed/resilient    # Jo
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Job pod Pending in llms, no scheduler events | root `vcluster-budget` on `vc-llms` spent (an engine holds 32 Gi) | park vLLM (Step 20 §9) or wait — `spark-batch` never preempts |
+| Job pod Pending in llms, no scheduler events | root `vcluster-budget` on `vc-llms` spent (engines at 32 Gi each, other batch jobs) | park an engine (Step 20 §9) or wait — `spark-batch` never preempts |
 | Job pod Pending with `untolerated taint {spark.lab/sdc: suspect}` | the quarantine from §5.4 is still on | remove it on the root |
 | resume picks a half-written checkpoint | no completion marker | only trust `COMPLETE` (as the script does) |
 | checkpoints fill the disk | no retention | keep-N pruning of complete checkpoints. Alert on PVC usage |

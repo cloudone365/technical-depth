@@ -7,7 +7,7 @@
 | **You will build** | A measured answer, on your GB10, to "what does a compiler buy me?" (eager vs `torch.compile` vs max-autotune, with the generated kernels), plus a practical map of how Kubernetes schedules GPUs, TPU slices and Trainium devices, so you can read or port manifests between clouds |
 | **Hardware** | dgx-spark-1 |
 | **Time** | 60 min |
-| **Risk** | None. The benchmark takes one of the root's 5 GPU slices for a few minutes |
+| **Risk** | None. The benchmark takes one of the root's 2 GPU slices for a few minutes |
 | **Clusters** | `spark-root` (namespace `platform-tools`: benchmarking the hardware is a platform job) · `llms` (only to compare what a tenant sees) |
 | **Lab files** | [`manifests/root/70-gpu/compile_compare.py`](lab/manifests/root/70-gpu/compile_compare.py), [`compile-compare.yaml`](lab/manifests/root/70-gpu/compile-compare.yaml), [`kustomization.yaml`](lab/manifests/root/70-gpu/kustomization.yaml) (ConfigMap `gemm-bench`), [`manifests/root/45-controller/`](lab/manifests/root/45-controller/) (slice ledger) |
 
@@ -31,7 +31,7 @@ Your Spark runs the same software stack as NVIDIA's datacenter systems (CUDA, cu
 
 ### 1.1 Why the benchmark runs on the root
 
-The lab puts hardware benchmarking in the root's `platform-tools` namespace, not in a vCluster. A compiler benchmark measures the *GB10*, and its result is a platform fact (like the baseline TFLOPS in Step 05 §4 Task 6) that every tenant's numbers are compared against. `platform-tools` has no ResourceQuota: the root's share of the Spark (14 CPU, ~64 GiB, 5 of the 15 time-slices) is kept by convention and watched by the slice ledger, not enforced. That is the usual platform-team trade — more freedom, more responsibility. Take a 6th slice and a tenant pod inside llms or dev-lab gets `Insufficient nvidia.com/gpu` from the root scheduler even though its vCluster quota still has room.
+The lab puts hardware benchmarking in the root's `platform-tools` namespace, not in a vCluster. A compiler benchmark measures the *GB10*, and its result is a platform fact (like the baseline TFLOPS in Step 05 §4 Task 6) that every tenant's numbers are compared against. `platform-tools` has no ResourceQuota: the root's share of the Spark (3 CPU, ~9.7 GiB, 2 of the 15 time-slices) is kept by convention and watched by the slice ledger, not enforced. That is the usual platform-team trade — more freedom, more responsibility. Take a 3rd slice and a tenant pod inside llms or dev-lab gets `Insufficient nvidia.com/gpu` from the root scheduler even though its vCluster quota still has room. This Job alone asks for more than that share (4 CPU requested, 16 Gi memory limit, §3.2): CPU can burst into idle cores, but memory can't, so run it while the vClusters' engines and batch jobs are quiet.
 
 ---
 
@@ -94,7 +94,7 @@ On a **memory-bandwidth-limited** part like GB10 (≈273 GB/s shared), fusion th
 | script | ConfigMap `gemm-bench` (`gemm_bench.py`, `compile_compare.py`), created by `kubectl --context spark-root apply -k manifests/root/70-gpu` | one ConfigMap for all GPU benchmarks |
 | resources | requests 4 CPU · 8 Gi, limits 16 Gi · `nvidia.com/gpu: 1` | Inductor compiles kernels on the CPU in parallel; max-autotune benchmarks many candidates |
 | `TORCH_LOGS` | empty; set to `output_code` to print the generated Triton kernels | §5.2 |
-| PriorityClass | none → `spark-interactive` (the global default) | a benchmark may be preempted by `spark-serving` |
+| PriorityClass | none → priority 0 (the root has no default PriorityClass, Step 07 §3.1) | a benchmark may be preempted by `spark-serving` |
 
 ### 3.3 Scheduling other accelerators in Kubernetes (reference)
 

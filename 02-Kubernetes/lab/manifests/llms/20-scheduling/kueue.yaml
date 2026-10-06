@@ -7,7 +7,7 @@
 #   LocalQueue      batch/train   "where tenants submit" (namespace-scoped)
 #
 # Kueue admits a Job; then the root quota on vc-llms admits its pods. Size
-# spark-cq so batch fits beside serving inside 4 CPU · 48 Gi · 8 slices.
+# spark-cq so batch fits beside serving inside 12 CPU · 88 Gi · 11 slices.
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: ResourceFlavor
 metadata:
@@ -31,11 +31,11 @@ spec:
         - name: gb10
           resources:
             - name: cpu
-              nominalQuota: "2"
+              nominalQuota: "10"
             - name: memory
-              nominalQuota: 24Gi
+              nominalQuota: 80Gi
             - name: nvidia.com/gpu
-              nominalQuota: "4"            # 4 of the llms vCluster's 8 time-slices; serving keeps the rest
+              nominalQuota: "3"            # 3 of the llms vCluster's 11 time-slices; serving keeps 8
 ---
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: LocalQueue

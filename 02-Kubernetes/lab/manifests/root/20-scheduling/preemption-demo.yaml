@@ -10,7 +10,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata: {name: filler, namespace: platform-tools}
 spec:
-  replicas: 5                       # the root's own 5 slices when the vClusters' GPUs are busy; scale as above
+  replicas: 2                       # the root's own 2 slices when the vClusters' GPUs are busy; scale as above
   selector: {matchLabels: {app: filler}}
   template:
     metadata: {labels: {app: filler}}

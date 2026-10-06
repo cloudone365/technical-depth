@@ -20,7 +20,7 @@ The goal isn't scale. It's the **same shape and the same failure modes** as a pr
 |---|---|---|
 | Platform cluster run by a platform team | kubeadm root cluster: static-pod control plane, Cilium, MetalLB, GPU Operator, observability | 01, 16 |
 | Separate clusters per team, upgraded independently | vCluster `dev-lab` and `llms`, each with its own API server and admins | 27 |
-| Hard budgets per cluster | root ResourceQuotas on `vc-dev-lab` (2 CPU · 8 Gi · 2 slices) and `vc-llms` (4 CPU · 48 Gi · 8 slices) | 12, 27 |
+| Hard budgets per cluster | root ResourceQuotas on `vc-dev-lab` (2 CPU · 8 Gi · 2 slices) and `vc-llms` (12 CPU · 88 Gi · 11 slices) | 12, 27 |
 | Control plane with backed-up datastore | stacked etcd, 6-hourly snapshots, off-box copy, restore drill; vCluster SQLite on PVCs | 03 |
 | Identity, RBAC, admission policy, audit | per-cluster x509 users, tenant ClusterRoles, 4 CEL policies, PSA, root audit log | 02 |
 | Teams with budgets inside a cluster | `tenant-alpha` / `tenant-beta` in dev-lab (500m · 2 Gi · 1 slice each) | 12 |
@@ -53,7 +53,7 @@ flowchart TB
         API["API server<br/>RBAC · APF · audit · encryption"]
         ETCD[("etcd<br/>snapshots /6 h")]
       end
-      subgraph PLATFORM["Platform tier · root keeps 14 CPU · ~64 GiB · 5 slices"]
+      subgraph PLATFORM["Platform tier · root keeps 3 CPU · ~9.7 GiB · 2 slices"]
         direction LR
         NET["Cilium + kube-proxy<br/>MetalLB .110–.119"]
         OBS["Prometheus · Grafana · Alertmanager<br/>+ host node-exporter :9100"]
@@ -66,7 +66,7 @@ flowchart TB
         TB["tenant-beta<br/>500m · 2 Gi · 1 slice"]
         LT["lab-tools<br/>netshoot · echo · drills"]
       end
-      subgraph LLM["vc-llms · vCluster llms (.112) · 4 CPU · 48 Gi · 8 slices"]
+      subgraph LLM["vc-llms · vCluster llms (.112) · 12 CPU · 88 Gi · 11 slices"]
         direction LR
         EDGE["Traefik .115<br/>Ingress + Gateway API"]
         SERVE["llm-serving<br/>mock-llm · vLLM · Triton · Qdrant"]
@@ -135,28 +135,29 @@ flowchart TB
 
 | Cluster · namespace | PSA | Budget | Admission policies | Priority |
 |---|---|---|---|---|
-| root · `vc-dev-lab` | baseline | **2 CPU req · 8 Gi · 2 slices · 300 Gi · 1 LB** | — (Cilium boundary, APF lane) | — |
-| root · `vc-llms` | privileged (warn: baseline) | **4 CPU req · 48 Gi · 8 slices · 500 Gi · 2 LB** | — (Cilium boundary, APF lane) | — |
+| root · `vc-dev-lab` | baseline | **2 CPU req · 8 Gi · 2 slices · 200 Gi · 1 LB** | — (Cilium boundary, APF lane) | — |
+| root · `vc-llms` | privileged (warn: baseline) | **12 CPU req · 88 Gi · 11 slices · 800 Gi · 2 LB** | — (Cilium boundary, APF lane) | — |
 | root · `platform-tools` | privileged | none (platform team) | — | platform / preemptible |
 | root · `observability`, `gpu-operator`, `metallb-system` | privileged | none | — | platform |
 | dev-lab · `tenant-alpha`, `tenant-beta` | restricted | 500m · 2 Gi · 1 slice · 100 Gi · 10 pods | no-latest, ≤1 slice, no NVIDIA env | interactive |
 | dev-lab · `lab-tools` | baseline | none inside (the root caps it) | — | mixed |
-| llms · `llm-serving` | baseline | 2.5 CPU req · 36 Gi lim · 6 slices · 400 Gi | no-latest, readiness required | serving |
-| llms · `batch` | privileged (warn: baseline). RDMA needs hostNetwork/IPC_LOCK | Kueue `spark-cq`: 2 CPU · 24 Gi · 4 slices | no-latest | batch |
+| llms · `llm-serving` | baseline | 10 CPU req · 80 Gi lim · 8 slices · 600 Gi | no-latest, readiness required | serving |
+| llms · `batch` | privileged (warn: baseline). RDMA needs hostNetwork/IPC_LOCK | Kueue `spark-cq`: 10 CPU · 80 Gi · 3 slices | no-latest | batch |
 | llms · `ingress` | baseline | none inside | — | platform |
 
 ### 3.3 Capacity plan (one Spark)
 
 | Consumer | CPU | Memory (UMA) | GPU slices |
 |---|---|---|---|
-| system + kube reserved (kubelet) | 3 | 10 Gi | — |
-| root platform (Cilium, MetalLB, kps, metrics-server, GPU Operator) | ~2 | ~8 Gi | — |
-| root headroom (platform-tools jobs, growth) | ~9 | ~46 GiB | 5 |
+| kubelet reservations (system 2 + kube 1 CPU; 8 + 2 Gi + 4 Gi eviction) | 3 | 14 Gi | — |
+| root platform (Cilium, MetalLB, kps, metrics-server, GPU Operator, platform-tools) | 3 | ~9.7 GiB | 2 |
 | vCluster dev-lab (control plane ~0.3 CPU · 0.5–1 Gi included) | 2 | 8 Gi | 2 |
-| vCluster llms (control plane, Traefik, Kueue, KEDA included) | 4 | 48 Gi | 8 |
+| vCluster llms (control plane, Traefik, Kueue, KEDA included) | 12 | 88 Gi | 11 |
 | **total** | **20** | **~119.7 GiB** | **15** |
 
-Inside llms, serving + batch can oversubscribe its 8 slices and 48 Gi by design: the root quota, Kueue and priorities decide who waits. `tests/budget_check.py` keeps these numbers honest.
+Memory is split without overcommit: what pods may use (~105.7 GiB allocatable) is exactly dev-lab + llms + the root platform. CPU may burst into idle cores. dev-lab stays small (tools, tenancy drills); llms gets the rest because the models run there: about 84 GiB for model servers after its own ≈1 CPU · 4 Gi of control plane and add-ons, so the `--gpu-memory-utilization` values of the models running at the same time should add up to ≲ 0.70 (Step 20 §2). The root's 2 slices are for `platform-tools` (GPU probes, the Step 14 §5.5 UMA experiment, the preemption demo's fillers).
+
+Inside llms, serving (8 slices · 80 Gi) + batch (3 slices · 80 Gi) add up to more than its 88 Gi by design: either side can use most of llms while the other is idle, and the root quota, Kueue and priorities decide who waits. The slices are not oversubscribed: 8 + 3 = 11. `tests/budget_check.py` keeps these numbers honest.
 
 ---
 
@@ -345,7 +346,7 @@ scripts/verify.sh
 | 3 | `context dev-lab` unreachable | MetalLB didn't assign `.111` (pool, `services.loadbalancers` quota) → Step 04 §8 |
 | 4 | admission tests fail | a policy binding namespace label missing → re-apply `<vcluster>/00-platform` |
 | 6 | gpu-smoke Pending with no events | dev-lab's 2 slices are in use → drill 02 explains it; scale down demos |
-| 7 | vLLM never Ready | `kubectl --context llms logs deploy/vllm`: model download, wrong image arch, `--gpu-memory-utilization` too high for free UMA, or the llms 48 Gi budget spent by another engine (Step 20 §9) |
+| 7 | vLLM never Ready | `kubectl --context llms logs deploy/vllm`: model download, wrong image arch, `--gpu-memory-utilization` too high for free UMA, or `serving-budget` (80 Gi) spent by two other engines (Step 20 §9) |
 | 8 | DDP hangs | Kueue not installed in llms → both jobs started partially (Step 07). NCCL on 1 node needs `BACKEND=gloo` |
 
 ---

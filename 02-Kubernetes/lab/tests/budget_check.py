@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Static consistency check of the 80/20-style split of one DGX Spark (Step 04).
+"""Static consistency check of how one DGX Spark is split (Step 04 §3).
 
 Reads the files that define the split and fails if they disagree:
   * root quotas            manifests/root/05-vclusters/quotas.yaml
+  * kubelet reservations   01-Ansible roles/kubeadm_cluster/defaults/main.yml
   * GPU time-slice count   01-Ansible roles/gpu_operator/defaults/main.yml
   * MetalLB pool           01-Ansible roles/metallb/defaults/main.yml
   * vCluster API/gateway IPs   vclusters/*.yaml, addons/traefik-values.yaml
@@ -19,6 +20,9 @@ import yaml
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ANSIBLE = os.path.join(LAB, "..", "..", "01-Ansible", "lab", "roles")
 SPARK = {"cpu": 20.0, "memory_gi": 119.7, "gpu": None}    # gpu filled from the GPU Operator role
+# What the root's own platform pods need (Cilium, MetalLB, Traefik, GPU Operator,
+# Prometheus, CoreDNS, local-path): the vClusters must leave at least this.
+ROOT_PLATFORM = {"cpu": 2.0, "memory_gi": 8.0, "gpu": 1}
 errors = []
 
 
@@ -45,7 +49,11 @@ def check(cond, msg):
         errors.append(msg)
 
 
-# ---- GPU slices and MetalLB pool from the Ansible roles
+# ---- kubelet reservations, GPU slices and MetalLB pool from the Ansible roles
+kd = yaml.safe_load(open(os.path.join(ANSIBLE, "kubeadm_cluster", "defaults", "main.yml")))
+RESERVED = {"cpu": cpu(kd["kubeadm_cluster_system_reserved"]["cpu"]) + cpu(kd["kubeadm_cluster_kube_reserved"]["cpu"]),
+            "memory_gi": gi(kd["kubeadm_cluster_system_reserved"]["memory"]) + gi(kd["kubeadm_cluster_kube_reserved"]["memory"])
+            + gi(kd["kubeadm_cluster_eviction_hard"]["memory.available"]), "gpu": 0}
 gpu_defaults = yaml.safe_load(open(os.path.join(ANSIBLE, "gpu_operator", "defaults", "main.yml")))
 SPARK["gpu"] = int(gpu_defaults["gpu_operator_timeslice_replicas"])
 mlb = yaml.safe_load(open(os.path.join(ANSIBLE, "metallb", "defaults", "main.yml")))
@@ -61,9 +69,12 @@ for ns, h in quotas.items():
                   "gpu": int(h["requests.nvidia.com/gpu"]), "storage_gi": gi(h["requests.storage"])}
     check(h["requests.memory"] == h["limits.memory"], f"{ns}: requests.memory must equal limits.memory (hard memory budget)")
 
+ALLOC = {k: SPARK[k] - RESERVED[k] for k in SPARK}
 for key in ("cpu", "memory_gi", "gpu"):
     used = sum(b[key] for b in budget.values())
-    check(used <= SPARK[key], f"vClusters take {used} {key} but the Spark has {SPARK[key]}")
+    left = ALLOC[key] - used
+    check(left >= ROOT_PLATFORM[key],
+          f"vClusters take {used} {key} of {ALLOC[key]:.1f} allocatable: the root keeps {left:.1f}, its platform needs {ROOT_PLATFORM[key]}")
 
 # ---- IPs: vCluster APIs and the llms gateway inside the MetalLB pool, all distinct
 ips = {}
@@ -109,13 +120,15 @@ for d in load_all(os.path.join(LAB, "manifests", "llms", "20-scheduling", "kueue
               "Kueue spark-cq does not fit the llms budget")
 
 # ---- report
-rows = [("Spark total", SPARK["cpu"], SPARK["memory_gi"], SPARK["gpu"])]
+rows = [("Spark total", SPARK["cpu"], SPARK["memory_gi"], SPARK["gpu"]),
+        ("kubelet resv.", RESERVED["cpu"], RESERVED["memory_gi"], 0),
+        ("allocatable", ALLOC["cpu"], ALLOC["memory_gi"], ALLOC["gpu"])]
 for ns in ("vc-dev-lab", "vc-llms"):
     b = budget[ns]
     rows.append((ns, b["cpu"], b["memory_gi"], b["gpu"]))
-rows.append(("root keeps", SPARK["cpu"] - sum(b["cpu"] for b in budget.values()),
-             SPARK["memory_gi"] - sum(b["memory_gi"] for b in budget.values()),
-             SPARK["gpu"] - sum(b["gpu"] for b in budget.values())))
+rows.append(("root keeps", ALLOC["cpu"] - sum(b["cpu"] for b in budget.values()),
+             ALLOC["memory_gi"] - sum(b["memory_gi"] for b in budget.values()),
+             ALLOC["gpu"] - sum(b["gpu"] for b in budget.values())))
 print(f"{'':14} {'CPU':>6} {'mem GiB':>8} {'slices':>7}")
 for name, c, m, g in rows:
     print(f"{name:14} {c:6.1f} {m:8.1f} {g:7d}")

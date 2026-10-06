@@ -1,12 +1,21 @@
-# The hard budgets of the two vClusters (Step 04). These are the real caps:
+# The hard budgets of the two vClusters (Step 04 §3). These are the real caps:
 # quotas inside a vCluster are ceilings for its tenants, but only this root
-# quota stops the vCluster as a whole. Root keeps the rest of the Spark:
+# quota stops the vCluster as a whole. The root keeps the rest of the Spark:
 #
-#               CPU (req)   memory      GPU slices   storage
-#   Spark total    20     ~119.7 GiB       15          ~3.7 TiB
-#   dev-lab         2        8 Gi           2           300 Gi
-#   llms            4       48 Gi           8           500 Gi
-#   root keeps     14       ~64 GiB         5           the rest
+#                          CPU (req)   memory       GPU slices   storage
+#   Spark total               20      ~119.7 GiB        15        ~3.7 TiB
+#   kubelet reservations       3       14 GiB            -         -   (system 2/8Gi, kube 1/2Gi, eviction 4Gi)
+#   allocatable to pods       17     ~105.7 GiB         15
+#   dev-lab                    2        8 Gi             2         200 Gi
+#   llms                      12       88 Gi            11         800 Gi
+#   root keeps                 3       ~9.7 GiB          2         the rest   (platform: Cilium, MetalLB,
+#                                                                              GPU Operator, Prometheus …)
+#
+# Rules: memory budgets + root platform must fit what is allocatable (no
+# memory overcommit on a unified-memory box); CPU may burst into idle cores.
+# dev-lab stays small (tools and tenancy drills); llms gets the rest, because
+# that is where the models run (≈84 GiB of model memory after its own
+# control plane and gateway — Step 20 §2).
 #
 # CPU is capped on requests only: a vCluster is guaranteed its share and may
 # burst into idle CPU. Memory is capped on requests AND limits — on a unified-
@@ -23,7 +32,7 @@ spec:
     requests.memory: 8Gi
     limits.memory: 8Gi
     requests.nvidia.com/gpu: "2"
-    requests.storage: 300Gi
+    requests.storage: 200Gi
     persistentvolumeclaims: "20"
     pods: "60"
     services.loadbalancers: "1"        # the vCluster API (192.168.0.111)
@@ -40,11 +49,11 @@ metadata:
   namespace: vc-llms
 spec:
   hard:
-    requests.cpu: "4"
-    requests.memory: 48Gi
-    limits.memory: 48Gi
-    requests.nvidia.com/gpu: "8"
-    requests.storage: 500Gi
+    requests.cpu: "12"
+    requests.memory: 88Gi
+    limits.memory: 88Gi
+    requests.nvidia.com/gpu: "11"
+    requests.storage: 800Gi
     persistentvolumeclaims: "20"
     pods: "80"
     services.loadbalancers: "2"        # the vCluster API (.112) + the llms gateway (.115)

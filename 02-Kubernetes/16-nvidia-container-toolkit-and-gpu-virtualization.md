@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **You will build** | A clear picture of how a GPU gets into a container on the root's containerd (runtime hook vs CDI), and how one GB10 becomes 15 time-slices split 5 / 2 / 8 between the root and the two vClusters. You'll measure what time-slicing actually gives several pods on one GB10, and close the "GPU leak" where pods that asked for no GPU — in any cluster — still get one |
+| **You will build** | A clear picture of how a GPU gets into a container on the root's containerd (runtime hook vs CDI), and how one GB10 becomes 15 time-slices split 2 / 2 / 11 between the root and the two vClusters. You'll measure what time-slicing actually gives several pods on one GB10, and close the "GPU leak" where pods that asked for no GPU — in any cluster — still get one |
 | **Hardware** | dgx-spark-1 |
 | **Time** | 75 min |
 | **Risk** | Low. §5.5 (runtime hardening) restarts containerd, which Docker shares |
@@ -15,7 +15,7 @@
 
 ## 1. Why this matters on a Spark
 
-One GPU, three clusters, several tenants. The sharing mechanism decides **isolation** (can one tenant crash or starve another?), **accounting** (does the quota mean anything?) and **performance** (what does each tenant actually get?). GB10 has no MIG, so the realistic options are time-slicing and MPS. The lab runs time-slicing with **15 replicas**, which the 01-Ansible `gpu_operator` role configured, and splits them with root quotas: the root keeps 5, `dev-lab` gets 2, `llms` gets 8.
+One GPU, three clusters, several tenants. The sharing mechanism decides **isolation** (can one tenant crash or starve another?), **accounting** (does the quota mean anything?) and **performance** (what does each tenant actually get?). GB10 has no MIG, so the realistic options are time-slicing and MPS. The lab runs time-slicing with **15 replicas**, which the 01-Ansible `gpu_operator` role configured, and splits them with root quotas: the root keeps 2, `dev-lab` gets 2, `llms` gets 11.
 
 | | Time-slicing (lab) | MPS | MIG | Whole GPU |
 |---|---|---|---|---|
@@ -35,9 +35,9 @@ The vClusters add no GPU machinery of their own. A tenant pod that asks for `nvi
 flowchart LR
   subgraph APIS["API servers · who may ask for slices"]
     direction TB
-    RQ["root namespaces<br/>(no quota · keeps 5)"]
+    RQ["root namespaces<br/>(no quota · keeps 2)"]
     DQ["dev-lab → vc-dev-lab<br/>quota 2"]
-    LQ["llms → vc-llms<br/>quota 8"]
+    LQ["llms → vc-llms<br/>quota 11"]
   end
   subgraph ROOT["dgx-spark-1 · root node"]
     direction LR
@@ -72,7 +72,7 @@ flowchart LR
   style APIS fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
 ```
 
-**The split is admission, not hardware.** The device plugin knows nothing about vClusters: it advertises 15 identical slices on the node. The 5 / 2 / 8 split exists only as `requests.nvidia.com/gpu` in the root quotas on `vc-dev-lab` and `vc-llms` (the root's own namespaces are unlimited, so "root keeps 5" means "whatever the vClusters can't take").
+**The split is admission, not hardware.** The device plugin knows nothing about vClusters: it advertises 15 identical slices on the node. The 2 / 2 / 11 split exists only as `requests.nvidia.com/gpu` in the root quotas on `vc-dev-lab` and `vc-llms` (the root's own namespaces are unlimited, so "root keeps 2" means "whatever the vClusters can't take").
 
 **The leak (breakfix 10).** With `default_runtime_name = "nvidia"`, every container on the node goes through `nvidia-container-runtime`. Any image that sets `NVIDIA_VISIBLE_DEVICES=all` (every CUDA base image does) gets the GPU injected, even though it never asked the device plugin — so neither the vCluster's quota nor the root scheduler counted it. Docker containers on the same box are the same story, without any Kubernetes accounting at all.
 
@@ -200,7 +200,7 @@ What to expect, with your baseline B from Step 15:
 | 2 | ≈ B/2 | ≈ B (minus switch overhead) |
 | 4 | ≈ B/4 | ≈ B, or a bit lower |
 
-**Time-slicing adds no capacity.** It shares one GPU fairly and costs some context-switch overhead. Fifteen `nvidia.com/gpu` slices don't mean fifteen GPUs. They mean fifteen tickets to one GPU — and the split gives llms 8 tickets, not 8/15 of the GPU's throughput. If llms runs one busy model server and dev-lab runs one, each gets about half while they're both computing, whatever the quota says. While the loop runs, `kubectl --context spark-root -n platform-tools get cm gpu-slice-ledger -o yaml` (Step 06) shows the slices in use across all three clusters.
+**Time-slicing adds no capacity.** It shares one GPU fairly and costs some context-switch overhead. Fifteen `nvidia.com/gpu` slices don't mean fifteen GPUs. They mean fifteen tickets to one GPU — and the split gives llms 11 tickets, not 11/15 of the GPU's throughput. If llms runs one busy model server and dev-lab runs one, each gets about half while they're both computing, whatever the quota says. While the loop runs, `kubectl --context spark-root -n platform-tools get cm gpu-slice-ledger -o yaml` (Step 06) shows the slices in use across all three clusters.
 
 ### 5.4 Reproduce and understand the leak
 
@@ -250,7 +250,7 @@ scripts/verify.sh gpu
 ```text
 ── gpu
 [PASS] GB10 node: dgx-spark-1
-[PASS] allocatable nvidia.com/gpu=15 (root 5 · dev-lab 2 · llms 8)
+[PASS] allocatable nvidia.com/gpu=15 (root 2 · dev-lab 2 · llms 11)
 [PASS] operator-validator Running
 [....] gpu-smoke from INSIDE dev-lab (tenant-beta → syncer → root scheduler → nvidia runtime)
 [PASS] gpu-smoke: GPU 0: NVIDIA GB10 (UUID: GPU-…)
@@ -291,7 +291,7 @@ scripts/verify.sh gpu
 | time-slicing ×15, split by root quotas | MIG on H100/B200 (hardware isolation) for multi-tenant inference. Whole GPUs for training |
 | envvar device list, nvidia default runtime | CDI everywhere (`cdi-cri`), no default nvidia runtime |
 | device plugin integer counts | DRA (`ResourceClaim`s) with the NVIDIA DRA driver: sharing strategies and MIG profiles as claim parameters |
-| one node's slices shared by every vCluster | GPU node pools per tenant cluster (vCluster node selectors / dedicated nodes), so "8 slices" can become "these 8 GPUs" |
+| one node's slices shared by every vCluster | GPU node pools per tenant cluster (vCluster node selectors / dedicated nodes), so "11 slices" can become "these 11 GPUs" |
 | vGPU? | vGPU is for VMs (virtual desktops, VM-per-tenant clouds). For containers on bare metal, the stack above is simpler and faster, and there's no hypervisor tax |
 
 ---
@@ -300,6 +300,6 @@ scripts/verify.sh gpu
 
 - [ ] I can explain both injection paths (legacy hook and CDI) and find their config files — including the one containerd that Kubernetes and Docker share.
 - [ ] I can say why each vCluster needs its own RuntimeClass object, and where its handler is resolved.
-- [ ] I measured that time-slices share one GPU's throughput rather than multiplying it, and know the 5 / 2 / 8 split is a quota, not a partition.
+- [ ] I measured that time-slices share one GPU's throughput rather than multiplying it, and know the 2 / 2 / 11 split is a quota, not a partition.
 - [ ] I reproduced the GPU leak from inside a vCluster and know the two changes that close it.
 - [ ] I know which sharing modes GB10 supports and which it doesn't.

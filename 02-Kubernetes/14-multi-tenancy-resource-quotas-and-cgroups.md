@@ -24,7 +24,7 @@ There are several layers of protection, and they fail differently:
 | **Runtime** (cgroups v2) | Linux kernel | while the process runs | CPU throttling (slow, no error), `OOMKilled` (exit 137) |
 | **Node** (kubelet reservations + eviction) | kubelet | when the node runs low | `Evicted: The node was low on resource: memory` — in any cluster |
 
-Two facts shape everything below. First, **quotas are admission, cgroups are runtime**: there is no `vc-llms` cgroup. A vCluster's 48 Gi is enforced as the *sum of its pods' declared limits*, and each pod's limit is enforced by its own `memory.max`. Second, on a UMA machine there's an awkward question: **CUDA allocations come from the same RAM, but are they counted in the pod's cgroup?** The answer decides whether any of these memory budgets protect the node from a greedy model server. §5.5 measures it on your DGX OS release instead of assuming.
+Two facts shape everything below. First, **quotas are admission, cgroups are runtime**: there is no `vc-llms` cgroup. llms's 88 Gi is enforced as the *sum of its pods' declared limits*, and each pod's limit is enforced by its own `memory.max`. Second, on a UMA machine there's an awkward question: **CUDA allocations come from the same RAM, but are they counted in the pod's cgroup?** The answer decides whether any of these memory budgets protect the node from a greedy model server. §5.5 measures it on your DGX OS release instead of assuming.
 
 ---
 
@@ -50,11 +50,11 @@ flowchart TB
         TB["tenant-beta · 500m · 2 Gi · 1 slice"]
         LT["lab-tools · no inner quota"]
       end
-      subgraph VL["vc-llms · root quota 4 CPU · 48 Gi · 8 slices"]
+      subgraph VL["vc-llms · root quota 12 CPU · 88 Gi · 11 slices"]
         direction TB
         LCP["llms-0 (control plane)"]
-        LS["llm-serving · 2500m · 36 Gi · 6 slices"]
-        BQ["batch · Kueue spark-cq 2 CPU · 24 Gi · 4"]
+        LS["llm-serving · 10 CPU · 80 Gi · 8 slices"]
+        BQ["batch · Kueue spark-cq 10 CPU · 80 Gi · 3"]
       end
     end
   end
@@ -98,19 +98,32 @@ On kubeadm, `kubeReserved` protects the kubelet and containerd — **not** the c
 
 | Resource | Root: `vcluster-budget` on `vc-dev-lab` | Inside dev-lab: `tenant-budget` per tenant | Root: `vcluster-budget` on `vc-llms` | Inside llms: `serving-budget` on `llm-serving` |
 |---|---|---|---|---|
-| CPU | `requests.cpu: 2` | `requests.cpu` **and** `limits.cpu: 500m` | `requests.cpu: 4` | `requests.cpu: 2500m` |
-| Memory | `requests.memory` = `limits.memory` = 8 Gi | `requests.memory` = `limits.memory` = 2 Gi | 48 Gi / 48 Gi | `limits.memory: 36Gi` |
-| GPU slices | `requests.nvidia.com/gpu: 2` | 1 | 8 | 6 |
-| Storage | 300 Gi, 20 PVCs | 100 Gi, 5 PVCs | 500 Gi, 20 PVCs | 400 Gi |
-| Objects | 60 pods, 1 LoadBalancer (the API `.111`), 0 NodePorts | 10 pods, 0 LBs, 0 NodePorts | 80 pods, 2 LBs (`.112`, `.115`), 0 NodePorts | — |
+| CPU | `requests.cpu: 2` | `requests.cpu` **and** `limits.cpu: 500m` | `requests.cpu: 12` | `requests.cpu: 10` |
+| Memory | `requests.memory` = `limits.memory` = 8 Gi | `requests.memory` = `limits.memory` = 2 Gi | 88 Gi / 88 Gi | `limits.memory: 80Gi` |
+| GPU slices | `requests.nvidia.com/gpu: 2` | 1 | 11 | 8 |
+| Storage | 200 Gi, 20 PVCs | 100 Gi, 5 PVCs | 800 Gi, 20 PVCs | 600 Gi |
+| Objects | 60 pods, 1 LoadBalancer (the API `.111`), 2 NodePorts (the API Service's ports) | 10 pods, 0 LBs, 0 NodePorts | 80 pods, 2 LBs (`.112`, `.115`), 4 NodePorts | — |
+
+How the Spark is split ([`manifests/root/05-vclusters/quotas.yaml`](lab/manifests/root/05-vclusters/quotas.yaml) carries the same table in its header):
+
+| | CPU (req) | Memory | GPU slices | Storage |
+|---|---|---|---|---|
+| Spark total | 20 | ≈119.7 GiB | 15 | ≈3.7 TiB |
+| kubelet reservations | 3 (system 2 + kube 1) | 14 Gi (8 + 2 + 4 eviction) | – | – |
+| allocatable | 17 | ≈105.7 GiB | 15 | |
+| vCluster dev-lab | 2 | 8 Gi | 2 | 200 Gi |
+| vCluster llms | 12 | 88 Gi | 11 | 800 Gi |
+| root keeps (platform) | 3 | ≈9.7 GiB | 2 | the rest |
+
+The split follows one rule per resource. The memory budgets plus the root's platform must fit allocatable memory: 8 + 88 + ≈9.7 = ≈105.7 GiB, with no overcommit, because on unified memory an overcommitted gigabyte is one a model server can't have. CPU may burst into idle cores (it's compressible), so a tight CPU split costs only latency. dev-lab stays small — tools and tenancy drills. llms gets the rest, because the models run there. The root's 2 slices are for `platform-tools`: GPU probes, the §5.5 UMA experiment and the preemption-demo filler (2 replicas).
 
 Three design rules:
 
 - **CPU is capped on requests only at the root.** A vCluster is guaranteed its share and may burst into idle CPU. dev-lab's *tenants* also have `limits.cpu`, so their pods get a hard `cpu.max`; llms's serving pods don't.
 - **Memory is capped on requests *and* limits at the root.** On a unified-memory box memory is GPU memory too, so overcommit is how model servers die. Capping `limits.memory` forces every pod in a vCluster to declare a limit.
-- **Inner quotas are ceilings, not reservations.** `tenant-alpha` + `tenant-beta` + `lab-tools` may promise more than dev-lab's 2 CPU / 8 Gi; whoever asks first gets it and the root refuses the next pod. llms's `llm-serving` (2.5 CPU · 36 Gi · 6 slices) plus Kueue's `spark-cq` (2 CPU · 24 Gi · slices: 4) exceed its 4 · 48 · 8 on purpose.
+- **Inner quotas are ceilings, not reservations.** `tenant-alpha` + `tenant-beta` + `lab-tools` may promise more than dev-lab's 2 CPU / 8 Gi; whoever asks first gets it and the root refuses the next pod. llms's `llm-serving` (10 CPU · 80 Gi · 8 slices) plus Kueue's `spark-cq` (10 CPU · 80 Gi · 3 slices) exceed its 12 · 88 · 11 on purpose: either side can use most of llms while the other is idle, and the root quota, Kueue and PriorityClasses decide who waits. The slices are the exception — 8 + 3 fills llms's 11 exactly.
 
-The root budget also pays for the vCluster itself: `llms-0` requests 250m and 768 Mi (limit 1536 Mi), and the vCluster's CoreDNS and every add-on (Traefik, Kueue, KEDA …) are synced pods in `vc-llms`. [`tests/budget_check.py`](lab/tests/budget_check.py) fails if the vClusters together promise more than the Spark has.
+The root budget also pays for the vCluster itself: `llms-0` requests 250m and 768 Mi (limit 1536 Mi), and the vCluster's CoreDNS and every add-on (Traefik, Kueue, KEDA …) are synced pods in `vc-llms` — together about 1 CPU and 4 Gi, which the serving and batch ceilings (10 CPU · 80 Gi each) leave room for. [`tests/budget_check.py`](lab/tests/budget_check.py) fails if the vClusters together promise more than the Spark has.
 
 ### 3.3 LimitRanges fill the gaps
 
@@ -299,7 +312,7 @@ Two possible outcomes:
 | Log | Meaning | How you protect the node |
 |---|---|---|
 | `start: … 0.3 GiB` → pod `OOMKilled` around 4 GiB | CUDA memory **is** charged to the pod cgroup | pod memory limits are a real GPU-memory guardrail — and so the root's `limits.memory` per vCluster really caps its GPU memory too. Size limits as weights + KV cache + overhead |
-| `allocated 16 GiB … memory.current=0.6 GiB` → `survived` | CUDA memory **isn't** charged (driver-owned pages) | pod limits don't bound GPU use, and **neither do the vCluster memory budgets**: llms's 48 Gi counts declared limits, not what its model servers put on the GPU. Rely on engine flags (`--gpu-memory-utilization`, `--mem-fraction-static`), the `SparkUMAPressure` alert, PriorityClasses and eviction |
+| `allocated 16 GiB … memory.current=0.6 GiB` → `survived` | CUDA memory **isn't** charged (driver-owned pages) | pod limits don't bound GPU use, and **neither do the vCluster memory budgets**: llms's 88 Gi counts declared limits, not what its model servers put on the GPU. Rely on engine flags (`--gpu-memory-utilization`, `--mem-fraction-static`), the `SparkUMAPressure` alert, PriorityClasses and eviction |
 
 **Record your result in the lab log**, with the driver version (`nvidia-smi --query-gpu=driver_version --format=csv,noheader`). Re-run it after every DGX OS or driver upgrade. The rest of this module is written to be safe under either outcome. That's why every serving manifest sets both a pod memory limit *and* an engine memory fraction.
 
@@ -329,7 +342,7 @@ python3 tests/budget_check.py
 | Check | Expected |
 |---|---|
 | node allocatable | 17 CPU, ≈105.7 GiB, `nvidia.com/gpu: 15` |
-| root budgets | `dev-lab root budget: 2 8Gi 2`, `llms root budget: 4 48Gi 8` |
+| root budgets | `dev-lab root budget: 2 8Gi 2`, `llms root budget: 12 88Gi 11` |
 | tenant quota `limits.cpu` | `500m` in both tenants |
 | bf01 / bf02 | inner refusal in dev-lab / root refusal with no scheduler events |
 | bare pod in dev-lab | `Burstable` |

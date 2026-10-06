@@ -325,7 +325,7 @@ docker run --rm 192.168.0.100:5000/spark-ee:1.0 ansible-galaxy collection list |
 | Git | Project SCM, update on launch; webhook from GitHub triggers job templates | 25 |
 | Vault (vault01) | "HashiCorp Vault Secret Lookup" / "Signed SSH" credential types, so no static keys live in AWX. Give AWX its own AppRole and policy on vault01; don't reuse Semaphore's `semaphore` AppRole | 18, 24 |
 | Semaphore (sema01) | none: it's the lab's main controller. Keep AWX to read-only templates (validate, drift) so the two never fight over the same hosts | 04 |
-| Kubernetes (`spark-root`) | Container Group runs job pods in `awx`; you can add a second group with a GPU `nodeSelector` for GPU-touching jobs (it comes out of the root's share of 5 time-slices). A job that must manage a vCluster uses a kubeconfig credential with the `dev-lab` / `llms` context | 19, 20 |
+| Kubernetes (`spark-root`) | Container Group runs job pods in `awx`; you can add a second group with a GPU `nodeSelector` for GPU-touching jobs (it comes out of the root's share of 2 time-slices). A job that must manage a vCluster uses a kubeconfig credential with the `dev-lab` / `llms` context | 19, 20 |
 | Prometheus | `/api/v2/metrics/` (enable in settings). Scrape it from the Step 12 stack | 12 |
 | ARA / logging | AWX external logging → Loki/Splunk; job events stay in Postgres | 27 |
 

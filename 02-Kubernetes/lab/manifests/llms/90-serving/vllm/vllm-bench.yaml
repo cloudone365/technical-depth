@@ -27,7 +27,7 @@ spec:
           env:
             - {name: MODEL, value: Qwen/Qwen2.5-0.5B-Instruct}
             - {name: HF_HOME, value: /models/hf}
-          resources: {requests: {cpu: 500m, memory: 1Gi}, limits: {memory: 1536Mi}}   # fits next to vLLM (32Gi) + Qdrant (2Gi) in serving-budget (36Gi)
+          resources: {requests: {cpu: 500m, memory: 1Gi}, limits: {memory: 1536Mi}}   # fits next to vLLM (32Gi) + Qdrant (2Gi) in serving-budget (80Gi)
           volumeMounts: [{name: models, mountPath: /models, readOnly: true}]
       volumes:
         - {name: models, persistentVolumeClaim: {claimName: model-cache, readOnly: true}}

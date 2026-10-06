@@ -6,7 +6,7 @@
 
 | | |
 |---|---|
-| **You will build** | The GPU Operator v26.7.1 deployed by Ansible with Helm in **host-driver mode** (DGX OS owns the driver and toolkit; the operator's driver, toolkit and CDI are off), NFD/GFD labels, the GB10 time-sliced into **15** `nvidia.com/gpu`, an automated validator gate and a GPU smoke pod. Then you watch the 15 slices split 5 / 2 / 8 between the root and the two vClusters |
+| **You will build** | The GPU Operator v26.7.1 deployed by Ansible with Helm in **host-driver mode** (DGX OS owns the driver and toolkit; the operator's driver, toolkit and CDI are off), NFD/GFD labels, the GB10 time-sliced into **15** `nvidia.com/gpu`, an automated validator gate and a GPU smoke pod. Then you watch the 15 slices split 2 / 2 / 11 between the root and the two vClusters |
 | **Hardware** | The root cluster from Step 19 (Semaphore template `05 Kubernetes`); §4.2 also needs the vClusters (`06b vClusters`). The operator itself is the template `06 GPU Operator` |
 | **Time** | 45 min |
 | **Risk** | Low. `atomic: true` rolls back a failed Helm upgrade |
@@ -39,9 +39,9 @@ flowchart LR
     VAL["operator-validator"]
   end
   subgraph BUD["who may use the 15 slices"]
-    R["root namespaces: 5"]
+    R["root namespaces: 2"]
     D["vc-dev-lab quota: 2"]
-    L["vc-llms quota: 8"]
+    L["vc-llms quota: 11"]
   end
   RT --> DP
   DRV --> VAL
@@ -77,9 +77,9 @@ A slice is a **ticket to the scheduler**, not a fraction of the GPU. The number 
 
 | Owner | Slices | Enforced by |
 |---|---|---|
-| vCluster `llms` | 8 | root ResourceQuota `vcluster-budget` in `vc-llms` (`requests.nvidia.com/gpu: "8"`) |
+| vCluster `llms` | 11 | root ResourceQuota `vcluster-budget` in `vc-llms` (`requests.nvidia.com/gpu: "11"`) |
 | vCluster `dev-lab` | 2 | root ResourceQuota `vcluster-budget` in `vc-dev-lab` (`"2"`) |
-| root (`platform-tools`, `default`, smoke tests, benchmarks) | 5 | what is left: 15 − 8 − 2 |
+| root (`platform-tools`: GPU probes, the 02-Kubernetes Step 14 §5.5 UMA experiment, the preemption demo's 2 filler replicas; `default` smoke tests) | 2 | what is left: 15 − 11 − 2 |
 
 The root quotas live in the 02-Kubernetes lab ([`quotas.yaml`](../02-Kubernetes/lab/manifests/root/05-vclusters/quotas.yaml)), and its `tests/budget_check.py` checks that they add up to `gpu_operator_timeslice_replicas`. Change the replica count here and you must change the quotas there, or one side lies.
 
@@ -121,7 +121,7 @@ gpu_operator_values:
     enabled: true
 
 # Time-slicing: advertise N logical GPUs per physical GB10 (no memory isolation!).
-# 15 slices: the root keeps 5, vCluster dev-lab gets 2, vCluster llms gets 8
+# 15 slices: the root keeps 2, vCluster dev-lab gets 2, vCluster llms gets 11
 # (quotas in "02-Kubernetes/lab/manifests/root/05-vclusters").
 gpu_operator_timeslice_replicas: 15
 ```
@@ -253,7 +253,7 @@ kubectl --context llms get node dgx-spark-1 -o jsonpath='{.status.allocatable.nv
 kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget | grep -E 'nvidia|memory'
 ```
 
-The node says 15; the root's quota on `vc-llms` says 8. The tenant can see more than it may use, and that gap is the most common source of "why is my pod Pending when the node has free GPUs?".
+The node says 15; the root's quota on `vc-llms` says 11. The tenant can see more than it may use, and that gap is the most common source of "why is my pod Pending when the node has free GPUs?".
 
 Now spend the `llms` budget:
 
@@ -263,7 +263,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata: { name: ts-demo, namespace: default }
 spec:
-  replicas: 8
+  replicas: 11
   selector: { matchLabels: { app: ts-demo } }
   template:
     metadata: { labels: { app: ts-demo } }
@@ -279,17 +279,17 @@ spec:
 
 ```bash
 kubectl --context llms apply -f ts-demo.yaml
-kubectl --context llms get pods -l app=ts-demo -o wide                # 8 Running on dgx-spark-1
-kubectl --context llms scale deploy ts-demo --replicas=9
-kubectl --context llms get pods -l app=ts-demo | grep Pending         # the 9th
+kubectl --context llms get pods -l app=ts-demo -o wide                # 11 Running on dgx-spark-1
+kubectl --context llms scale deploy ts-demo --replicas=12
+kubectl --context llms get pods -l app=ts-demo | grep Pending         # the 12th
 kubectl --context llms describe pod "$(kubectl --context llms get pods -l app=ts-demo --field-selector=status.phase=Pending -o name | head -1)" | sed -n '/Events/,$p'
-kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget | grep nvidia   # requests.nvidia.com/gpu  8  8
-ssh dgxadmin@192.168.0.100 nvidia-smi                                   # 8 python processes on one GB10
+kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget | grep nvidia   # requests.nvidia.com/gpu  11  11
+ssh dgxadmin@192.168.0.100 nvidia-smi                                   # 11 python processes on one GB10
 ```
 
-The 9th pod is `Pending` **inside** `llms`, but no scheduler ever looked at it. The vCluster's own API server accepted it (its `default` namespace has no quota), and the syncer's attempt to create the host copy in `vc-llms` was refused by the root quota. The events show the syncer's error, quoting `exceeded quota: vcluster-budget` and `requests.nvidia.com/gpu`, and there are no `FailedScheduling` events. Root slices are still free (15 − 8 = 7), yet `llms` can't have them. That is the budget working.
+The 12th pod is `Pending` **inside** `llms`, but no scheduler ever looked at it. The vCluster's own API server accepted it (its `default` namespace has no quota), and the syncer's attempt to create the host copy in `vc-llms` was refused by the root quota. The events show the syncer's error, quoting `exceeded quota: vcluster-budget` and `requests.nvidia.com/gpu`, and there are no `FailedScheduling` events. Root slices are still free (15 − 11 = 4), yet `llms` can't have them. That is the budget working.
 
-Same exercise in `dev-lab`: the 3rd GPU pod stays Pending. And on the root, `platform-tools` or `default` can still start 5 GPU pods, because the root namespaces have no slice quota and simply take what the vClusters don't hold. Clean up:
+Same exercise in `dev-lab`: the 3rd GPU pod stays Pending. And on the root, `platform-tools` or `default` can still start 2 GPU pods, because the root namespaces have no slice quota and simply take what the vClusters don't hold. Clean up:
 
 ```bash
 kubectl --context llms delete -f ts-demo.yaml
@@ -334,7 +334,7 @@ With option B the Secret exists twice. The original is in the vCluster's SQLite 
 | System | Note |
 |---|---|
 | Root cluster (Step 19) | Needs containerd's default runtime `nvidia`; the operator never edits containerd here (toolkit off) |
-| vClusters (Step 19 §3.4, 02-Kubernetes Step 04) | Consume slices through the root scheduler; budgets in `manifests/root/05-vclusters/quotas.yaml` must sum with the root's 5 to `gpu_operator_timeslice_replicas` |
+| vClusters (Step 19 §3.4, 02-Kubernetes Step 04) | Consume slices through the root scheduler; budgets in `manifests/root/05-vclusters/quotas.yaml` must sum with the root's 2 to `gpu_operator_timeslice_replicas` |
 | DGX OS upgrades (Step 10) | After a driver update, restart the device-plugin and validator pods (or reboot); the upgrade playbook's drain/uncordon covers it |
 | Telemetry (Step 12) | Choose either host dcgm-exporter **or** the operator's, not both |
 | Multus/RDMA (Step 21) | Same pod requests `nvidia.com/gpu` + `rdma/rdma_shared_cx7` |
@@ -362,5 +362,5 @@ With option B the Secret exists twice. The original is in the vCluster's SQLite 
 - [ ] `06-gpu-operator.yml` finishes with the validator Running and the allocatable assertion green (15 per node).
 - [ ] No driver or toolkit DaemonSet in `gpu-operator`; `cdi.enabled: false` in the release values.
 - [ ] NFD/GFD labels present (`nvidia.com/gpu.product`, `nvidia.com/gpu.compute.major=12`).
-- [ ] In `llms`, 8 GPU pods run and the 9th is refused by the root quota, while the node still shows free slices.
+- [ ] In `llms`, 11 GPU pods run and the 12th is refused by the root quota, while the node still shows free slices.
 - [ ] A pod receives `HF_TOKEN` from vault01 by one of the §4.3 routes, with the injector/operator in the same cluster as the pod.

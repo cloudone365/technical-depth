@@ -161,7 +161,7 @@ kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.capacity
 kubectl --context llms get node dgx-spark-1 -L spark.lab/gpu,nvidia.com/gpu.product,nvidia.com/gpu.replicas
 ```
 
-Capacity shows `nvidia.com/gpu: 15` and a `memory` figure that is the whole unified pool; allocatable is lower by the kubelet reservations (Step 14 §3.1). Inside llms the node looks the same — 15 slices — although llms may only use 8: budgets are quotas, not node properties.
+Capacity shows `nvidia.com/gpu: 15` and a `memory` figure that is the whole unified pool; allocatable is lower by the kubelet reservations (Step 14 §3.1). Inside llms the node looks the same — 15 slices — although llms may only use 11: budgets are quotas, not node properties.
 
 ### 5.3 The same view from inside a pod
 

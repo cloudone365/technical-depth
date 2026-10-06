@@ -99,7 +99,7 @@ Two clusters cooperate on every request. The **root** owns the address (MetalLB)
 | Service | `traefik-lab`, type LoadBalancer, annotation `metallb.io/loadBalancerIPs: 192.168.0.115`; synced to the root as `vc-llms/traefik-lab-x-ingress-x-llms`, where MetalLB serves it. Counts against llms' root quota `services.loadbalancers: 2` (API .112 + gateway .115) |
 | Hostnames | `llm.lab.local` (Ingress), `gw.lab.local` (HTTPRoute) → add both to your laptop's `/etc/hosts` as `192.168.0.115` |
 | Metrics | no Prometheus Operator inside llms: the chart exposes a plain `traefik-lab-metrics` Service; the root's ServiceMonitor `vcluster-workloads` scrapes it → `traefik_service_*{vcluster="llms", vnamespace="ingress"}` (KEDA uses these in Step 20) |
-| Resources | 1 replica, requests 100m CPU / 128 Mi, limit 512 Mi — out of llms' 4 CPU / 48 Gi budget |
+| Resources | 1 replica, requests 100m CPU / 128 Mi, limit 512 Mi — out of llms' 12 CPU / 88 Gi budget |
 
 ---
 

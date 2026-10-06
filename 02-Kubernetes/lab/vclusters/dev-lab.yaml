@@ -3,7 +3,7 @@
 # or scripts/install-addons.sh vclusters.
 #
 # Budget (enforced by the ROOT ResourceQuota in manifests/root/05-vclusters/quotas.yaml):
-#   2 CPU (requests) · 8 Gi memory (requests = limits) · 2 GPU time-slices · 300 Gi storage
+#   2 CPU (requests) · 8 Gi memory (requests = limits) · 2 GPU time-slices · 200 Gi storage
 # Everything below — this control plane, CoreDNS, every tenant pod — counts against it.
 #
 # Inside: tenant-alpha, tenant-beta, lab-tools (manifests/dev-lab).

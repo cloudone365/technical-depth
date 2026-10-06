@@ -5,9 +5,10 @@
 #   1. vLLM's own: --gpu-memory-utilization is a fraction of the ~119.7 GiB the
 #      GPU reports — i.e. of the SAME memory the OS, Kubernetes and every other
 #      pod use. 0.20 ≈ 24 GiB (weights + KV cache).
-#   2. The llms vCluster's: 48 Gi of memory limits for EVERYTHING in it (root
-#      quota on vc-llms). The 32 Gi limit below leaves room for Traefik, Kueue,
-#      KEDA, the control plane and a second model server. Whether CUDA memory
+#   2. The llms vCluster's: 88 Gi of memory limits for EVERYTHING in it (root
+#      quota on vc-llms; 80 Gi of it for llm-serving). The 32 Gi limit below
+#      leaves room for Traefik, Kueue, KEDA, the control plane and two more
+#      model servers. Whether CUDA memory
 #      is charged to this limit is measured in Step 14 §5.5 — size as if it is.
 apiVersion: v1
 kind: Secret

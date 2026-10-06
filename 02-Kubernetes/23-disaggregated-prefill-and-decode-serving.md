@@ -7,7 +7,7 @@
 | **You will build** | A working prefill/decode (P/D) split inside the `llms` vCluster: two vLLM instances with the NIXL KV connector and a small proxy that routes each request prefill → decode. You'll see the KV handoff in logs and headers, plus a transfer-time model that tells you when disaggregation is worth it. On two Sparks, the KV cache moves over the CX-7 |
 | **Hardware** | dgx-spark-1 (both roles share the GB10 via 2 slices: mechanics, not speed). 2 Sparks for §5.5 |
 | **Time** | 90 min |
-| **Risk** | Medium-low. Experimental feature: pin versions, and verify `import nixl` in your image first. Prefill + decode need 40 Gi of memory limits — more than `llm-serving`'s 36 Gi ceiling, so §5.2 lifts it for the experiment |
+| **Risk** | Medium-low. Experimental feature: pin versions, and verify `import nixl` in your image first. Prefill + decode need 40 Gi of memory limits; they fit `llm-serving`'s 80 Gi ceiling, even next to vLLM |
 | **Clusters** | `llms` (P, D, proxy, the `serving-budget` ceiling) · `spark-root` (the `vcluster-budget` cap, pod IPs, Cilium, and on two Sparks the CX-7 NetworkAttachmentDefinition in `vc-llms`) |
 | **Lab files** | [`manifests/llms/90-serving/pd-disagg/`](lab/manifests/llms/90-serving/pd-disagg/) (`pd.yaml`, `pd_proxy.py`), [`manifests/llms/10-tenancy/quotas.yaml`](lab/manifests/llms/10-tenancy/quotas.yaml), [`manifests/llms/85-network-operator/rdma-test-pod.yaml`](lab/manifests/llms/85-network-operator/rdma-test-pod.yaml) |
 
@@ -86,10 +86,11 @@ The side channel uses `VLLM_NIXL_SIDE_CHANNEL_HOST=status.podIP`. That IP is the
 |---|---|---|---|
 | P + D + proxy | 1.6 | 40.25 Gi | 2 |
 | + always-on (mocks, Qdrant) | 2.0 | 42.6 Gi | 2 |
-| `serving-budget` (inner ceiling) | 2.5 | **36 Gi** | 6 |
-| `vcluster-budget` (root cap, everything in llms) | 4 | 48 Gi | 8 |
+| + vLLM, if it stays up | 3.5 | 74.6 Gi | 3 |
+| `serving-budget` (inner ceiling) | 10 | **80 Gi** | 8 |
+| `vcluster-budget` (root cap, everything in llms) | 12 | 88 Gi | 11 |
 
-The experiment doesn't fit the tenant ceiling but does fit the vCluster — if nothing else big is running in llms. That's exactly the case the two layers were built for: the llms admin may lift a tenant ceiling temporarily; nobody inside llms can lift the root's.
+The experiment fits the tenant ceiling, even beside vLLM, and it fits the vCluster — if no big batch job is running in llms at the same time. No quota needs lifting. The limit to watch is UMA memory: P and D take 0.15 each, so with vLLM's 0.20 the util sum is 0.50, inside the ≲ 0.70 llms has for models (Step 20 §2).
 
 ### 3.2 KV-transfer time model
 
@@ -123,33 +124,33 @@ export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 
 ### 5.1 Pre-flight: does the image have NIXL?
 
-P/D uses the same image as Step 20's vLLM, so ask the running engine before parking it:
+P/D uses the same image as Step 20's vLLM, so ask the running engine. vLLM can stay up (74.6 of 80 Gi, util sum 0.50); park the other engines from Steps 21–22, which would push the limits past 80 Gi (and, for SGLang or KServe, the util sum to 0.70):
 
 ```bash
 kubectl --context llms -n llm-serving exec deploy/vllm -- python3 -c "import nixl, vllm; print('nixl OK, vllm', vllm.__version__)"
-# park every 32 Gi engine (Step 20 §9)
-kubectl --context llms -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite \
-  || kubectl --context llms -n llm-serving scale deploy vllm --replicas=0
+# park the other engines (Step 20 §9); vLLM stays
 kubectl --context llms -n llm-serving scale deploy sglang triton --replicas=0 2>/dev/null
 kubectl --context llms -n llm-serving delete inferenceservice qwen-small --ignore-not-found 2>/dev/null
 ```
 
 If `import nixl` fails, use a newer NGC vLLM tag that bundles it, or build a thin image `FROM nvcr.io/nvidia/vllm:<tag>` with `RUN pip install nixl` (and pin it).
 
-### 5.2 Lift the tenant ceiling, then deploy P, D and the proxy
+Park vLLM too only if memory requires it: if something outside `llm-serving` already uses model memory (a training job in `batch`, a benchmark on the root) and P + D + vLLM would take the sum past 0.70, use the KEDA pause annotation (Step 20 §9).
 
-Check the root has room for 40 Gi more in llms, then raise `serving-budget` for the experiment:
+### 5.2 Deploy P, D and the proxy
+
+Check that both layers have room for 40 Gi more in llms:
 
 ```bash
+kubectl --context llms -n llm-serving describe resourcequota serving-budget | grep -E 'limits.memory|requests.cpu|gpu'
 kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget | grep -E 'limits.memory|requests.cpu|gpu'
-kubectl --context llms -n llm-serving patch resourcequota serving-budget --type merge -p '{"spec":{"hard":{"limits.memory":"44Gi"}}}'
 kubectl --context llms apply -k manifests/llms/90-serving/pd-disagg
 kubectl --context llms -n llm-serving rollout status deploy/vllm-prefill --timeout=30m
 kubectl --context llms -n llm-serving rollout status deploy/vllm-decode --timeout=30m
 kubectl --context llms -n llm-serving logs deploy/vllm-prefill | grep -iE 'nixl|kv_transfer|connector' | head
 ```
 
-Expected: both engines log that the `NixlConnector` initialised (role `kv_both`) with a side-channel port. If `vcluster-budget` shows less than ~41 Gi free under `limits.memory`, the root will refuse the second engine: the pod sits `Pending` in llms with no scheduler events. Free memory in llms first (batch jobs, Step 25) rather than patching the root — that quota is the platform's promise to the other vCluster. If Argo CD already manages llms (Step 28), its `selfHeal` reverts this patch (and §5.5's namespace label) within minutes: pause `spark-llms-10-tenancy` and `spark-llms-00-platform` for the experiment, as Step 28 §2.3 shows.
+Expected: both engines log that the `NixlConnector` initialised (role `kv_both`) with a side-channel port. If `vcluster-budget` shows less than ~41 Gi free under `limits.memory`, the root will refuse the second engine: the pod sits `Pending` in llms with no scheduler events. Free memory in llms first (batch jobs, Step 25) rather than patching the root — that quota is the platform's promise to the other vCluster. If Argo CD already manages llms (Step 28), its `selfHeal` reverts §5.5's namespace label within minutes: pause `spark-llms-00-platform` for that experiment, as Step 28 §2.3 shows.
 
 Prove the side-channel address is a root pod IP:
 
@@ -178,10 +179,7 @@ Evidence of a real handoff: the decode log shows remote-prefill/NIXL read activi
 python3 scripts/ttft_probe.py --url http://localhost:8000 --model Qwen/Qwen2.5-0.5B-Instruct -n 10      # through P/D
 kill %1
 kubectl --context llms delete -k manifests/llms/90-serving/pd-disagg
-kubectl --context llms apply -k manifests/llms/10-tenancy                 # serving-budget back to 36 Gi
-kubectl --context llms -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas- \
-  || kubectl --context llms -n llm-serving scale deploy vllm --replicas=1
-kubectl --context llms -n llm-serving rollout status deploy/vllm --timeout=30m
+kubectl --context llms -n llm-serving rollout status deploy/vllm --timeout=30m   # if you parked it: remove the pause annotation first (Step 20 §9)
 kubectl --context llms -n llm-serving port-forward svc/vllm 8000 &
 python3 scripts/ttft_probe.py --url http://localhost:8000 --model qwen2.5-0.5b -n 10; kill %1
 ```
@@ -232,7 +230,7 @@ Then add to the prefill Deployment `nodeSelector: {kubernetes.io/hostname: dgx-s
 | Check | Expected |
 |---|---|
 | `import nixl` in the image | OK |
-| `serving-budget` | lifted to 44 Gi for the run, back to 36 Gi afterwards |
+| `serving-budget` | P + D + proxy counted (40.25 Gi), within 80 Gi; unchanged before and after |
 | P and D pod IPs | identical in llms and on the root |
 | proxy response | streamed tokens + `X-Prefill-Ms` header |
 | decode log | NIXL/remote-prefill activity per request |
@@ -244,7 +242,7 @@ Then add to the prefill Deployment `nodeSelector: {kubernetes.io/hostname: dgx-s
 
 | Symptom | Cause | Diagnose | Fix |
 |---|---|---|---|
-| `vllm-decode` 0/1, `exceeded quota: serving-budget` | P + D (40 Gi) over the 36 Gi ceiling | `kubectl --context llms -n llm-serving describe resourcequota serving-budget` | §5.2 patch |
+| `vllm-decode` 0/1, `exceeded quota: serving-budget` | another engine besides vLLM (SGLang, KServe, Triton) still in `llm-serving`: P + D + vLLM + it > 80 Gi | `kubectl --context llms -n llm-serving describe resourcequota serving-budget` | park it (§5.1, Step 20 §9) |
 | a P/D pod Pending in llms, **no** scheduler events | the root `vcluster-budget` on `vc-llms` is spent | `kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget` | stop batch jobs / other engines in llms |
 | decode recomputes the prompt (slow, no NIXL logs) | `kv_transfer_params` not forwarded, or prefill returned none | proxy logic, prefill response JSON | proxy must copy `kv_transfer_params` from the prefill response |
 | `NIXL handshake failed / timeout` | side-channel host/port unreachable | `VLLM_NIXL_SIDE_CHANNEL_HOST` = pod IP, containerPort 5600, NetworkPolicy; `hubble observe --namespace vc-llms --port 5600 --verdict DROPPED` | allow 5600 between the two Deployments (same namespace is allowed in the lab) |
@@ -262,7 +260,7 @@ Then add to the prefill Deployment `nodeSelector: {kubernetes.io/hostname: dgx-s
 |---|---|
 | 1 P + 1 D, stdlib proxy | xP + yD pools sized from traffic mix (prefill-heavy RAG vs decode-heavy chat), KV-aware router (llm-d, NVIDIA Dynamo, Gateway API Inference Extension) |
 | UCX over one CX-7 link | NIXL over IB/RoCE rails, GPUDirect RDMA, KV offload tiers (CPU memory → NVMe → remote, e.g. LMCache) |
-| a tenant ceiling lifted by hand | separate budgets per pool (a prefill quota and a decode quota), sized from SLOs |
+| one shared `serving-budget` for P, D and the monolithic engine | separate budgets per pool (a prefill quota and a decode quota), sized from SLOs |
 | manual comparison | SLO-driven autoscaling per pool (TTFT for P, TPOT for D) |
 
 ---
@@ -271,6 +269,6 @@ Then add to the prefill Deployment `nodeSelector: {kubernetes.io/hostname: dgx-s
 
 - [ ] I can explain why prefill and decode interfere, and which metric each one hurts.
 - [ ] I ran a P/D split and found evidence of the KV handoff in logs and headers.
-- [ ] I lifted a tenant ceiling inside llms after checking the root cap — and put it back.
+- [ ] I checked P + D against both quota layers and the util sum before deploying — no ceiling had to move.
 - [ ] I can estimate KV-transfer time for any model/prompt/link and decide whether P/D pays off.
 - [ ] I have an honest one-Spark result, and a plan for the two-Spark experiment.

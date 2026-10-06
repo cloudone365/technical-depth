@@ -7,7 +7,7 @@
 | **You will build** | A Triton deployment inside the `llms` vCluster serving a two-step **ensemble** (tokenise on CPU → score on the GB10), fed from a GitOps-friendly model repository. You'll measure dynamic batching with Triton's own metrics (scraped by the root's Prometheus), load-test it with `perf_analyzer` over gRPC, and find Triton's GPU process on the root |
 | **Hardware** | dgx-spark-1 |
 | **Time** | 75 min |
-| **Risk** | Low. Triton's 12 Gi limit doesn't fit `llm-serving` next to vLLM's 32 Gi: park vLLM first (Step 20 §9) |
+| **Risk** | Low. Triton's 12 Gi limit fits `llm-serving` next to vLLM's 32 Gi (48.4 of 80 Gi, Step 20 §9); vLLM can stay up |
 | **Clusters** | `llms` (Triton, the perf Job, the `serving-budget` quota) · `spark-root` (the real pod, `nvidia-smi`, Prometheus) |
 | **Lab files** | [`manifests/llms/90-serving/triton/`](lab/manifests/llms/90-serving/triton/) (`triton.yaml`, `kustomization.yaml`, `model_repository/{preprocess,scorer,pipeline}`), [`manifests/root/95-observability/vcluster-workloads.yaml`](lab/manifests/root/95-observability/vcluster-workloads.yaml) |
 
@@ -25,7 +25,7 @@ vLLM is an LLM engine. Triton is a **general inference server**: many models, ma
 | Ensembles / BLS | multi-step pipelines server-side, no client round trips |
 | HTTP/REST + gRPC (KServe v2 protocol) | same API for every model |
 
-On one Spark, Triton is also the *cheap* engine: the lab's toy pipeline needs 4 Gi requested / 12 Gi limit and one slice, against vLLM's 32 Gi. That's why it can share `llm-serving` with the mocks and Qdrant, but not with a 32 Gi LLM engine.
+On one Spark, Triton is also the *cheap* engine: the lab's toy pipeline needs 4 Gi requested / 12 Gi limit and one slice, against vLLM's 32 Gi. That's why it shares `llm-serving` with the mocks, Qdrant and a 32 Gi LLM engine without either being parked.
 
 ---
 
@@ -112,17 +112,17 @@ In the lab, the files are kustomize-generated ConfigMaps (`triton-preprocess`, `
 | `triton` (init container `layout`: 50m / 64 Mi, counted as the max with the main container) | 1 | 12 Gi | 1 |
 | `triton-perf` Job (created suspended) | 500m | 2 Gi | 0 |
 | always-on in `llm-serving` (mocks, Qdrant) | 400m | 2.4 Gi | 0 |
-| **total** against `serving-budget` (2.5 CPU · 36 Gi · 6) | 1.9 | 16.4 Gi | 1 |
+| **total** against `serving-budget` (10 CPU · 80 Gi · 8) | 1.9 | 16.4 Gi | 1 |
 
-With vLLM's 1.5 CPU / 32 Gi on top, both CPU and memory overflow — hence the swap in §5.1.
+With vLLM's 1.5 CPU / 32 Gi / 1 slice on top: 3.4 CPU, 48.4 Gi, 2 slices — it fits, so vLLM keeps running in §5.1. In UMA the toy pipeline adds little to vLLM's 0.20; a real Triton model counts toward the util sum ≲ 0.70 like any engine (Step 20 §2).
 
 ---
 
 ## 4. Integrations
 
 - **Image choice:** `tritonserver:25.09-pyt-python-py3` ships PyTorch for the Python backend (the scorer uses `torch.cuda`). The plain `-py3` image would fall back to CPU. The SDK image `-py3-sdk` carries `perf_analyzer`.
-- **TensorRT-LLM backend (modules 03–06)**: the same Deployment with the `-trtllm-python-py3` image and an engine built for sm_121 — and a 32 Gi-class memory limit, so it competes for the same §9 slot as vLLM.
-- **Guardrails / RAG (module 05)**: rerankers and embedding models are natural Triton tenants next to vLLM; on one Spark that means a bigger `serving-budget` or a smaller engine.
+- **TensorRT-LLM backend (modules 03–06)**: the same Deployment with the `-trtllm-python-py3` image and an engine built for sm_121 — and a 32 Gi-class memory limit, so it counts as one of the two engines `serving-budget` holds side by side (Step 20 §9).
+- **Guardrails / RAG (module 05)**: rerankers and embedding models are natural Triton tenants next to vLLM; on one Spark they fit `serving-budget` beside one or two engines, as long as the util sum stays ≲ 0.70.
 - **Gateway (Step 11 §5.9)**: Traefik inside llms routes gRPC to Triton with a `GRPCRoute`.
 
 ---
@@ -134,12 +134,12 @@ cd "02-Kubernetes/lab"
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 ```
 
-### 5.1 Make room, then deploy
+### 5.1 Deploy
+
+vLLM can stay running: both fit `serving-budget` (§3.4).
 
 ```bash
-# park vLLM (Step 20 §9) — KEDA-safe
-kubectl --context llms -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite \
-  || kubectl --context llms -n llm-serving scale deploy vllm --replicas=0
+kubectl --context llms -n llm-serving describe resourcequota serving-budget | grep -E 'requests.cpu|limits.memory|gpu'
 kubectl --context llms apply -k manifests/llms/90-serving/triton
 kubectl --context llms -n llm-serving logs deploy/triton -c layout
 kubectl --context llms -n llm-serving rollout status deploy/triton --timeout=15m     # first pull ≈ 15 GB
@@ -158,7 +158,7 @@ I… Started HTTPService at 0.0.0.0:8000
 I… Started Metrics Service at 0.0.0.0:8002
 ```
 
-If the rollout never starts, look for `exceeded quota: serving-budget` in `kubectl --context llms -n llm-serving get events` — vLLM is still there.
+If the rollout never starts, look for `exceeded quota: serving-budget` in `kubectl --context llms -n llm-serving get events` — other engines hold more than ~65 Gi of the 80 (vLLM + P/D, for example); park one (Step 20 §9). With two 32 Gi engines up, Triton itself still fits (78.4 Gi) but the perf Job in §5.3 does not.
 
 ### 5.2 Talk to it
 
@@ -236,8 +236,6 @@ Compare p99 latency between the two: the difference is the gateway hop (laptop �
 
 ```bash
 kubectl --context llms delete -k manifests/llms/90-serving/triton
-kubectl --context llms -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas- \
-  || kubectl --context llms -n llm-serving scale deploy vllm --replicas=1
 ```
 
 ---
@@ -251,7 +249,7 @@ kubectl --context llms -n llm-serving annotate scaledobject vllm autoscaling.ked
 | inference | 2 scores returned for 2 inputs |
 | average scorer batch size under load | > 1 (typically several), same from `/metrics` and from the root's Prometheus |
 | `nvidia-smi` on the Spark | Triton Python stub listed as a GPU process, in the cgroup of the root pod |
-| `serving-budget` | Triton fits only with vLLM parked |
+| `serving-budget` | Triton and vLLM both counted, within 10 CPU · 80 Gi · 8 |
 
 ---
 
@@ -259,7 +257,7 @@ kubectl --context llms -n llm-serving annotate scaledobject vllm autoscaling.ked
 
 | Symptom | Cause | Diagnose | Fix |
 |---|---|---|---|
-| Deployment 0/1, `exceeded quota: serving-budget` | vLLM (or SGLang/KServe) still in `llm-serving` | `kubectl --context llms -n llm-serving describe resourcequota serving-budget` | park the engine (Step 20 §9) |
+| Deployment 0/1, `exceeded quota: serving-budget` | other engines hold most of `llm-serving` (vLLM + P/D, or two 32 Gi engines for the perf Job) | `kubectl --context llms -n llm-serving describe resourcequota serving-budget` | park one engine (Step 20 §9) |
 | `failed to load 'scorer' … ModuleNotFoundError: torch` | image without PyTorch | model load log | `-pyt-python-py3` image (lab default). The code falls back to CPU otherwise |
 | model `UNAVAILABLE: Invalid argument: … dims` | config dims don't match the tensors the model returns | `/v2/models/<m>/config` | fix `config.pbtxt`. Remember `max_batch_size > 0` adds an implicit batch dim |
 | ensemble error `unable to find … output` | step `output_map` key mismatch | `pipeline/config.pbtxt` | the map key is the *model's* tensor name, the value is the ensemble-internal name |
@@ -277,7 +275,7 @@ kubectl --context llms -n llm-serving annotate scaledobject vllm autoscaling.ked
 |---|---|
 | Python toy models | TensorRT engines, ONNX, TensorRT-LLM, FIL for trees |
 | ConfigMap repository | S3/GCS repository, `--model-control-mode=explicit` + load API from CI |
-| 1 pod, one slice, one engine at a time in `llm-serving` | replicas behind the gateway, sized per pool. KServe `InferenceService` with the Triton runtime (Step 22). NVIDIA NIM containers package Triton/TRT-LLM per model |
+| 1 pod, one slice, next to one LLM engine in `llm-serving` | replicas behind the gateway, sized per pool. KServe `InferenceService` with the Triton runtime (Step 22). NVIDIA NIM containers package Triton/TRT-LLM per model |
 | manual perf_analyzer | Model Analyzer sweeps (instances × batch sizes × precisions) in CI |
 
 ---

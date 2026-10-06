@@ -3,7 +3,7 @@
 Everything the 28 steps of the [step-by-step guide](../00-kubernetes-step-by-step-guide.md) teach, as manifests, scripts and drills. The [01-Ansible lab](../../01-Ansible/lab/README.md) builds the base on one DGX Spark (a second Spark is optional):
 
 - a **root cluster** with kubeadm — dgx-spark-1 is control plane *and* worker — with Cilium, MetalLB and the GPU Operator (15 time-slices), and
-- two **vClusters** inside it ([Step 04](../04-nested-clusters-with-vcluster.md)): `dev-lab` (2 CPU · 8 Gi · 2 slices) and `llms` (4 CPU · 48 Gi · 8 slices).
+- two **vClusters** inside it ([Step 04](../04-nested-clusters-with-vcluster.md)): `dev-lab` (2 CPU · 8 Gi · 2 slices) and `llms` (12 CPU · 88 Gi · 11 slices); the root keeps 3 CPU · ~10 GiB · 2 slices for its platform.
 
 This directory holds their definitions and everything that runs on them. Every code block in the steps is taken from here.
 
@@ -81,7 +81,7 @@ flowchart LR
     subgraph VL["vc-llms"]
       LV["vCluster llms · API .112<br/>llm-serving · batch · Traefik .115"]
     end
-    GPU["GB10 → 15 time-slices<br/>root 5 · dev-lab 2 · llms 8"]
+    GPU["GB10 → 15 time-slices<br/>root 2 · dev-lab 2 · llms 11"]
   end
   subgraph S2["dgx-spark-2 · 192.168.0.101 · optional root worker"]
     G2["GB10 → 15 slices"]
