@@ -3,3 +3,14 @@ kind: Kustomization
 resources:
   - namespaces.yaml
   - ../../common/priorityclasses
+patches:
+  # No default PriorityClass on the ROOT. A pod a vCluster creates before it has
+  # its own default (its CoreDNS, the first add-ons) arrives here with
+  # 'priority: 0' and no class; with a root globalDefault the priority admission
+  # plugin computes 20000 instead and rejects the pod, so the syncer can never
+  # create it. Inside the vClusters spark-interactive stays the default.
+  - target: {kind: PriorityClass, name: spark-interactive}
+    patch: |-
+      - op: replace
+        path: /globalDefault
+        value: false

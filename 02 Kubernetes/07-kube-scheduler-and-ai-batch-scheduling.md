@@ -95,13 +95,15 @@ For a GPU pod in `llms/batch` that's three gates, each with its own number:
 |---|---|---|---|
 | `spark-platform` | 100000 | PreemptLowerPriority | monitoring, node-probe, **vCluster control planes** |
 | `spark-serving` | 50000 | PreemptLowerPriority | vLLM, Triton, SGLang (llms) |
-| `spark-interactive` (**globalDefault**) | 20000 | PreemptLowerPriority | notebooks, dev pods |
+| `spark-interactive` (**globalDefault** inside the vClusters) | 20000 | PreemptLowerPriority | notebooks, dev pods |
 | `spark-batch` | 10000 | **Never** | Kueue-admitted training (llms) |
 | `spark-preemptible` | 1000 | **Never** | best-effort experiments, the `filler` demo |
 
 `preemptionPolicy: Never` means *this pod never evicts others*. It can still **be** evicted by higher classes.
 
 The same five classes are created in all three clusters ([`common/priorityclasses`](lab/manifests/common/priorityclasses/priorityclasses.yaml), included by each `00-platform`), so tenants can name them. With `sync.toHost.priorityClasses` on ([`vclusters/*.yaml`](lab/vclusters)), a vCluster's classes are copied to the root under translated names with their values, and the synced pod carries its priority value with it. The root scheduler therefore compares a dev-lab pod, an llms pod and a platform pod **on one ladder**: a `spark-serving` pod in llms can preempt a `spark-preemptible` pod in dev-lab or in `platform-tools`. That's the point of a shared GPU — and the reason tenants must not be able to create PriorityClasses (§7).
+
+**No default class on the root.** [`root/00-platform`](lab/manifests/root/00-platform/kustomization.yaml) patches `globalDefault` off. A pod a vCluster creates before it has its own default (its CoreDNS, the first add-ons) reaches the root as `priority: 0` with no class. With a root default the Priority admission plugin computes 20000, rejects the pod (*"the integer value of priority (0) must not be provided in pod spec"*), and the syncer can never create it: the vCluster's pods stay `Pending` with a `SyncError` event.
 
 The vCluster control planes run at `spark-platform` (`controlPlane.statefulSet.scheduling.priorityClassName`), so no tenant pod can ever preempt the API server it was created through.
 
