@@ -205,7 +205,7 @@ print(f"{f}: {gb:.2f} GB in {dt:.2f}s -> {gb/dt:.2f} GB/s")
 PY
 ```
 
-Run it cold (after dropping caches) and warm. On a UMA machine the warm run is fast because the page cache already holds the weights, **but that cache is now occupying memory the model also needs**. That trade-off is the operational lesson of this volume.
+Run it cold (after dropping caches) and warm. On a UMA machine the warm run is fast because the page cache already holds the weights, **but that cache is now occupying memory the model also needs**. That trade-off is the operational lesson of this step.
 
 ---
 

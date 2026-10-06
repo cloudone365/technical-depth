@@ -348,7 +348,7 @@ On vault01 (admin login):
 ```bash
 vault list auth/approle/role/semaphore/secret-id                    # accessors of the secret_ids in use (note the current one)
 WRAP=$(vault write -wrap-ttl=5m -field=wrapping_token auth/approle/role/semaphore/secret-id \
-  cidr_list=192.168.0.210/32 metadata='{"issued_for":"sema01","by":"vol19"}')   # a NEW secret_id, sealed in a wrapper
+  cidr_list=192.168.0.210/32 metadata='{"issued_for":"sema01","by":"step18"}')   # a NEW secret_id, sealed in a wrapper
 vault write sys/wrapping/lookup token=$WRAP                         # creation_path auth/approle/role/semaphore/secret-id, ttl 5m; contents not revealed
 vault unwrap $WRAP                                                  # once: secret_id + secret_id_accessor
 vault unwrap $WRAP                                                  # again: error: the wrapper is single-use

@@ -106,7 +106,7 @@ Raft is Vault's built-in, replicated storage: no Consul, no external database. E
 | 3 | 2 | 1 | minimum for HA |
 | 5 | 3 | 2 | production for important estates |
 
-`node_id` names the node in the cluster, `cluster_addr` (port 8201) carries Raft replication and request forwarding, and new nodes join with `retry_join` blocks in their `vault.hcl`. Additional nodes belong next to vault01 in the management plane (VMs), **not** on the Sparks, for the reason at the top of this volume. Even a single-node Raft cluster gives you **snapshots** (§3.5), which is the backup unit.
+`node_id` names the node in the cluster, `cluster_addr` (port 8201) carries Raft replication and request forwarding, and new nodes join with `retry_join` blocks in their `vault.hcl`. Additional nodes belong next to vault01 in the management plane (VMs), **not** on the Sparks, for the reason at the top of this step. Even a single-node Raft cluster gives you **snapshots** (§3.5), which is the backup unit.
 
 ### 1.6 Policies: deny by default, paths and capabilities
 

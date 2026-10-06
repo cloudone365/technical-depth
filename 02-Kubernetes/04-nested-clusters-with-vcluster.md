@@ -6,7 +6,7 @@
 |---|---|
 | **You will build** | The lab's shape: a **root** Kubernetes cluster (kubeadm, one node that is master *and* worker) that owns the Spark's hardware, and two **virtual clusters** inside it — `dev-lab` and `llms` — each with its own API server, its own budget and its own tenants |
 | **Hardware** | 1 DGX Spark (a second one later joins the root as a worker) |
-| **Time** | 1 h to build and explore, then it is the stage for every other volume |
+| **Time** | 1 h to build and explore, then it is the stage for every other step |
 | **Risk** | Low. A vCluster can be deleted and recreated in a minute; `01-Ansible playbooks/99-reset-kubernetes.yml` wipes everything |
 | **Lab files** | [`lab/vclusters/`](lab/vclusters), [`lab/manifests/root/05-vclusters/`](lab/manifests/root/05-vclusters), `scripts/install-addons.sh vclusters`, 01-Ansible [`roles/vclusters`](../01-Ansible/lab/roles/vclusters) |
 

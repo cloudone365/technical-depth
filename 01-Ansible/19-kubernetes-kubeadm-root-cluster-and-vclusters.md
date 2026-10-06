@@ -533,7 +533,7 @@ kubectl --context spark-root -n vc-dev-lab get pod web-x-default-x-dev-lab \
 kubectl --context dev-lab delete pod web
 ```
 
-The host copy carries `requests` and `limits` that you never wrote. They come from the root LimitRange `vcluster-defaults` in `vc-dev-lab`, which exists because the root quota caps memory and would otherwise reject the pod. The tenant's cluster has its own API server, but the scheduler, kubelet, containerd and Cilium that ran `web` are the root's, built by this volume. The rest of the 02 lab (tenants, serving, Traefik on `.115`) goes on with `scripts/apply-lab.sh`; see 02-Kubernetes [Step 05](../02-Kubernetes/05-dgx-spark-datacenter-simulation-lab.md).
+The host copy carries `requests` and `limits` that you never wrote. They come from the root LimitRange `vcluster-defaults` in `vc-dev-lab`, which exists because the root quota caps memory and would otherwise reject the pod. The tenant's cluster has its own API server, but the scheduler, kubelet, containerd and Cilium that ran `web` are the root's, built by this step. The rest of the 02 lab (tenants, serving, Traefik on `.115`) goes on with `scripts/apply-lab.sh`; see 02-Kubernetes [Step 05](../02-Kubernetes/05-dgx-spark-datacenter-simulation-lab.md).
 
 ### 4.6 Upgrade the root
 

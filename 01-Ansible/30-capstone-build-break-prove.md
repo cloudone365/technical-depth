@@ -362,9 +362,9 @@ def read(path):
 CHECKS = []
 
 
-def check(vol, title):
+def check(step, title):
     def deco(fn):
-        CHECKS.append((vol, title, fn))
+        CHECKS.append((step, title, fn))
         return fn
     return deco
 
@@ -445,18 +445,18 @@ def main():
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
     results = []
-    for vol, title, fn in CHECKS:
+    for step, title, fn in CHECKS:
         try:
             ok, detail = fn()
         except Exception as e:  # noqa: BLE001 — scorecard must never crash
             ok, detail = False, f"error: {e}"
-        results.append({"volume": vol, "challenge": title, "pass": bool(ok), "evidence": detail})
+        results.append({"step": step, "challenge": title, "pass": bool(ok), "evidence": detail})
     score = sum(r["pass"] for r in results)
     if a.json:
         print(json.dumps({"score": score, "total": len(results), "results": results}, indent=2))
     else:
         for r in results:
-            print(f"[{'PASS' if r['pass'] else 'FAIL'}] Step {r['volume']:<6} {r['challenge']}\n         evidence: {r['evidence']}")
+            print(f"[{'PASS' if r['pass'] else 'FAIL'}] Step {r['step']:<6} {r['challenge']}\n         evidence: {r['evidence']}")
         print(f"\nScore: {score}/{len(results)}")
     raise SystemExit(0 if score == len(results) else 1)
 

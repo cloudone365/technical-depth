@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **You will build** | Proof that you can operate the platform without the volumes open. Twenty timed challenges, each with a goal, constraints, a success check you can run, and a pointer to the volume with the answer |
+| **You will build** | Proof that you can operate the platform without the step documents open. Twenty timed challenges, each with a goal, constraints, a success check you can run, and a pointer to the volume with the answer |
 | **Clusters** | all three. Each exercise says which: `spark-root` (node, platform, budgets), `dev-lab` (tenants, `lab-tools`), `llms` (serving, batch, Traefik, Kueue) |
 | **Hardware** | dgx-spark-1 |
 | **Time** | 6–8 h total. Do 2–3 per session |
@@ -17,9 +17,9 @@
 
 ```mermaid
 flowchart LR
-  R["Read the goal<br/>+ constraints"] --> W["Which cluster?<br/>spark-root · dev-lab · llms"] --> T["Start a timer"] --> D["Do it<br/>(no copy-paste from the volume)"] --> C["Run the success check"]
+  R["Read the goal<br/>+ constraints"] --> W["Which cluster?<br/>spark-root · dev-lab · llms"] --> T["Start a timer"] --> D["Do it<br/>(no copy-paste from the step documents)"] --> C["Run the success check"]
   C -->|pass| L["Log time + first<br/>useful command"]
-  C -->|fail| H["Hint = the volume §<br/>then retry"] --> D
+  C -->|fail| H["Hint = the step's §<br/>then retry"] --> D
   classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
   classDef gpu fill:#76b900,stroke:#3d6000,color:#000
   classDef tenant fill:#eaeef2,stroke:#57606a,color:#000
