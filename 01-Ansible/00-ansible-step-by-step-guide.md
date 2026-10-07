@@ -152,6 +152,7 @@ Work through Chapter 04 from top to bottom (MacBook, sema01 and the Semaphore UI
    scp vault01:~/vault-ca.crt .cache/vault-ca.crt                 # vault01's TLS certificate (SSH names vault01/sema01: Chapter 04 §2)
    ansible-playbook playbooks/04.1-semaphore-target.yml -K         # svc-ansible, NOPASSWD sudo, trust vault01's CA
    ```
+   If anything that talks to vault01 answers `{"errors":["Vault is sealed"]}`, vault01 has restarted: on vault01 run `vault operator unseal` twice, with two different unseal keys, until `vault status` shows `Sealed false` (Chapter 04 §2).
 2. **On sema01**, build the lab's Semaphore image and state volume from [`lab/semaphore/`](lab/semaphore/) (Chapter 04 §4).
 3. **In Semaphore**, create project `spark-lab`: repository, File inventory `01-Ansible/lab/inventory/hosts.yml`, variable group `vault-approle`, template `04.2 Ping`. Its first run proves the certificate chain (Chapter 04 §5).
 4. **First contact, custom facts and OS baseline** (Chapter 04 §6). **Semaphore:** `04.2 Ping` again; the log shows play 1 (*Get an SSH certificate from Vault*), then *Connectivity and identity check* on `dgx-spark-1`. Try the ad-hoc commands of §6.1 from the MacBook: Semaphore runs playbooks, not ad-hoc commands. Then create the template `04.3 Baseline` and run it twice (Chapter 04 §6.2–6.3).

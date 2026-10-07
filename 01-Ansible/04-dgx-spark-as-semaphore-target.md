@@ -86,6 +86,18 @@ curl -s --cacert .cache/vault-ca.crt https://192.168.0.211:8200/v1/ssh-client-si
 ansible -m ping dgx-spark-1 -K                              # expect: pong (as dgxadmin, your key)
 ```
 
+`{"errors":["Vault is sealed"]}` instead of `ssh-rsa …`? The network and TLS are fine (you got an answer from Vault), but Vault is locked. It seals itself every time vault01 restarts and stays sealed until you unseal it with two of the three unseal keys from Chapter 01 §3.4:
+
+```bash
+ssh vault01                                                  # or: ssh vault01@192.168.0.211
+vault status                                                 # Sealed true, Unseal Progress 0/2
+vault operator unseal                                        # unseal key 1
+vault operator unseal                                        # unseal key 2 (a different one)
+vault status                                                 # Sealed false
+```
+
+Then repeat the `curl`. While Vault is sealed, every Semaphore task fails at play 1 (*Get an SSH certificate from Vault*), so after any vault01 reboot, unseal it first. Auto-unseal removes this step (Chapter 17 §5).
+
 No `pong`? Then the Spark doesn't take your key as `dgxadmin` on 192.168.0.100 yet: that is the end state of [Chapter 03](03-bare-metal-provisioning-and-bootstrap.md) (bootstrap for a fresh DGX OS, `ssh-copy-id` for an installed one).
 
 ---
@@ -845,6 +857,7 @@ State then goes to the MacBook's `.cache/` instead of sema01's volume. After the
 |---|---|---|
 | `zsh: unknown group`, `No such file or directory` for words from a comment, or a `quote>` prompt | zsh on macOS doesn't treat `#` as a comment | `setopt interactivecomments` (and add it to `~/.zshrc`), §2 |
 | `ssh: Could not resolve hostname vault01` / wrong user on vault01 or sema01 | no SSH names on the MacBook | `~/.ssh/config` entries, §2 |
+| `{"errors":["Vault is sealed"]}` from `curl`, or play 1 fails with `Vault is sealed` / HTTP 503 | vault01 restarted; Vault seals itself on every restart | on vault01: `vault operator unseal` twice, with two different unseal keys (Chapter 01 §3.4); `vault status` shows `Sealed false` (§2, Verify 2) |
 | `Permission denied (publickey)` for svc-ansible | sshd doesn't trust vault01's CA, or the certificate expired | §3.2 fingerprints; run the task again for a fresh certificate; check clocks (Chapter 01 §10.2) |
 | A long task fails after a reboot or a long pause: `Permission denied` / `UNREACHABLE` halfway | the 15-minute certificate expired; the open SSH connection kept working, the new one after the reboot is refused | template extra variable `vault_ssh_cert_ttl: 1h` (the vault01 role's `max_ttl`) |
 | Play 1 skipped and then `Permission denied` for **dgxadmin** | the template has no variable group, so the lab thinks it's a MacBook run | attach `vault-approle` to the template |
