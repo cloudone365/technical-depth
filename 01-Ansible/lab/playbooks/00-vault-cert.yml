@@ -19,9 +19,11 @@
       ansible.builtin.assert:
         that: (ansible_config_file | default('')) is search('01-Ansible/lab/ansible\\.cfg$|/lab/ansible\\.cfg$')
         fail_msg: >-
-          Ansible loaded '{{ ansible_config_file | default('no config file') }}' instead of 01-Ansible/lab/ansible.cfg.
-          MacBook: run from the 01-Ansible/lab folder. Semaphore: the container lacks ANSIBLE_CONFIG —
+          Ansible loaded '{{ ansible_config_file | default('no config file') }}' instead of 01-Ansible/lab/ansible.cfg
+          (ANSIBLE_CONFIG='{{ lookup('ansible.builtin.env', 'ANSIBLE_CONFIG') }}').
+          MacBook: run from the 01-Ansible/lab folder. Semaphore with ANSIBLE_CONFIG empty: the container lacks it —
           docker-compose.override.yml must be in ~/semaphore on sema01, then docker compose up -d --build (Chapter 04 §4).
+          Semaphore with ANSIBLE_CONFIG set: see Chapter 04 §5.6.
         quiet: true
 
     - name: Semaphore run (vault01 AppRole attached)
