@@ -226,11 +226,16 @@ Design choices:
 
 Your NGC key lives in **vault01** at `kv/spark-lab/ngc` ([Chapter 04 §7](04-dgx-spark-as-semaphore-target.md): `17.1-vault.yml` from the MacBook, then `vault kv put kv/spark-lab/ngc api_key=nvapi-…`). The playbook never sees it in the repository or on a command line:
 
-- **Semaphore (normal):** run the template **`11.1 Containers`**. With `vault_lab_secrets_enabled: true` in the variable group, play 1 (`00-vault-cert.yml`) reads `kv/spark-lab/ngc` with its AppRole token (policy `spark-lab-read`) into `hostvars['localhost'].vault_lab_secrets`, and `11.1-containers.yml` passes it to `container_runtime_ngc_api_key` under `no_log`. The task log shows the NGC login task, never the key.
+- **Semaphore UI (normal):** run the template **`11.1 Containers`**. With `vault_lab_secrets_enabled: true` in the variable group, play 1 (`00-vault-cert.yml`) reads `kv/spark-lab/ngc` with its AppRole token (policy `spark-lab-read`) into `hostvars['localhost'].vault_lab_secrets`, and `11.1-containers.yml` passes it to `container_runtime_ngc_api_key` under `no_log`. The task log shows the NGC login task, never the key.
 - **Break-glass (MacBook):** there's no AppRole on the MacBook, so play 1 is skipped. Pass the key yourself, read with your own vault01 login:
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
+```
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=$PWD/.cache/vault-ca.crt   # vault login first
 ansible-playbook playbooks/11.1-containers.yml -l dgx-spark-1,localhost -K \
   -e ngc_api_key="$(vault kv get -field=api_key kv/spark-lab/ngc)"
@@ -241,6 +246,7 @@ ansible-playbook playbooks/11.1-containers.yml -l dgx-spark-1,localhost -K \
 Check the result:
 
 ```bash
+# ▶ MacBook · any folder
 ssh dgxadmin@192.168.0.100 'docker info --format "{{.DefaultRuntime}} {{json .Runtimes}}"; nvidia-ctk cdi list'
 # nvidia {"nvidia":{"path":"nvidia-container-runtime"},"runc":{...}}
 # INFO[0000] Found 2 CDI devices
@@ -385,9 +391,10 @@ int main() {
           - "{{ cuda_smoke_torch.stdout | default('pytorch test skipped') }}"
 ```
 
-Semaphore template `11.2 CUDA smoke`, or break-glass:
+**Semaphore UI:** run the template `11.2 CUDA smoke`, or break-glass from the MacBook:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/11.2-cuda-smoke.yml -l dgx-spark-1,localhost -K
 ```
 
@@ -410,6 +417,7 @@ The last task runs a bf16 matmul in `nvcr.io/nvidia/pytorch:25.11-py3` and print
 ### 3.4 Arm64 image hygiene
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 check_arm64() { docker manifest inspect "$1" | jq -r '.manifests[]?.platform | "\(.os)/\(.architecture)"' | sort -u; }
 check_arm64 nvcr.io/nvidia/pytorch:25.11-py3
 check_arm64 nvcr.io/nvidia/vllm:26.01-py3
@@ -420,6 +428,7 @@ Build your own images natively on the Spark, or with `docker buildx --platform l
 ### 3.5 Keeping large images under control
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 docker system df
 docker image prune -a --filter "until=720h"   # images unused for 30 days
 ```
@@ -454,7 +463,8 @@ Automate it with a weekly systemd timer from Ansible (exercise), but **never** p
 ## 6. Validation
 
 ```bash
-# MacBook (as dgxadmin); in Semaphore, run `11.2 CUDA smoke` instead of the second line
+# ▶ MacBook · 01-Ansible/lab (venv active)
+# as dgxadmin; in Semaphore, run `11.2 CUDA smoke` instead of the second line
 ansible dgx-spark-1 -b -K -m command -a "docker run --rm --device nvidia.com/gpu=all nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04 nvidia-smi -L"
 ansible-playbook playbooks/11.2-cuda-smoke.yml -l dgx-spark-1,localhost -K
 ```

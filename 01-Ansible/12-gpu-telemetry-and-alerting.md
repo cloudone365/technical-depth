@@ -359,10 +359,15 @@ groups:
 
 ## 4. Hands-on
 
-Run the Semaphore template **`12.1 Telemetry`** (break-glass: `ansible-playbook playbooks/12.1-telemetry.yml -l dgx-spark-1,localhost -K`), then check from the MacBook:
+**Semaphore UI:** run the template **`12.1 Telemetry`** (break-glass: `ansible-playbook playbooks/12.1-telemetry.yml -l dgx-spark-1,localhost -K`), then check from the MacBook:
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
+```
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 # node side
 ssh dgxadmin@192.168.0.100 'cat /var/lib/prometheus/node-exporter/spark_gpu.prom; curl -s localhost:9100/metrics | grep ^spark_ | head'
 # stack
@@ -389,6 +394,7 @@ Check them in Prometheus (Alerts tab) and Alertmanager (`:9093`). Wire a receive
 DCGM (Data Center GPU Manager) is NVIDIA's data-centre telemetry, health and diagnostics stack. `dcgm-exporter` is its Prometheus exporter. On DGX/HGX it's the standard. On a Spark, first check whether your DGX OS release supports it on GB10:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo apt install datacenter-gpu-manager-4-core 2>/dev/null || apt-cache search datacenter-gpu-manager
 sudo systemctl start nvidia-dcgm 2>/dev/null
 dcgmi discovery -l          # does it list the GB10?
@@ -398,7 +404,12 @@ dcgmi dmon -e 150,155,203 -c 5   # temp, power, util
 If the GPU is listed, enable the exporter container:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/12.1-telemetry.yml -l dgx-spark-1,localhost -K -e gpu_telemetry_dcgm_enabled=true   # or template `12.1 Telemetry` + extra variable
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 curl -s localhost:9400/metrics | grep -E '^DCGM_FI_DEV_(GPU_TEMP|POWER_USAGE|GPU_UTIL)'
 ```
 

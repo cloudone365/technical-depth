@@ -229,9 +229,12 @@ Key automation moves:
 
 ### 4.1 The operator on the root
 
-The role runs on the **controller**: in this lab the Semaphore container on sema01, which has `helm`, `kubectl` and `kubernetes.core` in its image and reads the kubeconfig from its state volume (Chapter 19 §2.5). Run the template **`20.1 GPU Operator`** (break-glass: `ansible-playbook playbooks/20.1-gpu-operator.yml` from the MacBook, against its own `.cache/` kubeconfig). The play only talks to the Kubernetes API, so it needs no SSH certificate. Then check from the MacBook:
+The role runs on the **controller**: in this lab the Semaphore container on sema01, which has `helm`, `kubectl` and `kubernetes.core` in its image and reads the kubeconfig from its state volume (Chapter 19 §2.5).
+
+**Semaphore UI:** run the template **`20.1 GPU Operator`** (break-glass: `ansible-playbook playbooks/20.1-gpu-operator.yml` from the MacBook, against its own `.cache/` kubeconfig). The play only talks to the Kubernetes API, so it needs no SSH certificate. Then check from the MacBook:
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
 tools/fetch-kubeconfig.sh sema01                     # same contexts as after 19.1; refresh after every cluster task
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
@@ -246,9 +249,10 @@ Expected: allocatable `"15"`, `nvidia.com/gpu.replicas: "15"` and a `nvidia.com/
 
 ### 4.2 Fifteen slices, three budgets
 
-Build the vClusters if you haven't (template `20.2 vClusters`, then `tools/fetch-kubeconfig.sh sema01` for the `dev-lab` and `llms` contexts). First, what a tenant sees:
+Build the vClusters if you haven't (**Semaphore UI:** template `20.2 vClusters`, then `tools/fetch-kubeconfig.sh sema01` on the MacBook for the `dev-lab` and `llms` contexts). First, what a tenant sees:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context llms get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'   # 15
 kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget | grep -E 'nvidia|memory'
 ```
@@ -278,6 +282,8 @@ spec:
 ```
 
 ```bash
+# ▶ MacBook · any folder
+# in the folder where you saved ts-demo.yaml
 kubectl --context llms apply -f ts-demo.yaml
 kubectl --context llms get pods -l app=ts-demo -o wide                # 11 Running on dgx-spark-1
 kubectl --context llms scale deploy ts-demo --replicas=12
@@ -292,6 +298,8 @@ The 12th pod is `Pending` **inside** `llms`, but no scheduler ever looked at it.
 Same exercise in `dev-lab`: the 3rd GPU pod stays Pending. And on the root, `platform-tools` or `default` can still start 2 GPU pods, because the root namespaces have no slice quota and simply take what the vClusters don't hold. Clean up:
 
 ```bash
+# ▶ MacBook · any folder
+# in the folder where you saved ts-demo.yaml
 kubectl --context llms delete -f ts-demo.yaml
 ```
 

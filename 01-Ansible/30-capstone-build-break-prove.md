@@ -290,6 +290,7 @@ if __name__ == "__main__":
 ```
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 scp tools/spark_invariants.py dgxadmin@192.168.0.101:
 ssh dgxadmin@192.168.0.101 'python3 spark_invariants.py --peer 192.168.100.11'
 ```
@@ -306,9 +307,13 @@ The scorecard reads one state folder: `$SPARK_LAB_CACHE` if set, else `lab/.cach
 So grade on sema01 against the state volume, after copying in the two MacBook-only files:
 
 ```bash
-# MacBook
+# ▶ MacBook · 01-Ansible/lab (venv active)
 scp .cache/bench.csv sema01:/tmp/ && ssh sema01 'sudo install -o 1001 -m 0600 /tmp/bench.csv /opt/spark-lab/cache/ && rm /tmp/bench.csv'
-# sema01 (vault-ca.crt is the copy next to the Chapter 01 compose file; the repository clone is from Chapter 04 §4)
+```
+
+```bash
+# ▶ sema01 (ssh sema01)
+# vault-ca.crt is the copy next to the Chapter 01 compose file; the repository clone is from Chapter 04 §4
 sudo install -o 1001 -m 0644 ~/semaphore/vault-ca.crt /opt/spark-lab/cache/vault-ca.crt
 sudo SPARK_LAB_CACHE=/opt/spark-lab/cache python3 ~/technical-depth/"01-Ansible/lab/tools/capstone_scorecard.py"
 ```
@@ -503,16 +508,24 @@ Complete them in order. "Evidence" is what the scorecard or a reviewer checks.
 
 ## 3. Chaos drill
 
-Run the Semaphore template `30.2 Chaos` with `--limit dgx-spark-2,localhost` (or `dgx-spark-1,localhost` with one Spark) and extra variable `chaos_fault: random`. Break-glass equivalent:
+**Semaphore UI:** run the template `30.2 Chaos` with `--limit dgx-spark-2,localhost` (or `dgx-spark-1,localhost` with one Spark) and extra variable `chaos_fault: random`. Break-glass equivalent:
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
 ansible-playbook playbooks/30.2-chaos.yml -l dgx-spark-2,localhost -K -e chaos_fault=random
 # Now find it using ONLY: 30.1 Validate, tools/drift-cycle.sh, Grafana/alerts, Loki, spark_invariants.py, 10.1 Driver audit
 # Then fix it with the normal templates and prove it with all three angles.
-sudo base64 -d /opt/spark-lab/cache/chaos-dgx-spark-2.sealed   # on sema01; reveal AFTER you've fixed it
-#   (break-glass run: base64 -d .cache/chaos-dgx-spark-2.sealed on the MacBook)
 ```
+
+Reveal the fault only AFTER you've fixed it:
+
+```bash
+# ▶ sema01 (ssh sema01)
+sudo base64 -d /opt/spark-lab/cache/chaos-dgx-spark-2.sealed   # reveal AFTER you've fixed it
+```
+
+(After a break-glass run the sealed file is on the MacBook instead: `base64 -d .cache/chaos-dgx-spark-2.sealed` in `01-Ansible/lab`.)
 
 <details>
 <summary><b>Fault catalogue (spoilers: open after the drill)</b></summary>
@@ -535,7 +548,7 @@ The lesson from fault 3 is why the lab ships a **staleness** alert, `SparkGPUMet
 
 ## 4. Full rebuild and final proof
 
-In Semaphore, one template after the other, each ending in `failed=0`:
+**Semaphore UI:** one template after the other, each ending in `failed=0`:
 
 1. `site` (everything, idempotently), then `site` again: `changed=0` across the board.
 2. `30.1 Validate`, and on the MacBook `tools/drift-cycle.sh; echo "drift exit=$?"` → 0.
@@ -546,6 +559,7 @@ In Semaphore, one template after the other, each ending in `failed=0`:
 `site.yml` leaves out `03.1-bootstrap.yml`, `04.1-semaphore-target.yml` and `17.1-vault.yml` on purpose: they run from the MacBook, before Semaphore can log in or with an admin token Semaphore must never hold. The break-glass form of the same proof:
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
 ansible-playbook playbooks/site.yml -l dgx-spark-1,localhost -K                 # everything, idempotently
 ansible-playbook playbooks/site.yml -l dgx-spark-1,localhost -K                 # second run: changed=0 across the board

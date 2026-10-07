@@ -37,7 +37,12 @@ With **pipelining** on (our `ansible.cfg`), steps 3–4 are a single SSH round-t
 These are interactive experiments, so run them from your **MacBook** (the break-glass login: `dgxadmin`, your key). In Semaphore you'd get the same `-vvvv` output by adding `-vvvv` to a template's CLI args, but you can't then `ssh` in as `svc-ansible` to read the payload: only Semaphore holds its certificate, and that's the point.
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
+```
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible dgx-spark-1 -m ping -vvvv 2>&1 | grep -E 'ESTABLISH|SSH: EXEC|PUT|<dgx-spark-1> (EXEC|SSH)'
 ```
 
@@ -46,11 +51,19 @@ Look for `EXEC ... sudo -H -S -n -u root /bin/sh -c 'echo BECOME-SUCCESS-... ; /
 Now switch pipelining off and keep the payload on the Spark so you can read it:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ANSIBLE_PIPELINING=0 ANSIBLE_KEEP_REMOTE_FILES=1 \
   ansible dgx-spark-1 -m ansible.builtin.stat -a path=/etc/dgx-release -vvv 2>&1 | grep -o '/home/dgxadmin/.ansible/tmp/[^ /]*' | head -1
 # → /home/dgxadmin/.ansible/tmp/ansible-tmp-1727630000.12-4242-1234
+```
 
+```bash
+# ▶ MacBook · any folder
 ssh dgxadmin@192.168.0.100
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 cd ~/.ansible/tmp/ansible-tmp-*/
 python3 AnsiballZ_stat.py explode        # unpacks the module into ./debug_dir
 ls debug_dir/ansible/modules/            # stat.py — the real module source
@@ -208,6 +221,7 @@ c                           # continue
 `ansible-console` gives you a REPL against the inventory:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-console spark --become
 spark (2)[f:10]# nvidia-smi -L
 spark (2)[f:10]# setup filter=ansible_local

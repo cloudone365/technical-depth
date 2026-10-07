@@ -94,7 +94,12 @@ keyed_groups:
 Do this from your MacBook. Semaphore's inventory (Chapter 04 §5.5) is the **file** `01-Ansible/lab/inventory/hosts.yml`, not the directory, so `zz-constructed.yml` isn't loaded there and these fact-driven groups don't exist in Semaphore tasks; the static and functional groups do. On the MacBook, `ansible.cfg` loads the whole `inventory/` directory and the fact cache is your own `.cache/facts`:
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
+```
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/04.2-ping.yml -l dgx-spark-1,localhost -K                   # populates .cache/facts/*
 ansible-playbook playbooks/04.3-baseline.yml -l dgx-spark-1,localhost -K --tags facts  # adds ansible_local.spark
 ansible-inventory --graph
@@ -113,6 +118,7 @@ Output (example):
 Now **target by state** with inventory patterns:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 # only healthy GPU nodes that are Kubernetes workers and NOT under memory pressure
 # (30.1-validate targets the Sparks themselves; 19.1/20.1/20.2 run from localhost against the API)
 ansible-playbook playbooks/30.1-validate.yml -l 'gpu_ready:&k8s_workers:!uma_pressure'
@@ -260,11 +266,18 @@ keyed_groups:
     prefix: seen_on
 ```
 
-Discovery is an interactive tool, not something Semaphore runs: the lab's Semaphore image has no Avahi, and multicast doesn't cross into a container's bridge network anyway. On a Linux machine on the Sparks' LAN:
+Discovery is an interactive tool, not something Semaphore runs: the lab's Semaphore image has no Avahi, and multicast doesn't cross into a container's bridge network anyway. Take the raw view on a Spark (or any Linux machine on the Sparks' LAN):
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo apt install avahi-utils                         # the machine you run the discovery from
 avahi-browse -p -r -t _ssh._tcp | grep '^='          # raw view
+```
+
+Then build the inventory from it. The plugin runs `avahi-browse` on the machine that runs `ansible-inventory`, so on the MacBook point it at a capture with `from_file:` (next paragraph):
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-inventory -i inventory-examples/spark.mdns.yml --graph
 ansible-inventory -i inventory -i inventory-examples/spark.mdns.yml --graph   # merged with static
 ```
@@ -283,6 +296,7 @@ The plugin accepts `from_file:` so you can unit-test it against a saved capture 
 **Discovery vs. source of truth.** Use discovery to *find* what's there, and compare it against what *should* be there:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 comm -3 <(ansible-inventory -i inventory --list | jq -r '.spark.hosts[]' | sort) \
         <(ansible-inventory -i inventory-examples/spark.mdns.yml --list | jq -r '.spark.hosts[]' | sort)
 # column 1 = declared but not seen (down?), column 2 = seen but not declared (rogue/new)
@@ -291,6 +305,7 @@ comm -3 <(ansible-inventory -i inventory --list | jq -r '.spark.hosts[]' | sort)
 ### 3.3 NetBox as source of truth (optional, runs on the Spark)
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 git clone -b release https://github.com/netbox-community/netbox-docker.git ~/netbox-docker
 cd ~/netbox-docker
 cat > docker-compose.override.yml <<'EOF'
@@ -364,6 +379,7 @@ compose:
 ```
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 NETBOX_TOKEN=... ansible-inventory -i inventory-examples/netbox.yml --graph
 ```
 

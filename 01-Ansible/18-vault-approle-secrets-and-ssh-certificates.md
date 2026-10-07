@@ -117,6 +117,7 @@ and [`group_vars/spark.yml`](lab/inventory/group_vars/spark.yml) switches the lo
 Dynamic secrets are created on demand, unique per consumer and short-lived, so a leak has a small blast radius and a clear audit trail. The SSH CA is the dynamic secret this lab is built around. The lab has no database, but the shape of a leased dynamic secret is worth knowing:
 
 ```bash
+# ▶ vault01 (ssh vault01)
 # ILLUSTRATIVE — not in this lab: a database engine issuing a per-run PostgreSQL user
 vault secrets enable database
 vault write database/config/slurmdb plugin_name=postgresql-database-plugin \
@@ -262,21 +263,29 @@ PLAY RECAP  dgx-spark-1 : … failed=0   localhost : … failed=0
 **Verify on all three systems:**
 
 ```bash
-# vault01: the AppRole read the NGC key (path and role in clear, values HMAC'd)
+# ▶ vault01 (ssh vault01)
+# the AppRole read the NGC key (path and role in clear, values HMAC'd)
 sudo jq -c 'select(.type=="response" and .request.path=="kv/data/spark-lab/ngc") | {time, role: .auth.metadata.role_name, policies: .auth.policies}' \
   /var/log/vault_audit.log | tail -1                     # role "semaphore", policies [default semaphore-ssh spark-lab-read]
+```
 
-# dgx-spark-1: logged in by certificate, and Docker holds an nvcr.io login
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+# logged in by certificate, and Docker holds an nvcr.io login
 sudo journalctl -u ssh --since "15 min ago" | grep 'svc-ansible.*CERT'   # Accepted publickey for svc-ansible … ED25519-CERT
 sudo jq '.auths | keys' /root/.docker/config.json                        # ["nvcr.io"]
+```
 
-# sema01 (in ~/semaphore): the certificate play 1 wrote
+```bash
+# ▶ sema01 (ssh sema01)
+# in ~/semaphore: the certificate play 1 wrote
 docker compose exec semaphore ssh-keygen -L -f /tmp/lab_ssh/id_ed25519-cert.pub | grep -E 'Key ID|Valid|Principals' -A1
 ```
 
 **Now try it from the MacBook** (break-glass path) to see the boundary:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 cd ~/technical-depth/"01-Ansible/lab"
 ansible-playbook playbooks/18.1-vault-integration.yml -l dgx-spark-1,localhost -K
 # play 1 is skipped (no vault_role_id), then the assert stops with "Run it from Semaphore …"
@@ -320,6 +329,7 @@ exec vault kv get -field=password kv/spark-lab/ansible-vault
 It runs **on the MacBook**, with your own admin login. Store the password once, then encrypt the NGC key as a fallback variable (`11.1-containers.yml` takes `ngc_api_key` first, then the vault01 value):
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 cd ~/technical-depth/"01-Ansible/lab"
 export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=$PWD/.cache/vault-ca.crt
 vault login                                                                   # your admin login; the token lands in ~/.vault-token
@@ -346,6 +356,7 @@ Uncommenting `vault_password_file = ./tools/vault-pass.sh` in [`ansible.cfg`](la
 On vault01 (admin login):
 
 ```bash
+# ▶ vault01 (ssh vault01)
 vault list auth/approle/role/semaphore/secret-id                    # accessors of the secret_ids in use (note the current one)
 WRAP=$(vault write -wrap-ttl=5m -field=wrapping_token auth/approle/role/semaphore/secret-id \
   cidr_list=192.168.0.210/32 metadata='{"issued_for":"sema01","by":"step18"}')   # a NEW secret_id, sealed in a wrapper
@@ -359,26 +370,30 @@ What wrapping buys you: the wrapper is **single-use** and **short-lived**, so if
 Prove the CIDR binding (still on vault01, i.e. *not* from 192.168.0.210):
 
 ```bash
+# ▶ vault01 (ssh vault01)
 vault write auth/approle/login role_id=$(vault read -field=role_id auth/approle/role/semaphore/role-id) \
   secret_id=<the new secret_id>                                     # fails: source address not allowed by the secret_id's CIDR list
 vault write auth/approle/role/semaphore/secret-id-accessor/lookup \
   secret_id_accessor=<the new accessor>                             # cidr_list [192.168.0.210/32], metadata, creation_time
 ```
 
-In Semaphore, paste the new secret_id into the `vault_secret_id` secret of **both** variable groups that use AppRole `semaphore` (project `lab` from Chapter 01 §8.6 and project `spark-lab`), then run **04.2 Ping** in each: `failed=0`. Only then destroy the old one:
+**Semaphore UI:** paste the new secret_id into the `vault_secret_id` secret of **both** variable groups that use AppRole `semaphore` (project `lab` from Chapter 01 §8.6 and project `spark-lab`), then run **04.2 Ping** in each: `failed=0`. Only then destroy the old one:
 
 ```bash
+# ▶ vault01 (ssh vault01)
 vault write auth/approle/role/semaphore/secret-id-accessor/destroy secret_id_accessor=<the OLD accessor>
 vault list auth/approle/role/semaphore/secret-id                    # only the new accessor is left
 ```
 
-Run **04.2 Ping** once more. Next steps toward production (role-level, so they affect both projects; plan them): `secret_id_ttl` with a calendar reminder to rotate, `token_bound_cidrs=192.168.0.210/32`, and one AppRole per environment or template class (Chapter 01 §11, Chapter 04 §12).
+**Semaphore UI:** run **04.2 Ping** once more. Next steps toward production (role-level, so they affect both projects; plan them): `secret_id_ttl` with a calendar reminder to rotate, `token_bound_cidrs=192.168.0.210/32`, and one AppRole per environment or template class (Chapter 01 §11, Chapter 04 §12).
 
 ### 3.6 SSH certificates: what's signed, what's refused, what can't be revoked
 
 Inspect a certificate play 1 issued (on sema01, in `~/semaphore`):
 
 ```bash
+# ▶ sema01 (ssh sema01)
+# in ~/semaphore
 docker compose exec semaphore ssh-keygen -L -f /tmp/lab_ssh/id_ed25519-cert.pub
 #   Type: ssh-ed25519-cert-v01@openssh.com user certificate
 #   Key ID: "vault-approle-…"           Vault's default key_id_format (token display name + key hash)
@@ -390,6 +405,8 @@ docker compose exec semaphore ssh-keygen -L -f /tmp/lab_ssh/id_ed25519-cert.pub
 Test the CA by hand on vault01 with [`tools/vault-ssh-cert.sh`](lab/tools/vault-ssh-cert.sh) (needs a `vault login` there and the repository cloned on vault01), or with the commands of Chapter 04 §3.3:
 
 ```bash
+# ▶ vault01 (ssh vault01)
+# in 01-Ansible/lab of the repository clone on vault01
 tools/vault-ssh-cert.sh ~/semaphore_lab svc-ansible                 # signs ~/semaphore_lab.pub, prints the certificate
 ssh -i ~/semaphore_lab -o CertificateFile=~/semaphore_lab-cert.pub svc-ansible@192.168.0.100 'hostname; sudo -n whoami'   # dgx-spark-1, root
 ```
@@ -397,13 +414,14 @@ ssh -i ~/semaphore_lab -o CertificateFile=~/semaphore_lab-cert.pub svc-ansible@1
 Now try what the role must refuse:
 
 ```bash
+# ▶ vault01 (ssh vault01)
 vault write ssh-client-signer/sign/ansible public_key=@$HOME/semaphore_lab.pub valid_principals=root
 # error: root is not a valid value for valid_principals   (allowed_users: svc-ansible)
 vault write ssh-client-signer/sign/ansible public_key=@$HOME/semaphore_lab.pub valid_principals=dgxadmin
 # error as well: the admin account can't be reached with a Vault certificate, by design
 ```
 
-And the expiry test of Chapter 04 §9: 16 minutes after a task, `docker compose exec semaphore ssh -i /tmp/lab_ssh/id_ed25519 svc-ansible@192.168.0.100 true` is refused; the next task run works again. No cleanup, no revocation list.
+And the expiry test of Chapter 04 §9: 16 minutes after a task, `docker compose exec semaphore ssh -i /tmp/lab_ssh/id_ed25519 svc-ansible@192.168.0.100 true` (on sema01, in `~/semaphore`) is refused; the next task run works again. No cleanup, no revocation list.
 
 **Revocation.** A signed certificate can't be recalled by Vault. The controls are the short TTL, a `RevokedKeys` KRL in sshd for an emergency, and CA rotation (re-run `04.1-semaphore-target.yml` after `vault write ssh-client-signer/config/ca generate_signing_key=true`, which invalidates every outstanding certificate at once).
 

@@ -54,6 +54,7 @@ echo "ALL LOCAL CHECKS PASSED"
 ```
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
 tests/run-local-checks.sh
 ```
@@ -97,10 +98,15 @@ The `production` profile is the strictest built-in profile. Every exception in t
 The trick for hardware-dependent code: **capture real command output once from the Spark, commit it as a fixture, and test the parser against it** in CI.
 
 ```bash
-# on a Spark
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+# in 01-Ansible/lab of a repository clone on the Spark (or copy the files to the MacBook's lab/tests/fixtures/ afterwards)
 avahi-browse -p -r -t _ssh._tcp > tests/fixtures/avahi-browse.txt
 ibdev2netdev > tests/fixtures/ibdev2netdev.txt
 nvidia-smi --query-gpu=index,name,temperature.gpu,power.draw,utilization.gpu,memory.used --format=csv > tests/fixtures/smi.csv
+```
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ANSIBLE_STDOUT_CALLBACK=ansible.posix.json ansible-playbook playbooks/26.1-drift-check.yml > tests/fixtures/drift-real.json
 ```
 
@@ -182,7 +188,8 @@ scenario:
 ```
 
 ```bash
-# on dgx-spark-1 (native arm64 container; no emulation)
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+# native arm64 container; no emulation. Start in the folder that holds your repository clone (technical-depth)
 cd "01-Ansible/lab/roles/spark_baseline"
 python3 -m venv ~/.venvs/molecule && . ~/.venvs/molecule/bin/activate
 pip install -r ../../requirements.txt
@@ -265,7 +272,8 @@ jobs:
 ### 4.1 Register the Spark as a self-hosted runner
 
 ```bash
-# on dgx-spark-1, as a non-root user in the docker group
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+# as a non-root user in the docker group
 mkdir ~/actions-runner && cd ~/actions-runner
 # download the linux-arm64 runner from: GitHub repo → Settings → Actions → Runners → New self-hosted runner
 ./config.sh --url https://github.com/cloudone365/technical-depth --token <TOKEN> --labels spark --unattended

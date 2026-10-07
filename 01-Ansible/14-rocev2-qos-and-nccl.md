@@ -151,7 +151,12 @@ flowchart LR
 ```
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
+```
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/14.1-roce-qos.yml -K
 ssh dgxadmin@192.168.0.100 'sudo mlnx_qos -i enp1s0f1np1 | sed -n "1,20p"'
 ```
@@ -283,6 +288,7 @@ NVIDIA's Spark NCCL guide bootstraps over the **management** interface (`NCCL_SO
 ```
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/14.2-nccl-test.yml -K
 ```
 
@@ -339,6 +345,7 @@ The same variables go into vLLM or TRT-LLM multi-node launches. NVIDIA's vLLM Sp
 Counters to watch during a run:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 watch -n1 "ethtool -S enp1s0f1np1 | grep -E 'rx_prio3_(bytes|pause)|tx_prio3_(bytes|pause)|rx_discards|np_cnp_sent|rp_cnp_handled'"
 ```
 

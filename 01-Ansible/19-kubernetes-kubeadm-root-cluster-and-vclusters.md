@@ -215,6 +215,7 @@ mode: iptables
 The lab writes the file on the **controller**. Semaphore's checkout of the repository is temporary, so `lab_cache_dir` points at the state volume (Chapter 04 §4), and the next template run finds the contexts there. The 02-Kubernetes labs run `kubectl` on your MacBook, so after `05` and `06b` copy it over:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 tools/fetch-kubeconfig.sh sema01        # ssh to sema01, docker compose exec … cat, checks for the spark-root context, writes .cache/ (0600)
 ```
 
@@ -426,9 +427,10 @@ Budgets, sync rules and naming are taught in 02-Kubernetes [Chapter 04](../02-Ku
 
 ### 4.1 Build the root cluster
 
-Run the Semaphore template **`19.1 Kubernetes`** (break-glass: `ansible-playbook playbooks/19.1-kubernetes.yml -l dgx-spark-1,localhost -K`). The task log ends with `failed=0` on `dgx-spark-1` and `localhost`. Then, on the MacBook:
+**Semaphore UI:** run the template **`19.1 Kubernetes`** (break-glass, on the MacBook in `01-Ansible/lab`: `ansible-playbook playbooks/19.1-kubernetes.yml -l dgx-spark-1,localhost -K`). The task log ends with `failed=0` on `dgx-spark-1` and `localhost`. Then, on the MacBook:
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
 tools/fetch-kubeconfig.sh sema01
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
@@ -442,7 +444,12 @@ Expected: `dgx-spark-1` `Ready` with role `control-plane`, `ARCH` column `arm64`
 On the Spark itself:
 
 ```bash
+# ▶ MacBook · any folder
 ssh dgxadmin@192.168.0.100
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 ls /etc/kubernetes/manifests                       # etcd.yaml kube-apiserver.yaml kube-controller-manager.yaml kube-scheduler.yaml
 sudo crictl ps --name kube-apiserver               # CRI view, through /etc/crictl.yaml
 sudo ctr namespaces ls                             # k8s.io (kubelet) and moby (Docker): one containerd
@@ -455,6 +462,7 @@ apt-mark showhold | grep -E 'kube'                 # kubeadm kubectl kubelet
 With `nvidia` as containerd's default runtime, a pod can see the GPU even before the GPU Operator exists. That shows what the operator adds (scheduling and accounting):
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root run smi --rm -it --restart=Never \
   --image=nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04 \
   --env NVIDIA_VISIBLE_DEVICES=all -- nvidia-smi -L
@@ -465,6 +473,7 @@ It prints the GB10, but Kubernetes has no idea a GPU was used: no `nvidia.com/gp
 ### 4.3 Pod network and LoadBalancer IPs
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n kube-system exec ds/cilium -- cilium-dbg status --brief    # OK
 kubectl --context spark-root -n kube-system exec ds/cilium -- cilium-dbg status | grep -E 'KubeProxyReplacement|Routing|IPAM'
 ssh dgxadmin@192.168.0.100 'ip -d link show cilium_vxlan | grep -o "vxlan.*dstport [0-9]*"; ls /etc/cni/net.d'
@@ -476,17 +485,19 @@ Expected: `KubeProxyReplacement: False`, tunnel `vxlan`, IPAM `kubernetes`; `/et
 Try MetalLB with a throwaway Service:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root create deploy lb-demo --image=nginx:1.27-alpine
 kubectl --context spark-root expose deploy lb-demo --port 80 --type LoadBalancer
 kubectl --context spark-root get svc lb-demo -w                # EXTERNAL-IP from 192.168.0.110–119
 curl -sI http://$(kubectl --context spark-root get svc lb-demo -o jsonpath='{.status.loadBalancer.ingress[0].ip}') | head -1
-ip neigh | grep 192.168.0.11                                   # the IP resolves to dgx-spark-1's enP7s7 MAC
+arp -a | grep 192.168.0.11                                     # the IP resolves to dgx-spark-1's enP7s7 MAC (macOS: arp; Linux: ip neigh)
 kubectl --context spark-root delete svc,deploy lb-demo
 ```
 
 With two Sparks, measure the pod network between nodes (`nodeName` pins each pod):
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root run a --image=nicolaka/netshoot:v0.13 --overrides='{"spec":{"nodeName":"dgx-spark-1"}}' -- sleep 1d
 kubectl --context spark-root run b --image=nicolaka/netshoot:v0.13 --overrides='{"spec":{"nodeName":"dgx-spark-2"}}' -- sleep 1d
 B=$(kubectl --context spark-root get pod b -o jsonpath='{.status.podIP}')
@@ -498,8 +509,13 @@ Expect a little under 10 Gb/s: VXLAN over the mgmt link. That is by design. The 
 ### 4.4 Prove audit, encryption and snapshots
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n default create secret generic enc-demo --from-literal=k=v
 ssh dgxadmin@192.168.0.100
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt \
   --cert=/etc/kubernetes/pki/etcd/healthcheck-client.crt --key=/etc/kubernetes/pki/etcd/healthcheck-client.key \
   get /registry/secrets/default/enc-demo | hexdump -C | head -5      # … k8s:enc:aescbc:v1:key1: …
@@ -512,9 +528,10 @@ The audit record for the Secret is at `Metadata` level (no payload), as the poli
 
 ### 4.5 Add the vClusters and use three contexts
 
-Run the templates **`20.1 GPU Operator`** (Chapter 20: the GPU slices the budgets refer to) and **`20.2 vClusters`** in Semaphore, then fetch the kubeconfig again, because 20.2 added two contexts on sema01:
+**Semaphore UI:** run the templates **`20.1 GPU Operator`** (Chapter 20: the GPU slices the budgets refer to) and **`20.2 vClusters`**, then fetch the kubeconfig again on the MacBook, because 20.2 added two contexts on sema01:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 tools/fetch-kubeconfig.sh sema01                     # now spark-root, dev-lab, llms
 kubectl config get-contexts                          # KUBECONFIG is set above: spark-root (current), dev-lab, llms
 kubectl --context spark-root get ns | grep -E '^vc-'
@@ -525,6 +542,7 @@ kubectl --context dev-lab get nodes                   # the real dgx-spark-1, sy
 Follow one pod down into the root:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab run web --image=nginx:1.27-alpine
 kubectl --context dev-lab get pod web -o wide                           # Running on dgx-spark-1
 kubectl --context spark-root -n vc-dev-lab get pods | grep web          # web-x-default-x-dev-lab
@@ -540,17 +558,36 @@ The host copy carries `requests` and `limits` that you never wrote. They come fr
 kubeadm upgrades go one minor at a time: control plane first, then kubelets. The full procedure is in 02-Kubernetes Chapter 01 §8.1. The `ssh` and `kubectl` steps below run from your MacBook (as `dgxadmin`, with the fetched kubeconfig); the converge step is the `19.1 Kubernetes` template. What matters for Ansible is **order**. Don't bump `kubeadm_cluster_version` and re-run `19.1-kubernetes.yml` first. `packages.yml` would install the new **kubelet** on a control plane that still runs the old API server, and a kubelet newer than its API server is outside Kubernetes' version-skew policy.
 
 ```bash
+# ▶ MacBook · any folder
 # Patch release inside v1.36 (same pkgs.k8s.io repo):
 ssh dgxadmin@192.168.0.100
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo apt-mark unhold kubeadm && sudo apt-get install -y kubeadm=1.36.X-1.1 && sudo apt-mark hold kubeadm
 sudo kubeadm upgrade plan
 sudo kubeadm upgrade apply v1.36.X            # static pods one by one; extraArgs come from ConfigMap kube-system/kubeadm-config
 exit
+```
+
+```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root drain dgx-spark-1 --ignore-daemonsets --delete-emptydir-data   # one node: evicts everything, vClusters included
-# Semaphore: template 19.1 Kubernetes with extra variable kubeadm_cluster_version=1.36.X, first as a dry run (--check --diff), then for real.
-# Break-glass equivalent:
+```
+
+**Semaphore UI:** template **19.1 Kubernetes** with extra variable `kubeadm_cluster_version=1.36.X`, first as a dry run (`--check --diff`), then for real. Break-glass equivalent:
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/19.1-kubernetes.yml -l dgx-spark-1,localhost -K -e kubeadm_cluster_version=1.36.X --check --diff   # shows kubelet/kubectl moving
 ansible-playbook playbooks/19.1-kubernetes.yml -l dgx-spark-1,localhost -K -e kubeadm_cluster_version=1.36.X                  # converges + re-holds
+```
+
+Then, either way:
+
+```bash
+# ▶ MacBook · any folder
 ssh dgxadmin@192.168.0.100 'sudo systemctl daemon-reload && sudo systemctl restart kubelet'
 kubectl --context spark-root uncordon dgx-spark-1
 ```
@@ -558,6 +595,7 @@ kubectl --context spark-root uncordon dgx-spark-1
 For a **new minor** (1.36 → 1.37) the packages live in a new repo. Add it before step 1, with the role's own module arguments:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible k8s_control_plane:k8s_workers -b -m ansible.builtin.get_url \
   -a "url=https://pkgs.k8s.io/core:/stable:/v1.37/deb/Release.key dest=/etc/apt/keyrings/kubernetes-v1.37.asc mode=0644"
 ansible k8s_control_plane:k8s_workers -b -m ansible.builtin.apt_repository \
@@ -626,9 +664,10 @@ The Spark is a lab: breaking the cluster, wiping it and rebuilding it in under a
 | Restarts | containerd and Docker (drops stale sandboxes) | Driver, toolkit, Slurm, NFS |
 | Controller | `kubeconfig-*.yaml` in the state folder | the rest of the state folder; Semaphore, vault01 and the task history (they're outside the Spark) |
 
-In Semaphore: `19.2 Reset Kubernetes` → `19.1 Kubernetes` → `20.1 GPU Operator` → `20.2 vClusters`, then `tools/fetch-kubeconfig.sh sema01` on the MacBook. Break-glass equivalent:
+**Semaphore UI:** `19.2 Reset Kubernetes` → `19.1 Kubernetes` → `20.1 GPU Operator` → `20.2 vClusters`, then `tools/fetch-kubeconfig.sh sema01` on the MacBook. Break-glass equivalent:
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
 ansible-playbook playbooks/19.2-reset-kubernetes.yml -l dgx-spark-1,localhost -K   # type RESET
 ansible-playbook playbooks/19.1-kubernetes.yml -l dgx-spark-1,localhost -K

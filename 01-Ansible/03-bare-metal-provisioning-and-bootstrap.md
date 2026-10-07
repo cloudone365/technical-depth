@@ -110,13 +110,14 @@ Two paths, one end state:
 Two cases for the last row:
 
 - **Already static on 192.168.0.100** (set in NetworkManager or Settings): nothing to do. You won't find it in `/etc/netplan` on DGX OS; it lives in NetworkManager (`nmcli -g ipv4.method,ipv4.addresses connection show "<profile>"` shows `manual`).
-- **DHCP that always gives 192.168.0.100** (a reservation on your router; `ip addr` shows `dynamic`): fine for the lab, as long as the reservation exists. The bootstrap leaves it alone unless you add `-e bootstrap_force_static=true`.
+- **DHCP that always gives 192.168.0.100** (a reservation on your router; `ip addr` on the Spark shows `dynamic`): fine for the lab, as long as the reservation exists. The bootstrap leaves it alone unless you add `-e bootstrap_force_static=true`.
 
 So with an installed Spark whose name and address already match, use §3.3 and skip §3.2. If only the hostname is wrong, run just the first bootstrap command of §3.2 (without `bootstrap_static_ip`) with `-e bootstrap_current_ip=192.168.0.100`: it fixes the name and doesn't touch the network.
 
 Either way you need an SSH key on the MacBook first; `03.1-bootstrap.yml` installs `~/.ssh/id_ed25519.pub` (`spark_admin_pubkeys` in [`group_vars/all.yml`](lab/inventory/group_vars/all.yml)):
 
 ```bash
+# ▶ MacBook · any folder
 ls ~/.ssh/id_ed25519.pub || ssh-keygen -t ed25519 -C "$(whoami)@$(hostname -s)"   # create one if you don't have a key; -C is only a label
 ```
 
@@ -417,7 +418,12 @@ This is one of the few playbooks that runs **from your MacBook**, not from Semap
 **Your first Spark, `dgx-spark-1`.** On a Spark that has just finished the first-boot wizard (password login, DHCP address), `03.1-bootstrap.yml` sets the hostname, installs your key for `dgxadmin` (task *Install control-node SSH key(s)*) and, on the second run, moves it to the static IP through NetworkManager. A dead-man timer rolls the network back if Ansible can't reconnect. Each step checks first, so a re-run changes nothing that is already right.
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
+```
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/03.1-bootstrap.yml -l dgx-spark-1 -k -K -e bootstrap_current_ip=<its DHCP IP>                              # -k: SSH password, still on
 ansible-playbook playbooks/03.1-bootstrap.yml -l dgx-spark-1 -K -e bootstrap_current_ip=<its DHCP IP> -e bootstrap_static_ip=true     # move to 192.168.0.100
 ssh dgxadmin@192.168.0.100 hostname                                   # dgx-spark-1, no password: your key is in
@@ -428,7 +434,12 @@ That is this chapter's end state for dgx-spark-1 (§7); Chapter 04 then makes it
 **A later Spark, `dgx-spark-2`** (once Chapter 04 is done for the first one), shows the full sequence including the Semaphore step:
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
+```
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 # First run: password SSH (-k) and sudo (-K), on the DHCP address, no IP change yet
 ansible-playbook playbooks/03.1-bootstrap.yml -l dgx-spark-2 -k -K -e bootstrap_current_ip=192.168.0.137
 
@@ -451,6 +462,7 @@ From now on, plain inventory addressing works and the node belongs to Semaphore:
 Skip this on a fresh DGX OS: `03.1-bootstrap.yml` in §3.2 already installed your MacBook key (task *Install control-node SSH key(s)*). For a Spark that is already installed, named `dgx-spark-1`, on 192.168.0.100, with the user `dgxadmin`, copy the key yourself (it asks for `dgxadmin`'s password once):
 
 ```bash
+# ▶ MacBook · any folder
 ssh-copy-id dgxadmin@192.168.0.100                        # your ~/.ssh/id_ed25519.pub (§3)
 ssh-copy-id dgxadmin@192.168.0.101                        # second Spark, if any
 ssh dgxadmin@192.168.0.100 'hostname; grep -c "$(hostname)" /etc/hosts; ip -4 addr show enP7s7 | grep inet; uname -m; head -3 /etc/dgx-release'
@@ -502,10 +514,10 @@ DGX OS ships tuned kernel parameters, so don't change them casually. When you mu
 
 The real test of provisioning automation is to wipe a node and rebuild it:
 
-1. Record the state: Semaphore template `30.1 Validate` with `--limit dgx-spark-2,localhost` (keep `validation/dgx-spark-2.json` from sema01's state volume, `/opt/spark-lab/cache`).
+1. Record the state. **Semaphore UI:** run the template `30.1 Validate` with `--limit dgx-spark-2,localhost` (keep `validation/dgx-spark-2.json` from sema01's state volume, `/opt/spark-lab/cache`).
 2. Re-image dgx-spark-2 from the USB recovery media (the OEM/NVIDIA guide covers creating it with `dd`; verify the checksum first).
 3. Complete the wizard (§3.1).
-4. From the MacBook: `03.1-bootstrap.yml` (both runs), then `04.1-semaphore-target.yml -l dgx-spark-2,localhost -K`. The re-image gave the node a new SSH host key, so on sema01 remove the old one first (`docker compose exec semaphore ssh-keygen -R 192.168.0.101`, Chapter 04 §13). Then the Semaphore template `site` with `--limit dgx-spark-2,localhost`.
+4. From the MacBook: `03.1-bootstrap.yml` (both runs), then `04.1-semaphore-target.yml -l dgx-spark-2,localhost -K`. The re-image gave the node a new SSH host key, so on sema01 remove the old one first (`docker compose exec semaphore ssh-keygen -R 192.168.0.101`, Chapter 04 §13). Then, **Semaphore UI:** run the template `site` with `--limit dgx-spark-2,localhost`.
 5. Validate again and `diff` the two JSON reports. **Anything that differs is something you did by hand and never automated.**
 
 Semaphore, vault01 and the task history of the first build are untouched by the re-image: that's why the controller lives outside the Spark.
@@ -574,9 +586,10 @@ The Spark has no BMC, but the Redfish automation you'll use on DGX B200/GB200 sy
         var: redfish.redfish_facts.system
 ```
 
-Semaphore template `03.2 Redfish practice`, or break-glass from the MacBook:
+**Semaphore UI:** run the template `03.2 Redfish practice`, or break-glass from the MacBook:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/03.2-redfish-practice.yml -l dgx-spark-1,localhost -K
 curl -s http://192.168.0.100:8000/redfish/v1/Systems | jq '.Members'
 ```

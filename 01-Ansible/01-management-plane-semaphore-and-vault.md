@@ -43,6 +43,8 @@ Adjust IPs to your network. Use static IPs or DHCP reservations, because certifi
 **Why:** certificates and TLS are time-bound and tied to IP addresses, so every machine needs a fixed address, a correct clock and a running SSH service before you install anything. Run this on **each VM** (change the hostname and IP per machine).
 
 ```bash
+# ▶ vault01 (ssh vault01)
+# repeat on sema01 (ssh sema01) with its own hostname and IP
 sudo apt update && sudo apt -y upgrade        # refresh package lists, then install updates on the base OS
 sudo apt install -y openssh-server curl wget gpg gnupg lsb-release ca-certificates openssl nano   # SSH server plus tools later steps use (apt package names are lowercase)
 sudo systemctl enable --now ssh               # start the SSH server now and at every boot
@@ -56,6 +58,8 @@ sudo timedatectl set-ntp true                 # keep the clock synchronized; cer
 **Firewall (ufw).** Always allow SSH first so you don't lock yourself out.
 
 ```bash
+# ▶ vault01 (ssh vault01)
+# repeat on sema01 (ssh sema01); each machine needs only its own port rule
 sudo ufw allow OpenSSH                                          # the ufw profile installed with openssh-server
 sudo ufw allow from 192.168.0.0/24 to any port 8200 proto tcp   # vault01 only: Vault API and UI, LAN only
 sudo ufw allow from 192.168.0.0/24 to any port 3000 proto tcp   # sema01 only: Semaphore web UI, LAN only
@@ -66,6 +70,8 @@ sudo ufw status                                                 # list the activ
 **Verify section 2.1** (on every VM):
 
 ```bash
+# ▶ vault01 (ssh vault01)
+# repeat on sema01 (ssh sema01)
 hostnamectl | grep -i 'static hostname'   # expect the machine's name
 ip -br a                                  # expect the fixed IP on your interface
 timedatectl | grep -i synchronized        # expect: System clock synchronized: yes
@@ -82,6 +88,7 @@ ping -c 2 192.168.0.201                   # expect replies from each target
 **3.1 Install**
 
 ```bash
+# ▶ vault01 (ssh vault01)
 # Download HashiCorp's signing key and convert (--dearmor) to the binary format apt needs
 wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp.gpg
 # Add HashiCorp's apt repo; signed-by pins it to that key; lsb_release -cs inserts your Ubuntu codename
@@ -93,6 +100,7 @@ sudo apt update && sudo apt install -y vault
 **3.2 TLS certificate.** Why: Vault carries tokens and secrets, so it must never speak plain HTTP. A self-signed cert is fine in a lab.
 
 ```bash
+# ▶ vault01 (ssh vault01)
 sudo mkdir -p /opt/vault/tls      # folder for the cert and key (no cd: the vault package makes /opt/vault readable only by the vault user)
 # req -x509        = create a self-signed certificate directly
 # -newkey rsa:4096 = generate a new 4096-bit key at the same time
@@ -131,6 +139,7 @@ cluster_addr = "https://192.168.0.211:8201"   # address for node-to-node traffic
 ```
 
 ```bash
+# ▶ vault01 (ssh vault01)
 sudo mkdir -p /opt/vault/data && sudo chown vault:vault /opt/vault/data  # storage dir owned by vault
 sudo systemctl enable --now vault          # start Vault now and at every boot
 export VAULT_ADDR=https://192.168.0.211:8200   # tells the vault CLI where the server is
@@ -142,6 +151,7 @@ export VAULT_CACERT=$HOME/vault-ca.crt         # tells the CLI to trust our self
 **3.4 Initialize and unseal.** Why: a new Vault is empty and sealed. Initialization generates the master key and splits it into shares so no single person can open Vault.
 
 ```bash
+# ▶ vault01 (ssh vault01)
 vault operator init -key-shares=3 -key-threshold=2   # create 3 unseal keys; any 2 can unseal; prints a root token
 vault operator unseal      # run twice, entering two different unseal keys, until Sealed shows false
 vault login                # authenticate the CLI with the Initial Root Token
@@ -152,6 +162,7 @@ Save the unseal keys and root token securely. In this lab Vault re-seals after e
 **3.5 Audit log.** Why: every request to Vault gets recorded, which is what auditors ask for.
 
 ```bash
+# ▶ vault01 (ssh vault01)
 sudo touch /var/log/vault_audit.log && sudo chown vault:vault /var/log/vault_audit.log  # create file the vault user can write
 vault audit enable file file_path=/var/log/vault_audit.log   # turn on the file audit device
 ```
@@ -159,6 +170,7 @@ vault audit enable file file_path=/var/log/vault_audit.log   # turn on the file 
 **Verify section 3** (on vault01):
 
 ```bash
+# ▶ vault01 (ssh vault01)
 vault status                              # expect: Initialized true, Sealed false, Storage Type raft
 sudo systemctl is-active vault            # expect: active
 sudo openssl x509 -in /opt/vault/tls/vault.crt -noout -ext basicConstraints   # expect: CA:FALSE
@@ -172,6 +184,7 @@ Vault re-seals every time vault01 restarts. After a reboot run `vault operator u
 **Why:** this defines what Vault will sign (the role), what Semaphore is allowed to do (the policy), and how Semaphore proves who it is (AppRole).
 
 ```bash
+# ▶ vault01 (ssh vault01)
 # Mount the SSH secrets engine at a custom path named ssh-client-signer
 vault secrets enable -path=ssh-client-signer ssh
 # Have Vault generate the CA key pair; the private half never leaves Vault, the public half is readable
@@ -179,6 +192,7 @@ vault write ssh-client-signer/config/ca generate_signing_key=true
 ```
 
 ```bash
+# ▶ vault01 (ssh vault01)
 # Create a signing role named "ansible" (the JSON is read from stdin via the "-")
 vault write ssh-client-signer/roles/ansible - <<'EOF'
 {
@@ -206,6 +220,7 @@ EOF
 | `ttl` / `max_ttl` | Default and maximum certificate lifetime: 15 minutes and 1 hour |
 
 ```bash
+# ▶ vault01 (ssh vault01)
 # Policy: the only thing Semaphore may do is request signatures from the ansible role
 vault policy write semaphore-ssh - <<'EOF'
 path "ssh-client-signer/sign/ansible" {
@@ -226,6 +241,7 @@ Record the **role_id** and **secret_id** for §8.6.
 **Verify section 4** (on vault01):
 
 ```bash
+# ▶ vault01 (ssh vault01)
 vault read ssh-client-signer/roles/ansible      # expect: allowed_users svc-ansible, ttl 15m
 vault policy read semaphore-ssh                 # expect: one path, ssh-client-signer/sign/ansible
 vault read auth/approle/role/semaphore          # expect: token_policies [semaphore-ssh]
@@ -239,6 +255,7 @@ vault write auth/approle/login role_id=<role_id> secret_id=<secret_id>   # expec
 First, on vault01, print the CA public key: `vault read -field=public_key ssh-client-signer/config/ca`. Then on **each target**:
 
 ```bash
+# ▶ Ubuntu test target (from Chapter 01)
 sudo nano /etc/ssh/trusted-user-ca-keys.pem   # paste the CA public key; sshd will trust certificates signed by it
 
 sudo useradd -m -s /bin/bash svc-ansible      # create the account with a home dir (-m) and a shell (-s); no password, so password login is impossible
@@ -249,6 +266,7 @@ sudo visudo -c                                # syntax check; a broken sudoers f
 ```
 
 ```bash
+# ▶ Ubuntu test target (from Chapter 01)
 sudo tee /etc/ssh/sshd_config.d/10-vault-ca.conf <<'EOF'
 TrustedUserCAKeys /etc/ssh/trusted-user-ca-keys.pem   # accept certificates signed by this CA
 Match User svc-ansible                                 # the rules below apply only to this account
@@ -263,11 +281,15 @@ Your existing `client01` login is untouched, so you can't lock yourself out.
 **Verify section 5.** The pasted CA key must be **one single line that starts with `ssh-rsa`**; a wrapped line is silently ignored by sshd.
 
 ```bash
-# On vault01: print the fingerprint of the real CA key
+# ▶ vault01 (ssh vault01)
+# print the fingerprint of the real CA key
 vault read -field=public_key ssh-client-signer/config/ca > ~/ca.pub
 ssh-keygen -l -f ~/ca.pub                                  # -l prints key size, SHA256 fingerprint and type
+```
 
-# On each target:
+```bash
+# ▶ Ubuntu test target (from Chapter 01)
+# on each target
 id svc-ansible                                             # expect a uid line: the account exists
 sudo visudo -c                                             # expect "parsed OK" for the sudoers files
 sudo sshd -T | grep -i trustedusercakeys                   # expect /etc/ssh/trusted-user-ca-keys.pem: sshd loaded the setting
@@ -279,6 +301,7 @@ sudo ssh-keygen -l -f /etc/ssh/trusted-user-ca-keys.pem    # expect the SAME SHA
 **Why:** this proves Vault and the targets work together. If Semaphore fails later, you know the problem is in Semaphore.
 
 ```bash
+# ▶ vault01 (ssh vault01)
 ssh-keygen -t ed25519 -f ~/semaphore_lab -N ""     # create a key pair; -N "" = no passphrase. This stands in for the key Semaphore will hold
 # Ask Vault to sign the PUBLIC key for principal svc-ansible; -field prints only the certificate; @ reads a file
 vault write -field=signed_key ssh-client-signer/sign/ansible \
@@ -299,12 +322,14 @@ Expected output: `root`. These keys are only for this test; the Semaphore playbo
 Prepare **sema01** like vault01 (prerequisites: hostname `sema01`, static IP `192.168.0.210`, time sync, updates, `openssh-server`), then open the web port:
 
 ```bash
+# ▶ sema01 (ssh sema01)
 sudo ufw allow from 192.168.0.0/24 to any port 3000 proto tcp   # Semaphore web UI, LAN only
 ```
 
 **7.1 Install Docker**
 
 ```bash
+# ▶ sema01 (ssh sema01)
 sudo apt update && sudo apt install -y docker.io docker-compose-v2   # container engine and the "docker compose" command
 sudo systemctl enable --now docker                                   # start Docker now and at boot
 sudo usermod -aG docker $USER                                        # run docker without sudo; log out and back in to apply
@@ -314,6 +339,7 @@ newgrp docker   # apply the new group in this terminal now (or log out and back 
 **7.2 Bring the Vault CA certificate and test the path to Vault**
 
 ```bash
+# ▶ sema01 (ssh sema01)
 mkdir -p ~/semaphore && cd ~/semaphore
 scp vault01@192.168.0.211:~/vault-ca.crt ./vault-ca.crt        # the public certificate copy you made in §3.3
 curl --cacert ./vault-ca.crt https://192.168.0.211:8200/v1/sys/health   # JSON output = network and TLS trust work (the Vault status codes are expected)
@@ -322,6 +348,8 @@ curl --cacert ./vault-ca.crt https://192.168.0.211:8200/v1/sys/health   # JSON o
 **7.3 Create the secrets file and the compose file**
 
 ```bash
+# ▶ sema01 (ssh sema01)
+# in ~/semaphore (from §7.2)
 cat > .env <<EOF
 DB_PASS=$(openssl rand -hex 16)
 ENC_KEY=$(head -c32 /dev/urandom | base64)
@@ -334,6 +362,8 @@ cat .env
 What this does: `cat > .env <<EOF` writes everything up to the line `EOF` into a new file named `.env`. Because `EOF` is **unquoted**, the shell runs the `$(...)` parts and stores random values: `openssl rand -hex 16` makes a database password, and `head -c32 /dev/urandom | base64` makes the 32-byte key Semaphore uses to encrypt stored secrets. Change `ADMIN_PASS` (your web login) before running it, and avoid the `$` character, because Docker Compose treats `$name` as a variable. `chmod 600` makes the file readable only by you. Back up `.env`: without `ENC_KEY`, Semaphore cannot decrypt what it stored. Set the values before the first `docker compose up`, because PostgreSQL fixes its password on first start.
 
 ```bash
+# ▶ sema01 (ssh sema01)
+# in ~/semaphore
 cat > docker-compose.yml <<'EOF'
 services:
   postgres:
@@ -372,17 +402,19 @@ docker compose up -d              # start both containers in the background
 docker compose logs -f semaphore  # watch startup; Ctrl+C when it reports it is listening on port 3000
 ```
 
-Log in at `http://192.168.0.210:3000` as `admin` with your `ADMIN_PASS`.
+**Semaphore UI:** log in at `http://192.168.0.210:3000` as `admin` with your `ADMIN_PASS`.
 
 **Verify section 7** (on sema01, in `~/semaphore`):
 
 ```bash
+# ▶ sema01 (ssh sema01)
+# in ~/semaphore
 docker compose ps                          # expect: postgres and semaphore both "Up"
 docker compose logs --tail 20 semaphore    # expect no errors and a line saying it listens on port 3000
 curl -sI http://localhost:3000 | head -1   # expect an HTTP 200 or 302 status line
 ```
 
-Then open `http://192.168.0.210:3000` from your Mac (plain **http**, not https) and sign in as `admin`. If the page does not load, see the troubleshooting table in section 12.
+Then, in the **Semaphore UI**, open `http://192.168.0.210:3000` from your Mac (plain **http**, not https) and sign in as `admin`. If the page does not load, see the troubleshooting table in section 12.
 
 ## 8. Git repository, keys and Semaphore configuration
 
@@ -465,6 +497,7 @@ The repository needs these files under `playbooks/`. The first two are below; th
 ```
 
 ```bash
+# ▶ MacBook · any folder
 mkdir -p ~/lab-playbooks/playbooks && cd ~/lab-playbooks   # work folder; -p also creates the parent folders
 # save the two files above as playbooks/00-vault-cert.yaml and playbooks/whoami.yaml
 git init -b main                  # turn the folder into a Git repository with a branch named main
@@ -479,6 +512,8 @@ Pushing uses **your own** GitHub sign-in (for example `gh auth login`, or a sepa
 **Verify 8.3:**
 
 ```bash
+# ▶ MacBook · any folder
+# in ~/lab-playbooks (the folder from the block above)
 git log --oneline     # expect one commit
 git ls-files          # expect playbooks/00-vault-cert.yaml and playbooks/whoami.yaml
 ```
@@ -486,14 +521,15 @@ git ls-files          # expect playbooks/00-vault-cert.yaml and playbooks/whoami
 Then refresh the repository page on GitHub: the `playbooks` folder must be visible.
 
 ### 8.4 Create the project in Semaphore
-Open `http://192.168.0.210:3000`, sign in as `admin`, click **New Project**, name it `lab`, and create it. Everything below happens inside this project.
+**Semaphore UI:** open `http://192.168.0.210:3000`, sign in as `admin`, click **New Project**, name it `lab`, and create it. Everything below happens inside this project.
 
 ### 8.5 Store the GitHub token as a key
-Project `lab`, **Key Store**, **New Key**: Name `github-token`, Type **Login with password**, Login = your GitHub username, Password = the token from 8.2, **Save**. Semaphore encrypts it with the `ENC_KEY` from your `.env` file.
+**Semaphore UI:** project `lab`, **Key Store**, **New Key**: Name `github-token`, Type **Login with password**, Login = your GitHub username, Password = the token from 8.2, **Save**. Semaphore encrypts it with the `ENC_KEY` from your `.env` file.
 
 *Stronger alternative, an SSH deploy key (read-only, valid for one repository only):*
 
 ```bash
+# ▶ MacBook · any folder
 ssh-keygen -t ed25519 -f ~/semaphore_deploy -N "" -C "semaphore-deploy"   # new key pair, no passphrase
 cat ~/semaphore_deploy.pub     # public half: add it in GitHub, repository Settings, Deploy keys, leave "Allow write access" unticked
 cat ~/semaphore_deploy         # private half: Semaphore Key Store, New Key, Type SSH Key, name github-deploy
@@ -506,21 +542,22 @@ With a deploy key, use the URL `git@github.com:<your-user>/lab-playbooks.git` in
 On vault01 print the two values:
 
 ```bash
+# ▶ vault01 (ssh vault01)
 vault read -field=role_id auth/approle/role/semaphore/role-id            # the role_id: the AppRole's "username"
 vault write -f -field=secret_id auth/approle/role/semaphore/secret-id    # a NEW secret_id on every run: the AppRole's "password"
 ```
 
-In Semaphore: **Variable Groups** (called **Environment** in some versions), **New**:
+**Semaphore UI:** **Variable Groups** (called **Environment** in some versions), **New**:
 1. Name `vault-approle`.
 2. Extra variables (JSON): `{"vault_role_id": "PASTE-THE-ROLE-ID"}`.
 3. Secrets, **Add secret**: type **Variable**, name `vault_secret_id`, value = the secret_id. Secret values are stored encrypted and are hidden after saving.
 4. **Save**.
 
 ### 8.7 Add the repository
-**Repositories**, **New**: Name `lab-playbooks`, URL `https://github.com/<your-user>/lab-playbooks.git`, Branch `main`, Access Key `github-token`, **Save**.
+**Semaphore UI:** **Repositories**, **New**: Name `lab-playbooks`, URL `https://github.com/<your-user>/lab-playbooks.git`, Branch `main`, Access Key `github-token`, **Save**.
 
 ### 8.8 Add the inventory
-**Inventory**, **New**: Name `lab-hosts`, type **Static**, User Credentials `None` (the playbook supplies the key), content:
+**Semaphore UI:** **Inventory**, **New**: Name `lab-hosts`, type **Static**, User Credentials `None` (the playbook supplies the key), content:
 
 ```ini
 [lab]
@@ -537,7 +574,7 @@ ansible_python_interpreter=/usr/bin/python3
 What the variables do: `ansible_user` is the automation account, `ansible_ssh_private_key_file` is the key that play 1 creates (ssh automatically uses the `-cert.pub` file next to it), `StrictHostKeyChecking=accept-new` accepts a host key the first time you see it, and the interpreter line pins Python so Ansible never re-discovers it.
 
 ### 8.9 Create the task template
-**Task Templates**, **New Template**, type **Ansible Playbook**:
+**Semaphore UI:** **Task Templates**, **New Template**, type **Ansible Playbook**:
 
 | Field | Value |
 |---|---|
@@ -550,12 +587,22 @@ What the variables do: `ansible_user` is the automation account, `ansible_ssh_pr
 Save, then click **Run**.
 
 ### 8.10 Verify the first run
-The task log must show two plays: **Get an SSH certificate from Vault** (steps `ok`, secret tasks hidden) and the second play with `who.stdout: root` for both IPs, ending in `failed=0`. Then confirm on all three systems:
+**Semaphore UI:** the task log must show two plays: **Get an SSH certificate from Vault** (steps `ok`, secret tasks hidden) and the second play with `who.stdout: root` for both IPs, ending in `failed=0`. Then confirm on all three systems:
 
 ```bash
-sudo journalctl -u ssh --since "10 minutes ago" | grep svc-ansible   # on a target: expect "Accepted publickey ... ED25519-CERT"
-sudo grep -c 'sign/ansible' /var/log/vault_audit.log                 # on vault01: the count grows with each task run
-docker compose exec semaphore ssh-keygen -L -f /tmp/lab_ssh/id_ed25519-cert.pub   # on sema01: principal svc-ansible, validity about 15 minutes
+# ▶ Ubuntu test target (from Chapter 01)
+sudo journalctl -u ssh --since "10 minutes ago" | grep svc-ansible   # expect "Accepted publickey ... ED25519-CERT"
+```
+
+```bash
+# ▶ vault01 (ssh vault01)
+sudo grep -c 'sign/ansible' /var/log/vault_audit.log                 # the count grows with each task run
+```
+
+```bash
+# ▶ sema01 (ssh sema01)
+# in ~/semaphore
+docker compose exec semaphore ssh-keygen -L -f /tmp/lab_ssh/id_ed25519-cert.pub   # principal svc-ansible, validity about 15 minutes
 ```
 
 ## 9. Verify the full chain
@@ -570,7 +617,7 @@ docker compose exec semaphore ssh-keygen -L -f /tmp/lab_ssh/id_ed25519-cert.pub 
 
 ## 10. Maintenance playbooks: OS updates and time sync
 
-**Why:** once the chain works, every operational task is just another template that imports the same certificate play. For each file below: save it in `playbooks/` in your repository, run `git add . && git commit -m "add playbook" && git push`, then create a template as in 8.9 (same inventory, repository and variable group) with the matching playbook path. Run each one as a **dry run** first if your Semaphore version offers it; it uses `--check` and changes nothing.
+**Why:** once the chain works, every operational task is just another template that imports the same certificate play. For each file below: save it in `playbooks/` in your repository, run `git add . && git commit -m "add playbook" && git push` (on your Mac, in `~/lab-playbooks`), then create a template as in 8.9 (same inventory, repository and variable group) with the matching playbook path. Run each one as a **dry run** first if your Semaphore version offers it; it uses `--check` and changes nothing.
 
 ### 10.1 update_ubuntu.yaml (rolling OS updates)
 
@@ -649,6 +696,7 @@ docker compose exec semaphore ssh-keygen -L -f /tmp/lab_ssh/id_ed25519-cert.pub 
 **Verify 10.1** (on a target):
 
 ```bash
+# ▶ Ubuntu test target (from Chapter 01)
 grep -E 'Start-Date|Requested-By|^Upgrade:' /var/log/apt/history.log   # when it ran, as which user (svc-ansible) and which packages changed
 apt list --upgradable 2>/dev/null          # expect an empty list after a full update
 ls /var/run/reboot-required                # exists only when a reboot is still pending
@@ -800,6 +848,7 @@ Variables: `timezone` (default `America/New_York`) and `ntp_servers` (use your i
 **Verify 10.2** (on a target):
 
 ```bash
+# ▶ Ubuntu test target (from Chapter 01)
 timedatectl                    # expect your time zone and "System clock synchronized: yes"
 chronyc tracking               # chrony hosts: "Leap status: Normal" and a small offset
 chronyc sources -v             # your servers are listed

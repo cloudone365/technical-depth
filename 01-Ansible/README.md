@@ -64,16 +64,22 @@ One Spark is the default. `dgx-spark-2` is commented out in [`lab/inventory/host
 
 The Kubernetes end-state is one **kubeadm** root cluster (`spark-root`) with two **vClusters** inside it, `dev-lab` and `llms`. Ansible builds it in three stages: `19.1-kubernetes.yml` (kubeadm, Cilium, MetalLB) → `20.1-gpu-operator.yml` (15 GPU time-slices) → `20.2-vclusters.yml` (the two vClusters, applied from the [02-Kubernetes lab](../02-Kubernetes/lab/README.md)). All three contexts land in one file, `kubeconfig-spark-lab.yaml`, on sema01's state volume; `lab/tools/fetch-kubeconfig.sh sema01` copies it to `lab/.cache/` on your MacBook, where the 02-Kubernetes labs expect it.
 
-> **Convention used in every chapter.** "**Semaphore:** `NN Name`" means run that template in project `spark-lab`; template names follow the playbook names (`19.1 Kubernetes` ↔ `19.1-kubernetes.yml`). The same playbook from the MacBook, `ansible-playbook playbooks/NN-….yml -K` in `01-Ansible/lab`, is the **break-glass** path: without the Semaphore variable group, play 1 is skipped and you log in as `dgxadmin` with your own key ([Chapter 04 §11](04-dgx-spark-as-semaphore-target.md)). Only `03.1-bootstrap.yml`, `04.1-semaphore-target.yml` and `17.1-vault.yml` run from the MacBook as the normal path. A template's number is `<chapter>.<n>`, the chapter that explains it: **`19.1 Kubernetes`** is the first template of **Chapter 19**. The exceptions are `00-vault-cert.yml` and `site`.
+> **Convention used in every chapter.** "**Semaphore UI:** `NN Name`" means run that template in project `spark-lab`; template names follow the playbook names (`19.1 Kubernetes` ↔ `19.1-kubernetes.yml`). The same playbook from the MacBook, `ansible-playbook playbooks/NN-….yml -K` in `01-Ansible/lab`, is the **break-glass** path: without the Semaphore variable group, play 1 is skipped and you log in as `dgxadmin` with your own key ([Chapter 04 §11](04-dgx-spark-as-semaphore-target.md)). Only `03.1-bootstrap.yml`, `04.1-semaphore-target.yml` and `17.1-vault.yml` run from the MacBook as the normal path. A template's number is `<chapter>.<n>`, the chapter that explains it: **`19.1 Kubernetes`** is the first template of **Chapter 19**. The exceptions are `00-vault-cert.yml` and `site`.
 
 ## Start here
 
 1. **[Chapter 00 · Step-by-step guide](00-ansible-step-by-step-guide.md)**: the build order. One section per chapter, each linking its document, with the Semaphore template(s) or MacBook commands to run and a "Done when" check.
+   Every command block starts with a `# ▶` line naming the machine and folder: see [Where each command runs](00-ansible-step-by-step-guide.md#where-each-command-runs) (and its one-time `lab` shortcut).
 2. **[Chapter 01 · Management plane: Semaphore & Vault](01-management-plane-semaphore-and-vault.md)**: the first chapter, `vault01` and `sema01` built by hand. Then follow the guide.
 3. **[`lab/README.md`](lab/README.md)**: the project layout and quick start.
 
 ```bash
-cd "01-Ansible/lab"                          # on your MacBook
+# ▶ MacBook · technical-depth (repo root)
+cd "01-Ansible/lab"
+```
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 pip install -r requirements.txt && ansible-galaxy collection install -r requirements.yml -p ./collections
 tests/run-local-checks.sh                    # lint, syntax, katas, fixture tests: no Spark needed
 ```

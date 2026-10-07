@@ -179,7 +179,12 @@ ansible-galaxy collection build "$OUT" --output-path "$LAB/.cache/dist" --force
 ```
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
+```
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 tools/build-collection.sh 0.1.0
 ansible-galaxy collection install .cache/dist/cloudone-spark-0.1.0.tar.gz -p /tmp/colltest
 ANSIBLE_COLLECTIONS_PATH=/tmp/colltest ansible-doc -t role -l cloudone.spark
@@ -230,7 +235,8 @@ additional_build_steps:
 ```
 
 ```bash
-# on dgx-spark-1 (native arm64 build; no emulation)
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+# native arm64 build, no emulation; run from a clone of technical-depth on the Spark
 pip install ansible-builder ansible-navigator
 cd "01-Ansible/lab"
 ansible-builder build -t spark-ee:1.0 -f ee/execution-environment.yml --container-runtime docker -v 3
@@ -242,6 +248,7 @@ docker run --rm spark-ee:1.0 ansible-galaxy collection list | grep -cE 'communit
 Multi-arch (so AWX on x86 and the Spark can both pull it):
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 ansible-builder create -f ee/execution-environment.yml --output-filename Containerfile
 docker buildx build --platform linux/arm64,linux/amd64 -t ghcr.io/cloudone365/spark-ee:1.0 \
   -f context/Containerfile context --push
@@ -250,6 +257,7 @@ docker buildx build --platform linux/arm64,linux/amd64 -t ghcr.io/cloudone365/sp
 Run playbooks through the EE, exactly as AWX will:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 ansible-navigator run playbooks/30.1-validate.yml --eei spark-ee:1.0 --mode stdout \
   --pae false -i inventory --become-password-file <(echo "$SUDO_PW")
 ```

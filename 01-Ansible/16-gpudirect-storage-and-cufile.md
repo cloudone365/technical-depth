@@ -177,7 +177,12 @@ flowchart LR
 ```
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
+```
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/16.1-gds-check.yml -K
 ```
 
@@ -193,7 +198,8 @@ Read the result:
 ### 3.1 The comparison that actually matters: model load time
 
 ```bash
-# inside an NGC PyTorch container on the Spark, with /srv/models mounted
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+# the script runs inside an NGC PyTorch container, with /srv/models mounted
 docker run --rm --gpus all -v /srv/models:/models nvcr.io/nvidia/pytorch:25.11-py3 python - <<'PY'
 import time, torch, os, glob
 from safetensors.torch import load_file

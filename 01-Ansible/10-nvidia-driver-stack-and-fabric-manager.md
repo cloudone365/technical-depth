@@ -159,7 +159,12 @@ On a real HGX node, the rule you'd automate is "Fabric Manager version == driver
 ```
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
+```
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/10.1-driver-audit.yml -K
 ```
 
@@ -291,6 +296,7 @@ driver_audit:
 ```
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/10.2-dgxos-upgrade.yml -K -e upgrade_dry_run=true    # what's pending, on every node
 ansible-playbook playbooks/10.2-dgxos-upgrade.yml -K -l dgx-spark-2                  # canary
 ansible-playbook playbooks/10.1-driver-audit.yml -K -l dgx-spark-2
@@ -303,6 +309,7 @@ ansible-playbook playbooks/10.2-dgxos-upgrade.yml -K -l dgx-spark-1
 ### 3.3 Check what `nvidia-smi` can and can't tell you on a UMA system
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 nvidia-smi --query-gpu=name,driver_version,compute_cap,memory.total,memory.used --format=csv
 # name, driver_version, compute_cap, memory.total [MiB], memory.used [MiB]
 # NVIDIA GB10, 580.xx.xx, 12.1, [N/A], [N/A]     <- expected on unified memory
@@ -336,6 +343,7 @@ free -g        # the real memory signal for GPU workloads
 Evidence bundle for NVIDIA support:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo nvidia-bug-report.sh          # → nvidia-bug-report.log.gz  (or node_drain_bug_report=true in Chapter 29)
 ```
 

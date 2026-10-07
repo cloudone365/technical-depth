@@ -155,7 +155,12 @@ CMD ["/usr/sbin/sshd", "-D", "-e"]
 ```
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
+```
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/09.1-fleet-sim.yml -e fleet_size=64 -K
 ansible -i .cache/fleet.ini fleet -m ping -f 64 -o | sort | head -3
 ```
@@ -190,6 +195,7 @@ The benchmark workload (facts plus ten `copy` tasks, a typical baseline shape):
 Keep everything identical except one variable per run. `ANSIBLE_CALLBACKS_ENABLED=ansible.posix.timer` prints the wall time.
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 bench() {  # usage: bench <label> [env...]
   label=$1; shift
   rm -rf ~/.ansible/cp/*   # cold mux sockets each run
@@ -221,9 +227,14 @@ Record your results in a table like this. The shape is what matters; absolute nu
 Watch the saturation point live while `f64` runs:
 
 ```bash
-# controller (MacBook)
+# ▶ MacBook · any folder
+# the controller
 top -o %CPU     # ansible-playbook workers
-# on the Spark
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+# the fleet-sim containers run here
 docker stats --no-stream | sort -k3 -h | tail
 journalctl -u ssh --since "-5min" | grep -c 'beginning MaxStartups throttling'
 ```
@@ -287,6 +298,7 @@ Mitogen replaces per-task SSH and Python start-up with a persistent interpreter 
 - It isn't supported inside AWX execution environments by Red Hat.
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 pip install mitogen
 ANSIBLE_STRATEGY_PLUGINS=$(python -c 'import ansible_mitogen,os;print(os.path.dirname(ansible_mitogen.__file__)+"/plugins/strategy")') \
 ANSIBLE_STRATEGY=mitogen_linear \
@@ -329,7 +341,12 @@ The same `ansible.cfg` runs inside the Semaphore container (`ANSIBLE_CONFIG="01-
 ## 7. Clean up and validate
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/09.1-fleet-sim.yml -e fleet_state=absent -e fleet_size=64 -K
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 docker ps --filter label=spark.lab/fleet-sim=true -q | wc -l     # 0
 ```
 

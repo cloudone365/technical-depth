@@ -93,14 +93,34 @@ Rule of thumb: **hardware facts in `group_vars/spark.yml`, per-box addressing in
 
 ### 3.1 Build the MacBook toolchain
 
+First, once, type this line by hand (not pasted as part of a block): it makes macOS zsh treat `#` lines, including the `# ▶` location line at the top of every block, as comments.
+
+`setopt interactivecomments; echo 'setopt interactivecomments' >> ~/.zshrc`
+
 The lab has two controllers that run the same repository. **Semaphore** on `sema01` runs every playbook once [Chapter 04](04-dgx-spark-as-semaphore-target.md) is done; its container image (kubectl, helm, Python libraries, collections) comes from [`lab/semaphore/`](lab/semaphore/) and is built in [Chapter 04 §4](04-dgx-spark-as-semaphore-target.md). Your **MacBook** needs its own toolchain for the bootstrap playbooks (`03.1-bootstrap.yml`, `04.1-semaphore-target.yml`), `17.1-vault.yml`, and break-glass runs:
 
 ```bash
-# macOS (or any Linux/WSL box) with Python ≥ 3.11
+# ▶ MacBook · any folder
+# macOS (or any Linux/WSL box) with Python ≥ 3.11; run it from your home folder (~) so the clone lands in ~/technical-depth
 git clone https://github.com/cloudone365/technical-depth.git
 cd "technical-depth/01-Ansible/lab"
 python3 -m venv ~/.venvs/spark-ansible
 source ~/.venvs/spark-ansible/bin/activate
+```
+
+Add a one-time `lab` shortcut that takes any new terminal straight to the lab folder with the venv active (adjust the path if you cloned somewhere other than `~/technical-depth`); the guide's section [Where each command runs](00-ansible-step-by-step-guide.md#where-each-command-runs) explains the location line at the top of every command block:
+
+```bash
+# ▶ MacBook · any folder
+echo "alias lab='cd ~/technical-depth/01-Ansible/lab && source ~/.venvs/spark-ansible/bin/activate'" >> ~/.zshrc
+source ~/.zshrc
+lab                                   # prompt now: (spark-ansible) … lab %
+```
+
+Then install the Python packages and collections:
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 pip install -r requirements.txt
 ansible-galaxy collection install -r requirements.yml -p ./collections
 ansible --version        # expect: core 2.18.x, config file = .../lab/ansible.cfg
@@ -109,6 +129,7 @@ ansible --version        # expect: core 2.18.x, config file = .../lab/ansible.cf
 Prove the toolchain before you touch any hardware. `tests/run-local-checks.sh` runs everything CI runs that doesn't need a Spark (yamllint, syntax checks, ansible-lint, the Jinja katas, fixture tests):
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 tests/run-local-checks.sh        # expect, as the last line: ALL LOCAL CHECKS PASSED
 ```
 
@@ -189,6 +210,7 @@ So keep long or rebooting Semaphore tasks to one host per task (`--limit`), and 
 The inventory below is what the lab ships with: `dgx-spark-1` on 192.168.0.100 and the CX-7 interface names a DGX Spark reports. You don't need the Spark to write it. Nothing uses the fabric before [Chapter 13](13-connectx7-fabric-and-opensm.md), which has you confirm the names on each box with `ibdev2netdev`; its output looks like this:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 ibdev2netdev                                   # on a Spark (Chapter 13), not needed now
 # rocep1s0f0 port 1 ==> enp1s0f0np0 (Down)
 # rocep1s0f1 port 1 ==> enp1s0f1np1 (Up)       <- cable is in this cage
@@ -344,6 +366,7 @@ cx7_interfaces:
 Check that Ansible sees what you meant. All three run on the MacBook alone: `debug` is evaluated by the controller and never connects:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-inventory --graph
 ansible-inventory --host dgx-spark-1 --yaml | head -40     # merged vars for one host
 ansible -m debug -a "var=cx7_interfaces" spark           # per-host value
@@ -374,6 +397,7 @@ ansible -m debug -a "var=cx7_interfaces" spark           # per-host value
 A diagnostic sequence worth memorising:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible --version                                    # which core, which config file, which Python
 ansible-config dump --only-changed                   # which config is actually in effect
 ansible-inventory --host dgx-spark-1 --yaml          # which vars will be used
@@ -385,6 +409,7 @@ ansible dgx-spark-1 -m debug -a "var=ansible_user"   # who the MacBook logs in a
 ## 6. Validation
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 tests/run-local-checks.sh                            # ALL LOCAL CHECKS PASSED
 ansible --version | head -2                          # core 2.18.x, config file = …/01-Ansible/lab/ansible.cfg
 ansible-config dump --only-changed                   # the settings from lab/ansible.cfg, nothing else

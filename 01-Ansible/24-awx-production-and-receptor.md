@@ -78,6 +78,7 @@ flowchart LR
 2. From your MacBook (as `dgxadmin`, the bootstrap path):
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 mkdir -p .cache/receptor && tar xzf ~/Downloads/dgx-spark-2_install_bundle.tar.gz -C .cache/receptor
 cd .cache/receptor/dgx-spark-2_install_bundle
 ansible-galaxy collection install -r requirements.yml       # ansible.receptor
@@ -91,6 +92,7 @@ ansible-playbook -i inventory.yml install_receptor.yml -e ansible_user=nvidia -K
 On the Spark, check it:
 
 ```bash
+# ▶ dgx-spark-2 (ssh dgx-spark-2)
 systemctl status receptor
 receptorctl --socket /var/run/receptor/receptor.sock status     # peers, work types
 podman images | grep -i ee                                      # EE image pulled on first job
@@ -207,6 +209,7 @@ spec:
 ```
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 kubectl --context spark-root apply -f .cache/awx/backup.yaml
 kubectl --context spark-root -n awx get awxbackup awx-backup-2026-09-29 -o jsonpath='{.status}' | jq
 ```

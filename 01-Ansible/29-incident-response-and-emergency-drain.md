@@ -28,9 +28,10 @@ flowchart LR
 
 **`serial: 1`, and refuse to run without `-l`.** A drain that runs against every host at once is an outage you caused yourself.
 
-**Two ways to start it.** Normally from Semaphore: the template **`29.1 Emergency drain`** in project `spark-lab`, whose CLI args name the node (`["--limit", "dgx-spark-2,localhost"]`; keep `localhost` for play 1 and the `kubectl` steps) and whose extra variables pick the stages (`node_drain_reboot`, `node_drain_undrain_after`, `node_drain_bug_report`). The task history then records who drained which node, when, and what happened. **Break-glass** from your MacBook, when sema01 or vault01 is down (Chapter 04 §11):
+**Two ways to start it.** **Semaphore UI** (the normal way): the template **`29.1 Emergency drain`** in project `spark-lab`, whose CLI args name the node (`["--limit", "dgx-spark-2,localhost"]`; keep `localhost` for play 1 and the `kubectl` steps) and whose extra variables pick the stages (`node_drain_reboot`, `node_drain_undrain_after`, `node_drain_bug_report`). The task history then records who drained which node, when, and what happened. **Break-glass** from your MacBook, when sema01 or vault01 is down (Chapter 04 §11):
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
 tools/fetch-kubeconfig.sh sema01 || true          # if sema01 still answers; otherwise use the copy you fetched last
 ansible-playbook playbooks/29.1-emergency-drain.yml -l dgx-spark-2,localhost -K -e node_drain_reboot=true
@@ -199,6 +200,7 @@ node_drain_bundle_dir: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') 
 `node_drain_kubeconfig` is the lab file `kubeconfig-spark-lab.yaml` in the controller's state folder (sema01's state volume under Semaphore, `.cache/` on the MacBook), and `node_drain_context` pins `k8s_drain` to `spark-root` — whatever the file's `current-context` happens to be (someone may have run `kubectl config use-context llms` on it). Only the root has nodes to cordon. The by-hand equivalent is:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
 kubectl --context spark-root drain dgx-spark-2 --ignore-daemonsets --delete-emptydir-data --grace-period=60 --timeout=300s
 ```
@@ -214,6 +216,7 @@ A vCluster has no kubelet and no nodes of its own, so there's nothing to drain "
 | Tenant PodDisruptionBudgets | Respected: vCluster syncs PDBs to the root | A tight tenant PDB can block the drain until `wait_timeout` (§5) |
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root get pods -A -o wide --field-selector spec.nodeName=dgx-spark-2   # what is still there
 kubectl --context spark-root -n vc-llms get pods                                           # tenant pods, root names
 kubectl --context spark-root get pdb -A                                                    # synced PDBs show up in vc-*
@@ -229,9 +232,10 @@ kubectl --context spark-root get pdb -A                                         
 
 **Signals:** `SparkGPUUnresponsive` alert; Slurm health check drains the node (`healthcheck: nvidia-smi unresponsive`); workloads stuck in CUDA calls.
 
-Semaphore: template `29.1 Emergency drain`, `--limit dgx-spark-2,localhost`, extra variables `node_drain_bug_report: true`, `node_drain_reboot: true`, `node_drain_undrain_after: true` (see the certificate note in §1). Break-glass:
+**Semaphore UI:** template `29.1 Emergency drain`, `--limit dgx-spark-2,localhost`, extra variables `node_drain_bug_report: true`, `node_drain_reboot: true`, `node_drain_undrain_after: true` (see the certificate note in §1). Break-glass:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/29.1-emergency-drain.yml -l dgx-spark-2,localhost -K \
   -e node_drain_bug_report=true -e node_drain_reboot=true -e node_drain_undrain_after=true
 ```
@@ -243,6 +247,7 @@ If it happens again after the reboot, keep the node drained and open a case with
 **Signals:** `SparkGPUXid` alert; Loki `|= "NVRM: Xid"`.
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible dgx-spark-2 -b -m shell -a "journalctl -k --since '-24h' --no-pager | grep 'NVRM: Xid'"
 ```
 
@@ -337,9 +342,10 @@ Kubernetes side first: `kubectl --context spark-root get pods -A --field-selecto
         msg: "MemAvailable {{ uma_before.stdout }} GiB → {{ uma_after.stdout }} GiB"
 ```
 
-Semaphore: template `29.2 UMA relief` (`--limit dgx-spark-1,localhost`; extra variable `uma_drop_caches: true` to relieve). Break-glass:
+**Semaphore UI:** template `29.2 UMA relief` (`--limit dgx-spark-1,localhost`; extra variable `uma_drop_caches: true` to relieve). Break-glass:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/29.2-uma-relief.yml -l dgx-spark-1,localhost -K                          # diagnose
 ansible-playbook playbooks/29.2-uma-relief.yml -l dgx-spark-1,localhost -K -e uma_drop_caches=true   # relieve
 ```
@@ -351,8 +357,14 @@ Prevent it from recurring: set memory limits on model-server containers, keep th
 **Signals:** `SparkCX7Degraded` (speed < 200G), NCCL falls back to `NET/Socket`, NFS falls back to TCP.
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible spark -b -K -m shell -a "ibdev2netdev; ethtool enp1s0f1np1 | grep -E 'Speed|Link detected'"   # MacBook, ad hoc
-# then Semaphore: 13.1 Fabric (re-assert config + verify), 13.2 RDMA perftest (measure after fixing); break-glass:
+```
+
+**Semaphore UI:** then run **13.1 Fabric** (re-assert config + verify) and **13.2 RDMA perftest** (measure after fixing). Break-glass:
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/13.1-fabric.yml -K
 ansible-playbook playbooks/13.2-rdma-perftest.yml -K
 ```

@@ -273,7 +273,7 @@ exit 0
 
 Design choices:
 
-- **The munge key is generated with `creates:`** on the controller and never regenerated. A new key on a live cluster would lock out every node. In this lab "the controller" is Semaphore, and the key lives on sema01's state volume. A break-glass run from the MacBook has its own `.cache/` **without** that key, so it would generate a new one and push it to every node. Before running `22.1-slurm.yml` from the MacBook, copy the key over (`ssh sema01 'cd ~/semaphore && docker compose exec -T semaphore cat /var/lib/spark-lab/cache/munge.key' > .cache/munge.key && chmod 600 .cache/munge.key`), and delete it again afterwards. Keeping a copy in vault01's `kv/spark-lab/` is the production answer.
+- **The munge key is generated with `creates:`** on the controller and never regenerated. A new key on a live cluster would lock out every node. In this lab "the controller" is Semaphore, and the key lives on sema01's state volume. A break-glass run from the MacBook has its own `.cache/` **without** that key, so it would generate a new one and push it to every node. Before running `22.1-slurm.yml` from the MacBook, copy the key over (on the MacBook, in `01-Ansible/lab`: `ssh sema01 'cd ~/semaphore && docker compose exec -T semaphore cat /var/lib/spark-lab/cache/munge.key' > .cache/munge.key && chmod 600 .cache/munge.key`), and delete it again afterwards. Keeping a copy in vault01's `kv/spark-lab/` is the production answer.
 - **"Resume" is selective.** Nodes drained by `healthcheck:` or `maint:` reasons stay drained. Only nodes down because of the reconfiguration itself get resumed. An automation that blindly resumes everything would undo your own safety net.
 - **Same template, every node.** The role renders `slurm.conf` from inventory, so adding dgx-spark-3 is an inventory edit plus a run.
 
@@ -281,10 +281,15 @@ Design choices:
 
 ## 3. Hands-on
 
-Run the Semaphore template **`22.1 Slurm`** (break-glass: `ansible-playbook playbooks/22.1-slurm.yml -l dgx-spark-1,localhost -K`, after copying the munge key as above). Then on the Spark:
+**Semaphore UI:** run the template **`22.1 Slurm`** (break-glass, on the MacBook in `01-Ansible/lab`: `ansible-playbook playbooks/22.1-slurm.yml -l dgx-spark-1,localhost -K`, after copying the munge key as above). Then on the Spark:
 
 ```bash
+# ▶ MacBook · any folder
 ssh dgxadmin@192.168.0.100
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sinfo -N -o "%N %T %G %m %c"          # dgx-spark-1 idle gpu:gb10:1 106496 20
 scontrol show node dgx-spark-1 | grep -E 'Gres|RealMemory|State'
 ```
@@ -292,6 +297,7 @@ scontrol show node dgx-spark-1 | grep -E 'Gres|RealMemory|State'
 ### 3.1 Prove device confinement
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 srun -p gpu -t 1 nvidia-smi -L                  # no --gres → should FAIL to see the GPU
 srun -p gpu -t 1 --gres=gpu:gb10:1 nvidia-smi -L   # → GPU 0: NVIDIA GB10
 ```
@@ -301,6 +307,7 @@ If the first command still sees the GPU, `ConstrainDevices` isn't active: check 
 ### 3.2 Batch job: PyTorch in a container
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 cat > ~/torch-check.sbatch <<'EOF'
 #!/bin/bash
 #SBATCH -J torch-check
@@ -321,6 +328,7 @@ sbatch ~/torch-check.sbatch && squeue && sleep 30 && cat torch-check-*.out
 ### 3.3 Two-node NCCL job
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 cat > ~/nccl-2node.sbatch <<'EOF'
 #!/bin/bash
 #SBATCH -J nccl-2node
@@ -345,13 +353,16 @@ sbatch ~/nccl-2node.sbatch
 ### 3.4 Watch the health check drain a node
 
 ```bash
-# on dgx-spark-2 — TEMPORARILY make the UMA threshold impossible to meet
+# ▶ dgx-spark-2 (ssh dgx-spark-2)
+# TEMPORARILY make the UMA threshold impossible to meet
 sudo sed -i 's/-lt 4 ]/-lt 999 ]/' /usr/local/sbin/spark-slurm-healthcheck.sh
 sleep 130; sinfo -R          # REASON: healthcheck: UMA MemAvailable < 4 GiB
+```
 
-# Semaphore: run the template 22.1 Slurm again — re-running the role restores the script
-# (template drift fixed) and deliberately does NOT resume a node drained with a 'healthcheck:' reason
-#   break-glass: ansible-playbook playbooks/22.1-slurm.yml -K
+**Semaphore UI:** run the template **22.1 Slurm** again. Re-running the role restores the script (template drift fixed) and deliberately does NOT resume a node drained with a `healthcheck:` reason. Break-glass, on the MacBook in `01-Ansible/lab`: `ansible-playbook playbooks/22.1-slurm.yml -K`.
+
+```bash
+# ▶ dgx-spark-2 (ssh dgx-spark-2)
 sinfo -R                     # still drained: that's the point
 
 # a human (or a separate, restricted Semaphore template) resumes it after checking
@@ -361,6 +372,7 @@ sudo scontrol update NodeName=dgx-spark-2 State=RESUME
 ### 3.5 Experiment: does GPU memory count against the job's cgroup on UMA?
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 srun -p gpu --gres=gpu:gb10:1 --mem=8G -t 5 python3 - <<'PY'
 import torch, time
 xs=[]

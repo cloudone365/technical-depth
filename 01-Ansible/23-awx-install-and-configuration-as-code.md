@@ -81,6 +81,8 @@ Everything on a Spark competes for one unified pool (~119.7 GiB usable), includi
 The Spark is **arm64**. Before installing, confirm that every image you'll pull has a `linux/arm64` manifest:
 
 ```bash
+# ▶ MacBook · any folder
+# needs Docker on the Mac (Docker Desktop or similar)
 for img in quay.io/ansible/awx-operator:2.19.1 quay.io/ansible/awx:24.6.1 \
            quay.io/ansible/awx-ee:24.6.1 quay.io/sclorg/postgresql-15-c9s:latest \
            docker.io/redis:7; do
@@ -99,6 +101,7 @@ done
 ### 3.1 Operator
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 export KUBECONFIG="$PWD/.cache/kubeconfig-spark-lab.yaml"   # contexts spark-root, dev-lab, llms
 mkdir -p .cache/awx && cd .cache/awx
 cat > kustomization.yaml <<'EOF'
@@ -119,6 +122,8 @@ kubectl --context spark-root -n awx rollout status deploy/awx-operator-controlle
 ### 3.2 Stable secrets (so a reinstall doesn't orphan the DB)
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
+# still inside .cache/awx from §3.1
 kubectl --context spark-root -n awx create secret generic awx-admin-password --from-literal=password="$(openssl rand -base64 24)"
 kubectl --context spark-root -n awx create secret generic awx-secret-key      --from-literal=secret_key="$(openssl rand -base64 48)"
 kubectl --context spark-root -n awx get secret awx-admin-password awx-secret-key -o yaml > ../awx-secrets.backup.yaml   # keep safe
@@ -149,6 +154,8 @@ spec:
 ```
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
+# still inside .cache/awx from §3.1
 kubectl --context spark-root apply -f awx.yaml
 kubectl --context spark-root -n awx logs -f deploy/awx-operator-controller-manager -c awx-manager | grep -E 'PLAY RECAP|failed=[1-9]'
 kubectl --context spark-root -n awx get pods -w      # awx-web, awx-task, awx-postgres-15-0 → Running
@@ -160,6 +167,8 @@ curl -s http://192.168.0.100:30080/api/v2/ping/ | jq .version
 Clicking through the UI can't be reviewed or rebuilt. Use the `awx.awx` collection instead:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
+cd ../..                                  # §3.1 left this shell in .cache/awx: back to 01-Ansible/lab
 ansible-galaxy collection install awx.awx -p ./collections
 export CONTROLLER_HOST=http://192.168.0.100:30080 CONTROLLER_USERNAME=admin
 export CONTROLLER_PASSWORD=$(kubectl --context spark-root -n awx get secret awx-admin-password -o jsonpath='{.data.password}' | base64 -d)
@@ -248,6 +257,7 @@ This machine credential is the **simple** version: your own `dgxadmin` key, stor
 - Play 1 (`00-vault-cert.yml`) is skipped in AWX for the same reason, so it doesn't conflict with the credential plugin.
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/awx-config.yml -e @.cache/awx-secrets.yml
 awx --conf.host $CONTROLLER_HOST job_templates launch "spark · validate" --monitor   # optional awxkit CLI
 ```
@@ -309,6 +319,7 @@ additional_build_steps:
 ```
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 pip install ansible-builder
 cd "01-Ansible/lab"
 ansible-builder build -t 192.168.0.100:5000/spark-ee:1.0 -f ee/execution-environment.yml --container-runtime docker
@@ -353,6 +364,7 @@ docker run --rm 192.168.0.100:5000/spark-ee:1.0 ansible-galaxy collection list |
 ## 7. Validation
 
 ```bash
+# ▶ MacBook · any folder
 curl -s http://192.168.0.100:30080/api/v2/ping/ | jq '{version, active_node}'
 kubectl --context spark-root -n awx top pods   # within the §1.3 budget (needs metrics-server: install-addons.sh metrics-server)
 ```

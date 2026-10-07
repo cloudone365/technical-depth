@@ -49,11 +49,13 @@ Each step has a **Why**, then commands with a comment on every line, then a **Ve
 
 - **zsh and `#` comments.** macOS's zsh does **not** treat `#` as a comment when you type or paste commands: everything after it becomes arguments (errors like `zsh: unknown group`, `No such file or directory`, or a hanging quote from an apostrophe). The commented command blocks in these guides need it switched on:
   ```bash
+  # ▶ MacBook · any folder
   setopt interactivecomments                                   # this shell
   echo 'setopt interactivecomments' >> ~/.zshrc                # every new shell
   ```
 - **SSH names for the management plane**, so `vault01` and `sema01` in the commands below resolve to the right address and user. Your login user on vault01 is the one from Chapter 01 (`vault01` in its examples); put your own sema01 user in place of `<your-user>`:
   ```bash
+  # ▶ MacBook · any folder
   cat >> ~/.ssh/config <<'EOF'
   Host vault01
     HostName 192.168.0.211
@@ -71,6 +73,7 @@ Each step has a **Why**, then commands with a comment on every line, then a **Ve
 Then, on your MacBook (the repository and Ansible come from [Chapter 02](02-control-node-and-ansible-core.md) §3.1):
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 cd ~/technical-depth/"01-Ansible/lab"                       # the lab folder; every relative path below starts here
 (umask 077 && mkdir -p .cache)                              # local state folder, private to you (git-ignored); no chmod, which some Mac antivirus tools block
 scp vault01:~/vault-ca.crt .cache/vault-ca.crt               # vault01 TLS certificate (the copy you made in Chapter 01 §3.3)
@@ -81,6 +84,7 @@ ssh -t dgxadmin@192.168.0.100 'hostname; sudo -v && echo sudo-ok'   # admin logi
 **Verify 2:**
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ls -l .cache/vault-ca.crt                                    # the certificate is there
 curl -s --cacert .cache/vault-ca.crt https://192.168.0.211:8200/v1/ssh-client-signer/public_key | cut -c1-20   # expect: ssh-rsa AAAA… (public, no token)
 ansible -m ping dgx-spark-1 -K                              # expect: pong (as dgxadmin, your key)
@@ -89,7 +93,12 @@ ansible -m ping dgx-spark-1 -K                              # expect: pong (as d
 `{"errors":["Vault is sealed"]}` instead of `ssh-rsa …`? The network and TLS are fine (you got an answer from Vault), but Vault is locked. It seals itself every time vault01 restarts and stays sealed until you unseal it with two of the three unseal keys from Chapter 01 §3.4:
 
 ```bash
+# ▶ MacBook · any folder
 ssh vault01                                                  # or: ssh vault01@192.168.0.211
+```
+
+```bash
+# ▶ vault01 (ssh vault01)
 vault status                                                 # Sealed true, Unseal Progress 0/2
 vault operator unseal                                        # unseal key 1
 vault operator unseal                                        # unseal key 2 (a different one)
@@ -117,6 +126,7 @@ Your `dgxadmin` login is untouched, so you can't lock yourself out.
 ### 3.1 Run it
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/04.1-semaphore-target.yml -l dgx-spark-1,localhost -K   # localhost: fetches the CA key from vault01
 ```
 
@@ -125,6 +135,7 @@ ansible-playbook playbooks/04.1-semaphore-target.yml -l dgx-spark-1,localhost -K
 ### 3.2 Verify on dgx-spark-1
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 id svc-ansible                                               # expect a uid line
 sudo visudo -c                                               # expect: parsed OK (including /etc/sudoers.d/90-svc-ansible)
 sudo sshd -T | grep -i trustedusercakeys                     # expect: trustedusercakeys /etc/ssh/trusted-user-ca-keys.pem
@@ -138,6 +149,7 @@ On vault01: `vault read -field=public_key ssh-client-signer/config/ca > ~/ca.pub
 The same test as Chapter 01 §6, against the Spark. If Semaphore fails later, you'll know the problem isn't the trust:
 
 ```bash
+# ▶ vault01 (ssh vault01)
 ssh-keygen -t ed25519 -f ~/semaphore_lab -N "" <<<y >/dev/null       # test key (overwrites the Chapter 01 one)
 vault write -field=signed_key ssh-client-signer/sign/ansible \
   public_key=@$HOME/semaphore_lab.pub valid_principals=svc-ansible > ~/semaphore_lab-cert.pub
@@ -163,6 +175,7 @@ Expected: `dgx-spark-1` and `root`. `01-Ansible/lab/tools/vault-ssh-cert.sh` doe
 | [`docker-compose.override.yml`](lab/semaphore/docker-compose.override.yml) | merged with your Chapter 01 `docker-compose.yml`: builds that image, mounts `/opt/spark-lab/cache`, sets `ANSIBLE_CONFIG`, `SPARK_LAB_CACHE` and the log and fact paths |
 
 ```bash
+# ▶ sema01 (ssh sema01)
 cd ~ && git clone https://github.com/cloudone365/technical-depth.git   # the lab repository, as the image's build context
 sudo install -d -o 1001 -g 0 -m 0700 /opt/spark-lab/cache            # state folder, owned by the container's semaphore user (uid 1001)
 cp ~/technical-depth/"01-Ansible/lab/semaphore/docker-compose.override.yml" ~/semaphore/   # next to the Chapter 01 compose file
@@ -171,11 +184,12 @@ docker compose build semaphore                                       # builds se
 docker compose up -d                                                 # recreates the semaphore container; PostgreSQL and your data are untouched
 ```
 
-`/opt/spark-lab/cache` will hold cluster-admin kubeconfigs: back it up like the `.env` file (Chapter 01 §7.3) and keep it readable by the container user only. To update the tools later, `git -C ~/technical-depth pull`, then `docker compose build semaphore && docker compose up -d`.
+`/opt/spark-lab/cache` will hold cluster-admin kubeconfigs: back it up like the `.env` file (Chapter 01 §7.3) and keep it readable by the container user only. To update the tools later (on sema01, in `~/semaphore`): `git -C ~/technical-depth pull`, then `docker compose build semaphore && docker compose up -d`.
 
 **Verify 4 (on sema01, in ~/semaphore):**
 
 ```bash
+# ▶ sema01 (ssh sema01)
 docker compose ps                                                    # expect: postgres and semaphore Up
 docker compose exec semaphore kubectl version --client               # expect: Client Version: v1.36.5
 docker compose exec semaphore helm version --short                   # expect: v3.18.x
@@ -193,15 +207,15 @@ Your Chapter 01 project `lab` keeps working: same database, same keys, and the n
 
 ### 5.1 Project
 
-**New Project** → name `spark-lab`. Everything below happens inside it.
+**Semaphore UI:** **New Project** → name `spark-lab`. Everything below happens inside it.
 
 ### 5.2 Key for the repository
 
-**Key Store → New Key**: name `github-token`, type *Login with password*. Login is your GitHub user; Password is a **read-only** fine-grained token for `technical-depth` (Chapter 01 §8.2: Contents → Read-only). If the repository is public, type *None* works too. An SSH deploy key (Chapter 01 §8.5) is the stronger option.
+**Semaphore UI:** **Key Store → New Key**: name `github-token`, type *Login with password*. Login is your GitHub user; Password is a **read-only** fine-grained token for `technical-depth` (Chapter 01 §8.2: Contents → Read-only). If the repository is public, type *None* works too. An SSH deploy key (Chapter 01 §8.5) is the stronger option.
 
 ### 5.3 Variable group `vault-approle`
 
-**Variable Groups → New**, exactly as Chapter 01 §8.6 (same AppRole, so the same values work):
+**Semaphore UI:** **Variable Groups → New**, exactly as Chapter 01 §8.6 (same AppRole, so the same values work):
 
 1. Name `vault-approle`.
 2. Extra variables (JSON): `{"vault_role_id": "PASTE-THE-ROLE-ID", "vault_lab_secrets_enabled": false}`.
@@ -212,11 +226,11 @@ Your Chapter 01 project `lab` keeps working: same database, same keys, and the n
 
 ### 5.4 Repository
 
-**Repositories → New**: name `technical-depth`, URL `https://github.com/cloudone365/technical-depth.git`, branch `main`, access key `github-token`.
+**Semaphore UI:** **Repositories → New**: name `technical-depth`, URL `https://github.com/cloudone365/technical-depth.git`, branch `main`, access key `github-token`.
 
 ### 5.5 Inventory
 
-**Inventory → New**: name `spark-lab`, type **File**, repository `technical-depth`, path `01-Ansible/lab/inventory/hosts.yml`, user credentials *None* (play 1 supplies the key).
+**Semaphore UI:** **Inventory → New**: name `spark-lab`, type **File**, repository `technical-depth`, path `01-Ansible/lab/inventory/hosts.yml`, user credentials *None* (play 1 supplies the key).
 
 The inventory file comes with its `group_vars/` and `host_vars/`, so addresses, the automation user, the certificate path and `StrictHostKeyChecking=accept-new` are all already there; you don't retype them.
 
@@ -224,7 +238,7 @@ The inventory file comes with its `group_vars/` and `host_vars/`, so addresses, 
 
 ### 5.6 First template: `04.2 Ping`
 
-**Task Templates → New Template**, type *Ansible Playbook*:
+**Semaphore UI:** **Task Templates → New Template**, type *Ansible Playbook*:
 
 | Field | Value |
 |---|---|
@@ -245,9 +259,19 @@ Save, then **Run**.
 Then check all three systems: this is the proof that the login used a vault01 certificate.
 
 ```bash
-sudo journalctl -u ssh --since "10 minutes ago" | grep svc-ansible   # on dgx-spark-1: "Accepted publickey for svc-ansible … ED25519-CERT"
-sudo grep -c 'sign/ansible' /var/log/vault_audit.log                 # on vault01: the count grows with each task run
-docker compose exec semaphore ssh-keygen -L -f /tmp/lab_ssh/id_ed25519-cert.pub | grep -A1 Principals   # on sema01: svc-ansible
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+sudo journalctl -u ssh --since "10 minutes ago" | grep svc-ansible   # "Accepted publickey for svc-ansible … ED25519-CERT"
+```
+
+```bash
+# ▶ vault01 (ssh vault01)
+sudo grep -c 'sign/ansible' /var/log/vault_audit.log                 # the count grows with each task run
+```
+
+```bash
+# ▶ sema01 (ssh sema01)
+# in ~/semaphore
+docker compose exec semaphore ssh-keygen -L -f /tmp/lab_ssh/id_ed25519-cert.pub | grep -A1 Principals   # svc-ansible
 ```
 
 ---
@@ -285,9 +309,10 @@ docker compose exec semaphore ssh-keygen -L -f /tmp/lab_ssh/id_ed25519-cert.pub 
           kernel {{ ansible_facts.kernel }}
 ```
 
-In Semaphore this is the template **`04.2 Ping`** (§5.6): run it again and open the log. It shows play 1, *Get an SSH certificate from Vault*, then this play. Break-glass from the MacBook:
+**Semaphore UI:** this is the template **`04.2 Ping`** (§5.6): run it again and open the log. It shows play 1, *Get an SSH certificate from Vault*, then this play. Break-glass from the MacBook:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/04.2-ping.yml -K     # -K prompts for dgxadmin's sudo password
 ```
 
@@ -302,6 +327,7 @@ ok: [dgx-spark-1] => msg: dgx-spark-1 aarch64 20 cores 119.6 GiB Ubuntu 24.04 ke
 Ad-hoc commands are how you poke a box without writing a playbook. Semaphore runs playbooks, not ad-hoc commands, so these run **from your MacBook** as `dgxadmin` (no Semaphore variable group → your own key). Name the host instead of the group `spark` while the optional dgx-spark-2 isn't there:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible dgx-spark-1 -m command -a "nvidia-smi --query-gpu=name,driver_version --format=csv"
 ansible dgx-spark-1 -m shell   -a "free -g | head -2"
 ansible dgx-spark-1 -m setup   -a "filter=ansible_processor*"
@@ -495,9 +521,10 @@ print(json.dumps({
     verbosity: 1
 ```
 
-**In Semaphore**, create the template **`04.3 Baseline`**: the same fields as `04.2 Ping` (§5.6), with playbook filename `01-Ansible/lab/playbooks/04.3-baseline.yml`. Its first role is `spark_facts` (tag `facts`), so every run installs the fact before the baseline; you run the template in §6.3. To look at the fact on its own first, run only that tag with the break-glass form, then read the result with an ad-hoc `setup` (from the MacBook, like every ad-hoc command):
+**Semaphore UI:** create the template **`04.3 Baseline`**: the same fields as `04.2 Ping` (§5.6), with playbook filename `01-Ansible/lab/playbooks/04.3-baseline.yml`. Its first role is `spark_facts` (tag `facts`), so every run installs the fact before the baseline; you run the template in §6.3. To look at the fact on its own first, run only that tag with the break-glass form, then read the result with an ad-hoc `setup` (from the MacBook, like every ad-hoc command):
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/04.3-baseline.yml -K --tags facts -v    # break-glass: only the spark_facts role
 ansible dgx-spark-1 -m setup -a "filter=ansible_local" | less      # ad-hoc, from the MacBook
 ```
@@ -605,9 +632,10 @@ The `spark_baseline` role installs the tooling you'll need in every later chapte
     - spark_baseline_nvidia_pkgs | difference(spark_baseline_holds.stdout_lines) | length > 0
 ```
 
-**In Semaphore:** run `04.3 Baseline` with *Dry run* ticked (`--check --diff`) for the preview, then run it for real, then run it again. Break-glass from the MacBook:
+**Semaphore UI:** run `04.3 Baseline` with *Dry run* ticked (`--check --diff`) for the preview, then run it for real, then run it again. Break-glass from the MacBook:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/04.3-baseline.yml -K --check --diff   # preview
 ansible-playbook playbooks/04.3-baseline.yml -K                  # apply
 ansible-playbook playbooks/04.3-baseline.yml -K                  # again → changed=0
@@ -630,6 +658,7 @@ ansible-playbook playbooks/04.3-baseline.yml -K                  # again → cha
 **Verify 6** (ad-hoc, from the MacBook; `-b -K` = become with dgxadmin's sudo password):
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible dgx-spark-1 -m command -a "test -x /etc/ansible/facts.d/spark.fact"
 ansible dgx-spark-1 -m command -a "apt-mark showhold" -b -K | grep -c nvidia     # > 0
 ansible dgx-spark-1 -m command -a "sysctl -n vm.max_map_count" -b -K             # 1048576
@@ -662,6 +691,7 @@ ansible dgx-spark-1 -m command -a "sshd -T" -b -K | grep -E 'permitrootlogin|all
 - seeds a placeholder `kv/spark-lab/ngc`.
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=$PWD/.cache/vault-ca.crt   # the vault CLI on the MacBook talks to vault01
 vault login                                      # an admin token (root token in the lab; a named admin in production)
 export VAULT_TOKEN=$(vault print token)          # the playbook reads it from the environment; it is never written to disk
@@ -672,16 +702,17 @@ unset VAULT_TOKEN                                # don't leave an admin token in
 
 No `vault` CLI on the MacBook? Run the `vault` commands on vault01 instead, and paste the token into `export VAULT_TOKEN=…` on the MacBook for the playbook run.
 
-Then in Semaphore: variable group `vault-approle` → change `vault_lab_secrets_enabled` to `true`.
+**Semaphore UI:** variable group `vault-approle` → change `vault_lab_secrets_enabled` to `true`.
 
 **Verify 7:**
 
 ```bash
-vault read auth/approle/role/semaphore | grep token_policies   # on vault01: [semaphore-ssh spark-lab-read]
+# ▶ vault01 (ssh vault01)
+vault read auth/approle/role/semaphore | grep token_policies   # expect: [semaphore-ssh spark-lab-read]
 vault kv get -field=api_key kv/spark-lab/ngc | cut -c1-6       # the first characters of your key, not REPLACE_ME
 ```
 
-In Semaphore, add and run a template `18.1 Vault integration` (`01-Ansible/lab/playbooks/18.1-vault-integration.yml`, same inventory, variable group and CLI args). Its log reports `Lab secrets read from kv/spark-lab/: ['ngc']` and `NGC key present: True`, without ever printing the key.
+**Semaphore UI:** add and run a template `18.1 Vault integration` (`01-Ansible/lab/playbooks/18.1-vault-integration.yml`, same inventory, variable group and CLI args). Its log reports `Lab secrets read from kv/spark-lab/: ['ngc']` and `NGC key present: True`, without ever printing the key.
 
 ---
 
@@ -746,6 +777,7 @@ Never schedule it.
 `19.1 Kubernetes` and `20.2 vClusters` write `kubeconfig-spark-lab.yaml` (contexts `spark-root`, `dev-lab`, `llms`) to sema01's state volume. The 02-Kubernetes labs run `kubectl` from your MacBook and expect it at `01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml`. Copy it there after each of those two tasks:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 tools/fetch-kubeconfig.sh sema01                                     # reads it through the container, writes .cache/kubeconfig-spark-lab.yaml (0600)
 export KUBECONFIG="$PWD/.cache/kubeconfig-spark-lab.yaml"            # what every 02-Kubernetes command uses
 kubectl --context spark-root get nodes                               # expect: dgx-spark-1 Ready control-plane
@@ -829,6 +861,7 @@ Unchanged: template `site` (`site.yml`, which imports the new names itself) and 
 When sema01 or vault01 is down, you can still reach the Spark the way you did in §2:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 cd ~/technical-depth/"01-Ansible/lab"
 ansible-playbook playbooks/29.1-emergency-drain.yml -l dgx-spark-1,localhost -K   # no vault_role_id → dgxadmin + your key; play 1 is skipped
 ```
@@ -882,6 +915,7 @@ State then goes to the MacBook's `.cache/` instead of sema01's volume. After the
 A diagnostic sequence worth memorising (MacBook):
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible dgx-spark-1 -m ping -vvv 2>&1 | grep -E 'ESTABLISH|EXEC|SSH:'   # is it SSH, sudo or Python?
 ansible-playbook playbooks/04.3-baseline.yml --list-tasks --list-tags
 ansible-playbook playbooks/04.3-baseline.yml --start-at-task "Harden sshd (drop-in, validated before reload)" -K

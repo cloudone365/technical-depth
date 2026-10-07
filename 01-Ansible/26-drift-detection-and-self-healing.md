@@ -274,10 +274,11 @@ exit $rc
 
 Two ways to run the same check:
 
-- **Semaphore template `26.1 Drift check`** (`26.1-drift-check.yml`, check mode built in, CLI args `--limit dgx-spark-1,localhost` while there's one Spark). Play 1 gets the certificate; the host play changes nothing. The task log shows drift as `changed=N` in the recap, and `--diff` shows the lines. This is what runs every night (§4.4).
+- **Semaphore UI:** template **`26.1 Drift check`** (`26.1-drift-check.yml`, check mode built in, CLI args `--limit dgx-spark-1,localhost` while there's one Spark). Play 1 gets the certificate; the host play changes nothing. The task log shows drift as `changed=N` in the recap, and `--diff` shows the lines. This is what runs every night (§4.4).
 - **`tools/drift-cycle.sh`** wraps the same playbook with the JSON callback, the report, the Prometheus metric and the guarded heal. It runs `ansible-playbook` itself, so it runs where you have the repository and a login: your MacBook (as `dgxadmin`, pass `BECOME_ARGS=-K`). Its output goes to `$SPARK_LAB_CACHE/drift`, or `.cache/drift` when that's unset. The script has no limit option: with one Spark, add the limit through `BECOME_ARGS`, which it passes to every Ansible command: `BECOME_ARGS="-K -l dgx-spark-1,localhost" tools/drift-cycle.sh`.
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
 tools/drift-cycle.sh; echo "exit=$?"
 cat .cache/drift/check-*.md | tail -20
@@ -286,6 +287,7 @@ cat .cache/drift/check-*.md | tail -20
 ### 4.2 Create drift on purpose, then watch it
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ssh dgxadmin@192.168.0.101 'sudo sysctl -w vm.swappiness=60 && sudo sed -i "s/^vm.swappiness.*/vm.swappiness = 60/" /etc/sysctl.d/90-spark.conf'
 ssh dgxadmin@192.168.0.101 'sudo apt-mark unhold $(apt-mark showhold | grep -m1 nvidia)'
 tools/drift-cycle.sh; echo "exit=$?"          # → 2, dgx-spark-2 listed with both tasks
@@ -307,6 +309,7 @@ The Grafana "Config drift (tasks)" stat on the overview dashboard (Chapter 12) t
 ### 4.3 Heal (safe tags only) and confirm
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 AUTO_HEAL=1 tools/drift-cycle.sh; echo "exit=$?"     # → heal on dgx-spark-2 only → recheck → 0
 ```
 

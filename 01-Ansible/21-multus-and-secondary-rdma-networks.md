@@ -333,6 +333,7 @@ spec:
 ```
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
 ansible-playbook playbooks/21.1-multus-rdma.yml
@@ -346,6 +347,7 @@ Expected on each node: `RDMA` 64, `GPU` 15. In `/etc/cni/net.d`, `00-multus.conf
 ### 3.1 Pod-to-pod RDMA across Sparks
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n platform-tools exec rdma-test-dgx-spark-2 -- ib_write_bw -d rocep1s0f1 -q 4 -D 10 --report_gbits -F &
 sleep 3
 kubectl --context spark-root -n platform-tools exec rdma-test-dgx-spark-1 -- ib_write_bw -d rocep1s0f1 -q 4 -D 10 --report_gbits -F 192.168.100.202
@@ -356,6 +358,7 @@ Inside the pods, `ibv_devices` shows the host's RDMA devices, because the shared
 Multus also records what it did, on the root object:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n platform-tools get pod rdma-test-dgx-spark-1 \
   -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}' | jq '.[] | {name, interface, ips}'
 ```
@@ -397,6 +400,8 @@ Every limit on this pod is checked in a different place. `nvidia.com/gpu: 1` pas
 ### 3.3 Follow the annotation from the vCluster to the NIC
 
 ```bash
+# ▶ MacBook · any folder
+# in the folder where you saved nccl-worker-0.yaml
 kubectl --context llms apply -f nccl-worker-0.yaml
 kubectl --context llms -n batch get pod nccl-worker-0 -o wide                  # Running, IP 10.42.x.x (eth0)
 HOSTPOD=$(kubectl --context spark-root -n vc-llms get pods -o json \

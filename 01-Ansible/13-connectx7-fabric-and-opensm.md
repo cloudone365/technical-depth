@@ -78,6 +78,7 @@ To model a ring in this lab, give each host **two** `cx7_interfaces` groups on d
 ### 3.1 Cable and discover
 
 ```bash
+# ▶ MacBook · any folder
 ssh dgxadmin@192.168.0.100 ibdev2netdev
 # rocep1s0f1 port 1 ==> enp1s0f1np1 (Up)
 # roceP2p1s0f1 port 1 ==> enP2p1s0f1np1 (Up)
@@ -304,7 +305,12 @@ Use the **same cage number** on both Sparks. It keeps the config symmetric, and 
 ```
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
+```
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/13.1-fabric.yml -K
 ```
 
@@ -423,6 +429,7 @@ TASK [Print NCCL environment derived from the fabric]
 ```
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/13.2-rdma-perftest.yml -K                       # port idx 0
 ansible-playbook playbooks/13.2-rdma-perftest.yml -K -e perftest_port_idx=1
 ansible-playbook playbooks/13.2-rdma-perftest.yml -K -e perftest_qps=1     # see why QPs matter
@@ -431,9 +438,14 @@ ansible-playbook playbooks/13.2-rdma-perftest.yml -K -e perftest_qps=1     # see
 Manual equivalents, for when you're debugging by hand:
 
 ```bash
-# dgx-spark-2 (server)
+# ▶ dgx-spark-2 (ssh dgx-spark-2)
+# server
 ib_write_bw -d rocep1s0f1 -x 3 -q 4 -D 10 --report_gbits -F
-# dgx-spark-1 (client)
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+# client
 ib_write_bw -d rocep1s0f1 -x 3 -q 4 -D 10 --report_gbits -F 192.168.100.12
 show_gids | grep -E 'rocep1s0f1|v2'          # which index is RoCE v2 + IPv4
 ```
@@ -474,6 +486,7 @@ What stays the same, and what this chapter trains: **inventory-driven addressing
 Fast triage bundle:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 ibdev2netdev; rdma link show
 for d in rocep1s0f1 roceP2p1s0f1; do ibv_devinfo -d $d | grep -E 'state|active_mtu|link_layer'; done
 ethtool enp1s0f1np1 | grep -E 'Speed|Duplex|Link detected'

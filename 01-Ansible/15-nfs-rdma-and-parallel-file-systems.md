@@ -195,7 +195,12 @@ nfs_rdma_tcp_fallback: true
 ```
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
+```
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/15.1-nfs-rdma.yml -K
 ssh dgxadmin@192.168.0.101 'nfsstat -m | grep -A1 /mnt/models; cat /proc/fs/nfsd/portlist 2>/dev/null'
 # Expect: proto=rdma,port=20049 on the client; "rdma 20049" in the server portlist
@@ -204,10 +209,15 @@ ssh dgxadmin@192.168.0.101 'nfsstat -m | grep -A1 /mnt/models; cat /proc/fs/nfsd
 ### 3.1 Put a model in it once, and use it on both nodes
 
 ```bash
-# on dgx-spark-1 (server side, local disk speed)
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+# server side, local disk speed
 docker run --rm -v /srv/models:/models -e HF_TOKEN nvcr.io/nvidia/pytorch:25.11-py3 \
   huggingface-cli download Qwen/Qwen2.5-7B-Instruct --local-dir /models/qwen2.5-7b-instruct
-# on dgx-spark-2 (over RDMA)
+```
+
+```bash
+# ▶ dgx-spark-2 (ssh dgx-spark-2)
+# over RDMA
 ls -lh /mnt/models/qwen2.5-7b-instruct/*.safetensors
 ```
 
@@ -216,7 +226,8 @@ For multi-node vLLM (NVIDIA's Ray-based Spark recipe), mount the **same path** i
 ### 3.2 Measure it
 
 ```bash
-# dgx-spark-2: sequential read over RDMA (direct I/O, bypass client page cache)
+# ▶ dgx-spark-2 (ssh dgx-spark-2)
+# sequential read over RDMA (direct I/O, bypass client page cache)
 fio --name=seqread --filename=/mnt/models/fio.bin --size=16G --rw=read --bs=1M \
     --ioengine=libaio --iodepth=32 --numjobs=4 --direct=1 --group_reporting
 # compare with TCP: remount with proto=tcp (or run the fallback task) and repeat

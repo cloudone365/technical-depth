@@ -114,12 +114,13 @@ its own it is a complete cluster.
 
 ## Kubernetes: one root cluster, two vClusters
 
-In Semaphore (project `spark-lab`), run the templates `19.1 Kubernetes` (kubeadm root
+**Semaphore UI:** in project `spark-lab`, run the templates `19.1 Kubernetes` (kubeadm root
 cluster + Cilium + MetalLB), `20.1 GPU Operator` (node advertises `nvidia.com/gpu: 15`)
 and `20.2 vClusters` (dev-lab on 192.168.0.111, llms on 192.168.0.112). They write the
 kubeconfig to sema01's state volume. Then, on your MacBook:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 tools/fetch-kubeconfig.sh sema01                         # → .cache/kubeconfig-spark-lab.yaml (0600)
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml   # contexts: spark-root, dev-lab, llms
 kubectl --context spark-root get nodes -o wide
@@ -141,33 +142,44 @@ and `kubeconfig-llms.yaml` to the state folder for anyone who should only see on
 ## Quick start
 
 ```bash
+# ▶ MacBook · any folder
 # 0. Management plane: vault01 + sema01 by hand (Chapter 01: ../01-management-plane-semaphore-and-vault.md)
 
 # 1. MacBook toolchain (Chapter 02 §3.1)
 python3 -m venv ~/.venvs/spark-ansible && source ~/.venvs/spark-ansible/bin/activate
+```
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 pip install -r requirements.txt
 ansible-galaxy collection install -r requirements.yml -p ./collections
+```
 
-# 2. Edit inventory/hosts.yml (IPs) and host_vars/*.yml (CX-7 names from `ibdev2netdev`), push
+```bash
+# ▶ MacBook · any folder
+# 2. Edit inventory/hosts.yml (IPs) and host_vars/*.yml (CX-7 names from `ibdev2netdev` on the Spark), push
 #    Key login for the MacBook (Chapter 03): fresh from the first-boot wizard? playbooks/03.1-bootstrap.yml (§3.2).
 ssh-copy-id dgxadmin@192.168.0.100     # already installed (Chapter 03 §3.3); and .101
+```
 
-# 3. Make the Spark a Semaphore target (Chapter 04: ../04-dgx-spark-as-semaphore-target.md), from the MacBook
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
+# 3. Make the Spark a Semaphore target (Chapter 04: ../04-dgx-spark-as-semaphore-target.md)
 scp vault01:~/vault-ca.crt .cache/vault-ca.crt
 ansible-playbook playbooks/04.1-semaphore-target.yml -l dgx-spark-1,localhost -K
-#    on sema01: build semaphore/ (Chapter 04 §4); in Semaphore: project spark-lab, variable group vault-approle (Chapter 04 §5)
+#    on sema01: build semaphore/ (Chapter 04 §4); Semaphore UI: project spark-lab, variable group vault-approle (Chapter 04 §5)
 export VAULT_TOKEN=<admin token> && ansible-playbook playbooks/17.1-vault.yml && unset VAULT_TOKEN   # Chapter 04 §7
 ```
 
-4. **In Semaphore**, walk the stages as templates (each is safe to re-run; no `--limit`
+4. **Semaphore UI:** walk the stages as templates (each is safe to re-run; no `--limit`
    needed while `dgx-spark-2` is commented out, and any limit must keep `localhost`): `04.2 Ping` → `04.3 Baseline`
    → `13.1 Fabric` (two Sparks) → `11.1 Containers` → `19.1 Kubernetes` → `20.1 GPU Operator`
    → `20.2 vClusters` → `30.1 Validate`, or everything with `site`.
-5. **Day-2 in Semaphore:** `26.1 Drift check` scheduled nightly, `29.1 Emergency drain`
+5. **Semaphore UI:** day 2, `26.1 Drift check` scheduled nightly, `29.1 Emergency drain`
    (extra variables, `--limit` on one node), `14.2 NCCL test` (two Sparks).
 
 ```bash
-# MacBook
+# ▶ MacBook · 01-Ansible/lab (venv active)
 tools/fetch-kubeconfig.sh sema01                                 # after 19.1 / 20.2
 tools/drift-cycle.sh                                             # what drifted? (exit 0/2/3)
 python3 tools/capstone_scorecard.py                              # evidence-based progress (Chapter 30 §1.3)
@@ -179,8 +191,14 @@ ansible-playbook playbooks/29.1-emergency-drain.yml -l dgx-spark-1,localhost -K
 ## Quality gates (run before every commit)
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 tests/run-local-checks.sh                  # yamllint, ansible-lint (production), syntax, katas, fixtures
-cd roles/spark_baseline && molecule test   # on the Spark: native arm64 container
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+# in the repository's 01-Ansible/lab on the Spark (Chapter 25 §3): native arm64 container
+cd roles/spark_baseline && molecule test
 ```
 
 ## Versions pinned here (check before use)

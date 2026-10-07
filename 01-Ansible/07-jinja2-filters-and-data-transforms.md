@@ -40,7 +40,12 @@ Three layers each get a chance to eat your backslashes and quotes:
 Run it first, then read each block:
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
+```
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/07.1-jinja-lab.yml        # → "7/7 Jinja katas passed"
 ```
 
@@ -303,6 +308,7 @@ Replace the canned vars with live output:
 Tools for debugging expressions:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ansible localhost -m debug -a "msg={{ '580.82.09' is version('580', '>=') }}"
 ansible dgx-spark-1 -m debug -a "msg={{ hostvars['dgx-spark-2'].cx7_interfaces | map(attribute='address') }}"
 ansible-console localhost      # then: debug msg="{{ ... }}"

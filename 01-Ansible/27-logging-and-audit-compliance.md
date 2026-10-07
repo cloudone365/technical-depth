@@ -379,9 +379,10 @@ compactor:
 
 ### 4.1 Deploy
 
-Run the Semaphore template **`27.1 Logging audit`** (break-glass: `ansible-playbook playbooks/27.1-logging-audit.yml -l dgx-spark-1,localhost -K`), then:
+**Semaphore UI:** run the template **`27.1 Logging audit`** (break-glass, on the MacBook in `01-Ansible/lab`: `ansible-playbook playbooks/27.1-logging-audit.yml -l dgx-spark-1,localhost -K`), then:
 
 ```bash
+# ▶ MacBook · any folder
 curl -s http://192.168.0.100:3100/ready                        # ready
 curl -s http://192.168.0.100:8000/api/v1/ | jq 'keys'           # ARA API
 ```
@@ -391,6 +392,7 @@ curl -s http://192.168.0.100:8000/api/v1/ | jq 'keys'           # ARA API
 The ARA callback runs on the **controller**. The lab's Semaphore image doesn't include it, so start on the MacBook:
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 pip install "ara>=1.7"                                       # client side, on the controller (here: the MacBook)
 export ANSIBLE_CALLBACK_PLUGINS=$(python3 -m ara.setup.callback_plugins)
 export ARA_API_CLIENT=http ARA_API_SERVER=http://192.168.0.100:8000
@@ -403,14 +405,23 @@ To record the **Semaphore** runs too, add `ara` to [`semaphore/requirements-sema
 
 ### 4.2b The management-plane trail: Semaphore, vault01, sshd
 
-One template run leaves three matching records. Run `04.2 Ping` in Semaphore, then:
+One template run leaves three matching records. **Semaphore UI:** run `04.2 Ping`, then:
 
 ```bash
-# sema01: the task, who ran it, its status (also in the UI: project spark-lab → Task history)
+# ▶ sema01 (ssh sema01)
+# the task, who ran it, its status (also in the UI: project spark-lab → Task history)
 cd ~/semaphore && docker compose exec semaphore ls /var/lib/spark-lab/cache   # ansible.log grows with every task
-# vault01: the AppRole login and the signature for that task
+```
+
+```bash
+# ▶ vault01 (ssh vault01)
+# the AppRole login and the signature for that task
 sudo grep -E 'auth/approle/login|sign/ansible' /var/log/vault_audit.log | tail -2 | jq -c '{time, path: .request.path, type}'
-# dgx-spark-1: the login with that certificate, then the sudo commands
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+# the login with that certificate, then the sudo commands
 sudo journalctl -u ssh --since "10 minutes ago" | grep 'ED25519-CERT'
 sudo grep svc-ansible /var/log/auth.log | grep COMMAND | tail -3
 ```
@@ -433,13 +444,14 @@ Line the three up by time: the Semaphore task's start, the `sign/ansible` reques
 ### 4.4 auditd: prove it catches a manual change
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 ssh dgxadmin@192.168.0.101 'sudo sed -i "s/mtu: 9000/mtu: 1500/" /etc/netplan/40-cx7.yaml'
 ssh dgxadmin@192.168.0.101 'sudo ausearch -k network -i --start recent | tail -20'
 # → type=SYSCALL ... comm="sed" ... auid=nvidia ... key="network"
 tools/drift-cycle.sh      # drift reports the fabric template (and doesn't auto-heal it)
-# a human puts it back: Semaphore template 13.1 Fabric with --limit dgx-spark-2,localhost
-#   (break-glass: ansible-playbook playbooks/13.1-fabric.yml -K -l dgx-spark-2,localhost)
 ```
+
+**Semaphore UI:** a human puts it back with the template **13.1 Fabric** and `--limit dgx-spark-2,localhost` (break-glass, on the MacBook in `01-Ansible/lab`: `ansible-playbook playbooks/13.1-fabric.yml -K -l dgx-spark-2,localhost`).
 
 ### 4.5 The Kubernetes API audit log: root vs vCluster
 
@@ -448,6 +460,7 @@ auditd sees *files* changing. It can't see `kubectl patch resourcequota`, which 
 The nesting adds one twist. Each vCluster has its **own** API server. A tenant's `kubectl --context dev-lab create …` is decided by that API server, and the root only sees the result: the vCluster's syncer writing a translated object into `vc-dev-lab` under its own ServiceAccount.
 
 ```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
 # 1. A platform change on the root: who touched the llms budget?
 kubectl --context spark-root -n vc-llms annotate resourcequota vcluster-budget spark.lab/audit-test="$(date +%s)" --overwrite
