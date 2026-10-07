@@ -4,6 +4,9 @@
 # These are the "golden values" the validate + drift playbooks enforce.
 # ------------------------------------------------------------------------
 ansible_become: true
+# Same as interpreter_python in ansible.cfg, here too so a run never falls back to
+# interpreter discovery (and its warning) on the Sparks.
+ansible_python_interpreter: /usr/bin/python3
 
 # ------------------------------------------------------------------------
 # How the controller logs in (Chapter 04 §1).

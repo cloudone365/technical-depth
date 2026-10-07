@@ -282,10 +282,13 @@ The first run is the first time all four machines work together: Semaphore on se
 
 | Message in the task log | Cause | Fix |
 |---|---|---|
+| *The lab's ansible.cfg is in use* fails: `Ansible loaded '…' instead of 01-Ansible/lab/ansible.cfg` | the Semaphore container has no `ANSIBLE_CONFIG`: `docker-compose.override.yml` wasn't in `~/semaphore` when the container started, so it runs the stock image without the lab settings | on sema01: `cd ~/semaphore && docker compose up -d --build` (§4); check with `docker compose exec semaphore env \| grep ANSIBLE_CONFIG` |
 | `Vault is sealed` / HTTP `503` | vault01 restarted; Vault seals itself on every restart | on vault01: `vault operator unseal` twice, with two different unseal keys (§2, Verify 2) |
 | `permission denied` / HTTP `400` at *Log in to Vault with AppRole* | wrong or expired `secret_id` / `role_id` in the variable group | create a new `secret_id` on vault01 (Chapter 01 §5) and paste it into `vault-approle` (§5.3) |
 | `certificate verify failed` / `CERTIFICATE_VERIFY_FAILED` | the Semaphore container doesn't have vault01's TLS certificate, or vault01's IP isn't in it | the `vault-ca.crt` mount from §4 and Chapter 01 §7.3; `vault_addr` must use the address in the certificate |
 | `Connection refused` / timeout to `192.168.0.211:8200` | Vault not running, or a firewall | `systemctl status vault` and `sudo ufw status` on vault01 |
+
+A **warning** in play 2, not a failure: `Host 'dgx-spark-1' is using the discovered Python interpreter at '/usr/bin/python3.12'`. The lab pins `/usr/bin/python3` in `ansible.cfg` and `group_vars/spark.yml`, so with an up-to-date repository you shouldn't see it; if you do, Semaphore isn't using the lab's `ansible.cfg` (first row above).
 
 **Play 2 fails** (*Connectivity and identity check*, on `dgx-spark-1`) with `svc-ansible@192.168.0.100: Permission denied (publickey)`: the certificate was issued, but the Spark refused it. The Spark's SSH log names the reason. Read it from the MacBook:
 

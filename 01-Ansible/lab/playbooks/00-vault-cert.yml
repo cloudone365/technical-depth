@@ -15,6 +15,15 @@
   gather_facts: false
   check_mode: false                       # must really run, even for a --check dry run
   tasks:
+    - name: The lab's ansible.cfg is in use (roles, inventory plugins, SSH settings)
+      ansible.builtin.assert:
+        that: (ansible_config_file | default('')) is search('01-Ansible/lab/ansible\\.cfg$|/lab/ansible\\.cfg$')
+        fail_msg: >-
+          Ansible loaded '{{ ansible_config_file | default('no config file') }}' instead of 01-Ansible/lab/ansible.cfg.
+          MacBook: run from the 01-Ansible/lab folder. Semaphore: the container lacks ANSIBLE_CONFIG —
+          docker-compose.override.yml must be in ~/semaphore on sema01, then docker compose up -d --build (Chapter 04 §4).
+        quiet: true
+
     - name: Semaphore run (vault01 AppRole attached)
       when: vault_role_id is defined
       block:

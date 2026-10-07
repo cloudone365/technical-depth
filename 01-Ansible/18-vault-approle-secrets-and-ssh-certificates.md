@@ -144,6 +144,11 @@ Every playbook that SSHes to the Sparks starts with `import_playbook: 00-vault-c
   gather_facts: false
   check_mode: false                       # must really run, even for a --check dry run
   tasks:
+    - name: The lab's ansible.cfg is in use (roles, inventory plugins, SSH settings)
+      ansible.builtin.assert:                # fails early, with a fix, if Semaphore runs without ANSIBLE_CONFIG (Chapter 04 §4)
+        that: (ansible_config_file | default('')) is search('01-Ansible/lab/ansible\\.cfg$|/lab/ansible\\.cfg$')
+        quiet: true
+
     - name: Semaphore run (vault01 AppRole attached)
       when: vault_role_id is defined      # MacBook runs skip the whole block (break-glass as dgxadmin)
       block:
