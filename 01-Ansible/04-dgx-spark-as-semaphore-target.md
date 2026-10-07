@@ -274,6 +274,67 @@ sudo grep -c 'sign/ansible' /var/log/vault_audit.log                 # the count
 docker compose exec semaphore ssh-keygen -L -f /tmp/lab_ssh/id_ed25519-cert.pub | grep -A1 Principals   # svc-ansible
 ```
 
+#### If the first run of `04.2 Ping` fails
+
+The first run is the first time all four machines work together: Semaphore on sema01, vault01, the Spark, and the clocks on all of them. First find **which play** failed in the task log, then match the message.
+
+**Play 1 fails** (*Get an SSH certificate from Vault*, on `localhost`): the problem is between sema01 and vault01.
+
+| Message in the task log | Cause | Fix |
+|---|---|---|
+| `Vault is sealed` / HTTP `503` | vault01 restarted; Vault seals itself on every restart | on vault01: `vault operator unseal` twice, with two different unseal keys (§2, Verify 2) |
+| `permission denied` / HTTP `400` at *Log in to Vault with AppRole* | wrong or expired `secret_id` / `role_id` in the variable group | create a new `secret_id` on vault01 (Chapter 01 §5) and paste it into `vault-approle` (§5.3) |
+| `certificate verify failed` / `CERTIFICATE_VERIFY_FAILED` | the Semaphore container doesn't have vault01's TLS certificate, or vault01's IP isn't in it | the `vault-ca.crt` mount from §4 and Chapter 01 §7.3; `vault_addr` must use the address in the certificate |
+| `Connection refused` / timeout to `192.168.0.211:8200` | Vault not running, or a firewall | `systemctl status vault` and `sudo ufw status` on vault01 |
+
+**Play 2 fails** (*Connectivity and identity check*, on `dgx-spark-1`) with `svc-ansible@192.168.0.100: Permission denied (publickey)`: the certificate was issued, but the Spark refused it. The Spark's SSH log names the reason. Read it from the MacBook:
+
+```bash
+# ▶ MacBook · any folder
+ssh -t dgx-spark-1 'id svc-ansible; sudo sshd -T | grep -i trustedusercakeys; sudo journalctl -u ssh --since "-15 min" --no-pager | grep -iE "svc-ansible|cert" | tail -5'
+```
+
+| What you see | Cause | Fix |
+|---|---|---|
+| `id: 'svc-ansible': no such user`, no `trustedusercakeys` line | §3 (`04.1-semaphore-target.yml`) hasn't run on the Spark | run §3.1 from the MacBook, then **Run** again |
+| `Certificate invalid: expired` (or `not yet valid`) on a brand-new certificate | **clock skew.** vault01 stamps the 15-minute validity with *its* clock; if vault01 or sema01 is off by more than that, the Spark sees an expired certificate. Typical when a VM was paused or its host slept, and on minimal images without a time service | see *Fix the clocks* below |
+| `Authentication refused: bad ownership or modes` | permissions on svc-ansible's home or `.ssh` | rerun §3.1 |
+| no `svc-ansible` lines at all | the connection never reached sshd: wrong IP, or a firewall | `ssh dgxadmin@192.168.0.100` from sema01 should answer; `ansible_host` in `hosts.yml` |
+
+**Fix the clocks.** Compare all three from the MacBook:
+
+```bash
+# ▶ MacBook · any folder
+for h in vault01 sema01 dgx-spark-1; do printf "%-12s " $h; ssh $h 'date -u "+%F %T UTC"; timedatectl show -p NTPSynchronized --value' | paste - -; done
+date -u "+%F %T UTC   (MacBook)"
+```
+
+All must show the same time (within a second or two) and `yes`. On each machine that doesn't, do these three steps **on its console** (or over SSH if `sudo` works there):
+
+```bash
+# ▶ vault01 console (then the same on sema01)
+# 1. set the clock from a web server's Date header (apt refuses package lists while the clock is far off)
+sudo date -s "$(curl -sI http://google.com | grep -i '^date:' | cut -d' ' -f2-)"
+date -u                                            # now matches the MacBook's date -u
+```
+
+```bash
+# ▶ vault01 console (then the same on sema01)
+# 2. install a time service: minimal Ubuntu images have no systemd-timesyncd, so `timedatectl set-ntp true` does nothing there
+sudo apt-get update && sudo apt-get install -y chrony
+```
+
+```bash
+# ▶ vault01 console (then the same on sema01)
+# 3. start it and keep it running at boot
+sudo systemctl enable --now chrony
+sleep 10; timedatectl | grep -i synchronized       # System clock synchronized: yes
+```
+
+Then **Run** `04.2 Ping` again; Vault doesn't need a restart. If `curl` returns nothing in step 1, type the time by hand: `sudo date -u -s "YYYY-MM-DD HH:MM:SS"` with the UTC time `date -u` shows on the MacBook. If `chronyc sources` finds no server after a minute, your router blocks outside NTP: add `server 192.168.0.1 iburst` to `/etc/chrony/sources.d/router.sources` and run `sudo chronyc reload sources`.
+
+> `sudo` over SSH rejects your password but works on the console? The console session still has a recent sudo login cached. Do the fix there, and reset the account's password while you're at it (`sudo passwd vault01`) so SSH + sudo works next time.
+
 ---
 
 ## 6. First contact, custom facts and OS baseline (in Semaphore)
@@ -893,7 +954,7 @@ State then goes to the MacBook's `.cache/` instead of sema01's volume. After the
 | Can't find where to delete or rename a project (no "Settings" in the sidebar) | project settings are a tab on **Dashboard** (History · Activity · Settings), not a sidebar entry, and only for the project's Owner | open `http://192.168.0.210:3000/project/<id>/settings` (the number from the address bar); **Delete Project** is at the bottom. Deleting removes the project's templates, inventories, key store, variable groups and task history, nothing on the hosts |
 | `{"errors":["Vault is sealed"]}` from `curl`, or play 1 fails with `Vault is sealed` / HTTP 503 | vault01 restarted; Vault seals itself on every restart | on vault01: `vault operator unseal` twice, with two different unseal keys (Chapter 01 §3.4); `vault status` shows `Sealed false` (§2, Verify 2) |
 | `Permission denied (publickey)` for svc-ansible | sshd doesn't trust vault01's CA, or the certificate expired | §3.2 fingerprints; run the task again for a fresh certificate; check clocks (Chapter 01 §10.2) |
-| Play 1 succeeds, play 2 `Permission denied (publickey)`, and the Spark's log (`sudo journalctl -u ssh \| grep -i cert`) says `Certificate invalid: expired` (or `not yet valid`) on a brand-new certificate | **clock skew**: vault01 stamps the 15-minute validity with its own clock; if vault01 (or sema01) is off by more than that, the Spark sees it as expired. Typical after a VM was paused or its host slept | compare: `for h in vault01 sema01 dgx-spark-1; do ssh $h 'date -u; timedatectl show -p NTPSynchronized --value'; done` (on the MacBook). On the one that's off: set the clock from the Mac first (`ssh -t vault01 "sudo date -u -s '$(date -u '+%Y-%m-%d %H:%M:%S')'"`; `apt` refuses package lists while the clock is far behind), then `sudo apt-get install -y chrony && sudo systemctl enable --now chrony` (minimal images have no `systemd-timesyncd`). If `chronyc sources` finds no server, add `server 192.168.0.1 iburst` in `/etc/chrony/sources.d/router.sources` and `sudo chronyc reload sources`. Rerun the task (no Vault restart needed) |
+| Play 1 succeeds, play 2 `Permission denied (publickey)`, and the Spark's log (`sudo journalctl -u ssh \| grep -i cert`) says `Certificate invalid: expired` (or `not yet valid`) on a brand-new certificate | **clock skew**: vault01 stamps the 15-minute validity with its own clock; if vault01 (or sema01) is off by more than that, the Spark sees it as expired. Typical after a VM was paused or its host slept, and on minimal images without a time service | §5.6 *Fix the clocks*: compare the three clocks from the MacBook; on the one that's off, set the clock from a web server's Date header (`sudo date -s "$(curl -sI http://google.com \| grep -i '^date:' \| cut -d' ' -f2-)"`), install `chrony`, `sudo systemctl enable --now chrony`. Rerun the task (no Vault restart needed) |
 | A long task fails after a reboot or a long pause: `Permission denied` / `UNREACHABLE` halfway | the 15-minute certificate expired; the open SSH connection kept working, the new one after the reboot is refused | template extra variable `vault_ssh_cert_ttl: 1h` (the vault01 role's `max_ttl`) |
 | Play 1 skipped and then `Permission denied` for **dgxadmin** | the template has no variable group, so the lab thinks it's a MacBook run | attach `vault-approle` to the template |
 | Play 1 never runs, hosts unreachable | `--limit` without `localhost` | `--limit dgx-spark-1,localhost` |

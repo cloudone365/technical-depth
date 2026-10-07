@@ -194,7 +194,7 @@ Work through Chapter 04 from top to bottom (MacBook, sema01 and the Semaphore UI
    ```
    If anything that talks to vault01 answers `{"errors":["Vault is sealed"]}`, vault01 has restarted: on vault01 run `vault operator unseal` twice, with two different unseal keys, until `vault status` shows `Sealed false` (Chapter 04 §2).
 2. **On sema01**, build the lab's Semaphore image and state volume from [`lab/semaphore/`](lab/semaphore/) (Chapter 04 §4).
-3. **Semaphore UI:** create project `spark-lab`: repository, File inventory `01-Ansible/lab/inventory/hosts.yml`, variable group `vault-approle`, template `04.2 Ping`. Its first run proves the certificate chain (Chapter 04 §5).
+3. **Semaphore UI:** create project `spark-lab`: repository, File inventory `01-Ansible/lab/inventory/hosts.yml`, variable group `vault-approle`, template `04.2 Ping`. Its first run proves the certificate chain (Chapter 04 §5). First run failed? Chapter 04 §5.6 *If the first run of `04.2 Ping` fails* sorts it by play: play 1 = sema01↔vault01 (sealed Vault, AppRole, TLS), play 2 = the Spark refused the certificate. The most common cause there is a clock that is off on vault01 or sema01 (`Certificate invalid: expired` in the Spark's SSH log), fixed with chrony.
 4. **First contact, custom facts and OS baseline** (Chapter 04 §6). **Semaphore UI:** `04.2 Ping` again; the log shows play 1 (*Get an SSH certificate from Vault*), then *Connectivity and identity check* on `dgx-spark-1`. Try the ad-hoc commands of §6.1 from the MacBook: Semaphore runs playbooks, not ad-hoc commands. Then create the template `04.3 Baseline` and run it twice (Chapter 04 §6.2–6.3).
    ```bash
    # ▶ MacBook · 01-Ansible/lab (venv active)
