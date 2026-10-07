@@ -46,11 +46,11 @@ Adjust IPs to your network. Use static IPs or DHCP reservations, because certifi
 # ▶ vault01 (ssh vault01)
 # repeat on sema01 (ssh sema01) with its own hostname and IP
 sudo apt update && sudo apt -y upgrade        # refresh package lists, then install updates on the base OS
-sudo apt install -y openssh-server curl wget gpg gnupg lsb-release ca-certificates openssl nano   # SSH server plus tools later steps use (apt package names are lowercase)
+sudo apt install -y openssh-server curl wget gpg gnupg lsb-release ca-certificates openssl nano chrony   # SSH server, NTP (chrony) and tools later steps use (apt package names are lowercase)
 sudo systemctl enable --now ssh               # start the SSH server now and at every boot
 sudo hostnamectl set-hostname vault01         # use sema01 on the Semaphore VM
 echo '192.168.0.211 vault01' | sudo tee -a /etc/hosts   # local name-to-IP mapping; use the machine's own IP
-sudo timedatectl set-ntp true                 # keep the clock synchronized; certificates fail when clocks drift
+sudo systemctl enable --now chrony            # keep the clock synchronized: SSH certificates are only valid for 15 minutes, so a VM whose clock drifts (paused VM, sleeping host) breaks every login
 ```
 
 **Fixed IP address.** The easiest way is a DHCP reservation for each VM's MAC address on your router. Otherwise edit the netplan file (`ls /etc/netplan/`, back it up first) and apply it with `sudo netplan try`, which rolls back automatically after 120 seconds unless you confirm.
@@ -75,6 +75,7 @@ sudo ufw status                                                 # list the activ
 hostnamectl | grep -i 'static hostname'   # expect the machine's name
 ip -br a                                  # expect the fixed IP on your interface
 timedatectl | grep -i synchronized        # expect: System clock synchronized: yes
+chronyc tracking | grep -E 'Reference|System time'   # expect a real time server and an offset of milliseconds
 systemctl is-active ssh                   # expect: active
 sudo ufw status                           # expect OpenSSH plus the port rule for that machine
 curl -sI https://apt.releases.hashicorp.com | head -1   # expect an HTTP status line: the VM has internet access
