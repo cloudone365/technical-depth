@@ -172,7 +172,7 @@ Expected: `dgx-spark-1` and `root`. `01-Ansible/lab/tools/vault-ssh-cert.sh` doe
 | File | What it does |
 |---|---|
 | [`Dockerfile`](lab/semaphore/Dockerfile) | `FROM semaphoreui/semaphore`, plus `kubectl` v1.36.5, `helm`, the Python libraries in [`requirements-semaphore.txt`](lab/semaphore/requirements-semaphore.txt) and the collections in [`requirements.yml`](lab/requirements.yml) |
-| [`docker-compose.override.yml`](lab/semaphore/docker-compose.override.yml) | merged with your Chapter 01 `docker-compose.yml`: builds that image, mounts `/opt/spark-lab/cache`, sets `ANSIBLE_CONFIG`, `SPARK_LAB_CACHE` and the log and fact paths |
+| [`docker-compose.override.yml`](lab/semaphore/docker-compose.override.yml) | merged with your Chapter 01 `docker-compose.yml`: builds that image, mounts `/opt/spark-lab/cache`, sets `ANSIBLE_CONFIG`, `SPARK_LAB_CACHE` and the log and fact paths, and lists them in `SEMAPHORE_FORWARDED_ENV_VARS`: Semaphore starts each task with a clean environment and passes on only `PATH` and the variables named there |
 
 ```bash
 # ▶ sema01 (ssh sema01)
@@ -195,6 +195,7 @@ docker compose exec semaphore kubectl version --client               # expect: C
 docker compose exec semaphore helm version --short                   # expect: v3.18.x
 docker compose exec semaphore ansible-galaxy collection list kubernetes.core   # expect: kubernetes.core 5.x or newer
 docker compose exec semaphore sh -c 'echo $SPARK_LAB_CACHE; touch $SPARK_LAB_CACHE/.w && echo writable'   # expect the path, then: writable
+docker compose exec semaphore sh -c 'echo $SEMAPHORE_FORWARDED_ENV_VARS'   # expect the list with ANSIBLE_CONFIG and SPARK_LAB_CACHE: only these reach a task
 ```
 
 Your Chapter 01 project `lab` keeps working: same database, same keys, and the new image is a superset of the old one.
@@ -282,7 +283,7 @@ The first run is the first time all four machines work together: Semaphore on se
 
 | Message in the task log | Cause | Fix |
 |---|---|---|
-| *The lab's ansible.cfg is in use* fails: `Ansible loaded '…' instead of 01-Ansible/lab/ansible.cfg` | the Semaphore container has no `ANSIBLE_CONFIG`: `docker-compose.override.yml` wasn't in `~/semaphore` when the container started, so it runs the stock image without the lab settings | on sema01: `cd ~/semaphore && docker compose up -d --build` (§4); check with `docker compose exec semaphore env \| grep ANSIBLE_CONFIG` |
+| *The lab's ansible.cfg is in use* fails: `Ansible loaded '/etc/ansible/ansible.cfg' instead of 01-Ansible/lab/ansible.cfg (ANSIBLE_CONFIG='')` | the variable doesn't reach Ansible. Either the container doesn't have it (`docker-compose.override.yml` not in `~/semaphore`, so the stock image runs), or it has it but Semaphore doesn't forward it: Semaphore starts each task with a clean environment and passes on only `PATH` plus the names in `SEMAPHORE_FORWARDED_ENV_VARS` | on sema01: `cd ~/technical-depth && git pull && cp 01-Ansible/lab/semaphore/docker-compose.override.yml ~/semaphore/ && cd ~/semaphore && docker compose up -d --build`. Check: `docker compose exec semaphore env \| grep -E 'ANSIBLE_CONFIG|FORWARDED'` shows both lines |
 | `Vault is sealed` / HTTP `503` | vault01 restarted; Vault seals itself on every restart | on vault01: `vault operator unseal` twice, with two different unseal keys (§2, Verify 2) |
 | `permission denied` / HTTP `400` at *Log in to Vault with AppRole* | wrong or expired `secret_id` / `role_id` in the variable group | create a new `secret_id` on vault01 (Chapter 01 §5) and paste it into `vault-approle` (§5.3) |
 | `certificate verify failed` / `CERTIFICATE_VERIFY_FAILED` | the Semaphore container doesn't have vault01's TLS certificate, or vault01's IP isn't in it | the `vault-ca.crt` mount from §4 and Chapter 01 §7.3; `vault_addr` must use the address in the certificate |

@@ -3,7 +3,8 @@
 # It changes only the 'semaphore' service (Chapter 04 §4):
 #   * builds the lab image (Kubernetes tools + collections) instead of pulling the stock one
 #   * keeps the lab state on the host (/opt/spark-lab/cache), so it survives restarts
-#   * tells Ansible where the lab config and the state live
+#   * tells Ansible where the lab config and the state live, and has Semaphore
+#     forward those variables into every task (SEMAPHORE_FORWARDED_ENV_VARS)
 # Assumes the repository is cloned at ~/technical-depth on sema01.
 ---
 services:
@@ -25,3 +26,8 @@ services:
       SPARK_LAB_CACHE: /var/lib/spark-lab/cache
       ANSIBLE_CACHE_PLUGIN_CONNECTION: /var/lib/spark-lab/cache/facts
       ANSIBLE_LOG_PATH: /var/lib/spark-lab/cache/ansible.log
+      # Semaphore starts every task with a CLEAN environment: only PATH and the
+      # variables named here reach ansible-playbook. Without this line the five
+      # settings above exist in the container but never reach Ansible (play 1's
+      # ansible.cfg check fails with ANSIBLE_CONFIG='').
+      SEMAPHORE_FORWARDED_ENV_VARS: '["ANSIBLE_CONFIG","ANSIBLE_COLLECTIONS_PATH","SPARK_LAB_CACHE","ANSIBLE_CACHE_PLUGIN_CONNECTION","ANSIBLE_LOG_PATH"]'
