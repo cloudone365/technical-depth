@@ -7,7 +7,7 @@
 # Needs an admin token, so run it from your MacBook (not from Semaphore):
 #   export VAULT_TOKEN=<admin token>          # on vault01: vault login, then copy the token
 #   ansible-playbook playbooks/17.1-vault.yml
-#   vault kv put kv/spark-lab/ngc api_key=<your NGC key>
+#   on vault01: read -rsp 'NGC key: ' NGC_KEY; printf %s "$NGC_KEY" | vault kv put kv/spark-lab/ngc api_key=-
 # Then set vault_lab_secrets_enabled=true in Semaphore's vault-approle variable group.
 - name: Lab secrets on vault01 (KV engine, policy, AppRole attachment)
   hosts: localhost

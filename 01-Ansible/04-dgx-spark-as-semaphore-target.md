@@ -784,11 +784,13 @@ unset VAULT_TOKEN                          # don't leave an admin token in the s
 
 In bash (not zsh) the prompt syntax is `read -s -p "Vault admin token: " VAULT_TOKEN`.
 
-**Task 7.3 · Store your real NGC key (on vault01).** `api_key=-` makes Vault read the value from the keyboard, so the key doesn't end up in your shell history. Don't type `<` `>` around anything: zsh and bash treat them as file redirections.
+**Task 7.3 · Store your real NGC key (on vault01).** `read -rsp` asks for the key without showing it; `api_key=-` tells Vault to take the value from the pipe instead of the command line, so the key never appears in your shell history or the process list. Paste only the key; don't put it after `api_key=`. Don't type `<` `>` around anything: zsh and bash treat them as file redirections.
 
 ```bash
 # ▶ vault01 (ssh vault01)
-vault kv put kv/spark-lab/ngc api_key=-   # paste the nvapi-… key, press Enter, then Ctrl-D
+read -rsp "NGC key: " NGC_KEY; echo                                     # paste the nvapi-… key, Enter (not shown)
+printf %s "$NGC_KEY" | vault kv put kv/spark-lab/ngc api_key=-   # "-" = take the value from the line before; no trailing newline
+unset NGC_KEY
 ```
 
 Already have the `vault` program on the MacBook (`brew tap hashicorp/tap && brew install hashicorp/tap/vault`)? Then you can do Tasks 7.1 and 7.3 there too, from the lab folder, with `export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=$PWD/.cache/vault-ca.crt` instead of the vault01 paths. `vault login` then saves the root token in `~/.vault-token` on the Mac: delete that file afterwards.
@@ -800,7 +802,7 @@ Already have the `vault` program on the MacBook (`brew tap hashicorp/tap && brew
 | You see | Cause | Fix |
 |---|---|---|
 | `zsh: command not found: vault` (MacBook) | the `vault` program is only on vault01 | run Tasks 7.1 and 7.3 on vault01 as shown, or install it with brew |
-| `zsh: no such file or directory: your` / `parse error near \`newline'` | `<…>` copied literally | use `api_key=-` and paste the key when asked |
+| `zsh: no such file or directory: your` / `parse error near \`newline'` | `<…>` copied literally | use Task 7.3 as written and paste the key at the `NGC key:` prompt |
 | `Vault is sealed` / `* Vault is sealed` | vault01 restarted | on vault01: `vault operator unseal` twice, two different keys |
 | `permission denied` (403) on `vault login` or in the playbook | not the root token (e.g. a Semaphore token or an unseal key) | use the Initial Root Token from `vault operator init` |
 | `export VAULT_TOKEN=<admin token from vault01> and run again` | `VAULT_TOKEN` empty in this shell | repeat Task 7.2 in the same terminal window; `echo ${#VAULT_TOKEN}` must print more than 0 |

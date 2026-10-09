@@ -70,7 +70,7 @@
   community.docker.docker_login:
     registry_url: nvcr.io
     username: "$oauthtoken"
-    password: "{{ container_runtime_ngc_api_key }}"
+    password: "{{ container_runtime_ngc_api_key | trim }}"   # a pasted newline would break the login
     reauthorize: false
   no_log: true
   when:

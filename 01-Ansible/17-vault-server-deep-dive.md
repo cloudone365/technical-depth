@@ -272,7 +272,9 @@ unset VAULT_TOKEN                                # no admin token left in the sh
 
 ```bash
 # ▶ vault01 (ssh vault01)
-vault kv put kv/spark-lab/ngc api_key=-          # paste the nvapi-… key, Enter, Ctrl-D; replaces REPLACE_ME
+read -rsp "NGC key: " NGC_KEY; echo                                     # paste the nvapi-… key, Enter (not shown)
+printf %s "$NGC_KEY" | vault kv put kv/spark-lab/ngc api_key=-   # "-" = take the value from the line before; no trailing newline
+unset NGC_KEY
 ```
 
 **Verify:**
