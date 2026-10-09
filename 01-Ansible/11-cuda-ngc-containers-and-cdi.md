@@ -224,7 +224,7 @@ Design choices:
 
 ### 3.1 Converge the runtime
 
-Your NGC key lives in **vault01** at `kv/spark-lab/ngc` ([Chapter 04 §7](04-dgx-spark-as-semaphore-target.md): `17.1-vault.yml` from the MacBook, then the NGC key stored on vault01 with `vault kv put kv/spark-lab/ngc api_key=-`, Task 7.3). The playbook never sees it in the repository or on a command line:
+Your NGC key (a personal key from ngc.nvidia.com → Setup, Chapter 04 §7 Task 7.0) lives in **vault01** at `kv/spark-lab/ngc` ([Chapter 04 §7](04-dgx-spark-as-semaphore-target.md): `17.1-vault.yml` from the MacBook, then the NGC key stored on vault01 with `vault kv put kv/spark-lab/ngc api_key=-`, Task 7.3). The playbook never sees it in the repository or on a command line:
 
 - **Semaphore UI (normal):** run the template **`11.1 Containers`**. With `vault_lab_secrets_enabled: true` in the variable group, play 1 (`00-vault-cert.yml`) reads `kv/spark-lab/ngc` with its AppRole token (policy `spark-lab-read`) into `hostvars['localhost'].vault_lab_secrets`, and `11.1-containers.yml` passes it to `container_runtime_ngc_api_key` under `no_log`. The task log shows the NGC login task, never the key.
 - **Break-glass (MacBook):** there's no AppRole on the MacBook, so play 1 is skipped. Pass the key yourself, read with your own vault01 login:

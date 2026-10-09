@@ -751,7 +751,7 @@ ansible dgx-spark-1 -m command -a "sshd -T" -b -K | grep -E 'permitrootlogin|all
 
 **Can I skip it for now?** Yes. Nothing before Chapter 11 needs it. If you skip it, leave `vault_lab_secrets_enabled` at `false` and `11.1 Containers` simply skips the NGC login. Come back before Chapter 11.
 
-**What you need:** vault01 unsealed (Chapter 01 §3.4), its root token (printed by `vault operator init` in Chapter 01), your NGC API key (`nvapi-…`, from ngc.nvidia.com → Setup → API Key), and `.cache/vault-ca.crt` in the lab folder (§2).
+**What you need:** vault01 unsealed (Chapter 01 §3.4), its root token (printed by `vault operator init` in Chapter 01), your NGC personal key (`nvapi-…`, Task 7.0), and `.cache/vault-ca.crt` in the lab folder (§2).
 
 [`17.1-vault.yml`](lab/playbooks/17.1-vault.yml) (role [`vault_config`](lab/roles/vault_config/)) runs on the MacBook but only talks to vault01's HTTPS API (`ansible.builtin.uri`); it doesn't need the `vault` program on the MacBook. It:
 
@@ -760,6 +760,15 @@ ansible dgx-spark-1 -m command -a "sshd -T" -b -K | grep -E 'permitrootlogin|all
 - writes the read-only policy `spark-lab-read` (`kv/data/spark-lab/*`);
 - adds it to AppRole `semaphore`, so its tokens carry `semaphore-ssh` **and** `spark-lab-read`;
 - seeds a placeholder `kv/spark-lab/ngc` (value `REPLACE_ME`).
+
+**Task 7.0 · Create your NGC key (browser, once).** NGC is NVIDIA's container registry (`nvcr.io`); an account is free.
+
+1. Open **ngc.nvidia.com** and sign in (or create an NVIDIA account). If it asks for an organization, pick your personal one.
+2. Top-right menu (your name) → **Setup** → **Generate Personal Key** (direct page: `org.ngc.nvidia.com/setup/personal-keys`). Don't use the older **Generate API Key** (legacy) option.
+3. **Key name** `spark-lab`; **Expiration** as you like (when it expires, generate a new one and repeat Task 7.3); **Services included**: at least **NGC Catalog** (that is what allows pulls from `nvcr.io`).
+4. **Generate**, then copy the key (`nvapi-…`). NGC shows it only once. Don't save it in a file, a note or a chat; it goes straight into vault01 in Task 7.3.
+
+The login user is always the literal `$oauthtoken`; the key is the password. `11.1 Containers` does that login for you.
 
 **Task 7.1 · Get an admin token (on vault01).** The `vault` program is installed on vault01 (Chapter 01), not on the MacBook.
 
@@ -793,6 +802,25 @@ printf %s "$NGC_KEY" | vault kv put kv/spark-lab/ngc api_key=-   # "-" = take th
 unset NGC_KEY
 ```
 
+Check what is stored, without printing the key: `vault kv get -field=api_key kv/spark-lab/ngc | cut -c1-6` must print `nvapi-`.
+
+**If the key ever landed on a command line** (for example you typed `api_key=nvapi-…`), it is now in that machine's shell history. Remove it, and close other terminals/ssh sessions to that machine first, because a shell writes its history again when it exits:
+
+```bash
+# ▶ vault01 (ssh vault01)
+history -c                           # clear this shell's in-memory history
+sed -i '/nvapi-/d' ~/.bash_history   # delete the lines from the file
+grep -c nvapi ~/.bash_history        # expect: 0
+```
+
+```bash
+# ▶ MacBook · any folder
+sed -i '' '/nvapi-/d' ~/.zsh_history
+grep -c nvapi ~/.zsh_history         # expect: 0
+```
+
+Not sure where it has been? Rotate it: NGC → **Setup** → **Personal Keys**, delete the old key, generate a new one (Task 7.0) and store it again (Task 7.3). The Vault audit log is fine as it is: it stores secret values only as HMAC hashes.
+
 Already have the `vault` program on the MacBook (`brew tap hashicorp/tap && brew install hashicorp/tap/vault`)? Then you can do Tasks 7.1 and 7.3 there too, from the lab folder, with `export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=$PWD/.cache/vault-ca.crt` instead of the vault01 paths. `vault login` then saves the root token in `~/.vault-token` on the Mac: delete that file afterwards.
 
 **Task 7.4 · Switch it on. Semaphore UI:** variable group `vault-approle` → change `vault_lab_secrets_enabled` to `true`.
@@ -802,6 +830,7 @@ Already have the `vault` program on the MacBook (`brew tap hashicorp/tap && brew
 | You see | Cause | Fix |
 |---|---|---|
 | `zsh: command not found: vault` (MacBook) | the `vault` program is only on vault01 | run Tasks 7.1 and 7.3 on vault01 as shown, or install it with brew |
+| `unauthorized: authentication required` from `nvcr.io` in `11.1 Containers` | wrong, expired or deleted NGC key, or the key lacks the **NGC Catalog** service | new key (Task 7.0), store it again (Task 7.3) |
 | `zsh: no such file or directory: your` / `parse error near \`newline'` | `<…>` copied literally | use Task 7.3 as written and paste the key at the `NGC key:` prompt |
 | `Vault is sealed` / `* Vault is sealed` | vault01 restarted | on vault01: `vault operator unseal` twice, two different keys |
 | `permission denied` (403) on `vault login` or in the playbook | not the root token (e.g. a Semaphore token or an unseal key) | use the Initial Root Token from `vault operator init` |

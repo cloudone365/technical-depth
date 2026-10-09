@@ -201,7 +201,7 @@ Work through Chapter 04 from top to bottom (MacBook, sema01 and the Semaphore UI
    ansible-playbook playbooks/04.2-ping.yml -K       # break-glass (MacBook, as dgxadmin)
    ansible-playbook playbooks/04.3-baseline.yml -K   # break-glass
    ```
-5. **Lab secrets** (optional until Chapter 11): get an admin token on vault01, run `17.1-vault.yml` from the MacBook to add the KV engine and policy, store the NGC key on vault01, then set `vault_lab_secrets_enabled: true` in the variable group (Chapter 04 §7, Tasks 7.1–7.4; explained in Chapters 17 and 18):
+5. **Lab secrets** (optional until Chapter 11): create an NGC personal key on ngc.nvidia.com (Setup → Generate Personal Key, service NGC Catalog), get an admin token on vault01, run `17.1-vault.yml` from the MacBook to add the KV engine and policy, store the NGC key on vault01, then set `vault_lab_secrets_enabled: true` in the variable group (Chapter 04 §7, Tasks 7.0–7.4; explained in Chapters 17 and 18):
    ```bash
    # ▶ vault01 (ssh vault01)
    export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=$HOME/vault-ca.crt
