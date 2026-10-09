@@ -1,0 +1,82 @@
+---
+# Chapter 05 §6, Exercise 4: start a long download in the background (async + poll: 0),
+# let the baseline run while it downloads, then wait for it with async_status.
+#
+#   MacBook:   ansible-playbook playbooks/05.1-async-download.yml -l dgx-spark-1,localhost -K
+#   Semaphore: template "05.1 Async download" (same inventory, variable group and CLI args as 04.2 Ping)
+#
+# Default download: one 7B model file in GGUF format (Qwen2.5-7B-Instruct, Q4_K_M, ~4.7 GB, no login needed).
+# Override with -e async_model_url=... -e async_model_file=...
+# Remove it afterwards: -e async_cleanup=true (deletes the file and does nothing else).
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
+- name: Download a model in the background while the baseline runs
+  hosts: spark
+  become: true
+  vars:
+    async_model_dir: /srv/models
+    async_model_url: https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+    async_model_file: Qwen2.5-7B-Instruct-Q4_K_M.gguf
+    async_cleanup: false
+  tasks:
+    - name: Cleanup only — remove the downloaded file
+      when: async_cleanup | bool
+      block:
+        - name: Remove the model file
+          ansible.builtin.file:
+            path: "{{ async_model_dir }}/{{ async_model_file }}"
+            state: absent
+
+        - name: Stop here
+          ansible.builtin.meta: end_host
+
+    - name: Model folder exists
+      ansible.builtin.file:
+        path: "{{ async_model_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Start the download in the background (returns at once)
+      ansible.builtin.get_url:
+        url: "{{ async_model_url }}"
+        dest: "{{ async_model_dir }}/{{ async_model_file }}"
+        mode: "0644"
+        timeout: 60                       # per network read, not the whole download
+      async: 3600                         # the job may run for up to 1 hour
+      poll: 0                             # don't wait: Ansible moves on to the next task
+      register: async_download_job
+
+    - name: Show the job id
+      ansible.builtin.debug:
+        msg: "Download running as async job {{ async_download_job.ansible_job_id }}; result file /root/.ansible_async/{{ async_download_job.ansible_job_id }}"
+
+    - name: Meanwhile, the baseline runs
+      ansible.builtin.include_role:
+        name: spark_baseline
+
+    - name: Join — wait for the download to finish (checks every 15 s, up to 1 hour)
+      ansible.builtin.async_status:
+        jid: "{{ async_download_job.ansible_job_id }}"
+      register: async_download_result
+      until: async_download_result.finished
+      retries: 240
+      delay: 15
+
+    - name: Size on disk
+      ansible.builtin.stat:
+        path: "{{ async_model_dir }}/{{ async_model_file }}"
+      register: async_model_stat
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: >-
+          {{ async_model_file }}: {{ (async_model_stat.stat.size / 1024**3) | round(2) }} GiB,
+          changed={{ async_download_result.changed }} (false on a re-run: get_url skips a file that is already there)
+
+    - name: Clean up the async job's result file
+      ansible.builtin.async_status:
+        jid: "{{ async_download_job.ansible_job_id }}"
+        mode: cleanup

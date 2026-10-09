@@ -874,6 +874,7 @@ Create the remaining templates (`04.2 Ping` and `04.3 Baseline` exist already), 
 | `03.2 Redfish practice` | `03.2-redfish-practice.yml` | Redfish mockup BMC, practice for data-centre nodes |
 | `04.2 Ping` | `04.2-ping.yml` | first test (§5.6); explained in §6.1 |
 | `04.3 Baseline` | `04.3-baseline.yml` | created in §6.2: custom facts (§6.2), OS, packages, sysctls (§6.3); also Chapters 03, 10 |
+| `05.1 Async download` | `05.1-async-download.yml` | Chapter 05 §6.4: background download + join; optional |
 | `07.1 Jinja lab` | `07.1-jinja-lab.yml` | the 7 Jinja katas; localhost only |
 | `10.1 Driver audit` | `10.1-driver-audit.yml` | driver consistency |
 | `10.2 DGX OS upgrade` | `10.2-dgxos-upgrade.yml` | reboots: extra variable `vault_ssh_cert_ttl: 1h` (§13); also Chapter 28 |

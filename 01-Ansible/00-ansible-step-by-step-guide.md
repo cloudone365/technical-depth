@@ -237,7 +237,9 @@ ANSIBLE_PIPELINING=0 ANSIBLE_KEEP_REMOTE_FILES=1 \
   ansible dgx-spark-1 -m ansible.builtin.stat -a path=/etc/dgx-release -vvv 2>&1 | grep -o '/home/dgxadmin/.ansible/tmp/[^ /]*' | head -1
 ```
 
-✅ **Done when** you have run `AnsiballZ_stat.py explode` and `execute` on the Spark and can tell from an error alone whether a failure is SSH, sudo, Python, module or logic.
+Then the four exercises in Chapter 05 §6 (step by step there): time the baseline with and without pipelining/mux, read `apt.py`'s lock handling, lose a handler and get it back with `--force-handlers`, and run `05.1-async-download.yml` (a model download in the background while the baseline runs).
+
+✅ **Done when** you have run `AnsiballZ_stat.py explode` and `execute` on the Spark and can tell from an error alone whether a failure is SSH, sudo, Python, module or logic, and the §6 *Done when* list is ticked.
 
 ## Chapter 06 · Inventory: static, dynamic & discovery → [document](06-inventory-static-dynamic-and-discovery.md)
 

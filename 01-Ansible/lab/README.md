@@ -50,6 +50,7 @@ lab/
 │   ├── 04.1-semaphore-target.yml   # MacBook, once: svc-ansible + NOPASSWD sudo, trust vault01's CA                      (Chapter 04)
 │   ├── 04.2-ping.yml               # first contact: SSH, sudo, Python, it IS a Spark                                     (Chapter 04 §6.1)
 │   ├── 04.3-baseline.yml           # custom facts (spark_facts) + OS baseline (spark_baseline)                           (Chapter 04 §6.2–6.3)
+│   ├── 05.1-async-download.yml     # async + poll: 0 + async_status: a model download while the baseline runs            (Chapter 05 §6.4)
 │   ├── 17.1-vault.yml              # MacBook, admin VAULT_TOKEN: lab secrets in vault01                                  (Chapter 04 §7, Chapter 18)
 │   ├── 19.1-kubernetes.yml         # kubeadm, Cilium, MetalLB; then 20.1-gpu-operator → 20.2-vclusters                   (Chapters 19, 20)
 │   ├── 19.2-reset-kubernetes.yml   # wipes Kubernetes and every vCluster for a clean rebuild                             (Chapter 19)
