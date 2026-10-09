@@ -1,6 +1,11 @@
 ---
 # ansible-inventory -i inventory-examples/spark.mdns.yml --graph
 # Requires: avahi-utils on the control node, control node on the Sparks' LAN.
+# MacBook (no avahi-browse on macOS): capture on a Spark, read the capture (Chapter 06 §3.2):
+#   ssh dgxadmin@192.168.0.100 'avahi-browse -p -r -t _ssh._tcp' > .cache/mdns.txt
+#   cp inventory-examples/spark.mdns.yml .cache/spark.mdns.yml
+#   echo 'from_file: .cache/mdns.txt' >> .cache/spark.mdns.yml
+#   ansible-inventory -i .cache/spark.mdns.yml --graph
 plugin: spark_mdns
 name_regex: '^dgx-spark-\d+$'
 # interface: enp0s31f6          # your control node's LAN NIC

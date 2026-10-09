@@ -251,7 +251,18 @@ ansible-playbook playbooks/04.3-baseline.yml -K --tags facts   # fills .cache/fa
 ansible-inventory --graph
 ```
 
-✅ **Done when** `dgx-spark-1` shows up under `gpu_ready` and `driver_580`, and you can explain why those groups don't exist in a Semaphore task.
+Then discovery (Chapter 06 §3.2): a Spark listens for mDNS announcements, the MacBook reads its capture.
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
+ssh -t dgxadmin@192.168.0.100 'sudo apt install -y avahi-utils'                     # once; asks for dgxadmin's sudo password
+ssh dgxadmin@192.168.0.100 'avahi-browse -p -r -t _ssh._tcp' > .cache/mdns.txt      # capture, saved on the MacBook
+cp inventory-examples/spark.mdns.yml .cache/spark.mdns.yml
+echo 'from_file: .cache/mdns.txt' >> .cache/spark.mdns.yml                          # read the capture instead of listening
+ansible-inventory -i .cache/spark.mdns.yml --graph                                  # expect @spark: dgx-spark-1
+```
+
+✅ **Done when** `dgx-spark-1` shows up under `gpu_ready` and `driver_580`, the mDNS graph lists it under `spark`, and you can explain why those groups don't exist in a Semaphore task.
 
 ## Chapter 07 · Jinja2 filters & data transforms → [document](07-jinja2-filters-and-data-transforms.md)
 
