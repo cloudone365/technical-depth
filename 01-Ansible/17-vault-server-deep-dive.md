@@ -252,23 +252,33 @@ vault policy list                    # default, semaphore-ssh, root; spark-lab-r
 vault read ssh-client-signer/roles/ansible | grep -E 'allowed_users|ttl'   # svc-ansible, 15m, 1h
 ```
 
-### 3.2 Add the Spark lab's KV engine and policy (on your MacBook)
+### 3.2 Add the Spark lab's KV engine and policy (vault01 + MacBook)
 
-This is [Chapter 04 §7](04-dgx-spark-as-semaphore-target.md); skip the first run if you already did it there.
+This is [Chapter 04 §7](04-dgx-spark-as-semaphore-target.md) (Tasks 7.1–7.3); skip the first run if you already did it there. The `vault` program runs on vault01; the playbook runs on the MacBook and only needs the token.
+
+```bash
+# ▶ vault01 (ssh vault01)
+vault login                                      # Initial Root Token (Chapter 01 §3.4)
+vault print token                                # copy it for the MacBook
+```
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
-export VAULT_TOKEN=$(vault print token)          # the playbook reads the admin token from the environment
+read -s "VAULT_TOKEN?Vault admin token: " && export VAULT_TOKEN   # zsh; paste the token (not shown, not saved)
 ansible-playbook playbooks/17.1-vault.yml          # localhost only: talks to vault01's API
 ansible-playbook playbooks/17.1-vault.yml          # run it AGAIN: every task ok, changed=0 (idempotent)
-vault kv put kv/spark-lab/ngc api_key=<your NGC API key>   # replaces the REPLACE_ME placeholder
 unset VAULT_TOKEN                                # no admin token left in the shell
+```
+
+```bash
+# ▶ vault01 (ssh vault01)
+vault kv put kv/spark-lab/ngc api_key=-          # paste the nvapi-… key, Enter, Ctrl-D; replaces REPLACE_ME
 ```
 
 **Verify:**
 
 ```bash
-# ▶ MacBook · 01-Ansible/lab (venv active)
+# ▶ vault01 (ssh vault01)
 vault read -field=token_policies auth/approle/role/semaphore     # [semaphore-ssh spark-lab-read]
 vault policy read spark-lab-read                                 # the two kv/… paths from §1.6
 vault kv metadata get kv/spark-lab/ngc | grep current_version   # 2 (version 1 = the placeholder, 2 = your key)

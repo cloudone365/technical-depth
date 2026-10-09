@@ -201,15 +201,22 @@ Work through Chapter 04 from top to bottom (MacBook, sema01 and the Semaphore UI
    ansible-playbook playbooks/04.2-ping.yml -K       # break-glass (MacBook, as dgxadmin)
    ansible-playbook playbooks/04.3-baseline.yml -K   # break-glass
    ```
-5. **Lab secrets**: run `17.1-vault.yml` from the MacBook to add the KV engine, policy and NGC key to vault01, then set `vault_lab_secrets_enabled: true` in the variable group (Chapter 04 §7; explained in Chapters 17 and 18):
+5. **Lab secrets** (optional until Chapter 11): get an admin token on vault01, run `17.1-vault.yml` from the MacBook to add the KV engine and policy, store the NGC key on vault01, then set `vault_lab_secrets_enabled: true` in the variable group (Chapter 04 §7, Tasks 7.1–7.4; explained in Chapters 17 and 18):
+   ```bash
+   # ▶ vault01 (ssh vault01)
+   export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=$HOME/vault-ca.crt
+   vault login                                # the Initial Root Token from Chapter 01
+   vault print token                          # copy it for the MacBook step
+   ```
    ```bash
    # ▶ MacBook · 01-Ansible/lab (venv active)
-   export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=$PWD/.cache/vault-ca.crt
-   vault login                                       # admin token for vault01 (root token in the lab)
-   export VAULT_TOKEN=$(vault print token)           # read from the environment, never written to disk
-   ansible-playbook playbooks/17.1-vault.yml           # localhost only: talks to vault01's API
-   vault kv put kv/spark-lab/ngc api_key=nvapi-...   # the real key replaces the placeholder
+   read -s "VAULT_TOKEN?Vault admin token: " && export VAULT_TOKEN   # paste; nothing is shown or saved
+   ansible-playbook playbooks/17.1-vault.yml  # localhost only: talks to vault01's API
    unset VAULT_TOKEN
+   ```
+   ```bash
+   # ▶ vault01 (ssh vault01)
+   vault kv put kv/spark-lab/ngc api_key=-    # paste the nvapi-… key, Enter, Ctrl-D
    ```
 6. **Create the remaining templates** from the table in Chapter 04 §8.1.
 

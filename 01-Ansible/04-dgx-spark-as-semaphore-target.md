@@ -743,31 +743,70 @@ ansible dgx-spark-1 -m command -a "sshd -T" -b -K | grep -E 'permitrootlogin|all
 
 ---
 
-## 7. Lab secrets in vault01 (on your MacBook, once)
+## 7. Lab secrets in vault01 (once; vault01 + MacBook)
 
-**Why:** some lab playbooks need secrets, for example the NGC API key that `11.1-containers.yml` uses to pull NVIDIA images. They belong in vault01, next to the SSH CA, not in the repository. Setting this up needs an **admin** token, which Semaphore must never hold, so you run it from the MacBook.
+**What this section does, in one sentence:** it gives vault01 a safe place for the lab's passwords and keys (a key-value store called `kv/`), lets Semaphore *read* that place, and puts your NVIDIA NGC API key in it.
 
-[`17.1-vault.yml`](lab/playbooks/17.1-vault.yml) (role [`vault_config`](lab/roles/vault_config/)):
+**Why:** some lab playbooks need secrets, for example the NGC API key that `11.1-containers.yml` uses to pull NVIDIA images. They belong in vault01, next to the SSH CA, not in the repository. Until now Semaphore's AppRole can only *sign SSH keys*; after this section it can also *read* `kv/spark-lab/*`. Changing what the AppRole may do needs an **admin** token (the root token from Chapter 01 §3.4), which Semaphore must never hold, so you do it by hand, once.
+
+**Can I skip it for now?** Yes. Nothing before Chapter 11 needs it. If you skip it, leave `vault_lab_secrets_enabled` at `false` and `11.1 Containers` simply skips the NGC login. Come back before Chapter 11.
+
+**What you need:** vault01 unsealed (Chapter 01 §3.4), its root token (printed by `vault operator init` in Chapter 01), your NGC API key (`nvapi-…`, from ngc.nvidia.com → Setup → API Key), and `.cache/vault-ca.crt` in the lab folder (§2).
+
+[`17.1-vault.yml`](lab/playbooks/17.1-vault.yml) (role [`vault_config`](lab/roles/vault_config/)) runs on the MacBook but only talks to vault01's HTTPS API (`ansible.builtin.uri`); it doesn't need the `vault` program on the MacBook. It:
 
 - **checks** what Chapter 01 built (the signing role allows `svc-ansible`; AppRole `semaphore` exists) and never rewrites it;
 - mounts a KV v2 engine at `kv/`;
 - writes the read-only policy `spark-lab-read` (`kv/data/spark-lab/*`);
 - adds it to AppRole `semaphore`, so its tokens carry `semaphore-ssh` **and** `spark-lab-read`;
-- seeds a placeholder `kv/spark-lab/ngc`.
+- seeds a placeholder `kv/spark-lab/ngc` (value `REPLACE_ME`).
+
+**Task 7.1 · Get an admin token (on vault01).** The `vault` program is installed on vault01 (Chapter 01), not on the MacBook.
+
+```bash
+# ▶ vault01 (ssh vault01)
+export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=$HOME/vault-ca.crt
+vault status | grep Sealed        # must say false; if true: vault operator unseal (twice, two different keys)
+vault login                       # paste the Initial Root Token from Chapter 01 §3.4
+vault print token                 # prints the token (hvs.…); copy it for Task 7.2
+```
+
+**Task 7.2 · Run the playbook (on the MacBook).** `read -s` asks for the token without showing it and without saving it in your shell history.
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
-export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=$PWD/.cache/vault-ca.crt   # the vault CLI on the MacBook talks to vault01
-vault login                                      # an admin token (root token in the lab; a named admin in production)
-export VAULT_TOKEN=$(vault print token)          # the playbook reads it from the environment; it is never written to disk
-ansible-playbook playbooks/17.1-vault.yml          # localhost only: talks to vault01's API
-vault kv put kv/spark-lab/ngc api_key=<your NGC API key>   # the real value replaces the placeholder
-unset VAULT_TOKEN                                # don't leave an admin token in the shell
+ls .cache/vault-ca.crt                     # must exist; if not, copy it (§2): scp vault01:~/vault-ca.crt .cache/vault-ca.crt
+read -s "VAULT_TOKEN?Vault admin token: "  # zsh: paste the hvs.… token, press Enter (nothing is shown)
+export VAULT_TOKEN                         # the playbook reads it from the environment; it is never written to disk
+ansible-playbook playbooks/17.1-vault.yml  # localhost only: talks to vault01's API; expect failed=0
+unset VAULT_TOKEN                          # don't leave an admin token in the shell
 ```
 
-No `vault` CLI on the MacBook? Run the `vault` commands on vault01 instead, and paste the token into `export VAULT_TOKEN=…` on the MacBook for the playbook run.
+In bash (not zsh) the prompt syntax is `read -s -p "Vault admin token: " VAULT_TOKEN`.
 
-**Semaphore UI:** variable group `vault-approle` → change `vault_lab_secrets_enabled` to `true`.
+**Task 7.3 · Store your real NGC key (on vault01).** `api_key=-` makes Vault read the value from the keyboard, so the key doesn't end up in your shell history. Don't type `<` `>` around anything: zsh and bash treat them as file redirections.
+
+```bash
+# ▶ vault01 (ssh vault01)
+vault kv put kv/spark-lab/ngc api_key=-   # paste the nvapi-… key, press Enter, then Ctrl-D
+```
+
+Already have the `vault` program on the MacBook (`brew tap hashicorp/tap && brew install hashicorp/tap/vault`)? Then you can do Tasks 7.1 and 7.3 there too, from the lab folder, with `export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=$PWD/.cache/vault-ca.crt` instead of the vault01 paths. `vault login` then saves the root token in `~/.vault-token` on the Mac: delete that file afterwards.
+
+**Task 7.4 · Switch it on. Semaphore UI:** variable group `vault-approle` → change `vault_lab_secrets_enabled` to `true`.
+
+**If a command fails:**
+
+| You see | Cause | Fix |
+|---|---|---|
+| `zsh: command not found: vault` (MacBook) | the `vault` program is only on vault01 | run Tasks 7.1 and 7.3 on vault01 as shown, or install it with brew |
+| `zsh: no such file or directory: your` / `parse error near \`newline'` | `<…>` copied literally | use `api_key=-` and paste the key when asked |
+| `Vault is sealed` / `* Vault is sealed` | vault01 restarted | on vault01: `vault operator unseal` twice, two different keys |
+| `permission denied` (403) on `vault login` or in the playbook | not the root token (e.g. a Semaphore token or an unseal key) | use the Initial Root Token from `vault operator init` |
+| `export VAULT_TOKEN=<admin token from vault01> and run again` | `VAULT_TOKEN` empty in this shell | repeat Task 7.2 in the same terminal window; `echo ${#VAULT_TOKEN}` must print more than 0 |
+| `certificate verify failed` / `CERTIFICATE_VERIFY_FAILED` | `.cache/vault-ca.crt` missing, or not run from the lab folder | `cd ~/technical-depth/01-Ansible/lab`; copy the certificate (§2) |
+| `The signing role must exist…` / `AppRole … not found` | Chapter 01 §4 incomplete | finish Chapter 01 §4 on vault01, then re-run |
+| `x509: certificate signed by unknown authority` (vault CLI) | `VAULT_CACERT` not set in this shell | set `VAULT_ADDR` and `VAULT_CACERT` again (first line of Task 7.1) |
 
 **Verify 7:**
 
