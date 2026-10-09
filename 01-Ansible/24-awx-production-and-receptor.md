@@ -83,7 +83,7 @@ mkdir -p .cache/receptor && tar xzf ~/Downloads/dgx-spark-2_install_bundle.tar.g
 cd .cache/receptor/dgx-spark-2_install_bundle
 ansible-galaxy collection install -r requirements.yml       # ansible.receptor
 # the bundle ships install_receptor.yml + inventory.yml; point it at the Spark:
-ansible-playbook -i inventory.yml install_receptor.yml -e ansible_user=nvidia -K
+ansible-playbook -i inventory.yml install_receptor.yml -e ansible_user=dgxadmin -K
 ```
 
 3. Back in AWX the instance moves to **Ready**. Health-check it: `awx instances health_check dgx-spark-2`.

@@ -260,7 +260,7 @@ plugin: spark_mdns
 name_regex: '^dgx-spark-\d+$'
 # interface: enp0s31f6          # your control node's LAN NIC
 compose:
-  ansible_user: "'nvidia'"
+  ansible_user: "'dgxadmin'"      # the admin user on DGX OS (spark_admin_user); quoted twice: compose values are Jinja expressions
 keyed_groups:
   - key: mdns_interface
     prefix: seen_on
