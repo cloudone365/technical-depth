@@ -906,7 +906,31 @@ The playbooks `03.1-bootstrap.yml`, `04.1-semaphore-target.yml`, `09.1-fleet-sim
 
 ### 8.2 Build order
 
-`04.3 Baseline` already ran in §6.3. Then run `11.1 Containers` → `12.1 Telemetry` → `19.1 Kubernetes` → `20.1 GPU Operator` → `20.2 vClusters`, one after the other. Or run `site` once (it starts with `04.3 Baseline` again, which is safe: the baseline is idempotent). Each task log must end in `failed=0` before you start the next one: the same checkpoints as in §6 and Chapters 11, 12, 19 and 20 ([all chapters](00-ansible-step-by-step-guide.md)).
+**Two ways through the rest of this module. Pick one:**
+
+| | **A · Learn in order (recommended)** | **B · Build the whole lab now** |
+|---|---|---|
+| For | following 01-Ansible chapter by chapter | starting 02-Kubernetes (or the LLM modules) soon, and coming back to the chapters later |
+| What you do | continue with **Chapter 05**. Each chapter tells you when to run its template; you run it there, after reading why | run the templates below now, then read the chapters in order; their templates run again without harm (idempotent) |
+
+**Path A, chapter by chapter, on one Spark:**
+
+| Chapters | What runs on the Spark | Note |
+|---|---|---|
+| 05–09 | nothing new: Ansible itself (debugging, inventory, Jinja, roles, performance) | from the MacBook; `07.1 Jinja lab` is localhost only |
+| 10 | `10.1 Driver audit` (read-only) | `10.2 DGX OS upgrade` only when you mean to upgrade |
+| 11 | `11.1 Containers`, `11.2 CUDA smoke` | NGC login uses the key from §7 |
+| 12 | `12.1 Telemetry` | |
+| 13–15 | nothing, unless dgx-spark-2 exists | read them; their templates need two Sparks |
+| 16 | `16.1 GDS check` | |
+| 17–18 | vault01, `18.1 Vault integration` | §7 already did most of Chapter 17 §3.2 |
+| 19 | `19.1 Kubernetes` | then §8.4 for your kubeconfig |
+| 20 | `20.1 GPU Operator`, `20.2 vClusters` | the lab is now complete for 02-Kubernetes |
+| 21–30 | each chapter's own template | operations, audit, capstone |
+
+**Path B, the build now:** `04.3 Baseline` already ran in §6.3. Run `11.1 Containers` → `12.1 Telemetry` → `19.1 Kubernetes` → `20.1 GPU Operator` → `20.2 vClusters`, one after the other. Or run `site` once (it starts with `04.3 Baseline` again, which is safe: the baseline is idempotent). Each task log must end in `failed=0` before you start the next one: the same checkpoints as in §6 and Chapters 11, 12, 19 and 20 ([all chapters](00-ansible-step-by-step-guide.md)).
+
+Either way, create the templates (§8.1) whenever you like; creating one doesn't run it.
 
 ### 8.3 The danger zone
 
