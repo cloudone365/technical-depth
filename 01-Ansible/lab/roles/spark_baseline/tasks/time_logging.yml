@@ -13,6 +13,14 @@
     mode: "0644"
   notify: Restart chrony
 
+- name: Ensure the journald drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d     # drop-in folder for journald settings; not created by default
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+    
 - name: Persistent journald with a size cap
   ansible.builtin.copy:
     dest: /etc/systemd/journald.conf.d/60-spark.conf
