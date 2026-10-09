@@ -345,7 +345,14 @@ Open the file at those lines (`less +<line> debug_dir/ansible/modules/apt.py`) a
 sudo python3 AnsiballZ_apt.py execute     # raw JSON: "changed": false, because jq is installed
 ```
 
-**Optional · watch the lock wait happen.** Two terminals. In the first, hold apt's lock on purpose with the same Python library the module uses (`apt_pkg`); it keeps the lock until you press Ctrl-C:
+**Optional · watch the lock wait happen.** The test needs a package that is **not** installed. If `sl` is there from an earlier try (`dpkg -l sl` shows `ii`), remove it first:
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+sudo apt-get remove -y sl
+```
+
+Then two terminals. In the first, hold apt's lock on purpose with the same Python library the module uses (`apt_pkg`); it keeps the lock until you press Ctrl-C:
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
