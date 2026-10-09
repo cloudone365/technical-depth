@@ -345,14 +345,16 @@ Open the file at those lines (`less +<line> debug_dir/ansible/modules/apt.py`) a
 sudo python3 AnsiballZ_apt.py execute     # raw JSON: "changed": false, because jq is installed
 ```
 
-**Optional · watch the lock wait happen.** Two terminals. In the first, start an install and **leave it at the question** (apt holds the lock while it waits for your answer):
+**Optional · watch the lock wait happen.** Two terminals. In the first, hold apt's lock on purpose with the same Python library the module uses (`apt_pkg`); it keeps the lock until you press Ctrl-C:
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
-sudo apt-get install sl                    # stop at "Do you want to continue? [Y/n]" — don't answer yet
+sudo python3 -c 'import apt_pkg, time; apt_pkg.init(); apt_pkg.pkgsystem_lock(); print("apt is locked - Ctrl-C to release"); time.sleep(600)'
 ```
 
-In the second, ask Ansible for the same package with a short timeout:
+(A plain `sudo apt-get install …` is no good for this: for a single package without new dependencies, apt installs at once without asking "Do you want to continue?", so it never sits there holding the lock.)
+
+In the second, ask Ansible to install a package that is **not** installed yet (`sl`), with a short timeout:
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
@@ -360,7 +362,12 @@ ansible dgx-spark-1 -b -K -m ansible.builtin.apt -a "name=sl state=present lock_
 # after ~20 s: FAILED! … "Failed to lock apt for exclusive operation"
 ```
 
-Then answer `n` in the first terminal.
+Press Ctrl-C in the first terminal and run the same command again: now it installs `sl` (`CHANGED`). Remove it afterwards:
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
+ansible dgx-spark-1 -b -K -m ansible.builtin.apt -a "name=sl state=absent"
+```
 
 **Step 5 · Clean up.** `KEEP_REMOTE_FILES` never deletes anything.
 
