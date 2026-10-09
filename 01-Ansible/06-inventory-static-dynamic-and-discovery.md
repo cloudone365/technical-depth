@@ -274,15 +274,42 @@ sudo apt install avahi-utils                         # the machine you run the d
 avahi-browse -p -r -t _ssh._tcp | grep '^='          # raw view
 ```
 
-Then build the inventory from it. The plugin runs `avahi-browse` on the machine that runs `ansible-inventory`, so on the MacBook point it at a capture with `from_file:` (next paragraph):
+Then build the inventory from it. The plugin runs `avahi-browse` **on the machine that runs `ansible-inventory`**. On a Linux control node on the Sparks' LAN that just works:
 
 ```bash
-# ▶ MacBook · 01-Ansible/lab (venv active)
+# ▶ Linux control node with avahi-utils · 01-Ansible/lab (venv active) — on the MacBook use the capture below
 ansible-inventory -i inventory-examples/spark.mdns.yml --graph
 ansible-inventory -i inventory -i inventory-examples/spark.mdns.yml --graph   # merged with static
 ```
 
-A MacBook has no `avahi-browse` (macOS uses `dns-sd`). Take the capture on a Spark instead (`ssh dgxadmin@192.168.0.100 'avahi-browse -p -r -t _ssh._tcp' > .cache/mdns.txt`, after `sudo apt install avahi-utils` there) and point the plugin at it with `from_file: .cache/mdns.txt`.
+**On the MacBook: use a capture.** macOS has its own mDNS tool (`dns-sd`), not `avahi-browse`, and its output format is different, so the plugin can't run there. Instead, let a Spark do the listening, save what it heard to a file on the MacBook, and tell the plugin to read that file (`from_file:`) instead of listening itself:
+
+1. Install the listener on the Spark (once):
+
+   ```bash
+   # ▶ dgx-spark-1 (ssh dgx-spark-1)
+   sudo apt install -y avahi-utils
+   ```
+
+2. Capture from the MacBook. `ssh` runs `avahi-browse` on the Spark; `>` saves its output into a file on the **MacBook**:
+
+   ```bash
+   # ▶ MacBook · 01-Ansible/lab (venv active)
+   ssh dgxadmin@192.168.0.100 'avahi-browse -p -r -t _ssh._tcp' > .cache/mdns.txt
+   grep '^=' .cache/mdns.txt | head            # one '=' line per discovered SSH service: name, IPv4, port
+   ```
+
+3. Make a copy of the plugin config that reads the capture (the copy goes to `.cache/`, which git ignores; the file name must still end in `spark.mdns.yml` or the plugin ignores it):
+
+   ```bash
+   # ▶ MacBook · 01-Ansible/lab (venv active)
+   cp inventory-examples/spark.mdns.yml .cache/spark.mdns.yml
+   echo 'from_file: .cache/mdns.txt' >> .cache/spark.mdns.yml   # path relative to the lab folder
+   ansible-inventory -i .cache/spark.mdns.yml --graph
+   ansible-inventory -i inventory -i .cache/spark.mdns.yml --graph   # merged with static
+   ```
+
+   Expect `@spark:` with `dgx-spark-1` (and `dgx-spark-2` if it's on), plus `@seen_on_<interface>`. The capture is a snapshot: take it again when a Spark is added or changes address.
 
 The plugin accepts `from_file:` so you can unit-test it against a saved capture without any Sparks on the network. That's how it was validated for this lab:
 
