@@ -823,7 +823,15 @@ Not sure where it has been? Rotate it: NGC → **Setup** → **Personal Keys**, 
 
 Already have the `vault` program on the MacBook (`brew tap hashicorp/tap && brew install hashicorp/tap/vault`)? Then you can do Tasks 7.1 and 7.3 there too, from the lab folder, with `export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=$PWD/.cache/vault-ca.crt` instead of the vault01 paths. `vault login` then saves the root token in `~/.vault-token` on the Mac: delete that file afterwards.
 
-**Task 7.4 · Switch it on. Semaphore UI:** variable group `vault-approle` → change `vault_lab_secrets_enabled` to `true`.
+**Task 7.4 · Switch it on (Semaphore UI).** The switch is a variable in the variable group you created in §5.3, not a file in the repository:
+
+1. Open `http://192.168.0.210:3000`, project **spark-lab** (project selector at the top of the left sidebar).
+2. Left sidebar → **Variable Groups** (called **Environment** in older Semaphore versions) → click `vault-approle` (or its pencil/edit icon).
+3. In **Extra variables** (the JSON box) change `false` to `true`, so it reads `{"vault_role_id": "…your role id…", "vault_lab_secrets_enabled": true}`. Keep `vault_role_id` as it is, and `true` without quotes.
+4. Leave the **Secrets** part (`vault_secret_id`) untouched; it stays stored even though it's shown masked.
+5. **Save.** Every template that uses `vault-approle` picks it up on its next run; nothing to restart.
+
+With `true`, play 1 also reads `kv/spark-lab/*` from vault01 (the policy from Task 7.2 allows it). Set it back to `false` to stop that.
 
 **If a command fails:**
 
