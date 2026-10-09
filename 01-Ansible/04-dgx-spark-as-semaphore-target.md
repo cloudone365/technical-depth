@@ -831,6 +831,8 @@ Already have the `vault` program on the MacBook (`brew tap hashicorp/tap && brew
 4. Leave the **Secrets** part (`vault_secret_id`) untouched; it stays stored even though it's shown masked.
 5. **Save.** Every template that uses `vault-approle` picks it up on its next run; nothing to restart.
 
+   **Save** refuses with *Environment variables key can not be empty*? The form has a separate **Environment variables** list below the JSON box, and it holds an empty row. Delete that row (its trash/✕ icon) or fill it in; the lab doesn't use environment variables here. Then Save again.
+
 With `true`, play 1 also reads `kv/spark-lab/*` from vault01 (the policy from Task 7.2 allows it). Set it back to `false` to stop that.
 
 **If a command fails:**
@@ -1044,6 +1046,7 @@ State then goes to the MacBook's `.cache/` instead of sema01's volume. After the
 | `Host key verification failed` | dgx-spark-1 was reinstalled, so its host key changed | on sema01: `docker compose exec semaphore ssh-keygen -R 192.168.0.100` (only after you know why the key changed) |
 | `No module named 'kubernetes'` / `helm: not found` | the stock image is running | §4: `docker compose build semaphore && docker compose up -d`, check `docker compose ps` shows `semaphore-spark-lab:local` |
 | `Could not find … kubeconfig-spark-lab.yaml` in templates `20.1`/`20.2`/`21.1`/`29.1` | state is not on the volume (SPARK_LAB_CACHE unset) or `19.1 Kubernetes` never ran from Semaphore | §4 Verify; run `19.1 Kubernetes` from Semaphore |
+| Saving a variable group: *Environment variables key can not be empty* | an empty row in the **Environment variables** list (separate from the Extra variables JSON) | delete the empty row, then Save (§7 Task 7.4) |
 | `17.1-vault.yml`: `export VAULT_TOKEN=…` assertion | no admin token in the environment | §7 |
 | `17.1-vault.yml`: signing role does not allow svc-ansible | vault01's role differs from Chapter 01 §4 | `vault read ssh-client-signer/roles/ansible`; fix `allowed_users` there |
 | `11.1 Containers`: NGC login skipped | `vault_lab_secrets_enabled` false, or the key is still `REPLACE_ME` | §7 |
