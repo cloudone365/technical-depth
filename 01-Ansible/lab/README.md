@@ -24,7 +24,7 @@ lab/
 │   ├── group_vars/spark.yml    # login switch (svc-ansible + cert under Semaphore, dgxadmin otherwise), GB10 golden values, packages, sysctls
 │   └── host_vars/dgx-spark-N.yml  # per-node CX-7 addressing
 ├── inventory_plugins/spark_mdns.py   # discover Sparks via Avahi/mDNS                            (Chapter 06)
-├── inventory-examples/         # opt-in sources (mDNS)
+├── inventory-examples/         # opt-in sources (mDNS, NetBox)
 ├── roles/
 │   ├── spark_facts             # /etc/ansible/facts.d/spark.fact (GPU, CUDA, CX-7, UMA)          (Chapters 04, 07)
 │   ├── spark_baseline          # packages, NVIDIA holds, sysctl, SSH, chrony, journald + Molecule (Chapters 04, 25)
@@ -51,6 +51,7 @@ lab/
 │   ├── 04.2-ping.yml               # first contact: SSH, sudo, Python, it IS a Spark                                     (Chapter 04 §6.1)
 │   ├── 04.3-baseline.yml           # custom facts (spark_facts) + OS baseline (spark_baseline)                           (Chapter 04 §6.2–6.3)
 │   ├── 05.1-async-download.yml     # async + poll: 0 + async_status: a model download while the baseline runs            (Chapter 05 §6.4)
+│   ├── 06.1-netbox-seed.yml        # MacBook, optional: describe the lab in NetBox (API only, no SSH)                     (Chapter 06 §3.3)
 │   ├── 17.1-vault.yml              # MacBook, admin VAULT_TOKEN: lab secrets in vault01                                  (Chapter 04 §7, Chapter 18)
 │   ├── 19.1-kubernetes.yml         # kubeadm, Cilium, MetalLB; then 20.1-gpu-operator → 20.2-vclusters                   (Chapters 19, 20)
 │   ├── 19.2-reset-kubernetes.yml   # wipes Kubernetes and every vCluster for a clean rebuild                             (Chapter 19)

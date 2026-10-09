@@ -1,0 +1,104 @@
+---
+# Chapter 06 §3.3 (optional): describe the lab in NetBox, from the inventory.
+# Runs on the MacBook only and talks to NetBox's API; it never logs in to a Spark.
+#
+#   ansible-galaxy collection install -r requirements.yml -p ./collections   # includes netbox.netbox + ansible.utils
+#   python -m pip install pynetbox
+#   read -s "NETBOX_TOKEN?NetBox API token: " && export NETBOX_TOKEN
+#   ansible-playbook playbooks/06.1-netbox-seed.yml
+#
+# Re-running is safe: every module compares first and changes only what differs.
+- name: Model the lab in NetBox
+  hosts: spark
+  gather_facts: false
+  connection: local                                   # API calls from the MacBook, no SSH
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"   # the venv's Python (has pynetbox), not group_vars' /usr/bin/python3
+    netbox_url: "{{ lookup('ansible.builtin.env', 'NETBOX_URL') | default('http://192.168.0.100:8081', true) }}"
+    netbox_token: "{{ lookup('ansible.builtin.env', 'NETBOX_TOKEN') }}"
+    netbox_site: home-lab
+    netbox_role: gpu-node
+    netbox_k8s_tag: "{{ 'k8s-control-plane' if inventory_hostname in groups['k8s_control_plane'] | default([]) else 'k8s-worker' }}"
+  module_defaults:
+    group/netbox.netbox.netbox:
+      netbox_url: "{{ netbox_url }}"
+      netbox_token: "{{ netbox_token }}"
+  tasks:
+    - name: A NetBox API token is set
+      ansible.builtin.assert:
+        that: netbox_token | length > 0
+        fail_msg: "export NETBOX_TOKEN=<token from NetBox → your user → API Tokens> (Chapter 06 §3.3)"
+        quiet: true
+      run_once: true
+
+    - name: Shared objects (once) — manufacturer, device type, role, site, tags
+      run_once: true
+      block:
+        - name: Manufacturer
+          netbox.netbox.netbox_manufacturer:
+            data: { name: NVIDIA }
+
+        - name: Device type
+          netbox.netbox.netbox_device_type:
+            data: { model: DGX Spark, manufacturer: NVIDIA, u_height: 0 }
+
+        - name: Device role
+          netbox.netbox.netbox_device_role:
+            data: { name: "{{ netbox_role }}", color: 76b900 }
+
+        - name: Site
+          netbox.netbox.netbox_site:
+            data: { name: "{{ netbox_site }}" }
+
+        - name: Tags
+          netbox.netbox.netbox_tag:
+            data: { name: "{{ item }}" }
+          loop: [k8s-control-plane, k8s-worker]
+
+    - name: Device
+      netbox.netbox.netbox_device:
+        data:
+          name: "{{ inventory_hostname }}"
+          device_type: DGX Spark
+          device_role: "{{ netbox_role }}"
+          site: "{{ netbox_site }}"
+          status: active
+          tags: ["{{ netbox_k8s_tag }}"]
+
+    - name: Management interface
+      netbox.netbox.netbox_device_interface:
+        data:
+          device: "{{ inventory_hostname }}"
+          name: "{{ mgmt_interface }}"
+          type: 10gbase-t
+          mgmt_only: true
+
+    - name: Management address
+      netbox.netbox.netbox_ip_address:
+        data:
+          address: "{{ ansible_host }}/{{ mgmt_cidr | ansible.utils.ipaddr('prefix') }}"
+          assigned_object: { device: "{{ inventory_hostname }}", name: "{{ mgmt_interface }}" }
+
+    - name: Management address is the device's primary IPv4 (ansible_host when read back)
+      netbox.netbox.netbox_device:
+        data:
+          name: "{{ inventory_hostname }}"
+          primary_ip4: "{{ ansible_host }}/{{ mgmt_cidr | ansible.utils.ipaddr('prefix') }}"
+
+    - name: CX-7 interfaces
+      netbox.netbox.netbox_device_interface:
+        data:
+          device: "{{ inventory_hostname }}"
+          name: "{{ item.name }}"
+          type: 200gbase-x-qsfp56
+          mtu: "{{ item.mtu }}"
+      loop: "{{ cx7_interfaces | default([]) }}"
+      loop_control: { label: "{{ item.name }}" }
+
+    - name: CX-7 fabric addresses
+      netbox.netbox.netbox_ip_address:
+        data:
+          address: "{{ item.address }}"
+          assigned_object: { device: "{{ inventory_hostname }}", name: "{{ item.name }}" }
+      loop: "{{ cx7_interfaces | default([]) }}"
+      loop_control: { label: "{{ item.name }} {{ item.address }}" }

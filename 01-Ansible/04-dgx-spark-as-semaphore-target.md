@@ -903,7 +903,7 @@ Create the remaining templates (`04.2 Ping` and `04.3 Baseline` exist already), 
 | `30.2 Chaos` | `30.2-chaos.yml` | capstone fault injection |
 | `site` | `site.yml` | `04.3 Baseline`, `13.1 Fabric`, `11.1 Containers`, `12.1 Telemetry`, `19.1 Kubernetes`, `20.1 GPU Operator`, `20.2 vClusters`, `22.1 Slurm`, `15.1 NFS RDMA` and `30.1 Validate` in one task; extra variable `vault_ssh_cert_ttl: 1h` |
 
-The playbooks `03.1-bootstrap.yml`, `04.1-semaphore-target.yml`, `09.1-fleet-sim.yml`, `09.2-fleet-bench.yml` and `17.1-vault.yml` have no template: they run from the MacBook. `00-vault-cert.yml` is play 1, imported by the others.
+The playbooks `03.1-bootstrap.yml`, `04.1-semaphore-target.yml`, `06.1-netbox-seed.yml`, `09.1-fleet-sim.yml`, `09.2-fleet-bench.yml` and `17.1-vault.yml` have no template: they run from the MacBook. `00-vault-cert.yml` is play 1, imported by the others.
 
 ### 8.2 Build order
 

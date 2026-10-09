@@ -13,3 +13,7 @@ collections:
     version: ">=6.2.0"
   - name: kubernetes.core
     version: ">=5.0.0"
+  - name: ansible.utils
+    version: ">=4.0.0"
+  - name: netbox.netbox            # Chapter 06 §3.3 (optional NetBox exercise)
+    version: ">=3.20.0"

@@ -1,0 +1,11 @@
+---
+# Read the lab back from NetBox as an inventory (Chapter 06 §3.3).
+# The token comes from the environment (NETBOX_TOKEN), never from this file:
+#   ansible-inventory -i inventory-examples/netbox.yml --graph
+# Needs: the netbox.netbox collection and pynetbox in the venv.
+plugin: netbox.netbox.nb_inventory
+api_endpoint: http://192.168.0.100:8081
+validate_certs: false
+config_context: true
+group_by: [device_roles, sites, tags]
+# ansible_host is set by the plugin from each device's primary IPv4 (set by 06.1-netbox-seed.yml)

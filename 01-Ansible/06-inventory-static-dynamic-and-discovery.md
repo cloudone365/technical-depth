@@ -329,88 +329,111 @@ comm -3 <(ansible-inventory -i inventory --list | jq -r '.spark.hosts[]' | sort)
 # column 1 = declared but not seen (down?), column 2 = seen but not declared (rogue/new)
 ```
 
-### 3.3 NetBox as source of truth (optional, runs on the Spark)
+### 3.3 NetBox as source of truth (optional; NetBox runs on the Spark, Ansible on the MacBook)
+
+**Idea:** so far the inventory is files you write by hand (§2) or what the network announces (§3.2). In a real data centre, the list of machines, their ports, cables and IP addresses lives in a **CMDB**, usually [NetBox](https://netbox.dev), and Ansible reads its inventory from there. In this exercise you:
+
+1. run NetBox in Docker on the Spark;
+2. let a playbook describe the lab in NetBox (device, management port, CX-7 ports, addresses), using what's already in `inventory/`;
+3. read it back with the `netbox.netbox.nb_inventory` plugin, so NetBox becomes an inventory source like any other.
+
+| | |
+|---|---|
+| **Where** | NetBox: Docker on dgx-spark-1, port 8081. Ansible: MacBook, lab folder |
+| **Cost** | four containers (NetBox, worker, PostgreSQL, Redis), roughly 1–2 GB of memory; remove them at the end (step 7) |
+| **Files** | [`playbooks/06.1-netbox-seed.yml`](lab/playbooks/06.1-netbox-seed.yml) · [`inventory-examples/netbox.yml`](lab/inventory-examples/netbox.yml) |
+| **Time** | ~30 min, most of it NetBox's first start |
+
+**Step 1 · Start NetBox on the Spark.** DGX OS has Docker already. If `docker ps` says *permission denied*, put `sudo` in front of the `docker` commands.
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
+docker ps                                                   # Docker works?
 git clone -b release https://github.com/netbox-community/netbox-docker.git ~/netbox-docker
 cd ~/netbox-docker
-cat > docker-compose.override.yml <<'EOF'
+cat > docker-compose.override.yml <<'YAML'
 services:
   netbox:
     ports: ["8081:8080"]
-EOF
-docker compose pull && docker compose up -d        # images are multi-arch; first boot runs migrations
+YAML
+docker compose pull                                         # multi-arch images, fine on the Spark's Arm CPU
+docker compose up -d                                        # first start runs the database migrations: several minutes
+docker compose ps                                           # repeat until netbox shows (healthy)
+```
+
+**Step 2 · Create your NetBox admin user** (asks for a username, an e-mail you can leave empty, and a password):
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+cd ~/netbox-docker
 docker compose exec netbox /opt/netbox/netbox/manage.py createsuperuser
 ```
 
-Seed NetBox from your inventory, so the model describes the Spark precisely:
+**Step 3 · Create an API token.** Browser on the MacBook: `http://192.168.0.100:8081`, log in with that user, then your user name (top right) → **API Tokens** → **Add** (keep **Write enabled** on) → **Create**, and copy the token. Like the Vault token in Chapter 04 §7, it goes into the shell environment, never into a file.
 
-```yaml
-# playbooks/netbox-seed.yml  (ansible-galaxy collection install netbox.netbox; pip install pynetbox)
-- name: Model the lab in NetBox
-  hosts: spark
-  gather_facts: false
-  connection: local
-  vars:
-    nb: { url: "http://192.168.0.100:8081", token: "{{ lookup('env', 'NETBOX_TOKEN') }}" }
-  tasks:
-    - name: Manufacturer / device type / role / site (run once)
-      run_once: true
-      block:
-        - netbox.netbox.netbox_manufacturer: { netbox_url: "{{ nb.url }}", netbox_token: "{{ nb.token }}", data: { name: NVIDIA } }
-        - netbox.netbox.netbox_device_type:
-            netbox_url: "{{ nb.url }}"
-            netbox_token: "{{ nb.token }}"
-            data: { model: DGX Spark, manufacturer: NVIDIA, u_height: 0 }
-        - netbox.netbox.netbox_device_role: { netbox_url: "{{ nb.url }}", netbox_token: "{{ nb.token }}", data: { name: gpu-node, color: 76b900 } }
-        - netbox.netbox.netbox_site: { netbox_url: "{{ nb.url }}", netbox_token: "{{ nb.token }}", data: { name: home-lab } }
-    - name: Device
-      netbox.netbox.netbox_device:
-        netbox_url: "{{ nb.url }}"
-        netbox_token: "{{ nb.token }}"
-        data:
-          name: "{{ inventory_hostname }}"
-          device_type: DGX Spark
-          role: gpu-node
-          site: home-lab
-          custom_fields: {}
-          tags: ["{{ 'k8s-control-plane' if inventory_hostname in groups['k8s_control_plane'] else 'k8s-worker' }}"]
-    - name: CX-7 interfaces + IPs
-      netbox.netbox.netbox_interface:
-        netbox_url: "{{ nb.url }}"
-        netbox_token: "{{ nb.token }}"
-        data: { device: "{{ inventory_hostname }}", name: "{{ item.name }}", type: 200gbase-x-qsfp56, mtu: "{{ item.mtu }}" }
-      loop: "{{ cx7_interfaces }}"
-    - name: Fabric addresses
-      netbox.netbox.netbox_ip_address:
-        netbox_url: "{{ nb.url }}"
-        netbox_token: "{{ nb.token }}"
-        data:
-          address: "{{ item.address }}"
-          assigned_object: { device: "{{ inventory_hostname }}", name: "{{ item.name }}" }
-      loop: "{{ cx7_interfaces }}"
-```
-
-Then read it back as inventory:
-
-```yaml
-# inventory-examples/netbox.yml
-plugin: netbox.netbox.nb_inventory
-api_endpoint: http://192.168.0.100:8081
-validate_certs: false
-config_context: true
-group_by: [device_roles, sites, tags]
-compose:
-  ansible_host: primary_ip4.address | default('') | ansible.utils.ipaddr('address')
-```
+**Step 4 · Prepare the MacBook** (once): the NetBox collection and its Python library.
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
-NETBOX_TOKEN=... ansible-inventory -i inventory-examples/netbox.yml --graph
+ansible-galaxy collection install -r requirements.yml -p ./collections   # includes netbox.netbox + ansible.utils
+python -m pip install pynetbox
 ```
 
-**Source-of-truth rules for a real cluster:** NetBox (or your CMDB) owns *what exists and how it's cabled*. Ansible `group_vars` own *how it's configured*. Facts own *what state it's in*. Never let two of these define the same thing.
+**Step 5 · Describe the lab in NetBox.** The playbook runs on the MacBook (`connection: local`) and only talks to NetBox's API; it never logs in to the Spark. For every host in group `spark` it creates or updates:
+
+| NetBox object | Value | From |
+|---|---|---|
+| manufacturer, device type, role, site, tags | `NVIDIA`, `DGX Spark`, `gpu-node`, `home-lab`, `k8s-control-plane` / `k8s-worker` | fixed in the playbook (once) |
+| device | `dgx-spark-1`, role `gpu-node`, tag `k8s-control-plane` | `inventory_hostname`, group `k8s_control_plane` |
+| management interface + IP, set as **primary IPv4** | `enP7s7`, `192.168.0.100/24` | `mgmt_interface`, `ansible_host`, `mgmt_cidr` (`group_vars/all.yml`, `hosts.yml`) |
+| CX-7 interfaces + fabric IPs | `enp1s0f1np1` `192.168.100.11/24`, `enP2p1s0f1np1` `192.168.101.11/24`, MTU 9000 | `cx7_interfaces` (`host_vars/dgx-spark-1.yml`) |
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
+read -s "NETBOX_TOKEN?NetBox API token: " && export NETBOX_TOKEN   # zsh; paste the token (not shown, not saved)
+ansible-playbook playbooks/06.1-netbox-seed.yml                    # expect: several changed, failed=0
+ansible-playbook playbooks/06.1-netbox-seed.yml                    # again: changed=0 (idempotent)
+```
+
+Look at the result in NetBox: **Devices → Devices → dgx-spark-1**, tabs **Interfaces** and **IP Addresses**.
+
+**Step 6 · Read NetBox back as an inventory.**
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
+ansible-inventory -i inventory-examples/netbox.yml --graph                  # groups from role, site and tags
+ansible-inventory -i inventory-examples/netbox.yml --host dgx-spark-1 | grep -E 'ansible_host|primary_ip4'
+ansible -i inventory-examples/netbox.yml dgx-spark-1 -m ping               # a real SSH ping, host found via NetBox
+```
+
+Expect groups named after the role, site and tags (for example `device_roles_gpu_node`, `sites_home_lab`, `tags_k8s_control_plane`) with `dgx-spark-1` in them, and `ansible_host: 192.168.0.100`, which the plugin takes from the device's primary IPv4. Change something in the NetBox UI (add a tag, say), run `--graph` again, and the inventory follows.
+
+**Step 7 · Clean up.**
+
+```bash
+# ▶ MacBook · 01-Ansible/lab (venv active)
+unset NETBOX_TOKEN
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+cd ~/netbox-docker
+docker compose down          # stop; data kept for next time (docker compose up -d)
+# docker compose down -v     # or: stop AND delete NetBox's database
+```
+
+**If something fails:**
+
+| You see | Cause | Fix |
+|---|---|---|
+| `Failed to import the required Python library (pynetbox)` | pynetbox not in the venv | step 4 (venv active) |
+| `couldn't resolve module/action 'netbox.netbox…'` | collection not installed | step 4, in the lab folder |
+| `Connection refused` / timeout to `:8081` | NetBox still starting, or not up | on the Spark: `docker compose ps`, `docker compose logs netbox \| tail` |
+| `403` / `Invalid token` | token wrong, expired, or read-only | new token with **Write enabled** (step 3) |
+| `export NETBOX_TOKEN=…` assertion | token not in this shell | step 5's `read -s` line in the same terminal |
+| errors naming the NetBox version, or unknown fields | collection or pynetbox older than the NetBox from `netbox-docker` | `ansible-galaxy collection install netbox.netbox -p ./collections --upgrade` and `python -m pip install -U pynetbox` |
+
+**Source-of-truth rules for a real cluster:** NetBox (or your CMDB) owns *what exists and how it's cabled*. Ansible `group_vars` own *how it's configured*. Facts own *what state it's in*. Never let two of these define the same thing. (In this exercise the inventory seeds NetBox, the reverse of production, only because the lab has nothing else to start from.)
 
 ---
 
@@ -433,7 +456,7 @@ NETBOX_TOKEN=... ansible-inventory -i inventory-examples/netbox.yml --graph
 | Host appears twice with different names (IP vs name) | `ansible-inventory --list \| jq '._meta.hostvars \| keys'` | Keep one naming source. Use `compose: ansible_host` rather than naming hosts by IP |
 | mDNS finds nothing | `avahi-browse -a -t` on the machine running discovery | Different L2 segment, or multicast filtered (Wi-Fi APs, VLANs); `systemctl status avahi-daemon` on the Spark |
 | Variables from `group_vars/spark.yml` missing for mDNS hosts | `ansible-inventory --host dgx-spark-1` | group_vars load relative to the inventory *source*. Pass both `-i inventory -i inventory-examples/...` so the directory's group_vars apply |
-| NetBox plugin: `ansible.utils.ipaddr` not found | — | `ansible-galaxy collection install ansible.utils`; `pip install netaddr` |
+| `06.1-netbox-seed.yml`: `ansible.utils.ipaddr` not found | collections from `requirements.yml` not installed | `ansible-galaxy collection install -r requirements.yml -p ./collections`; `python -m pip install netaddr` |
 
 ## 6. Validation
 
