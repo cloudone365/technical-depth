@@ -429,6 +429,7 @@ docker compose down          # stop; data kept for next time (docker compose up 
 | `Failed to import the required Python library (pynetbox)` | pynetbox not in the venv | step 4 (venv active) |
 | `couldn't resolve module/action 'netbox.netbox…'` | collection not installed | step 4, in the lab folder |
 | `Connection refused` / timeout to `:8081` | NetBox still starting, or not up | on the Spark: `docker compose ps`, `docker compose logs netbox \| tail` |
+| Browser: *This site can't be reached*, but another browser (or `curl -sI http://192.168.0.100:8081/login/` on the MacBook) works | that browser rewrites `http://` to `https://` (HTTPS-only / "always use secure connections"), or an antivirus web filter or extension blocks it | type `http://192.168.0.100:8081` in full, allow the site in that setting or filter, or use the other browser |
 | `403` / `Invalid token` | token wrong, expired, or read-only | new token with **Write enabled** (step 3) |
 | `export NETBOX_TOKEN=…` assertion | token not in this shell | step 5's `read -s` line in the same terminal |
 | errors naming the NetBox version, or unknown fields | collection or pynetbox older than the NetBox from `netbox-docker` | `ansible-galaxy collection install netbox.netbox -p ./collections --upgrade` and `python -m pip install -U pynetbox` |
