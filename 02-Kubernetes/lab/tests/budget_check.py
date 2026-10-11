@@ -109,6 +109,29 @@ for d in load_all(os.path.join(LAB, "manifests", "root-llms", "10-tenancy", "quo
     check(h.get("requests.memory") == h.get("limits.memory"),
           f"{d['metadata']['namespace']}: requests.memory must equal limits.memory")
 
+# ---- training window (root-llms/training-window): serving + batch swap CPU/memory, same totals
+import subprocess
+try:
+    out = subprocess.run([os.environ.get("KUBECTL", "kubectl"), "kustomize",
+                          os.path.join(LAB, "manifests", "root-llms", "training-window")],
+                         capture_output=True, text=True, check=True).stdout
+    win = {d["metadata"]["namespace"]: d["spec"]["hard"] for d in yaml.safe_load_all(out)
+           if d and d.get("kind") == "ResourceQuota" and d["metadata"]["name"] in ("serving-budget", "batch-budget")}
+    w_cpu = sum(cpu(h["requests.cpu"]) for h in win.values())
+    w_mem = sum(gi(h["limits.memory"]) for h in win.values())
+    check(abs(w_cpu - (serving.get("cpu", 0) + batch.get("cpu", 0))) < 1e-6,
+          f"training window: serving + batch CPU {w_cpu} must equal the everyday {serving.get('cpu', 0) + batch.get('cpu', 0)}")
+    check(w_mem <= serving.get("memory_gi", 0) + 1e-6,
+          f"training window: serving + batch memory {w_mem} Gi must fit the LLM pool ({serving.get('memory_gi', 0)} Gi)")
+    for d in yaml.safe_load_all(out):
+        if d and d.get("kind") == "ClusterQueue":
+            res = {r["name"]: r["nominalQuota"] for r in d["spec"]["resourceGroups"][0]["flavors"][0]["resources"]}
+            h = win["batch"]
+            check(cpu(res["cpu"]) == cpu(h["requests.cpu"]) and gi(res["memory"]) == gi(h["limits.memory"]),
+                  "training window: spark-cq must equal batch-budget")
+except (OSError, subprocess.CalledProcessError) as e:
+    print(f"(training window not checked: {e})")
+
 # ---- every GPU container in the LLM stack: memory request = limit (the scheduler is the pool's guard)
 for root_dir, _dirs, files in os.walk(os.path.join(LAB, "manifests", "root-llms")):
     for fn in files:

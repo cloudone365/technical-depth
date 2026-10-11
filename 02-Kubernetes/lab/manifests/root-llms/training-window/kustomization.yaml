@@ -1,0 +1,38 @@
+# Training window (Chapters 07, 18; 03-DeepSeek fine-tuning): lend the LLM
+# memory pool to batch while serving is parked. Apply on the root:
+#   kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite
+#   kubectl --context spark-root apply -k manifests/root-llms/training-window
+# End it (back to the everyday split):
+#   kubectl --context spark-root apply -k manifests/root-llms/10-tenancy
+#   kubectl --context spark-root apply -k manifests/root-llms/20-scheduling
+#   kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas-
+#
+#                       everyday                      training window
+#   llm-serving         8 CPU · 90 Gi · 6 slices      2 CPU · 10 Gi · 6 slices   (mock LLM, Qdrant, one tiny model)
+#   batch / spark-cq    2 CPU · 12 Gi · 3 slices      8 CPU · 80 Gi · 3 slices   (LoRA/QLoRA, SFT, GRPO, FSDP on one Spark)
+#
+# CPU and memory move between the two; the platform's 3 CPU · ~11.7 GiB and the
+# slices don't change. A window quota below what is already in use doesn't
+# evict anything: park the model servers first, or new pods are refused.
+# With Argo CD (Chapter 28), disable self-heal on spark-root-llms-10-tenancy and
+# -20-scheduling for the window, or Argo CD puts the everyday numbers back.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../10-tenancy
+  - ../20-scheduling
+patches:
+  - target: {kind: ResourceQuota, name: serving-budget}
+    patch: |-
+      - {op: replace, path: /spec/hard/requests.cpu, value: "2"}
+      - {op: replace, path: /spec/hard/requests.memory, value: 10Gi}
+      - {op: replace, path: /spec/hard/limits.memory, value: 10Gi}
+  - target: {kind: ResourceQuota, name: batch-budget}
+    patch: |-
+      - {op: replace, path: /spec/hard/requests.cpu, value: "8"}
+      - {op: replace, path: /spec/hard/requests.memory, value: 80Gi}
+      - {op: replace, path: /spec/hard/limits.memory, value: 80Gi}
+  - target: {kind: ClusterQueue, name: spark-cq}
+    patch: |-
+      - {op: replace, path: /spec/resourceGroups/0/flavors/0/resources/0/nominalQuota, value: "8"}
+      - {op: replace, path: /spec/resourceGroups/0/flavors/0/resources/1/nominalQuota, value: 80Gi}
