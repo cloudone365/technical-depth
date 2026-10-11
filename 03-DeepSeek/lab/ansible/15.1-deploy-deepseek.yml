@@ -48,7 +48,7 @@
     - name: UMA budget allows the chat model next to the embedder
       tags: [always]
       ansible.builtin.assert:
-        that: (model.util | float) + (deepseek_with_apps | ternary(deepseek_embed_util, 0) | float) <= (deepseek_util_budget | float)
+        that: (model.util | float) + (deepseek_with_apps | bool | ternary(deepseek_embed_util, 0) | float) <= (deepseek_util_budget | float)
         fail_msg: >-
           util {{ model.util }} + embeddings {{ deepseek_embed_util }} exceeds the LLM pool budget {{ deepseek_util_budget }}
           (× ~121.7 GiB). {{ model.name }}{{ ' runs alone (models.yaml alone: true): -e deepseek_with_apps=false and park everything else'
@@ -80,13 +80,13 @@
       tags: [preflight, serve]
       vars:
         ds_hard_gi: "{{ ((ds_quota.resources | first | default({})).spec.hard['limits.memory'] | default('0Gi')) | regex_replace('Gi$', '') | int }}"
-        ds_need_gi: "{{ (model.mem | regex_replace('Gi$', '') | int) + (deepseek_with_apps | ternary(deepseek_apps_mem_gi, 0) | int) }}"
+        ds_need_gi: "{{ (model.mem | regex_replace('Gi$', '') | int) + (deepseek_with_apps | bool | ternary(deepseek_apps_mem_gi, 0) | int) }}"
       ansible.builtin.assert:
         that:
           - ds_quota.resources | length == 1
           - ds_need_gi | int <= ds_hard_gi | int
         fail_msg: >-
-          {{ deepseek_model }} needs {{ model.mem }}{{ deepseek_with_apps | ternary(' + ' ~ deepseek_apps_mem_gi ~ 'Gi for the apps', '') }}
+          {{ deepseek_model }} needs {{ model.mem }}{{ deepseek_with_apps | bool | ternary(' + ' ~ deepseek_apps_mem_gi ~ 'Gi for the apps', '') }}
           but serving-budget allows {{ ds_hard_gi }}Gi in total (02-Kubernetes root-llms/10-tenancy). Training window
           still applied? End it in 02-Kubernetes/lab: kubectl --context spark-root apply -k manifests/root-llms/10-tenancy
           and -k manifests/root-llms/20-scheduling.
@@ -175,7 +175,7 @@
 
     - name: Embeddings, LiteLLM (+ PostgreSQL) and Open WebUI
       tags: [apps]
-      when: deepseek_with_apps
+      when: deepseek_with_apps | bool
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         context: "{{ kube_context }}"
@@ -184,7 +184,7 @@
 
     - name: Remove the previous RAG ingest Job
       tags: [rag]
-      when: deepseek_with_apps and deepseek_with_rag
+      when: deepseek_with_apps | bool and deepseek_with_rag | bool
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         context: "{{ kube_context }}"
@@ -197,7 +197,7 @@
 
     - name: Index the repository for RAG (blue/green, quality-gated)
       tags: [rag]
-      when: deepseek_with_apps and deepseek_with_rag
+      when: deepseek_with_apps | bool and deepseek_with_rag | bool
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         context: "{{ kube_context }}"
