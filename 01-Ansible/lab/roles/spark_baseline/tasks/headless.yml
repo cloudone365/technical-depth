@@ -6,11 +6,13 @@
   ansible.builtin.command: systemctl get-default   # noqa: command-instead-of-module  (no module reads the default target)
   register: spark_baseline_default_target
   changed_when: false
+  check_mode: false                       # read-only: also runs in --check, so the 'when' below works
 
 - name: Memory available before
   ansible.builtin.command: awk '/MemAvailable/ {printf "%.1f GiB", $2/1048576}' /proc/meminfo
   register: spark_baseline_mem_before
   changed_when: false
+  check_mode: false
 
 - name: Boot to text mode from now on (multi-user.target)
   ansible.builtin.command: systemctl set-default multi-user.target   # noqa: command-instead-of-module
@@ -26,6 +28,7 @@
   ansible.builtin.command: awk '/MemAvailable/ {printf "%.1f GiB", $2/1048576}' /proc/meminfo
   register: spark_baseline_mem_after
   changed_when: false
+  check_mode: false
 
 - name: Report
   ansible.builtin.debug:

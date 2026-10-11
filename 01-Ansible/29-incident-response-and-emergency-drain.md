@@ -6,7 +6,7 @@
 |---|---|
 | **You will build** | One drain role that works across Kubernetes (root cluster *and* the vClusters inside it) and Slurm (`node_drain`), a forensics bundle collected **before** anything is restarted, runbooks A–E for the failure modes a Spark actually has (GPU hang, Xid, unified-memory pressure, CX-7 degradation, unreachable node), and an alert-to-automation path |
 | **Hardware** | 1–2× DGX Spark |
-| **Clusters** | `spark-root` (the drain itself); `dev-lab` and `llms` to watch what tenants see |
+| **Clusters** | `spark-root` (the drain itself, and the LLM stack in `llm-serving`/`batch`); `dev-lab` and `dev-llms` to watch what tenants see |
 | **Time** | 90 min (including drills) |
 | **Risk** | Medium. You'll deliberately take nodes out of service |
 
@@ -195,9 +195,9 @@ node_drain_bundle_dir: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') 
     - role: node_drain
 ```
 
-### 2.1 What a drain does to the nested clusters
+### 2.1 What a drain does to the models and the nested clusters
 
-`node_drain_kubeconfig` is the lab file `kubeconfig-spark-lab.yaml` in the controller's state folder (sema01's state volume under Semaphore, `.cache/` on the MacBook), and `node_drain_context` pins `k8s_drain` to `spark-root` — whatever the file's `current-context` happens to be (someone may have run `kubectl config use-context llms` on it). Only the root has nodes to cordon. The by-hand equivalent is:
+`node_drain_kubeconfig` is the lab file `kubeconfig-spark-lab.yaml` in the controller's state folder (sema01's state volume under Semaphore, `.cache/` on the MacBook), and `node_drain_context` pins `k8s_drain` to `spark-root` — whatever the file's `current-context` happens to be (someone may have run `kubectl config use-context dev-llms` on it). Only the root has nodes to cordon. The by-hand equivalent is:
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
@@ -205,24 +205,26 @@ export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
 kubectl --context spark-root drain dgx-spark-2 --ignore-daemonsets --delete-emptydir-data --grace-period=60 --timeout=300s
 ```
 
-A vCluster has no kubelet and no nodes of its own, so there's nothing to drain "inside" it. Every vCluster pod is a real pod on the root, renamed `<pod>-x-<namespace>-x-<vcluster>` in `vc-dev-lab` or `vc-llms`, and the root drain evicts it like any other pod:
+The model servers and training pods are ordinary root pods in `llm-serving` and `batch`, under their own names. A vCluster has no kubelet and no nodes of its own, so there's nothing to drain "inside" it either. Every vCluster pod is a real pod on the root, renamed `<pod>-x-<namespace>-x-<vcluster>` in `vc-dev-lab` or `vc-dev-llms`, and the root drain evicts it like any other pod:
 
 | What runs on the node | What the drain does | What you see |
 |---|---|---|
 | Static control-plane pods (kube-apiserver, etcd, …) on dgx-spark-1 | Skipped: they are mirror pods, owned by the kubelet, not the API | The root API stays up |
 | DaemonSets (cilium, kube-proxy, GPU Operator device plugin, MetalLB speaker) | Skipped (`ignore_daemonsets`) | Networking and the GPU stay advertised |
-| vCluster control planes (`dev-lab`, `llms` StatefulSets in `vc-*`) | Evicted | That vCluster's API (`https://192.168.0.111` / `.112`) is down until it reschedules. On a single Spark that means until you uncordon |
+| Model servers in `llm-serving`, training pods in `batch` | Evicted | Their Deployments recreate them; the new pods stay `Pending` while the node is cordoned, and the LLM API on `.115` has no backend for that model until it is Ready again |
+| vCluster control planes (`dev-lab`, `dev-llms` StatefulSets in `vc-*`) | Evicted | That vCluster's API (`https://192.168.0.111` / `.112`) is down until it reschedules. On a single Spark that means until you uncordon |
 | Tenant pods synced from a vCluster | Evicted | The tenant's controller recreates its pod; the syncer creates a new root pod, which stays `Pending` while the node is cordoned |
-| Tenant PodDisruptionBudgets | Respected: vCluster syncs PDBs to the root | A tight tenant PDB can block the drain until `wait_timeout` (§5) |
+| PodDisruptionBudgets | Respected: root PDBs directly, tenant PDBs because vCluster syncs them to the root | A tight PDB (a model server's, or a tenant's) can block the drain until `wait_timeout` (§5) |
 
 ```bash
 # ▶ MacBook · any folder
 kubectl --context spark-root get pods -A -o wide --field-selector spec.nodeName=dgx-spark-2   # what is still there
-kubectl --context spark-root -n vc-llms get pods                                           # tenant pods, root names
-kubectl --context spark-root get pdb -A                                                    # synced PDBs show up in vc-*
+kubectl --context spark-root -n llm-serving get pods                                       # model servers, their own names
+kubectl --context spark-root -n vc-dev-llms get pods                                       # sandbox pods, translated root names
+kubectl --context spark-root get pdb -A                                                    # root PDBs; synced tenant PDBs show up in vc-*
 ```
 
-**Single Spark:** `dgx-spark-1` is the only node, so draining it stops *every* workload in all three clusters (the root API itself keeps running). That's correct for a GPU hang, but it isn't a rolling drain. Use `node_drain_k8s=false` if you only need the evidence bundle.
+**Single Spark:** `dgx-spark-1` is the only node, so draining it stops *every* workload: the models and the pods of both vClusters (the root API itself keeps running). That's correct for a GPU hang, but it isn't a rolling drain. Use `node_drain_k8s=false` if you only need the evidence bundle.
 
 ---
 
@@ -268,7 +270,7 @@ The Slurm health check (Chapter 22) auto-drains on the hardware-class codes; the
 
 **Signals:** `SparkUnifiedMemoryLow`; CUDA OOM "while nvidia-smi shows nothing"; kubelet `MemoryPressure` evictions (the kubelet evicts below `memory.available` 4Gi, `roles/kubeadm_cluster/defaults`); the OOM killer in `dmesg`.
 
-Kubernetes side first: `kubectl --context spark-root get pods -A --field-selector=status.phase=Failed` lists evicted pods, vCluster pods included under their root names. The vCluster budgets cap memory with `limits.memory` (dev-lab 8Gi, llms 88Gi), but they are ceilings, not reservations. A model server started outside Kubernetes (Docker, Slurm) still takes from the same pool.
+Kubernetes side first: `kubectl --context spark-root get pods -A --field-selector=status.phase=Failed` lists evicted pods, model pods under their own names, vCluster pods under their root names. The budgets cap memory with `limits.memory` (`llm-serving` 90Gi, `batch` 12Gi from the same pool, each vCluster 4Gi), but they are ceilings, not reservations. Every GPU container in the LLM stack sets request = limit, so the scheduler won't place a pod whose memory isn't free; it can't see a process outside Kubernetes. A model server started outside Kubernetes (Docker, Slurm) still takes from the same pool.
 
 ```yaml
 # lab/playbooks/29.2-uma-relief.yml
@@ -369,7 +371,7 @@ ansible-playbook playbooks/13.1-fabric.yml -K
 ansible-playbook playbooks/13.2-rdma-perftest.yml -K
 ```
 
-Fix order: reseat the cable, then check that the same cage is used on both ends, then check the switch port speed (forced 200G), and finally reboot both nodes (NVIDIA's documented step when links won't come up). Drain dependent Slurm or Kubernetes multi-node jobs first (the llms vCluster's `batch` jobs use the CX-7 through the Multus NADs in `vc-llms`). A 2-node job can't run on a broken link.
+Fix order: reseat the cable, then check that the same cage is used on both ends, then check the switch port speed (forced 200G), and finally reboot both nodes (NVIDIA's documented step when links won't come up). Drain dependent Slurm or Kubernetes multi-node jobs first (the root's `batch` jobs use the CX-7 through the Multus NADs in `batch`). A 2-node job can't run on a broken link.
 
 ### Runbook E — Node unreachable (no BMC)
 
@@ -407,7 +409,7 @@ Automate **steps 1–3** (safe and reversible). Gate **step 4** (reboot or reloa
 
 | Symptom | Diagnose | Fix |
 |---|---|---|
-| k8s drain times out | `kubectl --context spark-root get pods -A -o wide --field-selector spec.nodeName=dgx-spark-2`; `kubectl --context spark-root get pdb -A` | PodDisruptionBudgets (including tenant PDBs synced from a vCluster into `vc-*`) or unmanaged pods; `terminate_grace_period`; delete stuck pods with the owner's consent. For a tenant pod, ask the tenant to delete it through their own context (`--context llms`), or the syncer may fight you |
+| k8s drain times out | `kubectl --context spark-root get pods -A -o wide --field-selector spec.nodeName=dgx-spark-2`; `kubectl --context spark-root get pdb -A` | PodDisruptionBudgets (including tenant PDBs synced from a vCluster into `vc-*`) or unmanaged pods; `terminate_grace_period`; delete stuck pods with the owner's consent. For a tenant pod, ask the tenant to delete it through their own context (`--context dev-llms`), or the syncer may fight you |
 | Drain fails with "node not found" / context error | `kubectl --kubeconfig .cache/kubeconfig-spark-lab.yaml config get-contexts` | `node_drain_context` must name the root (`spark-root`); a vCluster context has synced nodes you can't cordon from there. Fix the variable or re-run the template `19.1 Kubernetes` to restore the context. Break-glass from the MacBook: `tools/fetch-kubeconfig.sh sema01` first, or the drain uses a stale or missing `.cache/` copy |
 | Reconnect after the reboot: `Permission denied (publickey)` (Semaphore) | Task duration vs. the 15-minute certificate | Run the template again with `node_drain_reboot=false node_drain_undrain_after=true` (§1) |
 | Slurm DRAIN never reaches DRAINED | `squeue -w dgx-spark-2` | Running jobs finish first (by design); `scancel` only if agreed |

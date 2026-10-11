@@ -8,8 +8,8 @@
 | **Hardware** | dgx-spark-1. §5.6 and §8 need dgx-spark-2 and the QSFP cable |
 | **Time** | 90 min |
 | **Risk** | Low. Breaking policies is scripted and reversible (`breakfix 06`) |
-| **Clusters** | `spark-root` (Cilium, Hubble, the real pods, `netshoot-host`), `dev-lab` (netshoot, echo, the tenant probes), `llms` (serving policy, Traefik, `breakfix 06`) |
-| **Lab files** | [`manifests/dev-lab/30-networking/`](lab/manifests/dev-lab/30-networking/), [`manifests/root/30-networking/netshoot-host.yaml`](lab/manifests/root/30-networking/netshoot-host.yaml), [`manifests/dev-lab/10-tenancy/networkpolicies.yaml`](lab/manifests/dev-lab/10-tenancy/networkpolicies.yaml), [`manifests/llms/10-tenancy/networkpolicies.yaml`](lab/manifests/llms/10-tenancy/networkpolicies.yaml), [`manifests/root/05-vclusters/cilium-policies.yaml`](lab/manifests/root/05-vclusters/cilium-policies.yaml), [`scripts/pod-netns.sh`](lab/scripts/pod-netns.sh), 01-Ansible [`roles/cilium`](../01-Ansible/lab/roles/cilium/defaults/main.yml) |
+| **Clusters** | `spark-root` (Cilium, Hubble, the real pods, `netshoot-host`), `dev-lab` (netshoot, echo, the tenant probes), `dev-llms` (a sandbox probe for the boundary test); the LLM stack's namespaces `llm-serving` and `ingress` are on `spark-root` (serving policy, Traefik, `breakfix 06`) |
+| **Lab files** | [`manifests/dev-lab/30-networking/`](lab/manifests/dev-lab/30-networking/), [`manifests/root/30-networking/netshoot-host.yaml`](lab/manifests/root/30-networking/netshoot-host.yaml), [`manifests/dev-lab/10-tenancy/networkpolicies.yaml`](lab/manifests/dev-lab/10-tenancy/networkpolicies.yaml), [`manifests/root-llms/10-tenancy/networkpolicies.yaml`](lab/manifests/root-llms/10-tenancy/networkpolicies.yaml), [`manifests/root/05-vclusters/cilium-policies.yaml`](lab/manifests/root/05-vclusters/cilium-policies.yaml), [`scripts/pod-netns.sh`](lab/scripts/pod-netns.sh), 01-Ansible [`roles/cilium`](../01-Ansible/lab/roles/cilium/defaults/main.yml) |
 
 ---
 
@@ -43,8 +43,8 @@ flowchart LR
         E2["eth0 10.42.0.23/32"]
       end
     end
-    subgraph VCL["root ns vc-llms"]
-      P4["traefik-lab-…-x-ingress-x-llms<br/>10.42.0.40"]
+    subgraph VCL["root ns ingress (LLM stack, no syncer)"]
+      P4["traefik-lab-…<br/>10.42.0.40"]
     end
     V1["lxc…a<br/>eBPF from/to-container"] --> CH
     V2["lxc…b"] --> CH
@@ -94,7 +94,7 @@ With one Spark, pod ↔ pod traffic never leaves the node: Cilium's eBPF program
 | Range | Purpose | Set by |
 |---|---|---|
 | 192.168.0.0/24 | management / node IPs (`dgx-spark-1` .100, `dgx-spark-2` .101) | 01-Ansible inventory |
-| 192.168.0.110–119 | MetalLB L2 pool: .111 dev-lab API, .112 llms API, .115 Traefik in llms | 01-Ansible `roles/metallb` |
+| 192.168.0.110–119 | MetalLB L2 pool: .111 dev-lab API, .112 dev-llms API, .115 Traefik on the root (LLM gateway) | 01-Ansible `roles/metallb` |
 | 192.168.100.0/24, 192.168.101.0/24 | CX-7 point-to-point (one subnet per logical port), Multus NADs `cx7-a` / `cx7-b` | 01-Ansible `host_vars`, `playbooks/21.1-multus-rdma.yml` |
 | **10.42.0.0/16** | pods, one /24 per node (`10.42.0.0/24` dgx-spark-1, `10.42.1.0/24` dgx-spark-2). Root pods and synced vCluster pods share it | kubeadm `podSubnet`; kube-controller-manager allocates `node.spec.podCIDR`; Cilium `ipam.mode=kubernetes` uses it |
 | **10.43.0.0/16** | Service ClusterIPs — including every Service a vCluster syncs. Root DNS at **10.43.0.10** | kubeadm `serviceSubnet` |
@@ -144,22 +144,24 @@ Cilium doesn't decide by IP. Each endpoint gets a **security identity**, a numbe
 | `k8s:app=echo` … | the tenant's own labels, copied by the syncer | the tenant, through a NetworkPolicy the syncer translates |
 | `k8s:vcluster.loft.sh/namespace=lab-tools`, `vcluster.loft.sh/managed-by=dev-lab` | added by the syncer | used by the translated policies to tell inner namespaces apart |
 
-That gives two layers of policy on one datapath:
+That gives two layers of policy for a vCluster pod, on one datapath:
 
 | Layer | Written in | Enforced as |
 |---|---|---|
-| Tenant: `default-deny-ingress`, `allow-same-namespace` (dev-lab), `allow-ingress-and-same-namespace` (llms) | the vCluster, with plain NetworkPolicy | a translated NetworkPolicy in `vc-<name>` on the root (`…-x-<ns>-x-<vc>`), compiled by Cilium |
-| Platform: `vcluster-boundary` | the root, `CiliumNetworkPolicy` in `vc-dev-lab` and `vc-llms` | allow from `observability` (Prometheus), **deny** from the other vCluster's namespace. `enableDefaultDeny: false` so it never switches a pod into default-deny on its own |
+| Tenant: `default-deny-ingress`, `allow-same-namespace` (dev-lab) | the vCluster, with plain NetworkPolicy | a translated NetworkPolicy in `vc-<name>` on the root (`…-x-<ns>-x-<vc>`), compiled by Cilium |
+| Platform: `vcluster-boundary` | the root, `CiliumNetworkPolicy` in `vc-dev-lab` and `vc-dev-llms` | allow from `observability` (Prometheus), **deny** from the other vCluster's namespace. `enableDefaultDeny: false` so it never switches a pod into default-deny on its own |
 
 A deny always beats an allow in Cilium, so no tenant policy can reopen the boundary.
+
+The LLM stack has no vCluster around it. Its pods run in ordinary root namespaces with their real names and labels (`k8s:io.kubernetes.pod.namespace=llm-serving`, `k8s:app=mock-llm`), so its policy is one plain root NetworkPolicy, `allow-ingress-and-same-namespace` in `llm-serving`: it admits the `ingress` namespace (Traefik), `observability` (Prometheus) and pods in `llm-serving` itself, and drops everything else — including every pod in `vc-dev-lab` and `vc-dev-llms`. Nothing is translated, so what you read with `kubectl --context spark-root -n llm-serving get netpol` is exactly what Cilium compiles.
 
 ---
 
 ## 4. Integrations
 
-- **Multus + RDMA (01-Ansible `playbooks/21.1-multus-rdma.yml`)** adds a *second* interface (`net1`) inside selected pods, attached to the CX-7 by macvlan, plus the `rdma/rdma_shared_cx7` resource. NADs are namespaced, so they're created in `platform-tools` and in `vc-llms` — where llms' `batch` pods really run. NCCL uses `net1`, HTTP stays on `eth0`. The NVIDIA Network Operator path is the alternative ([`manifests/root/85-network-operator`](lab/manifests/root/85-network-operator/nicclusterpolicy.yaml), Chapter 17).
-- **hostNetwork** is the zero-dependency alternative for 2-Spark NCCL ([`manifests/llms/80-distributed/two-spark`](lab/manifests/llms/80-distributed/two-spark/kustomization.yaml)). You lose pod network isolation, so reserve it for training pods in llms' `batch` namespace (PSA `privileged` inside llms, and `vc-llms` on the root).
-- **NetworkPolicy + ingress (Chapter 11)**: `llm-serving` in llms admits only the `ingress` namespace and itself. Prometheus on the root is let in by `vcluster-boundary`, not by the tenant. Break it with `breakfix 06`.
+- **Multus + RDMA (01-Ansible `playbooks/21.1-multus-rdma.yml`)** adds a *second* interface (`net1`) inside selected pods, attached to the CX-7 by macvlan, plus the `rdma/rdma_shared_cx7` resource. NADs are namespaced, so they're created in `platform-tools` and in `batch` — the root namespace where the training pods run. NCCL uses `net1`, HTTP stays on `eth0`. The NVIDIA Network Operator path is the alternative ([`manifests/root/85-network-operator`](lab/manifests/root/85-network-operator/nicclusterpolicy.yaml), Chapter 17).
+- **hostNetwork** is the zero-dependency alternative for 2-Spark NCCL ([`manifests/root-llms/80-distributed/two-spark`](lab/manifests/root-llms/80-distributed/two-spark/kustomization.yaml)). You lose pod network isolation, so reserve it for training pods in the root's `batch` namespace (PSA `privileged` there, `warn: baseline`).
+- **NetworkPolicy + ingress (Chapter 11)**: `llm-serving` on the root admits only the `ingress` namespace, `observability` and itself. In the vClusters, Prometheus is let in by `vcluster-boundary`, not by the tenant. Break the serving policy with `breakfix 06`.
 - **Services (Chapter 09)**: Cilium moves packets between pod IPs; kube-proxy's iptables rules turn a ClusterIP into a pod IP *before* Cilium sees the packet.
 
 ---
@@ -271,15 +273,17 @@ With a 1500-byte management LAN, the route MTU is 1450 even for a neighbour on t
 
 ### 5.5 NetworkPolicies: prove isolation, then break it
 
-Apply the tenant policies in both vClusters and the serving tier in llms:
+Apply the tenant policies in dev-lab, the sandbox namespace in dev-llms and the serving tier on the root:
 
 ```bash
 kubectl --context dev-lab apply -k manifests/dev-lab/10-tenancy
-kubectl --context llms apply -k manifests/llms/00-platform
-kubectl --context llms apply -k manifests/llms/10-tenancy
-scripts/install-addons.sh traefik                                   # Traefik CRDs + controller in llms (Chapter 11)
-kubectl --context llms apply -k manifests/llms/40-ingress           # mock-llm in llm-serving
-kubectl --context spark-root apply -k manifests/root/05-vclusters   # vcluster-boundary (already there after install-addons.sh vclusters)
+kubectl --context dev-llms apply -k manifests/dev-llms/00-platform       # llm-sandbox
+kubectl --context dev-llms apply -k manifests/dev-llms/10-tenancy
+kubectl --context spark-root apply -k manifests/root-llms/00-platform    # llm-serving, batch, ingress
+kubectl --context spark-root apply -k manifests/root-llms/10-tenancy     # quotas, LimitRanges, allow-ingress-and-same-namespace
+scripts/install-addons.sh traefik                                        # Traefik CRDs + controller on the root (Chapter 11)
+kubectl --context spark-root apply -k manifests/root-llms/40-ingress     # mock-llm in llm-serving
+kubectl --context spark-root apply -k manifests/root/05-vclusters        # vcluster-boundary (already there after install-addons.sh vclusters)
 ```
 
 A throwaway client/server in each tenant of dev-lab (socat answers "ok" on :8080; PSA `restricted` needs the security context):
@@ -292,8 +296,10 @@ done
 kubectl --context dev-lab -n tenant-alpha wait --for=condition=Ready pod/probe
 kubectl --context dev-lab -n tenant-beta wait --for=condition=Ready pod/probe
 A=$(kubectl --context dev-lab -n tenant-alpha get pod probe -o jsonpath='{.status.podIP}')
-TRAEFIK_IP=$(kubectl --context llms -n ingress get pod -l app.kubernetes.io/name=traefik -o jsonpath='{.items[0].status.podIP}')
-MOCK_IP=$(kubectl --context llms -n llm-serving get pod -l app=mock-llm -o jsonpath='{.items[0].status.podIP}')
+MOCK_IP=$(kubectl --context spark-root -n llm-serving get pod -l app=mock-llm -o jsonpath='{.items[0].status.podIP}')
+# a client in the other vCluster (llm-sandbox is PSA baseline; the LimitRange fills in resources)
+kubectl --context dev-llms -n llm-sandbox run probe --image=nicolaka/netshoot:v0.13 --restart=Never -- sleep 3600
+kubectl --context dev-llms -n llm-sandbox wait --for=condition=Ready pod/probe
 ```
 
 Now the tests. Each line says which layer should decide:
@@ -305,16 +311,20 @@ kubectl --context dev-lab -n tenant-beta  exec probe -- nc -z -w3 "$A" 8080 && e
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- nc -z -w3 "$A" 8080 && echo "LEAK" || echo "blocked ✔ (lab-tools → alpha)"
 kubectl --context dev-lab -n tenant-alpha exec probe -- nslookup kubernetes.default >/dev/null && echo "DNS allowed ✔ (egress not restricted)"
 
-# dev-lab → llms — the root's vcluster-boundary (ingress namespace has no tenant policy at all)
-kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- nc -z -w3 "$TRAEFIK_IP" 8000 && echo "LEAK" || echo "blocked ✔ (dev-lab → llms, vcluster-boundary)"
-kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- nc -z -w3 "$MOCK_IP" 8000 && echo "LEAK" || echo "blocked ✔ (dev-lab → llm-serving)"
+# dev-llms → dev-lab — the root's vcluster-boundary (lab-tools has no tenant policy at all, so only the boundary can stop it)
+kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- nc -z -w3 "$ECHO_IP" 8080 && echo "allowed ✔ (lab-tools → echo, same vCluster)"
+kubectl --context dev-llms -n llm-sandbox exec probe -- nc -z -w3 "$ECHO_IP" 8080 && echo "LEAK" || echo "blocked ✔ (dev-llms → dev-lab, vcluster-boundary)"
 
-# inside llms — the serving policy
-kubectl --context llms -n llm-serving exec deploy/mock-llm-canary -- \
+# a vCluster → the LLM stack on the root — the serving policy in llm-serving
+kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- nc -z -w3 "$MOCK_IP" 8000 && echo "LEAK" || echo "blocked ✔ (dev-lab → llm-serving)"
+kubectl --context dev-llms -n llm-sandbox exec probe -- nc -z -w3 "$MOCK_IP" 8000 && echo "LEAK" || echo "blocked ✔ (dev-llms → llm-serving)"
+
+# inside llm-serving — the same policy lets its own pods in
+kubectl --context spark-root -n llm-serving exec deploy/mock-llm-canary -- \
   python3 -c "import urllib.request;print(urllib.request.urlopen('http://mock-llm:8000/health',timeout=3).status)"   # 200: same namespace
 ```
 
-There's no `mock-llm.llm-serving` name to try from dev-lab: each vCluster has its own DNS (Chapter 10) and `llm-serving` doesn't exist there. The tenants can only reach each other by IP — and the boundary stops that.
+There's no `mock-llm.llm-serving` name to try from dev-lab: each vCluster has its own DNS (Chapter 10) and `llm-serving` is a root namespace, not one of dev-lab's. The vCluster pods can only reach the model pods by IP — the overlay is flat — and the NetworkPolicy in `llm-serving` stops that. The way in for everyone, the vClusters included, is the gateway: `http://192.168.0.115` (Traefik in the root's `ingress` namespace, which has no policy because it is the public entry point).
 
 **Where is it enforced?** Not in iptables any more:
 
@@ -322,7 +332,8 @@ There's no `mock-llm.llm-serving` name to try from dev-lab: each vCluster has it
 sudo iptables-save | grep -c -i -E 'NWPLCY|POD-FW'                      # 0 — no policy chains
 kubectl --context spark-root -n vc-dev-lab get networkpolicy            # default-deny-ingress-x-tenant-alpha-x-dev-lab …
 kubectl --context spark-root -n vc-dev-lab get networkpolicy default-deny-ingress-x-tenant-alpha-x-dev-lab -o jsonpath='{.spec.podSelector}{"\n"}'
-kubectl --context spark-root get ciliumnetworkpolicy -A                 # vcluster-boundary in vc-dev-lab and vc-llms
+kubectl --context spark-root get ciliumnetworkpolicy -A                 # vcluster-boundary in vc-dev-lab and vc-dev-llms
+kubectl --context spark-root -n llm-serving get networkpolicy           # allow-ingress-and-same-namespace — a root object, no translated name
 kubectl --context spark-root -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg endpoint list | grep -E 'POLICY|probe|tenant'
 kubectl --context spark-root -n kube-system exec ds/cilium -c cilium-agent -- hubble observe --verdict DROPPED --last 10
 ```
@@ -338,9 +349,9 @@ scripts/breakfix.sh inject 06
 curl -s -m5 -H 'Host: llm.lab.local' http://192.168.0.115/v1/models || echo "times out"   # from your laptop or the Spark
 ```
 
-Serving becomes unreachable through Traefik. Diagnose it with the commands above (`kubectl --context llms -n llm-serving get netpol`, then Hubble on the root), fix it, then compare with `scripts/breakfix.sh answer 06`. `scripts/breakfix.sh reset 06` restores the original policies.
+Serving becomes unreachable through Traefik. Diagnose it with the commands above (`kubectl --context spark-root -n llm-serving get netpol`, then Hubble), fix it, then compare with `scripts/breakfix.sh answer 06`. `scripts/breakfix.sh reset 06` restores the original policies.
 
-Clean up the probes: `kubectl --context dev-lab -n tenant-alpha delete pod probe; kubectl --context dev-lab -n tenant-beta delete pod probe`.
+Clean up the probes: `kubectl --context dev-lab -n tenant-alpha delete pod probe; kubectl --context dev-lab -n tenant-beta delete pod probe; kubectl --context dev-llms -n llm-sandbox delete pod probe`.
 
 ### 5.6 (2 Sparks) See VXLAN on the wire and compare with RDMA
 
@@ -368,8 +379,8 @@ The gap is large. Pod-to-pod iperf3 over the overlay is capped by the 10 GbE man
 | Cilium healthy | `kubectl --context spark-root -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg status --brief` | `OK` |
 | Pod route MTU | `ip route` in netshoot (dev-lab) | `mtu 1450` (1500 mgmt LAN) |
 | Cross-tenant | beta → alpha `nc -z :8080` | times out |
-| Cross-vCluster | dev-lab netshoot → Traefik pod IP :8000 | times out; Hubble shows `DROPPED` |
-| Serving isolation | lab-tools → mock-llm pod IP | blocked; Traefik → mock-llm allowed (Chapter 11 test) |
+| Cross-vCluster | dev-llms probe → dev-lab echo pod IP :8080 | times out; Hubble shows `DROPPED` |
+| Serving isolation | lab-tools or llm-sandbox → mock-llm pod IP | blocked; Traefik → mock-llm allowed (Chapter 11 test) |
 | Scripted | `scripts/verify.sh platform tenancy vclusters` | Cilium ready, default-deny policies present, `Cilium vCluster boundary policies` PASS |
 
 ---

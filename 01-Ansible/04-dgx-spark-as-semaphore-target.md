@@ -19,7 +19,7 @@ Each step has a **Why**, then commands with a comment on every line, then a **Ve
 | MacBook | DHCP | your terminal: browser to Semaphore, `git push`, `kubectl` for the 02-Kubernetes labs, and the two bootstrap playbooks | [Chapter 02](02-control-node-and-ansible-core.md) (toolchain, inventory), [Chapter 03](03-bare-metal-provisioning-and-bootstrap.md) (SSH trust) |
 | `sema01` | 192.168.0.210 | **runs every lab playbook** (Semaphore + PostgreSQL in Docker). Its container is the Ansible *controller*: play 1, `kubectl`, `helm` and the `kubernetes.core` modules run there | Chapter 01 §7, plus §4 here |
 | `vault01` | 192.168.0.211 | SSH CA (`ssh-client-signer`, role `ansible`), AppRole `semaphore`, audit log; plus the lab's secrets (§7) | Chapter 01 §3–4, plus §7 here |
-| `dgx-spark-1` | 192.168.0.100 | the target: DGX OS, then the kubeadm root cluster `spark-root` with the vClusters `dev-lab` and `llms` inside it | the lab playbooks, run by Semaphore |
+| `dgx-spark-1` | 192.168.0.100 | the target: DGX OS, then the kubeadm root cluster `spark-root`, which runs the LLM stack, with the vClusters `dev-lab` and `dev-llms` inside it | the lab playbooks, run by Semaphore |
 | 192.168.0.201 / .202 | — | your existing Chapter 01 targets, unchanged (project `lab`) | Chapter 01 |
 
 **One Semaphore task, step by step** (template `19.1 Kubernetes` as the example):
@@ -27,7 +27,7 @@ Each step has a **Why**, then commands with a comment on every line, then a **Ve
 1. You click **Run**. Semaphore checks your role and clones `technical-depth` (branch `main`).
 2. **Play 1** (`playbooks/00-vault-cert.yml`, the same play as Chapter 01 §8.3) runs inside the container. It logs in to vault01 with the AppRole from the variable group and gets a 15-minute certificate for `svc-ansible`.
 3. The host plays SSH to `dgx-spark-1` as `svc-ansible` with that certificate. sshd checks the CA signature, the principal and the expiry, and `sudo` (NOPASSWD) runs the tasks.
-4. The controller plays run `kubectl`/`helm` in the container against `https://192.168.0.100:6443`. The kubeconfig with the contexts `spark-root`, `dev-lab` and `llms` lives on sema01's **state volume** (§4), not in the temporary checkout.
+4. The controller plays run `kubectl`/`helm` in the container against `https://192.168.0.100:6443`. The kubeconfig with the contexts `spark-root`, `dev-lab` and `dev-llms` lives on sema01's **state volume** (§4), not in the temporary checkout.
 5. The task log and history stay in Semaphore. vault01's audit log has the login and the signature, and dgx-spark-1's sshd log has `Accepted publickey … ED25519-CERT`.
 
 **Two ways in, decided by one variable.** [`inventory/group_vars/spark.yml`](lab/inventory/group_vars/spark.yml) switches the login on whether the Semaphore variable group (`vault_role_id`) is attached:
@@ -615,7 +615,7 @@ Every later role reads these instead of re-running `nvidia-smi`. A typical use i
 
 ### 6.3 OS baseline
 
-The `spark_baseline` role installs the tooling you'll need in every later chapter, pins the NVIDIA driver stack against accidental upgrades, and applies sysctl, SSH and time settings.
+The `spark_baseline` role installs the tooling you'll need in every later chapter, pins the NVIDIA driver stack against accidental upgrades, applies sysctl, SSH and time settings, and makes DGX OS headless.
 
 ```yaml
 # lab/roles/spark_baseline/tasks/main.yml
@@ -643,6 +643,13 @@ The `spark_baseline` role installs the tooling you'll need in every later chapte
 - name: Time and logging
   ansible.builtin.import_tasks: time_logging.yml
   tags: [baseline, time]
+
+- name: Headless (no desktop)
+  ansible.builtin.include_tasks: headless.yml
+  when:
+    - spark_baseline_headless | bool
+    - not spark_baseline_container_mode
+  tags: [baseline, headless]
 ```
 
 ```yaml
@@ -697,6 +704,50 @@ The `spark_baseline` role installs the tooling you'll need in every later chapte
     - spark_baseline_nvidia_pkgs | difference(spark_baseline_holds.stdout_lines) | length > 0
 ```
 
+#### Headless: no desktop on a server
+
+DGX OS ships as a desktop system: it boots to `graphical.target`, so the display manager `gdm` and a GNOME session start even when no monitor is connected. In this lab the Spark is a server. You reach it over SSH (and Semaphore does too), never at its own screen. The desktop then does nothing useful but still costs memory, and on the Spark that memory is the **unified** pool: CPU RAM and GPU memory are the same ~119.7 GiB, so every GiB the desktop holds is a GiB no model can use.
+
+**Headless** means DGX OS boots to text mode, `multi-user.target`: everything a server needs (networking, sshd, Docker, containerd, the kubelet, the DGX Dashboard on `localhost:11000`) and no graphical login or desktop session. The role does it when `spark_baseline_headless` is `true` (the default in [`defaults/main.yml`](lab/roles/spark_baseline/defaults/main.yml)):
+
+```yaml
+# lab/roles/spark_baseline/tasks/headless.yml (core)
+- name: Current default boot target
+  ansible.builtin.command: systemctl get-default
+  register: spark_baseline_default_target
+  changed_when: false
+
+- name: Boot to text mode from now on (multi-user.target)
+  ansible.builtin.command: systemctl set-default multi-user.target
+  when: spark_baseline_default_target.stdout != 'multi-user.target'
+  changed_when: true
+
+- name: Leave the graphical target now (stops gdm and the desktop session, no reboot)
+  ansible.builtin.command: systemctl isolate multi-user.target
+  when: spark_baseline_default_target.stdout != 'multi-user.target'
+  changed_when: true
+# + MemAvailable from /proc/meminfo before and after, and a Report task that prints both
+```
+
+`set-default` changes what the next boot does; `isolate` switches the running system now, so no reboot is needed. Isolating stops the units that only the graphical target wants (gdm and the GNOME session); SSH sessions, including the one Ansible runs over, are not affected. The task compares first, so the second run changes nothing. The *Report* task shows the effect, for example:
+
+```text
+default target graphical.target → multi-user.target; MemAvailable 112.4 GiB → 114.1 GiB
+```
+
+The numbers depend on what the desktop had loaded; a GNOME session with nobody logged in typically frees one to a few GiB. Chapter 19 counts on it: the kubelet's `system-reserved` memory is 6 Gi because DGX OS runs headless.
+
+Verify on the Spark:
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+systemctl get-default          # multi-user.target
+systemctl is-active gdm        # inactive
+free -g                        # compare "available" with the Report line
+```
+
+To undo it, set `spark_baseline_headless: false` (for example as a template extra variable) so the role leaves the target alone, and switch back on the Spark: `sudo systemctl set-default graphical.target && sudo reboot`. The variable alone doesn't restore the desktop; the role never switches back on its own.
+
 **Semaphore UI:** run `04.3 Baseline` with *Dry run* ticked (`--check --diff`) for the preview, then run it for real, then run it again. Break-glass from the MacBook:
 
 ```bash
@@ -728,11 +779,13 @@ ansible dgx-spark-1 -m command -a "test -x /etc/ansible/facts.d/spark.fact"
 ansible dgx-spark-1 -m command -a "apt-mark showhold" -b -K | grep -c nvidia     # > 0
 ansible dgx-spark-1 -m command -a "sysctl -n vm.max_map_count" -b -K             # 1048576
 ansible dgx-spark-1 -m command -a "sshd -T" -b -K | grep -E 'permitrootlogin|allowtcpforwarding'
+ansible dgx-spark-1 -m command -a "systemctl get-default"                         # multi-user.target
 ```
 
 - [ ] `04.2 Ping` reports `dgx-spark-1 aarch64 20 cores … Ubuntu 24.04` with `failed=0`
 - [ ] `ansible_local.spark.gpu.present == true` and `compute_cap == "12.1"`
 - [ ] `04.3 Baseline` second run: `changed=0`
+- [ ] DGX OS is headless: `systemctl get-default` prints `multi-user.target`, `systemctl is-active gdm` prints `inactive`
 - [ ] Semaphore's task history (and `ansible.log` in the state folder, `/opt/spark-lab/cache` on sema01) contains both runs
 
 ### 6.6 Break-it exercises
@@ -873,7 +926,7 @@ Create the remaining templates (`04.2 Ping` and `04.3 Baseline` exist already), 
 |---|---|---|
 | `03.2 Redfish practice` | `03.2-redfish-practice.yml` | Redfish mockup BMC, practice for data-centre nodes |
 | `04.2 Ping` | `04.2-ping.yml` | first test (§5.6); explained in §6.1 |
-| `04.3 Baseline` | `04.3-baseline.yml` | created in §6.2: custom facts (§6.2), OS, packages, sysctls (§6.3); also Chapters 03, 10 |
+| `04.3 Baseline` | `04.3-baseline.yml` | created in §6.2: custom facts (§6.2), OS, packages, sysctls, headless (§6.3); also Chapters 03, 10 |
 | `05.1 Async download` | `05.1-async-download.yml` | Chapter 05 §6.4: background download + join; optional |
 | `07.1 Jinja lab` | `07.1-jinja-lab.yml` | the 7 Jinja katas; localhost only |
 | `10.1 Driver audit` | `10.1-driver-audit.yml` | driver consistency |
@@ -891,7 +944,7 @@ Create the remaining templates (`04.2 Ping` and `04.3 Baseline` exist already), 
 | `19.1 Kubernetes` | `19.1-kubernetes.yml` | kubeadm root cluster, Cilium, MetalLB; writes the kubeconfig to the state volume |
 | `19.2 Reset Kubernetes` | `19.2-reset-kubernetes.yml` | **danger zone**: see 8.3; explained in Chapter 19 §8 |
 | `20.1 GPU Operator` | `20.1-gpu-operator.yml` | 15 time-slices |
-| `20.2 vClusters` | `20.2-vclusters.yml` | `dev-lab` and `llms`; adds their contexts; explained in Chapter 19 §3.4 and 02-Kubernetes Chapter 04 |
+| `20.2 vClusters` | `20.2-vclusters.yml` | LLM namespaces and budgets on the root, vClusters `dev-lab` and `dev-llms`; adds their contexts; explained in Chapter 19 §3.4 and 02-Kubernetes Chapter 04 |
 | `21.1 Multus RDMA` | `21.1-multus-rdma.yml` | secondary CX-7 networks |
 | `22.1 Slurm` | `22.1-slurm.yml` | Slurm with GRES and cgroup GPUs |
 | `26.1 Drift check` | `26.1-drift-check.yml` | check mode is built in (changes nothing); schedule it nightly |
@@ -944,14 +997,14 @@ Never schedule it.
 
 ### 8.4 Your kubeconfig on the MacBook
 
-`19.1 Kubernetes` and `20.2 vClusters` write `kubeconfig-spark-lab.yaml` (contexts `spark-root`, `dev-lab`, `llms`) to sema01's state volume. The 02-Kubernetes labs run `kubectl` from your MacBook and expect it at `01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml`. Copy it there after each of those two tasks:
+`19.1 Kubernetes` and `20.2 vClusters` write `kubeconfig-spark-lab.yaml` (contexts `spark-root`, `dev-lab`, `dev-llms`) to sema01's state volume. The 02-Kubernetes labs run `kubectl` from your MacBook and expect it at `01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml`. Copy it there after each of those two tasks:
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
 tools/fetch-kubeconfig.sh sema01                                     # reads it through the container, writes .cache/kubeconfig-spark-lab.yaml (0600)
 export KUBECONFIG="$PWD/.cache/kubeconfig-spark-lab.yaml"            # what every 02-Kubernetes command uses
 kubectl --context spark-root get nodes                               # expect: dgx-spark-1 Ready control-plane
-kubectl --context dev-lab get ns && kubectl --context llms get ns    # both vClusters answer
+kubectl --context dev-lab get ns && kubectl --context dev-llms get ns    # both vClusters answer
 ```
 
 This kubeconfig holds cluster-admin certificates, the human side of the lab, and you need it for the Kubernetes labs. Keep it on the MacBook only (it's git-ignored). In an enterprise, people get short-lived OIDC logins instead (02-Kubernetes Chapter 03).
@@ -1011,8 +1064,8 @@ Unchanged: template `site` (`site.yml`, which imports the new names itself) and 
 | dgx-spark-1: `sudo journalctl -u ssh \| grep svc-ansible` | `Accepted publickey … ED25519-CERT ID …` | login used a certificate, not a plain key |
 | dgx-spark-1: `sudo grep svc-ansible /var/log/auth.log \| grep COMMAND` | sudo lines for the tasks | privileged actions are traceable to the automation account |
 | vault01: `sudo grep -c 'sign/ansible' /var/log/vault_audit.log` | grows by one per task | every certificate request is recorded |
-| sema01: `docker compose exec semaphore ls /var/lib/spark-lab/cache` | `kubeconfig-spark-lab.yaml`, `kubeconfig-dev-lab.yaml`, `kubeconfig-llms.yaml`, `validation/` … | lab state survives the temporary checkout |
-| MacBook: `kubectl --context llms get nodes` | `dgx-spark-1` (synced from the root) | the 02-Kubernetes labs can start |
+| sema01: `docker compose exec semaphore ls /var/lib/spark-lab/cache` | `kubeconfig-spark-lab.yaml`, `kubeconfig-dev-lab.yaml`, `kubeconfig-dev-llms.yaml`, `validation/` … | lab state survives the temporary checkout |
+| MacBook: `kubectl --context dev-llms get nodes` | `dgx-spark-1` (synced from the root) | the 02-Kubernetes labs can start |
 | Expiry test | 16 minutes after a task, `docker compose exec semaphore ssh -i /tmp/lab_ssh/id_ed25519 svc-ansible@192.168.0.100 true` is refused; a new task run succeeds | credentials expire without cleanup |
 
 ---
@@ -1083,6 +1136,7 @@ State then goes to the MacBook's `.cache/` instead of sema01's volume. After the
 | `ansible_local` is empty | fact file not executable, or it printed non-JSON | `sudo /etc/ansible/facts.d/spark.fact \| jq .`; `chmod 755`; the script must print a single JSON object (§6.2) |
 | Fact gathering hangs for ~10 s | `nvidia-smi` blocked on a wedged GPU | `timeout 5 nvidia-smi; echo $?`; the fact script time-boxes itself; go to Chapter 29, Runbook A |
 | `E: Could not get lock /var/lib/dpkg/lock-frontend` | unattended-upgrades or the DGX Dashboard updater is running | `ps aux \| grep -E 'apt\|dpkg'`; the role retries 3× with a 10 s delay, otherwise wait for it to finish |
+| Monitor on the Spark shows only a text console (`dgx-spark-1 login:`), no desktop | headless by design (§6.3): `04.3 Baseline` set `multi-user.target` | work over SSH. For a desktop once: `sudo systemctl isolate graphical.target` (lasts until the next reboot; `04.3 Baseline` sees the default target is already `multi-user.target` and leaves the running system alone). For good: `spark_baseline_headless: false` on the template, then `sudo systemctl set-default graphical.target && sudo reboot` |
 | Second `04.3 Baseline` run is not `changed=0` | non-idempotent task (`command`/`shell` without `changed_when`) | `ansible-playbook … --diff -v`; add `creates:`, `changed_when:` or a real module |
 
 A diagnostic sequence worth memorising (MacBook):

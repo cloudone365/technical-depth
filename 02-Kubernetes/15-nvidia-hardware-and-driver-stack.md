@@ -158,10 +158,10 @@ cd "02-Kubernetes/lab"
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 kubectl --context spark-root get node dgx-spark-1 -o json | jq '.metadata.labels | with_entries(select(.key|test("nvidia.com|cpu-model")))'
 kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.capacity}{"\n"}{.status.allocatable}{"\n"}' | jq -c .
-kubectl --context llms get node dgx-spark-1 -L spark.lab/gpu,nvidia.com/gpu.product,nvidia.com/gpu.replicas
+kubectl --context dev-llms get node dgx-spark-1 -L spark.lab/gpu,nvidia.com/gpu.product,nvidia.com/gpu.replicas
 ```
 
-Capacity shows `nvidia.com/gpu: 15` and a `memory` figure that is the whole unified pool; allocatable is lower by the kubelet reservations (Chapter 14 §3.1). Inside llms the node looks the same — 15 slices — although llms may only use 11: budgets are quotas, not node properties.
+Capacity shows `nvidia.com/gpu: 15` and a `memory` figure that is the whole unified pool; allocatable is lower by the kubelet reservations (Chapter 14 §3.1). Inside dev-llms the node looks the same — 15 slices — although dev-llms may only use 2: budgets are quotas, not node properties. The LLM stack on the root sees the same 15 and is held to 6 (`llm-serving`) and 3 (`batch`) by namespace quotas.
 
 ### 5.3 The same view from inside a pod
 
@@ -233,7 +233,7 @@ Expected: `exec /bin/uname: exec format error`, with the pod in `Error`. Everyth
 | `no kernel image is available for execution on the device` | wheel/kernel lacks sm_121 | `python -c "import torch;print(torch.cuda.get_arch_list())"` | use NGC images or wheels built for sm_120/121 (+PTX) |
 | `CUDA driver version is insufficient for CUDA runtime version` | container CUDA newer than the driver | compare `nvidia-smi` "CUDA Version" and the image's CUDA | older image tag, or upgrade DGX OS |
 | `exec format error` | amd64 image | `docker manifest inspect` | arm64/multi-arch tag |
-| Throughput half of baseline | thermal/power throttling or another tenant | `nvidia-smi -q -d PERFORMANCE`; GPU pods of *all* clusters: `kubectl --context spark-root get pods -A -o wide` (vCluster pods are in `vc-*`) | airflow. Chapter 16 contention |
+| Throughput half of baseline | thermal/power throttling or another tenant | `nvidia-smi -q -d PERFORMANCE`; GPU pods of *all* clusters: `kubectl --context spark-root get pods -A -o wide` (model pods in `llm-serving`/`batch`, vCluster pods in `vc-*`) | airflow. Chapter 16 contention |
 | `Xid 13/31/43` in dmesg | app fault (bad kernel, illegal address) | `dmesg -T \| grep -i xid` | fix the workload. The node is fine |
 | `Xid 79` / `GPU has fallen off the bus` / `48` | hardware / severe | same | drain + reboot (01-Ansible Chapter 29, role `node_drain` — on one Spark that stops all three clusters). If it repeats, open an RMA |
 

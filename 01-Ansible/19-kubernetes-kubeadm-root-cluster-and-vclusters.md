@@ -6,11 +6,11 @@
 
 | | |
 |---|---|
-| **You will build** | The lab's **root** Kubernetes cluster, `spark-root`: kubeadm v1.36.5 on dgx-spark-1, which is control plane *and* worker. It gets containerd with the NVIDIA runtime as default, an audit log, encrypted Secrets and etcd snapshots on a timer, Cilium as the CNI and MetalLB for LoadBalancer IPs. Then the two vClusters `dev-lab` and `llms` go inside it, and one kubeconfig with three contexts lands on sema01's state volume, from where `tools/fetch-kubeconfig.sh` copies it to your MacBook. Built with the Semaphore templates `19.1 Kubernetes`, `20.1 GPU Operator` and `20.2 vClusters` |
+| **You will build** | The lab's **root** Kubernetes cluster, `spark-root`: kubeadm v1.36.5 on dgx-spark-1, which is control plane *and* worker. It gets containerd with the NVIDIA runtime as default, an audit log, encrypted Secrets and etcd snapshots on a timer, Cilium as the CNI and MetalLB for LoadBalancer IPs. Then the root gets the namespaces and budgets for the LLM stack, which runs directly on it, and two small vClusters, `dev-lab` and `dev-llms`, go inside it. One kubeconfig with three contexts lands on sema01's state volume, from where `tools/fetch-kubeconfig.sh` copies it to your MacBook. Built with the Semaphore templates `19.1 Kubernetes`, `20.1 GPU Operator` and `20.2 vClusters` |
 | **Hardware** | 1 DGX Spark (dgx-spark-2 optional: it joins as a worker) |
 | **Time** | 60 min (about 20 of it image pulls) |
 | **Risk** | Medium. Rewrites `/etc/containerd/config.toml` (the DGX OS original is kept as `.dgxos-orig`) and turns swap off. `playbooks/19.2-reset-kubernetes.yml` removes all of it again (§8) |
-| **Clusters** | `spark-root` (everything in §3–§4.4), `dev-lab` and `llms` (§4.5) |
+| **Clusters** | `spark-root` (everything in §3–§4.4, and the LLM namespaces in §3.4), `dev-lab` and `dev-llms` (§4.5) |
 | **Lab files** | [`roles/kubeadm_cluster`](lab/roles/kubeadm_cluster), [`roles/cilium`](lab/roles/cilium), [`roles/metallb`](lab/roles/metallb), [`roles/vclusters`](lab/roles/vclusters), [`playbooks/19.1-kubernetes.yml`](lab/playbooks/19.1-kubernetes.yml), [`20.2-vclusters.yml`](lab/playbooks/20.2-vclusters.yml), [`19.2-reset-kubernetes.yml`](lab/playbooks/19.2-reset-kubernetes.yml), [`inventory/hosts.yml`](lab/inventory/hosts.yml) |
 
 ---
@@ -38,7 +38,7 @@ The inventory model carries over. Kubespray's groups are `kube_control_plane`, `
 
 ```mermaid
 flowchart TB
-  CTL["Controller: Semaphore on sema01 · 192.168.0.210<br/>ansible-core · helm · kubectl (lab image)<br/>state volume: kubeconfig-spark-lab.yaml<br/>contexts spark-root · dev-lab · llms"]
+  CTL["Controller: Semaphore on sema01 · 192.168.0.210<br/>ansible-core · helm · kubectl (lab image)<br/>state volume: kubeconfig-spark-lab.yaml<br/>contexts spark-root · dev-lab · dev-llms"]
   MAC["MacBook<br/>lab/.cache/kubeconfig-spark-lab.yaml<br/>kubectl for the 02-Kubernetes labs"]
   MAC -. "tools/fetch-kubeconfig.sh sema01" .-> CTL
   subgraph S1["dgx-spark-1 · 192.168.0.100 · k8s_control_plane (also a worker: taints [])"]
@@ -49,7 +49,8 @@ flowchart TB
     CTD["containerd from DGX OS (shared with Docker)<br/>CRI on · SystemdCgroup · default runtime nvidia"]
     CIL["Cilium 1.20.2 · VXLAN · Hubble UI :31235"]
     MLB["MetalLB 0.16.0 · L2 on enP7s7<br/>pool 192.168.0.110–119"]
-    VC["vc-dev-lab: vCluster dev-lab → .111<br/>vc-llms: vCluster llms → .112"]
+    VC["vc-dev-lab: vCluster dev-lab → .111<br/>vc-dev-llms: vCluster dev-llms → .112"]
+    LLM["LLM stack on the root<br/>llm-serving · batch · ingress (Traefik → .115)"]
   end
   subgraph S2["dgx-spark-2 · 192.168.0.101 · k8s_workers (optional)"]
     KL2["kubelet · containerd · Cilium"]
@@ -73,7 +74,7 @@ flowchart TB
   class KL,CTD,KL2 node
   class CIL,MLB net
   class SEC sec
-  class VC tenant
+  class VC,LLM tenant
 ```
 
 Two networks, two jobs. The **pod network** (Cilium VXLAN) and the API run on the 10GbE management LAN, because `node-ip` is the mgmt address. **Bulk GPU traffic** (NCCL, RDMA) does not go through the pod network at all. It uses the 200G CX-7 fabric through a second pod interface from Multus (Chapter 21). The old lab tunnelled pod traffic over the CX-7 instead. That was faster for TCP, but it still couldn't carry RDMA, and it tied the cluster's health to a cable.
@@ -118,7 +119,7 @@ Two networks, two jobs. The **pod network** (Cilium VXLAN) and the API run on th
 | `19.1` play 1 · `kubeadm_cluster` | each Spark over SSH, `become` | the host | containerd ready, packages held, `kubeadm init` (dgx-spark-1) / `kubeadm join` (dgx-spark-2), context `spark-root` written to the controller's state folder |
 | `19.1` play 2 · `cilium`, `metallb` | controller (`localhost`) | root API with context `spark-root` | nodes `Ready`, CoreDNS running, LoadBalancer IPs available |
 | `20.1` · `gpu_operator` | controller | root API | 15 GPU time-slices per node (Chapter 20) |
-| `20.2` · `vclusters` | controller | root API, then each vCluster API | storage, budgets, `dev-lab` and `llms`, contexts merged |
+| `20.2` · `vclusters` | controller | root API, then each vCluster API | storage, root budgets (vClusters and LLM namespaces), `dev-lab` and `dev-llms`, contexts merged |
 
 "Controller" is the Semaphore container on sema01: templates `19.1 Kubernetes`, `20.1 GPU Operator`, `20.2 vClusters`, each with CLI args `--limit dgx-spark-1,localhost` while there's one Spark (Chapter 04 §8). That's why the lab image has `kubectl`, `helm` and the `kubernetes.core` collection ([`lab/semaphore/Dockerfile`](lab/semaphore/Dockerfile)). The same playbooks run from your MacBook as break-glass; the state folder is then `lab/.cache`.
 
@@ -179,7 +180,7 @@ apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 cgroupDriver: systemd
 maxPods: 200
-systemReserved: { cpu: "2", memory: "8Gi" }
+systemReserved: { cpu: "2", memory: "6Gi" }     # 6 Gi: DGX OS runs headless (Chapter 04 §6.3)
 kubeReserved:   { cpu: "1", memory: "2Gi" }
 evictionHard: { memory.available: "4Gi", nodefs.available: "10%", nodefs.inodesFree: "5%", imagefs.available: "15%" }
 ---
@@ -193,9 +194,9 @@ mode: iptables
 | `taints: []` | no taint | dgx-spark-1 is the only node. Without this, nothing but DaemonSets could run on it |
 | `controlPlaneEndpoint` | `192.168.0.100:6443` | A stable endpoint, so dgx-spark-2 (or more control planes later) can join. Change it to a VIP *before* `init` if you plan HA; it is baked into every certificate and kubeconfig |
 | Pod / Service CIDR | `10.42.0.0/16` / `10.43.0.0/16` | Kept from the earlier lab, so every address in the course stays valid |
-| `systemReserved` + `kubeReserved` + `evictionHard` | 3 CPU, 10 GiB, evict below 4 GiB | Unified memory: pods, their GPU allocations and DGX OS share ~119.7 GiB. Without a reserve, a big model can starve sshd and the DGX Dashboard. Allocatable ends up 17 CPU / ≈105.7 GiB |
+| `systemReserved` + `kubeReserved` + `evictionHard` | 3 CPU (system 2 + kube 1), 12 GiB (system 6 + kube 2 + eviction 4) | Unified memory: pods, their GPU allocations and DGX OS share ~119.7 GiB. Without a reserve, a big model can starve sshd and the DGX Dashboard. `systemReserved` memory is 6 Gi because DGX OS runs headless: `04.3 Baseline` turns off the GNOME desktop (Chapter 04 §6.3), so the OS needs less. Allocatable ends up 17 CPU / ≈107.7 GiB |
 | `evictionHard` lists all four signals | — | Setting the map **replaces** kubelet's defaults; a signal you omit is no longer enforced |
-| `maxPods: 200` | — | Two vClusters plus platform add-ons on one node pass the default 110 quickly: every tenant pod is a real pod here |
+| `maxPods: 200` | — | The LLM stack, two vClusters and the platform add-ons on one node pass the default 110 quickly: every tenant pod is a real pod here |
 | `bind-address: 0.0.0.0`, etcd metrics `:2381` | — | kube-prometheus-stack scrapes them from the pod network |
 | kube-proxy `mode: iptables` | Cilium with `kubeProxyReplacement=false` | 02-Kubernetes Chapter 09 reads the `KUBE-SVC-*` chains. Cilium's kube-proxy replacement (eBPF) is the faster alternative; turn it on only together with removing kube-proxy |
 | node labels | `spark.lab/gpu=gb10`, `spark.lab/node-index` | Lab-owned selectors: they exist before the GPU Operator, and GFD never rewrites them (it owns `nvidia.com/gpu.product`) |
@@ -208,8 +209,8 @@ mode: iptables
   MacBook: 01-Ansible/lab/.cache  (git-ignored; filled by tools/fetch-kubeconfig.sh sema01)
   context spark-root → cluster spark-root https://192.168.0.100:6443   user spark-root-admin   (kubeadm_cluster role)
   context dev-lab    → cluster dev-lab    https://192.168.0.111:443    user dev-lab            (vclusters role)
-  context llms       → cluster llms       https://192.168.0.112:443    user llms               (vclusters role)
-<state folder>/kubeconfig-dev-lab.yaml, kubeconfig-llms.yaml   standalone copies, one per vCluster
+  context dev-llms   → cluster dev-llms   https://192.168.0.112:443    user dev-llms           (vclusters role)
+<state folder>/kubeconfig-dev-lab.yaml, kubeconfig-dev-llms.yaml   standalone copies, one per vCluster
 ```
 
 The lab writes the file on the **controller**. Semaphore's checkout of the repository is temporary, so `lab_cache_dir` points at the state volume (Chapter 04 §4), and the next template run finds the contexts there. The 02-Kubernetes labs run `kubectl` on your MacBook, so after `05` and `06b` copy it over:
@@ -219,7 +220,7 @@ The lab writes the file on the **controller**. Semaphore's checkout of the repos
 tools/fetch-kubeconfig.sh sema01        # ssh to sema01, docker compose exec … cat, checks for the spark-root context, writes .cache/ (0600)
 ```
 
-Both roles **merge** rather than overwrite: each one reads the file, drops only the entries it owns (by name) and appends its own. Re-running 19.1 after 20.2 keeps the vCluster contexts; re-running 20.2 keeps `spark-root`. Every command in this course names its context (`kubectl --context spark-root …`, `helm --kube-context llms …`). With three clusters in one file, a bare `kubectl` is a guess.
+Both roles **merge** rather than overwrite: each one reads the file, drops only the entries it owns (by name) and appends its own. Re-running 19.1 after 20.2 keeps the vCluster contexts; re-running 20.2 keeps `spark-root`. Every command in this course names its context (`kubectl --context spark-root …`, `helm --kube-context dev-llms …`). With three clusters in one file, a bare `kubectl` is a guess.
 
 ---
 
@@ -305,7 +306,7 @@ The two `grep` probes carry `check_mode: false`. They are read-only, so they als
 
 | Item | Path | Note |
 |---|---|---|
-| Audit policy | `/etc/kubernetes/audit/audit-policy.yaml` ([`files/audit-policy.yaml`](lab/roles/kubeadm_cluster/files/audit-policy.yaml)) | Secrets/ConfigMaps at Metadata only; node and kube-system reads dropped; **full RequestResponse for writes in `vc-dev-lab`, `vc-llms`, `gpu-operator`, `platform-tools`**. An identical copy is kept at `02-Kubernetes/lab/kubeadm/audit-policy.yaml` (the 02 lab tests diff them) |
+| Audit policy | `/etc/kubernetes/audit/audit-policy.yaml` ([`files/audit-policy.yaml`](lab/roles/kubeadm_cluster/files/audit-policy.yaml)) | Secrets/ConfigMaps at Metadata only; node and kube-system reads dropped; **full RequestResponse for writes in `vc-dev-lab`, `vc-dev-llms`, `llm-serving`, `batch`, `gpu-operator`, `platform-tools`**. An identical copy is kept at `02-Kubernetes/lab/kubeadm/audit-policy.yaml` (the 02 lab tests diff them) |
 | Audit log | `/var/log/kubernetes/audit/audit.log` | 7 days, 5 × 100 MB |
 | Encryption config | `/etc/kubernetes/encryption/config.yaml` (0600) | `aescbc` key `key1` from `openssl rand -base64 32`, written **only if the file doesn't exist**, under `no_log`. Re-running never rotates the key by accident |
 | kubeadm config | `/etc/kubernetes/kubeadm-config.yaml` | If it changes on an existing cluster, the role doesn't re-init. It prints the `kubeadm init phase control-plane all` command to apply it |
@@ -383,12 +384,12 @@ kubeadm has no built-in load balancer: a `type: LoadBalancer` Service stays `<pe
 | IP | Service |
 |---|---|
 | `192.168.0.111` | `dev-lab` vCluster API |
-| `192.168.0.112` | `llms` vCluster API |
-| `192.168.0.115` | Traefik inside `llms` (installed by the 02 lab) |
+| `192.168.0.112` | `dev-llms` vCluster API |
+| `192.168.0.115` | Traefik on the root, namespace `ingress`: the LLM gateway (installed by the 02 lab) |
 
 Reserve `.110–.119` in your router's DHCP settings. In L2 mode the node answers ARP for the Service IP, so no router configuration is needed. The trade-off is that all traffic for one IP enters through one node.
 
-### 3.4 `vclusters`: two clusters inside the root (playbook 20.2)
+### 3.4 `vclusters`: LLM budgets on the root, two clusters inside it (playbook 20.2)
 
 The vCluster definitions are **not** duplicated in Ansible. The role applies the files of the 02-Kubernetes lab, so the Ansible path and the lab scripts can't drift apart:
 
@@ -396,23 +397,40 @@ The vCluster definitions are **not** duplicated in Ansible. The role applies the
 # lab/roles/vclusters/defaults/main.yml (excerpt)
 vclusters_lab_dir: "{{ playbook_dir }}/../../../02-Kubernetes/lab"
 vclusters_chart_version: "0.37.1"            # standard Kubernetes distro (vCluster ≥ 0.33 has no K3s)
-vclusters_root_manifests:                    # kustomize directories under manifests/root
-  - 00-platform                              # platform namespaces, PriorityClasses (no default class on the root)
-  - 05-vclusters                             # vc-* namespaces, LimitRanges, budgets, Cilium policies
+vclusters_root_manifests:                    # kustomize directories under manifests/
+  - root/00-platform                         # platform namespaces, PriorityClasses (no default class on the root)
+  - root/05-vclusters                        # vc-* namespaces, LimitRanges, budgets, Cilium policies
+  - root-llms/00-platform                    # LLM namespaces on the root: llm-serving, batch, ingress
+  - root-llms/10-tenancy                     # their ResourceQuotas and LimitRanges
 vclusters_list:
-  - { name: dev-lab, namespace: vc-dev-lab }   # vCluster #1 — 2 CPU · 8 Gi · 2 GPU slices
-  - { name: llms, namespace: vc-llms }         # vCluster #2 — 12 CPU · 88 Gi · 11 GPU slices
+  - { name: dev-lab, namespace: vc-dev-lab }   # vCluster #1 — 2 CPU · 4 Gi · 2 GPU slices
+  - { name: dev-llms, namespace: vc-dev-llms } # vCluster #2 — 2 CPU · 4 Gi · 2 GPU slices (LLM sandbox)
 ```
 
 | Step | What | Why first |
 |---|---|---|
 | 1 | local-path-provisioner v0.0.31, volumes under `/data/k8s`, StorageClasses `local-nvme`, `local-nvme-retain`, `local-path` as default | Each vCluster keeps its SQLite database on a `local-nvme` PVC |
-| 2 | Root kustomize directories above, rendered with the `kubernetes.core.kustomize` lookup and applied server-side (field manager `ansible-vclusters`): the same directories `scripts/apply-lab.sh` applies | Namespaces `vc-*`, PriorityClass `spark-platform` (the root has no default PriorityClass; 02-Kubernetes Chapter 07 §3.1), the **budgets** (`vcluster-budget` ResourceQuota + LimitRange) and the Cilium `vcluster-boundary` policies must exist before any vCluster pod |
-| 3 | `helm upgrade --install` chart `loft/vcluster` with [`vclusters/dev-lab.yaml`](../02-Kubernetes/lab/vclusters/dev-lab.yaml), [`llms.yaml`](../02-Kubernetes/lab/vclusters/llms.yaml) | API exposed as LoadBalancer `.111` / `.112` |
-| 4 | Read Secret `vc-<name>` (written by `exportKubeConfig`), write `.cache/kubeconfig-<name>.yaml`, merge contexts `dev-lab`, `llms` | §2.5 |
+| 2 | Root kustomize directories above, rendered with the `kubernetes.core.kustomize` lookup and applied server-side (field manager `ansible-vclusters`): the same directories `scripts/apply-lab.sh` applies | Namespaces `vc-*`, `llm-serving`, `batch`, `ingress`, PriorityClass `spark-platform` (the root has no default PriorityClass; 02-Kubernetes Chapter 07 §3.1), the **budgets** (`vcluster-budget` on each `vc-*`, `serving-budget`, `batch-budget`, with LimitRanges) and the Cilium `vcluster-boundary` policies must exist before any vCluster or model pod |
+| 3 | `helm upgrade --install` chart `loft/vcluster` with [`vclusters/dev-lab.yaml`](../02-Kubernetes/lab/vclusters/dev-lab.yaml), [`dev-llms.yaml`](../02-Kubernetes/lab/vclusters/dev-llms.yaml) | API exposed as LoadBalancer `.111` / `.112` |
+| 4 | Read Secret `vc-<name>` (written by `exportKubeConfig`), write `.cache/kubeconfig-<name>.yaml`, merge contexts `dev-lab`, `dev-llms` | §2.5 |
 | 5 | `k8s_info` on Namespace `default` **through each new context** | Proves the MetalLB IP, the certificate SAN and the credentials together |
 
-Budgets, sync rules and naming are taught in 02-Kubernetes [Chapter 04](../02-Kubernetes/04-nested-clusters-with-vcluster.md). The one rule to keep in mind here: of the 17 CPU, ~105.7 GiB and 15 GPU slices left after the kubelet reservations (§2.4: 3 CPU, 14 GiB including the 4 GiB eviction threshold), `dev-lab` gets 2 / 8 Gi / 2 and `llms` 12 / 88 Gi / 11, and the root keeps 3 CPU, ~9.7 GiB and 2 slices for its platform. The **root's** ResourceQuota on each `vc-*` namespace enforces it. Memory is never overcommitted (on unified memory it is GPU memory too); CPU may burst into idle cores.
+Budgets, sync rules and naming are taught in 02-Kubernetes [Chapter 04](../02-Kubernetes/04-nested-clusters-with-vcluster.md). The numbers to keep in mind here, starting from the 17 CPU, ~107.7 GiB and 15 GPU slices left after the kubelet reservations (§2.4: 3 CPU, 12 GiB including the 4 GiB eviction threshold):
+
+| | CPU (req) | memory | GPU slices | enforced by |
+|---|---|---|---|---|
+| vCluster `dev-lab` | 2 | 4 Gi | 2 | root ResourceQuota `vcluster-budget` in `vc-dev-lab` |
+| vCluster `dev-llms` | 2 | 4 Gi | 2 | root ResourceQuota `vcluster-budget` in `vc-dev-llms` |
+| **root keeps** | 13 | ~99.7 GiB | 11 | |
+| ↳ platform (Cilium, MetalLB, GPU Operator, Prometheus, Traefik, Kueue, KEDA, platform-tools) | 3 | ~9.7 GiB | 2 | what is left over |
+| ↳ `llm-serving` | 8 | up to 90 Gi | 6 | ResourceQuota `serving-budget` |
+| ↳ `batch` | 2 | up to 12 Gi | 3 | ResourceQuota `batch-budget` (= Kueue ClusterQueue `spark-cq`) |
+
+CPU and slices are split exactly; memory is not. `llm-serving` and `batch` share one ~90 GiB pool: serving may use all of it while nothing trains, and a training job takes up to 12 Gi of the same pool. What keeps the two from overcommitting unified memory is the scheduler: every GPU container in the LLM stack sets memory request = limit, so a pod that doesn't fit stays `Pending` instead of squeezing a running model. Memory is never overcommitted (on unified memory it is GPU memory too); CPU may burst into idle cores.
+
+**Why the LLMs run on the root, and why two small vClusters remain.** The models are the Spark's main job. On the root they get all of the GPU memory headroom, keep their real pod names in real namespaces (no syncer translation) and sit under one layer of quota instead of a vCluster quota inside a root quota. The two vClusters are kept small and identical: `dev-lab` for tenancy and syncer drills, `dev-llms` as an LLM sandbox with its own API server, where you try a manifest, the mock LLM or a tiny model before it goes to the root. The trade-off: whoever administers the root also operates the LLM stack, and the stack is isolated by namespaces (quotas, LimitRanges, NetworkPolicy, admission policies, PSA, PriorityClasses), not by a separate API server. The role applies only the LLM namespaces and budgets; the stack itself (Traefik, Kueue, KEDA, the model servers) comes from the 02 lab's `scripts/install-addons.sh` and `scripts/apply-lab.sh`.
+
+> **Built the earlier `llms` vCluster?** Remove it and its namespace, then build the current layout: `helm --kube-context spark-root uninstall llms -n vc-llms`, `kubectl --context spark-root delete ns vc-llms`, then the template `20.2 vClusters` (or `02-Kubernetes/lab/scripts/install-addons.sh vclusters`), then `install-addons.sh traefik`, `install-addons.sh kueue` and `install-addons.sh keda` on the root, one at a time, and finally `scripts/apply-lab.sh`. Fetch the kubeconfig again; the stale `llms` context can be deleted with `kubectl config delete-context llms`.
 
 ### 3.5 Things worth noticing
 
@@ -439,7 +457,7 @@ kubectl --context spark-root -n kube-system get pods -o wide
 kubectl --context spark-root describe node dgx-spark-1 | grep -E '^Taints|^Allocatable' -A6
 ```
 
-Expected: `dgx-spark-1` `Ready` with role `control-plane`, `ARCH` column `arm64`, `Taints: <none>`. In kube-system: the four static-pod mirrors (`kube-apiserver-dgx-spark-1`, `etcd-dgx-spark-1`, …), `coredns` ×2, `kube-proxy`, `cilium`, `cilium-operator`, `hubble-relay`, `hubble-ui`. Allocatable reads `cpu: 17` and memory about 105–106 GiB (printed in Ki).
+Expected: `dgx-spark-1` `Ready` with role `control-plane`, `ARCH` column `arm64`, `Taints: <none>`. In kube-system: the four static-pod mirrors (`kube-apiserver-dgx-spark-1`, `etcd-dgx-spark-1`, …), `coredns` ×2, `kube-proxy`, `cilium`, `cilium-operator`, `hubble-relay`, `hubble-ui`. Allocatable reads `cpu: 17` and memory about 107–108 GiB (printed in Ki).
 
 On the Spark itself:
 
@@ -532,10 +550,11 @@ The audit record for the Secret is at `Metadata` level (no payload), as the poli
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
-tools/fetch-kubeconfig.sh sema01                     # now spark-root, dev-lab, llms
-kubectl config get-contexts                          # KUBECONFIG is set above: spark-root (current), dev-lab, llms
-kubectl --context spark-root get ns | grep -E '^vc-'
-kubectl --context spark-root -n vc-llms get svc llms  # TYPE LoadBalancer, EXTERNAL-IP 192.168.0.112
+tools/fetch-kubeconfig.sh sema01                     # now spark-root, dev-lab, dev-llms
+kubectl config get-contexts                          # KUBECONFIG is set above: spark-root (current), dev-lab, dev-llms
+kubectl --context spark-root get ns | grep -E '^vc-|^llm-serving|^batch|^ingress'
+kubectl --context spark-root -n vc-dev-llms get svc dev-llms   # TYPE LoadBalancer, EXTERNAL-IP 192.168.0.112
+kubectl --context spark-root get resourcequota -A | grep -E 'budget'   # vcluster-budget ×2, serving-budget, batch-budget
 kubectl --context dev-lab get nodes                   # the real dgx-spark-1, synced from the root
 ```
 
@@ -551,7 +570,7 @@ kubectl --context spark-root -n vc-dev-lab get pod web-x-default-x-dev-lab \
 kubectl --context dev-lab delete pod web
 ```
 
-The host copy carries `requests` and `limits` that you never wrote. They come from the root LimitRange `vcluster-defaults` in `vc-dev-lab`, which exists because the root quota caps memory and would otherwise reject the pod. The tenant's cluster has its own API server, but the scheduler, kubelet, containerd and Cilium that ran `web` are the root's, built by this step. The rest of the 02 lab (tenants, serving, Traefik on `.115`) goes on with `scripts/apply-lab.sh`; see 02-Kubernetes [Chapter 05](../02-Kubernetes/05-dgx-spark-datacenter-simulation-lab.md).
+The host copy carries `requests` and `limits` that you never wrote. They come from the root LimitRange `vcluster-defaults` in `vc-dev-lab`, which exists because the root quota caps memory and would otherwise reject the pod. The tenant's cluster has its own API server, but the scheduler, kubelet, containerd and Cilium that ran `web` are the root's, built by this step. The rest of the 02 lab (tenants, the LLM stack on the root, Traefik on `.115`) goes on with `scripts/install-addons.sh` and `scripts/apply-lab.sh`; see 02-Kubernetes [Chapter 05](../02-Kubernetes/05-dgx-spark-datacenter-simulation-lab.md).
 
 ### 4.6 Upgrade the root
 
@@ -617,8 +636,8 @@ Then set `kubeadm_cluster_version` in `roles/kubeadm_cluster/defaults/main.yml` 
 | Vault (vault01, Chapter 18) | the place for a copy of the Secret-encryption key (e.g. under `kv/spark-lab/`); pods get secrets via Vault Agent Injector or External Secrets pointed at vault01 |
 | Semaphore (sema01, Chapter 04) | runs 19.1 / 19.2 / 20.1 / 20.2 as templates; keeps the kubeconfig and kubeadm join material on its state volume; `tools/fetch-kubeconfig.sh` copies the kubeconfig to the MacBook |
 | Drift detection (Chapter 26) | `19.1-kubernetes.yml --check` runs the read-only probes (`check_mode: false`) and reports containerd or package drift |
-| Drain & remediation (Chapter 29) | single node: draining dgx-spark-1 stops both vClusters' workloads too |
-| 02-Kubernetes lab | `scripts/install-addons.sh` (metrics-server, kube-prometheus-stack) and `scripts/apply-lab.sh root|dev-lab|llms` build on this cluster and the merged kubeconfig |
+| Drain & remediation (Chapter 29) | single node: draining dgx-spark-1 stops the models and both vClusters' workloads too |
+| 02-Kubernetes lab | `scripts/install-addons.sh` (metrics-server, kube-prometheus-stack) and `scripts/apply-lab.sh root|dev-lab|dev-llms` build on this cluster and the merged kubeconfig |
 
 ## 6. Troubleshooting & diagnostics
 
@@ -635,7 +654,7 @@ Then set `kubeadm_cluster_version` in `roles/kubeadm_cluster/defaults/main.yml` 
 | CoreDNS `Pending` | `kubectl --context spark-root -n kube-system describe pod -l k8s-app=kube-dns` | No CNI yet, or the node is tainted. `taints: []` only applies at `init`; remove a taint added later with `kubectl --context spark-root taint node dgx-spark-1 node-role.kubernetes.io/control-plane-` |
 | Worker join fails (token rejected, or `couldn't validate the identity of the API Server`) | `journalctl -u kubelet` on the worker; `controlPlaneEndpoint` in the config | Token expired (30 min) or the CA/endpoint changed since. Re-run 19.1: each run on an unjoined worker creates a fresh token and hash |
 | LoadBalancer Service stays `<pending>` | `kubectl --context spark-root -n metallb-system get ipaddresspool`; quota `services.loadbalancers` in `vc-*` | Pool missing (play 2 failed on the webhook: re-run), pool exhausted, or the vCluster's root quota is spent |
-| vCluster context: `x509: certificate is valid for …` or timeout | `kubectl --context spark-root -n vc-llms get svc llms` | MetalLB IP differs from `exportKubeConfig.server` / `proxy.extraSANs` in the values file |
+| vCluster context: `x509: certificate is valid for …` or timeout | `kubectl --context spark-root -n vc-dev-llms get svc dev-llms` | MetalLB IP differs from `exportKubeConfig.server` / `proxy.extraSANs` in the values file |
 | GPU pod: `failed to create shim … nvidia-container-runtime: not found` | `which nvidia-container-runtime` | Run Chapter 11 first, then re-run 19.1 (it re-registers the runtime) |
 | Pods evicted with `MemoryPressure` while a model loads | `kubectl --context spark-root describe node dgx-spark-1 \| grep -A5 Conditions`; `free -g` | Working as designed (eviction below 4 GiB). Reduce model or batch size, stop idle pods, tune the reserve |
 | `ImagePullBackOff`: `no match for platform` | `kubectl --context <ctx> describe pod` | amd64-only image; find an arm64 build (Chapter 11 §3.4) |
@@ -647,7 +666,8 @@ Then set `kubeadm_cluster_version` in `roles/kubeadm_cluster/defaults/main.yml` 
 - [ ] kubelet, kubeadm, kubectl held at 1.36.5.
 - [ ] A Secret reads `k8s:enc:aescbc:v1:key1:` in etcd; the audit log records its creation; `etcd-snapshot.timer` is active and `/var/lib/etcd-snapshots` has a snapshot.
 - [ ] Cilium status OK with `KubeProxyReplacement: False`; a LoadBalancer Service gets an IP from `.110–.119`.
-- [ ] `kubectl config get-contexts` shows `spark-root`, `dev-lab`, `llms`, and each answers.
+- [ ] `kubectl config get-contexts` shows `spark-root`, `dev-lab`, `dev-llms`, and each answers.
+- [ ] On the root, `llm-serving` and `batch` exist with `serving-budget` (8 CPU · 90 Gi · 6 slices) and `batch-budget` (2 CPU · 12 Gi · 3 slices); each `vc-*` has `vcluster-budget` 2 CPU · 4 Gi · 2 slices.
 - [ ] Re-running `19.1-kubernetes.yml` and `20.2-vclusters.yml` reports no `kubeadm init`/`join` and leaves all three contexts in place.
 
 ## 8. Reset and rebuild

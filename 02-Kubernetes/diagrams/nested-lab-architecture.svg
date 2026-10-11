@@ -1,13 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="1120" viewBox="0 0 960 1120" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" role="img" aria-labelledby="t d">
-<title id="t">DGX Spark nested Kubernetes lab: MacBook terminal, kubeadm root cluster, two vClusters</title>
-<desc id="d">A MacBook on the home LAN is the terminal. It reaches the root cluster API on 192.168.0.100:6443, the dev-lab vCluster API on 192.168.0.111 and the llms vCluster API on 192.168.0.112. Outside the Spark, sema01 runs every Ansible playbook through Semaphore: it gets a 15-minute SSH certificate from vault01 and logs in to the Spark as svc-ansible. On the DGX Spark, the kubeadm root cluster owns the node, Cilium, MetalLB, the GPU Operator with 15 time-slices, storage and Prometheus. Each vCluster runs its own API server, controller-manager, CoreDNS and SQLite as pods in a root namespace, and a syncer copies its pods, Services and PVCs to the root, where the root scheduler places them on the single node. Budgets: the kubelet reserves 3 CPU and 14 GiB for DGX OS and Kubernetes; dev-lab gets 2 CPU, 8 Gi, 2 slices; llms 12 CPU, 88 Gi, 11 slices; the root keeps 3 CPU, about 10 GiB and 2 slices for its platform.</desc>
+<title id="t">DGX Spark nested Kubernetes lab: MacBook terminal, kubeadm root cluster running the LLMs, two small vClusters</title>
+<desc id="d">A MacBook on the home LAN is the terminal. It reaches the root cluster API on 192.168.0.100:6443, the dev-lab vCluster API on 192.168.0.111 and the dev-llms vCluster API on 192.168.0.112. Outside the Spark, sema01 runs every Ansible playbook through Semaphore: it gets a 15-minute SSH certificate from vault01 and logs in to the Spark as svc-ansible. On the DGX Spark, which runs DGX OS headless, the kubeadm root cluster owns the node, Cilium, MetalLB, the GPU Operator with 15 time-slices, storage and Prometheus, and it runs the LLM stack itself in the root namespaces llm-serving, batch and ingress (Traefik on 192.168.0.115). Each vCluster runs its own API server, controller-manager, CoreDNS and SQLite as pods in a root namespace, and a syncer copies its pods, Services and PVCs to the root, where the root scheduler places them on the single node. Budgets: the kubelet reserves 3 CPU and 12 GiB; dev-lab and dev-llms get 2 CPU, 4 Gi and 2 slices each; the root keeps 13 CPU, about 99.7 GiB and 11 slices: 3 CPU, about 9.7 GiB and 2 slices for its platform, and one shared memory pool of about 90 GiB for llm-serving (8 CPU, 6 slices) and batch (2 CPU, 3 slices).</desc>
 <defs><marker id="m0969da" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1L9 5L1 9z" fill="#0969da"/></marker><marker id="m0b3d91" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1L9 5L1 9z" fill="#0b3d91"/></marker><marker id="m1f6feb" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1L9 5L1 9z" fill="#1f6feb"/></marker><marker id="m24292f" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1L9 5L1 9z" fill="#24292f"/></marker><marker id="mfb8500" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1L9 5L1 9z" fill="#fb8500"/></marker></defs>
 <rect x="0" y="0" width="960" height="1120" fill="#ffffff"/>
 <rect x="310" y="14" width="340" height="92" rx="5" fill="#24292f" stroke="#000" stroke-width="1"/>
 <text x="480.0" y="41.7" font-size="12" fill="#ffffff" text-anchor="middle" font-weight="600">MacBook · your terminal</text>
 <text x="480.0" y="56.7" font-size="11" fill="#ffffff" text-anchor="middle">kubectl · browser · git</text>
 <text x="480.0" y="71.7" font-size="11" fill="#ffffff" text-anchor="middle">KUBECONFIG = .cache/kubeconfig-spark-lab.yaml</text>
-<text x="480.0" y="86.7" font-size="11" fill="#ffffff" text-anchor="middle">contexts spark-root · dev-lab · llms (from sema01)</text>
+<text x="480.0" y="86.7" font-size="11" fill="#ffffff" text-anchor="middle">contexts spark-root · dev-lab · dev-llms (from sema01)</text>
 <text x="48" y="128" font-size="10.5" fill="#57606a" text-anchor="start">home LAN 192.168.0.0/24 · the MacBook is only a client</text>
 <rect x="680" y="14" width="240" height="44" rx="5" fill="#fff3e6" stroke="#fb8500" stroke-width="1.4"/>
 <text x="800.0" y="32.85" font-size="11" fill="#1f2328" text-anchor="middle" font-weight="600">sema01 · Semaphore :3000</text>
@@ -21,7 +21,7 @@
 <text x="430" y="164" font-size="11" fill="#57606a" text-anchor="start">all three clusters and every GPU slice live on this box</text>
 <rect x="60" y="180" width="410" height="236" rx="8" fill="#f3f8ff" stroke="#54aeff" stroke-width="1.6" stroke-dasharray="6 4"/>
 <text x="74" y="200" font-size="13.5" fill="#1f2328" text-anchor="start" font-weight="600">vCluster #1 · dev-lab</text>
-<text x="74" y="217" font-size="10.5" fill="#57606a" text-anchor="start">budget 2 CPU · 8 Gi · 2 GPU slices · 200 Gi — tenants &amp; experiments</text>
+<text x="74" y="217" font-size="10.5" fill="#57606a" text-anchor="start">budget 2 CPU · 4 Gi · 2 GPU slices · 200 Gi — tenants &amp; experiments</text>
 <rect x="352" y="188" width="106" height="22" rx="5" fill="#54aeff" stroke="#54aeff" stroke-width="1"/>
 <text x="405.0" y="202.675" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">API 192.168.0.111</text>
 <text x="74" y="240" font-size="10" fill="#57606a" text-anchor="start">its own control plane — runs as pods in root namespace vc-dev-lab</text>
@@ -47,11 +47,11 @@
 <text x="265.0" y="376.85" font-size="11" fill="#1f2328" text-anchor="middle" font-weight="600">syncer</text>
 <text x="265.0" y="390.85" font-size="10" fill="#1f2328" text-anchor="middle">copies pods · Services · PVCs down to the root as &lt;name&gt;-x-&lt;ns&gt;-x-&lt;vc&gt;</text>
 <rect x="490" y="180" width="410" height="236" rx="8" fill="#f3f8ff" stroke="#0969da" stroke-width="1.6" stroke-dasharray="6 4"/>
-<text x="504" y="200" font-size="13.5" fill="#1f2328" text-anchor="start" font-weight="600">vCluster #2 · llms</text>
-<text x="504" y="217" font-size="10.5" fill="#57606a" text-anchor="start">budget 12 CPU · 88 Gi · 11 GPU slices · 800 Gi — serving &amp; training</text>
+<text x="504" y="200" font-size="13.5" fill="#1f2328" text-anchor="start" font-weight="600">vCluster #2 · dev-llms</text>
+<text x="504" y="217" font-size="10.5" fill="#57606a" text-anchor="start">budget 2 CPU · 4 Gi · 2 GPU slices · 200 Gi — LLM sandbox</text>
 <rect x="782" y="188" width="106" height="22" rx="5" fill="#0969da" stroke="#0969da" stroke-width="1"/>
 <text x="835.0" y="202.675" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">API 192.168.0.112</text>
-<text x="504" y="240" font-size="10" fill="#57606a" text-anchor="start">its own control plane — runs as pods in root namespace vc-llms</text>
+<text x="504" y="240" font-size="10" fill="#57606a" text-anchor="start">its own control plane — runs as pods in root namespace vc-dev-llms</text>
 <rect x="504" y="248" width="90" height="28" rx="5" fill="#1f6feb" stroke="#0b3d91" stroke-width="1"/>
 <text x="549.0" y="265.675" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">API server</text>
 <rect x="601" y="248" width="90" height="28" rx="5" fill="#1f6feb" stroke="#0b3d91" stroke-width="1"/>
@@ -60,23 +60,23 @@
 <text x="743.0" y="265.675" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">CoreDNS</text>
 <rect x="795" y="248" width="90" height="28" rx="5" fill="#1f6feb" stroke="#0b3d91" stroke-width="1"/>
 <text x="840.0" y="265.675" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">SQLite on PVC</text>
-<text x="504" y="296" font-size="10" fill="#57606a" text-anchor="start">what its users see (inner namespaces):</text>
+<text x="504" y="296" font-size="10" fill="#57606a" text-anchor="start">what its users see (one inner namespace, llm-sandbox):</text>
 <rect x="504.0" y="304" width="122.0" height="42" rx="5" fill="#eaeef2" stroke="#8c959f" stroke-width="1"/>
-<text x="565.0" y="321.85" font-size="11" fill="#1f2328" text-anchor="middle" font-weight="600">llm-serving</text>
-<text x="565.0" y="335.85" font-size="10" fill="#1f2328" text-anchor="middle">vLLM · Triton · Qdrant</text>
+<text x="565.0" y="321.85" font-size="11" fill="#1f2328" text-anchor="middle" font-weight="600">llm-sandbox</text>
+<text x="565.0" y="335.85" font-size="10" fill="#1f2328" text-anchor="middle">1500m · 3 Gi · 2 slices</text>
 <rect x="634.0" y="304" width="122.0" height="42" rx="5" fill="#eaeef2" stroke="#8c959f" stroke-width="1"/>
-<text x="695.0" y="321.85" font-size="11" fill="#1f2328" text-anchor="middle" font-weight="600">batch</text>
-<text x="695.0" y="335.85" font-size="10" fill="#1f2328" text-anchor="middle">Kueue · torchrun</text>
+<text x="695.0" y="321.85" font-size="11" fill="#1f2328" text-anchor="middle" font-weight="600">mock LLM</text>
+<text x="695.0" y="335.85" font-size="10" fill="#1f2328" text-anchor="middle">OpenAI-style API</text>
 <rect x="764.0" y="304" width="122.0" height="42" rx="5" fill="#eaeef2" stroke="#8c959f" stroke-width="1"/>
-<text x="825.0" y="321.85" font-size="11" fill="#1f2328" text-anchor="middle" font-weight="600">ingress</text>
-<text x="825.0" y="335.85" font-size="10" fill="#1f2328" text-anchor="middle">Traefik · 192.168.0.115</text>
+<text x="825.0" y="321.85" font-size="11" fill="#1f2328" text-anchor="middle" font-weight="600">tiny model</text>
+<text x="825.0" y="335.85" font-size="10" fill="#1f2328" text-anchor="middle">≈0.5B · util 0.02</text>
 <rect x="550" y="358" width="290" height="44" rx="5" fill="#ffffff" stroke="#1f6feb" stroke-width="1.3"/>
 <text x="695.0" y="376.85" font-size="11" fill="#1f2328" text-anchor="middle" font-weight="600">syncer</text>
 <text x="695.0" y="390.85" font-size="10" fill="#1f2328" text-anchor="middle">copies pods · Services · PVCs down to the root as &lt;name&gt;-x-&lt;ns&gt;-x-&lt;vc&gt;</text>
 <g transform="translate(0,20)">
 <rect x="60" y="438" width="840" height="358" rx="8" fill="#f6f8fa" stroke="#0b3d91" stroke-width="1.8"/>
 <text x="330" y="460" font-size="13.5" fill="#1f2328" text-anchor="start" font-weight="600">Root cluster · spark-root · kubeadm v1.36</text>
-<text x="330" y="477" font-size="10.5" fill="#57606a" text-anchor="start">dgx-spark-1 is control plane AND worker · owns node, network, storage, GPU · keeps 3 CPU · ~10 GiB · 2 slices</text>
+<text x="330" y="477" font-size="10.5" fill="#57606a" text-anchor="start">control plane AND worker · owns the hardware · runs the LLMs · keeps 13 CPU · ~99.7 GiB · 11 slices</text>
 <rect x="80" y="488" width="240" height="48" rx="5" fill="#1f6feb" stroke="#0b3d91" stroke-width="1"/>
 <text x="200.0" y="508.775" font-size="11.5" fill="#ffffff" text-anchor="middle" font-weight="600">kube-apiserver :6443</text>
 <text x="200.0" y="523.275" font-size="10.5" fill="#ffffff" text-anchor="middle">RBAC · APF · audit · Secret encryption</text>
@@ -109,32 +109,32 @@
 <text x="812.5" y="581.275" font-size="10.5" fill="#1f2328" text-anchor="middle">benchmarks · probes</text>
 <rect x="80" y="604" width="800" height="46" rx="5" fill="#0e7c86" stroke="#0e7c86" stroke-width="1"/>
 <text x="480.0" y="623.775" font-size="11.5" fill="#ffffff" text-anchor="middle" font-weight="600">node dgx-spark-1: kubelet · kube-proxy · containerd + NVIDIA runtime</text>
-<text x="480.0" y="638.275" font-size="10.5" fill="#ffffff" text-anchor="middle">every pod of all three clusters really runs here — e.g. vllm-…-x-llm-serving-x-llms in namespace vc-llms</text>
-<text x="80" y="674" font-size="10.5" fill="#57606a" text-anchor="start">root namespaces:</text>
+<text x="480.0" y="638.275" font-size="10.5" fill="#ffffff" text-anchor="middle">every pod of all three clusters really runs here — e.g. vllm-… in llm-serving, echo-…-x-lab-tools-x-dev-lab in vc-dev-lab</text>
+<text x="80" y="674" font-size="10.5" fill="#57606a" text-anchor="start">root namespaces (a selection):</text>
 <rect x="80" y="682" width="106" height="26" rx="5" fill="#eaeef2" stroke="#8c959f" stroke-width="1"/>
 <text x="133.0" y="698.675" font-size="10.5" fill="#1f2328" text-anchor="middle" font-weight="600">kube-system</text>
 <rect x="194" y="682" width="106" height="26" rx="5" fill="#eaeef2" stroke="#8c959f" stroke-width="1"/>
-<text x="247.0" y="698.675" font-size="10.5" fill="#1f2328" text-anchor="middle" font-weight="600">gpu-operator</text>
+<text x="247.0" y="698.675" font-size="10.5" fill="#1f2328" text-anchor="middle" font-weight="600">observability</text>
 <rect x="308" y="682" width="106" height="26" rx="5" fill="#eaeef2" stroke="#8c959f" stroke-width="1"/>
-<text x="361.0" y="698.675" font-size="10.5" fill="#1f2328" text-anchor="middle" font-weight="600">metallb-system</text>
+<text x="361.0" y="698.675" font-size="10.5" fill="#1f2328" text-anchor="middle" font-weight="600">llm-serving</text>
 <rect x="422" y="682" width="106" height="26" rx="5" fill="#eaeef2" stroke="#8c959f" stroke-width="1"/>
-<text x="475.0" y="698.675" font-size="10.5" fill="#1f2328" text-anchor="middle" font-weight="600">observability</text>
+<text x="475.0" y="698.675" font-size="10.5" fill="#1f2328" text-anchor="middle" font-weight="600">batch</text>
 <rect x="536" y="682" width="106" height="26" rx="5" fill="#eaeef2" stroke="#8c959f" stroke-width="1"/>
-<text x="589.0" y="698.675" font-size="10.5" fill="#1f2328" text-anchor="middle" font-weight="600">platform-tools</text>
+<text x="589.0" y="698.675" font-size="10.5" fill="#1f2328" text-anchor="middle" font-weight="600">ingress</text>
 <rect x="650" y="682" width="106" height="26" rx="5" fill="#ffffff" stroke="#54aeff" stroke-width="1.4" stroke-dasharray="4 3"/>
 <text x="703.0" y="698.675" font-size="10.5" fill="#1f2328" text-anchor="middle" font-weight="600">vc-dev-lab</text>
 <rect x="764" y="682" width="106" height="26" rx="5" fill="#ffffff" stroke="#0969da" stroke-width="1.4" stroke-dasharray="4 3"/>
-<text x="817.0" y="698.675" font-size="10.5" fill="#1f2328" text-anchor="middle" font-weight="600">vc-llms</text>
-<text x="80" y="728" font-size="10.5" fill="#57606a" text-anchor="start">vc-dev-lab and vc-llms each hold one vCluster: its control-plane pods, its synced workload pods, and a ResourceQuota (the hard budget)</text>
-<text x="80" y="745" font-size="10.5" fill="#57606a" text-anchor="start">plus a Cilium policy that keeps the two vClusters from talking to each other. Inner quotas are ceilings; the root quota is the real cap.</text>
-<text x="80" y="770" font-size="10.5" fill="#1f2328" text-anchor="start" font-weight="600">Requests from tenants pass two API servers: first the vCluster's (their RBAC, quotas, policies), then — via the syncer — the root's.</text>
+<text x="817.0" y="698.675" font-size="10.5" fill="#1f2328" text-anchor="middle" font-weight="600">vc-dev-llms</text>
+<text x="80" y="728" font-size="10.5" fill="#57606a" text-anchor="start">llm-serving · batch · ingress run the LLMs on the root: one ~90 GiB memory pool, every GPU container request = limit.</text>
+<text x="80" y="745" font-size="10.5" fill="#57606a" text-anchor="start">vc-dev-lab and vc-dev-llms each hold one vCluster, its synced pods and a ResourceQuota (2 CPU · 4 Gi · 2 slices, the real cap).</text>
+<text x="80" y="770" font-size="10.5" fill="#1f2328" text-anchor="start" font-weight="600">vCluster requests pass two API servers (the vCluster's, then via the syncer the root's); LLM pods on the root pass one.</text>
 </g>
 <path d="M265.0 402 L265.0 506" fill="none" stroke="#1f6feb" stroke-width="1.6" marker-end="url(#m1f6feb)"/>
 <path d="M695.0 402 L695.0 430 L300 430 L300 506" fill="none" stroke="#1f6feb" stroke-width="1.6" marker-end="url(#m1f6feb)"/>
 <text x="703.0" y="446" font-size="10" fill="#1f6feb" text-anchor="middle">syncers talk only to the root API (scoped ServiceAccount token)</text>
 <g transform="translate(0,20)">
 <rect x="60" y="806" width="840" height="40" rx="5" fill="#e6f4f5" stroke="#0e7c86" stroke-width="1"/>
-<text x="480.0" y="830.025" font-size="11.5" fill="#1f2328" text-anchor="middle" font-weight="600">DGX OS 7 (Ubuntu 24.04) · NVIDIA driver + CUDA · Docker (shares containerd) · AppArmor · swap off</text>
+<text x="480.0" y="830.025" font-size="11.5" fill="#1f2328" text-anchor="middle" font-weight="600">DGX OS 7 (Ubuntu 24.04) · headless · NVIDIA driver + CUDA · Docker (shares containerd) · AppArmor · swap off</text>
 <rect x="70" y="860" width="156" height="52" rx="5" fill="#eaeef2" stroke="#8c959f" stroke-width="1"/>
 <text x="148.0" y="882.7" font-size="12" fill="#1f2328" text-anchor="middle" font-weight="600">20 Arm cores</text>
 <text x="148.0" y="897.7" font-size="11" fill="#1f2328" text-anchor="middle">CPU</text>
@@ -155,38 +155,38 @@
 <path d="M415.0 106 L415.0 186" fill="none" stroke="#0969da" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#m0969da)"/>
 <path d="M600 106 L600 124 L845.0 124 L845.0 186" fill="none" stroke="#0969da" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#m0969da)"/>
 <text x="423.0" y="131" font-size="10" fill="#0969da" text-anchor="start">--context dev-lab → .111</text>
-<text x="837.0" y="118" font-size="10" fill="#0969da" text-anchor="end">--context llms → .112</text>
+<text x="837.0" y="118" font-size="10" fill="#0969da" text-anchor="end">--context dev-llms → .112</text>
 <path d="M310 60 L22 60 L22 532 L78 532" fill="none" stroke="#0b3d91" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#m0b3d91)"/>
 <text transform="rotate(-90 33 300)" x="33" y="300" font-size="10" fill="#0b3d91" text-anchor="middle">--context spark-root → 192.168.0.100:6443 · Grafana :32000</text>
 <path d="M920 36 L948 36 L948 846 L902 846" fill="none" stroke="#fb8500" stroke-width="1.6" marker-end="url(#mfb8500)"/>
 <text transform="rotate(90 937 470)" x="937" y="470" font-size="10" fill="#9a5200" text-anchor="middle">Semaphore: ssh :22 as svc-ansible + 15-min cert · kubectl/helm :6443</text>
 <text x="894.0" y="416" font-size="10" fill="#1f2328" text-anchor="start"></text>
-<text x="40" y="1006" font-size="12" fill="#1f2328" text-anchor="start" font-weight="600">How the hardware is split (kubelet reservations first; vCluster caps enforced by ResourceQuotas in the root cluster)</text>
+<text x="40" y="1006" font-size="12" fill="#1f2328" text-anchor="start" font-weight="600">How the hardware is split (kubelet reservations first; every cap is a ResourceQuota in the root cluster)</text>
 <text x="40" y="1031" font-size="11" fill="#1f2328" text-anchor="start">CPU · 20 cores</text>
 <rect x="190.0" y="1018" width="105.0" height="18" fill="#57606a"/>
 <text x="242.5" y="1031" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">OS+kubelet 3</text>
 <rect x="295.0" y="1018" width="105.0" height="18" fill="#8c959f"/>
-<text x="347.5" y="1031" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">root 3</text>
+<text x="347.5" y="1031" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">platform 3</text>
 <rect x="400.0" y="1018" width="70.0" height="18" fill="#54aeff"/>
 <text x="435.0" y="1031" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">dev-lab 2</text>
 <rect x="470.0" y="1018" width="420.0" height="18" fill="#0969da"/>
-<text x="680.0" y="1031" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">llms 12</text>
+<text x="680.0" y="1031" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">dev-llms 2 · llm-serving 8 · batch 2</text>
 <text x="40" y="1057" font-size="11" fill="#1f2328" text-anchor="start">Memory · ~119.7 GiB</text>
 <rect x="190.0" y="1044" width="81.9" height="18" fill="#57606a"/>
-<text x="230.9" y="1057" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">OS+kubelet 14</text>
+<text x="230.9" y="1057" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">OS+kubelet 12</text>
 <rect x="271.9" y="1044" width="56.7" height="18" fill="#8c959f"/>
-<text x="300.2" y="1057" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">root ~10</text>
+<text x="300.2" y="1057" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">plat. ~10</text>
 <rect x="328.6" y="1044" width="46.8" height="18" fill="#54aeff"/>
-<text x="352.0" y="1057" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">dev 8</text>
+<text x="352.0" y="1057" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">vC 4+4</text>
 <rect x="375.4" y="1044" width="514.6" height="18" fill="#0969da"/>
-<text x="632.7" y="1057" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">llms 88 Gi</text>
+<text x="632.7" y="1057" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">LLM pool ~90 GiB (llm-serving ≤ 90 · batch ≤ 12, shared)</text>
 <text x="40" y="1083" font-size="11" fill="#1f2328" text-anchor="start">GPU · 15 slices</text>
 <rect x="190.0" y="1070" width="93.3" height="18" fill="#8c959f"/>
-<text x="236.7" y="1083" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">root 2</text>
+<text x="236.7" y="1083" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">platform 2</text>
 <rect x="283.3" y="1070" width="93.3" height="18" fill="#54aeff"/>
 <text x="330.0" y="1083" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">dev-lab 2</text>
 <rect x="376.7" y="1070" width="513.3" height="18" fill="#0969da"/>
-<text x="633.3" y="1083" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">llms 11</text>
+<text x="633.3" y="1083" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">dev-llms 2 · llm-serving 6 · batch 3</text>
 <rect x="40" y="1094" width="12" height="12" rx="2" fill="#24292f" stroke="#24292f" stroke-width="1"/>
 <text x="57" y="1104" font-size="10.5" fill="#1f2328" text-anchor="start">your MacBook</text>
 <rect x="133.2" y="1094" width="12" height="12" rx="2" fill="#fff3e6" stroke="#fff3e6" stroke-width="1"/>

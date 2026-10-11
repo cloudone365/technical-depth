@@ -4,7 +4,7 @@
 
 This page is the build order for the whole module. Each section below is one chapter: it links the chapter's document and says what to run and how you know the chapter is done. Work through them in order. Documents, templates and playbooks carry the chapter numbers: Chapter 13 is `13-….md`, and its templates are `13.1 Fabric` (`13.1-fabric.yml`) and `13.2 RDMA perftest`.
 
-**What you build.** One NVIDIA DGX Spark (`dgx-spark-1`, 192.168.0.100), automated end to end: OS baseline and custom GPU facts, containers and CUDA, telemetry, a kubeadm root cluster with two vClusters (`dev-lab`, `llms`), the GPU Operator, Slurm, logging and audit, drift detection, upgrades and incident drills, and a capstone that breaks the lab on purpose and makes you prove the fix. A second Spark (`dgx-spark-2`, 192.168.0.101) is optional. It is commented out in [`lab/inventory/hosts.yml`](lab/inventory/hosts.yml) until it joins, and it is needed only for the fabric, NCCL and NFS-over-RDMA chapters (13–15).
+**What you build.** One NVIDIA DGX Spark (`dgx-spark-1`, 192.168.0.100), automated end to end: OS baseline and custom GPU facts, containers and CUDA, telemetry, a kubeadm root cluster that runs the LLM stack, with two small vClusters inside it (`dev-lab`, `dev-llms`), the GPU Operator, Slurm, logging and audit, drift detection, upgrades and incident drills, and a capstone that breaks the lab on purpose and makes you prove the fix. A second Spark (`dgx-spark-2`, 192.168.0.101) is optional. It is commented out in [`lab/inventory/hosts.yml`](lab/inventory/hosts.yml) until it joins, and it is needed only for the fabric, NCCL and NFS-over-RDMA chapters (13–15).
 
 **Who runs what.**
 
@@ -81,7 +81,7 @@ Times are rough working times for one Spark, not counting reading.
 | 17 | [Vault server deep dive](17-vault-server-deep-dive.md) | Study: inspect vault01, seal drill, snapshot | 45 min | You can unseal and snapshot vault01 from memory |
 | 18 | [Vault AppRole, secrets & SSH certificates](18-vault-approle-secrets-and-ssh-certificates.md) | `18.1 Vault integration` | 20 min | `NGC key present: True` without the key in any log |
 | 19 | [Kubernetes: kubeadm root cluster & vClusters](19-kubernetes-kubeadm-root-cluster-and-vclusters.md) | `19.1 Kubernetes`, fetch kubeconfig | 45 min | `dgx-spark-1` `Ready`, Cilium `OK` |
-| 20 | [NVIDIA GPU Operator & time-slicing](20-nvidia-gpu-operator-and-time-slicing.md) | `20.1 GPU Operator`, then `20.2 vClusters` | 60 min | 15 `nvidia.com/gpu`; contexts `dev-lab` and `llms` answer |
+| 20 | [NVIDIA GPU Operator & time-slicing](20-nvidia-gpu-operator-and-time-slicing.md) | `20.1 GPU Operator`, then `20.2 vClusters` | 60 min | 15 `nvidia.com/gpu`; contexts `dev-lab` and `dev-llms` answer |
 | 21 | [Multus & secondary RDMA networks](21-multus-and-secondary-rdma-networks.md) | `21.1 Multus RDMA` | 45 min | A pod has a second, RDMA-capable interface |
 | 22 | [Slurm: GRES & cgroup GPUs](22-slurm-gres-and-cgroup-gpus.md) | `22.1 Slurm` | 45 min | `srun --gres=gpu:1 nvidia-smi` runs |
 | 23 | [AWX install & configuration as code](23-awx-install-and-configuration-as-code.md) | Optional study: arm64 pre-flight, AWX as code | 2 h | You can choose on-Spark vs hybrid AWX |
@@ -195,7 +195,7 @@ Work through Chapter 04 from top to bottom (MacBook, sema01 and the Semaphore UI
    If anything that talks to vault01 answers `{"errors":["Vault is sealed"]}`, vault01 has restarted: on vault01 run `vault operator unseal` twice, with two different unseal keys, until `vault status` shows `Sealed false` (Chapter 04 §2).
 2. **On sema01**, build the lab's Semaphore image and state volume from [`lab/semaphore/`](lab/semaphore/) (Chapter 04 §4).
 3. **Semaphore UI:** create project `spark-lab`: repository, File inventory `01-Ansible/lab/inventory/hosts.yml`, variable group `vault-approle`, template `04.2 Ping`. Its first run proves the certificate chain (Chapter 04 §5). First run failed? Chapter 04 §5.6 *If the first run of `04.2 Ping` fails* sorts it by play: play 1 = sema01↔vault01 (sealed Vault, AppRole, TLS), play 2 = the Spark refused the certificate. The most common cause there is a clock that is off on vault01 or sema01 (`Certificate invalid: expired` in the Spark's SSH log), fixed with chrony.
-4. **First contact, custom facts and OS baseline** (Chapter 04 §6). **Semaphore UI:** `04.2 Ping` again; the log shows play 1 (*Get an SSH certificate from Vault*), then *Connectivity and identity check* on `dgx-spark-1`. Try the ad-hoc commands of §6.1 from the MacBook: Semaphore runs playbooks, not ad-hoc commands. Then create the template `04.3 Baseline` and run it twice (Chapter 04 §6.2–6.3).
+4. **First contact, custom facts and OS baseline** (Chapter 04 §6). **Semaphore UI:** `04.2 Ping` again; the log shows play 1 (*Get an SSH certificate from Vault*), then *Connectivity and identity check* on `dgx-spark-1`. Try the ad-hoc commands of §6.1 from the MacBook: Semaphore runs playbooks, not ad-hoc commands. Then create the template `04.3 Baseline` and run it twice (Chapter 04 §6.2–6.3). Among other things it makes DGX OS **headless**: it switches the Spark to text mode (`multi-user.target`, no GNOME desktop) without a reboot and reports `MemAvailable` before → after, because the desktop only costs unified memory, which is GPU memory too.
    ```bash
    # ▶ MacBook · 01-Ansible/lab (venv active)
    ansible-playbook playbooks/04.2-ping.yml -K       # break-glass (MacBook, as dgxadmin)
@@ -429,13 +429,14 @@ ansible-playbook playbooks/18.1-vault-integration.yml -K   # break-glass: no App
 
 ## Chapter 19 · Kubernetes: kubeadm root cluster & vClusters → [document](19-kubernetes-kubeadm-root-cluster-and-vclusters.md)
 
-The end state of Chapters 19–20 is **one kubeadm root cluster with two vClusters inside it**:
+The end state of Chapters 19–20 is **one kubeadm root cluster that runs the LLM stack, with two small vClusters inside it**:
 
 | Context | What it is | Where |
 |---|---|---|
 | `spark-root` | kubeadm v1.36.5, `dgx-spark-1` is control plane *and* worker (no taint), `dgx-spark-2` joins as a worker if present; Cilium (VXLAN, kube-proxy kept), MetalLB L2 pool `192.168.0.110–119` | `https://192.168.0.100:6443` |
-| `dev-lab` | vCluster #1 in root namespace `vc-dev-lab`: 2 CPU · 8 Gi · 2 GPU slices | `https://192.168.0.111` |
-| `llms` | vCluster #2 in root namespace `vc-llms`: 12 CPU · 88 Gi · 11 GPU slices | `https://192.168.0.112` |
+| `spark-root` · `llm-serving`, `batch` | the LLM stack, directly on the root: `serving-budget` 8 CPU · up to 90 Gi · 6 slices, `batch-budget` 2 CPU · up to 12 Gi · 3 slices, one shared ~90 GiB memory pool; Traefik in `ingress` | LLM API `http://192.168.0.115` |
+| `dev-lab` | vCluster #1 in root namespace `vc-dev-lab`: 2 CPU · 4 Gi · 2 GPU slices | `https://192.168.0.111` |
+| `dev-llms` | vCluster #2 in root namespace `vc-dev-llms`, an LLM sandbox: 2 CPU · 4 Gi · 2 GPU slices | `https://192.168.0.112` |
 
 **Semaphore UI:** `19.1 Kubernetes` (kubeadm_cluster on the Spark, then cilium + metallb from the Semaphore container; the kubeconfig lands on sema01's state volume). Then, on the MacBook:
 
@@ -453,19 +454,20 @@ Break-glass: `ansible-playbook playbooks/19.1-kubernetes.yml -K` writes the kube
 
 ## Chapter 20 · NVIDIA GPU Operator & time-slicing → [document](20-nvidia-gpu-operator-and-time-slicing.md)
 
-**Semaphore UI:** `20.1 GPU Operator`, then `20.2 vClusters` (the two vClusters from Chapter 19 §3.4 and §4.5; adds the `dev-lab` and `llms` contexts on sema01's state volume). `20.2 vClusters` needs the [02-Kubernetes lab](../02-Kubernetes/lab/README.md) in the same repository checkout: the `vclusters` role applies its `vclusters/*.yaml` values and the kustomize directories `manifests/root/00-platform` and `manifests/root/05-vclusters` (namespaces, PriorityClasses, budgets) rather than keeping a copy. Then, on the MacBook:
+**Semaphore UI:** `20.1 GPU Operator`, then `20.2 vClusters` (the LLM namespaces and budgets on the root and the two vClusters, Chapter 19 §3.4 and §4.5; adds the `dev-lab` and `dev-llms` contexts on sema01's state volume). `20.2 vClusters` needs the [02-Kubernetes lab](../02-Kubernetes/lab/README.md) in the same repository checkout: the `vclusters` role applies its `vclusters/*.yaml` values and the kustomize directories `manifests/root/00-platform`, `manifests/root/05-vclusters`, `manifests/root-llms/00-platform` and `manifests/root-llms/10-tenancy` (namespaces, PriorityClasses, budgets) rather than keeping a copy. Then, on the MacBook:
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
 tools/fetch-kubeconfig.sh sema01                 # now with all three contexts
 kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}'   # 15
 kubectl --context dev-lab get namespaces
-kubectl --context llms get namespaces
+kubectl --context dev-llms get namespaces
+kubectl --context spark-root get resourcequota -A | grep budget   # vcluster-budget ×2, serving-budget, batch-budget
 ```
 
 Break-glass: `ansible-playbook playbooks/20.1-gpu-operator.yml` and `ansible-playbook playbooks/20.2-vclusters.yml` (localhost only, using the MacBook's `.cache/` kubeconfig).
 
-✅ **Done when** the node advertises `nvidia.com/gpu: 15`, the `cuda-smoke` pod in `default` prints the GB10, both vCluster contexts answer through their MetalLB IPs, and `kubectl --context spark-root -n vc-llms get resourcequota` shows the llms budget. The [02-Kubernetes](../02-Kubernetes/README.md) module starts from this kubeconfig.
+✅ **Done when** the node advertises `nvidia.com/gpu: 15`, the `cuda-smoke` pod in `default` prints the GB10, both vCluster contexts answer through their MetalLB IPs, and `kubectl --context spark-root -n llm-serving get resourcequota` shows `serving-budget` (8 CPU · 90 Gi · 6 slices). The [02-Kubernetes](../02-Kubernetes/README.md) module starts from this kubeconfig.
 
 ## Chapter 21 · Multus & secondary RDMA networks → [document](21-multus-and-secondary-rdma-networks.md)
 
@@ -625,7 +627,7 @@ python3 tools/capstone_scorecard.py   # grades the MacBook's .cache; for Semapho
 | `18.1-vault-integration.yml` | Demonstrates the Semaphore path: play 1 token reads `kv/spark-lab/ngc` | Semaphore | 18 |
 | `19.1-kubernetes.yml` | kubeadm root cluster (Cilium, MetalLB); then `tools/fetch-kubeconfig.sh sema01` | Semaphore | 19 |
 | `19.2-reset-kubernetes.yml` | Wipe Kubernetes and every vCluster for a clean rebuild (`RESET` prompt, or extra variable `reset_confirm: RESET` in Semaphore) | Semaphore, never scheduled | 19 §8 |
-| `20.1-gpu-operator.yml` · `20.2-vclusters.yml` | GPU Operator (15 time-slices) → vClusters dev-lab + llms; then fetch the kubeconfig | Semaphore | 20 (vClusters: 19 §3.4) |
+| `20.1-gpu-operator.yml` · `20.2-vclusters.yml` | GPU Operator (15 time-slices) → LLM budgets on the root, vClusters dev-lab + dev-llms; then fetch the kubeconfig | Semaphore | 20 (vClusters: 19 §3.4) |
 | `21.1-multus-rdma.yml` | Secondary RDMA networks for pods | Semaphore | 21 |
 | `22.1-slurm.yml` | Slurm | Semaphore | 22 |
 | `26.1-drift-check.yml` | Check-mode drift | Semaphore, scheduled nightly | 26 |

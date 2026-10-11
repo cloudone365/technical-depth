@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| **You will build** | A Qdrant vector database as a StatefulSet whose data survives pod deletion, a per-node GPU/UMA probe DaemonSet feeding Prometheus, a sharded tokenizer as an Indexed Job with per-shard retries and a corrupt-shard rehearsal, and PodDisruptionBudgets — written inside a vCluster — that make a root `kubectl drain` safe |
+| **You will build** | A Qdrant vector database as a StatefulSet whose data survives pod deletion, a per-node GPU/UMA probe DaemonSet feeding Prometheus, a sharded tokenizer as an Indexed Job with per-shard retries and a corrupt-shard rehearsal, and PodDisruptionBudgets — the LLM stack's on the root and a tenant's written inside a vCluster — that make a root `kubectl drain` safe |
 | **Hardware** | dgx-spark-1 |
 | **Time** | 90 min |
 | **Risk** | Low. §5.5 drains only with `--dry-run=server`; a real drain of the only node stops all three clusters' workloads |
-| **Clusters** | `llms` (Qdrant + PDBs), `dev-lab` (tokenizer Job), `spark-root` (node probe, the drain, and where every pod really runs) |
-| **Lab files** | [`manifests/llms/50-workloads/qdrant-statefulset.yaml`](lab/manifests/llms/50-workloads/qdrant-statefulset.yaml), [`manifests/root/50-workloads/node-probe-daemonset.yaml`](lab/manifests/root/50-workloads/node-probe-daemonset.yaml), [`manifests/dev-lab/50-workloads/tokenizer-indexed-job.yaml`](lab/manifests/dev-lab/50-workloads/tokenizer-indexed-job.yaml), [`vclusters/llms.yaml`](lab/vclusters/llms.yaml) (`sync.toHost.podDisruptionBudgets`), `scripts/breakfix.sh` scenario 11 |
+| **Clusters** | `spark-root` (Qdrant + PDBs in `llm-serving`, node probe, the drain, and where every pod really runs), `dev-lab` (tokenizer Job, a tenant PDB) |
+| **Lab files** | [`manifests/root-llms/50-workloads/qdrant-statefulset.yaml`](lab/manifests/root-llms/50-workloads/qdrant-statefulset.yaml), [`manifests/root/50-workloads/node-probe-daemonset.yaml`](lab/manifests/root/50-workloads/node-probe-daemonset.yaml), [`manifests/dev-lab/50-workloads/tokenizer-indexed-job.yaml`](lab/manifests/dev-lab/50-workloads/tokenizer-indexed-job.yaml), [`vclusters/dev-lab.yaml`](lab/vclusters/dev-lab.yaml) (`sync.toHost.podDisruptionBudgets`), `scripts/breakfix.sh` scenario 11 |
 
 ---
 
@@ -19,7 +19,7 @@ A Deployment assumes pods are interchangeable cattle. Much of an AI platform isn
 
 | Need | Controller | Example on the Spark |
 |---|---|---|
-| stable name + own disk, ordered start | **StatefulSet** | Qdrant, Milvus, Redis, Postgres for LiteLLM, etcd for Ray — and each vCluster's own control plane (`llms-0`, `dev-lab-0`) |
+| stable name + own disk, ordered start | **StatefulSet** | Qdrant, Milvus, Redis, Postgres for LiteLLM, etcd for Ray — and each vCluster's own control plane (`dev-lab-0`, `dev-llms-0`) |
 | exactly one per node | **DaemonSet** | GPU probes, dcgm-exporter, log shippers, Cilium, NCCL/RDMA device plugins |
 | N pieces of finite work | **Job** / **Indexed Job** | tokenization, embedding a corpus, eval sweeps, checkpoint conversion |
 | don't let maintenance kill the only copy | **PodDisruptionBudget** | 1-replica vector DB, 2-replica model server |
@@ -30,12 +30,13 @@ The nesting changes *where* each controller lives, and that's worth getting stra
 
 | Object | Its controller runs in | What reaches the root |
 |---|---|---|
-| StatefulSet `qdrant` (llms) | llms's controller-manager | the pod `qdrant-0` and the PVC `data-qdrant-0`, renamed (§3.4) |
-| Indexed Job `tokenize-shards` (dev-lab) | dev-lab's controller-manager | one pod per running index |
+| StatefulSet `qdrant` (root, `llm-serving`) | the **root's** controller-manager | — (it is a root object; the pod `qdrant-0` and the PVC `data-qdrant-0` keep their names) |
+| Indexed Job `tokenize-shards` (dev-lab) | dev-lab's controller-manager | one pod per running index, renamed (§3.4) |
 | DaemonSet `spark-node-probe` | the **root's** controller-manager | — (it is a root object) |
-| PDBs `qdrant`, `mock-llm` (llms) | written in llms, **synced to the root** | translated PDBs in `vc-llms`, enforced by the root's Eviction API |
+| PDBs `qdrant`, `mock-llm` (root, `llm-serving`) | root objects | — enforced directly by the root's Eviction API |
+| PDB `echo` (dev-lab, `lab-tools`, §5.5) | written in dev-lab, **synced to the root** | a translated PDB in `vc-dev-lab`, enforced by the root's Eviction API |
 
-StatefulSets, Jobs and DaemonSets are *not* synced: only their pods go down. A PDB is different, because the thing that respects it — the Eviction API that `kubectl drain` calls — belongs to the cluster that owns the node. That's the root. So the PDB has to be there too.
+Inside a vCluster, StatefulSets, Jobs and DaemonSets are *not* synced: only their pods go down. A PDB is different, because the thing that respects it — the Eviction API that `kubectl drain` calls — belongs to the cluster that owns the node. That's the root. So a tenant's PDB has to be there too. Qdrant needs none of this: the LLM stack runs on the root, so its StatefulSet, pod, PVC and PDB are root objects from the start.
 
 ---
 
@@ -43,36 +44,34 @@ StatefulSets, Jobs and DaemonSets are *not* synced: only their pods go down. A P
 
 ```mermaid
 flowchart TB
-  subgraph LLMS["vCluster llms · namespace llm-serving"]
-    direction TB
-    STS["StatefulSet qdrant<br/>(llms controller-manager)"] --> Q0V["qdrant-0<br/>qdrant-0.qdrant-headless.llm-serving.svc"]
-    PDBV["PDB qdrant · maxUnavailable 0<br/>PDB mock-llm · minAvailable 1"]
-  end
-  subgraph DEV["vCluster dev-lab · namespace tenant-alpha"]
+  subgraph DEV["vCluster dev-lab"]
     direction LR
-    JOB["Indexed Job tokenize-shards<br/>8 completions · 2 parallel"]
+    JOB["Indexed Job tokenize-shards<br/>tenant-alpha · 8 completions · 2 parallel"]
+    PDBV["PDB echo · lab-tools<br/>minAvailable 2"]
   end
   subgraph ROOT["Root cluster spark-root · dgx-spark-1"]
     direction TB
-    subgraph VCL["namespace vc-llms"]
-      Q0["qdrant-0-x-llm-serving-x-llms"] --> PVC0[("PVC data-qdrant-0-x-llm-serving-x-llms<br/>local-nvme-retain 20Gi")]
-      PDBR["PDB qdrant-x-llm-serving-x-llms"]
+    subgraph LS["namespace llm-serving (LLM stack, root objects)"]
+      STS["StatefulSet qdrant<br/>(root controller-manager)"] --> Q0["qdrant-0<br/>qdrant-0.qdrant-headless.llm-serving.svc"]
+      Q0 --> PVC0[("PVC data-qdrant-0<br/>local-nvme-retain 20Gi")]
+      PDBR["PDB qdrant · maxUnavailable 0<br/>PDB mock-llm · minAvailable 1"]
     end
     subgraph VCD["namespace vc-dev-lab"]
       I0["tokenize-shards-0-…-x-tenant-alpha-x-dev-lab"] --- I1["index 1 … 7"]
+      PDBT["PDB echo-x-lab-tools-x-dev-lab"]
     end
     subgraph PT["namespace platform-tools"]
       NP1["DaemonSet spark-node-probe<br/>pod on dgx-spark-1"]
     end
     EVICT["Eviction API"]
   end
-  Q0V -. "syncer" .-> Q0
-  PDBV -. "sync.toHost.podDisruptionBudgets" .-> PDBR
   JOB -. "syncer" .-> I0
+  PDBV -. "sync.toHost.podDisruptionBudgets" .-> PDBT
   NP1 --> TF[("/var/lib/prometheus/node-exporter<br/>k8s_node_probe.prom")]
   TF --> NE["host node-exporter :9100"] --> PROM["Prometheus (observability)"]
   DRAIN(["kubectl --context spark-root drain dgx-spark-1"]) --> EVICT
   EVICT -. "checks" .-> PDBR
+  EVICT -. "checks" .-> PDBT
   PDBR -. "blocks eviction" .-> Q0
   classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
   classDef store fill:#bf8700,stroke:#7a5600,color:#fff
@@ -84,12 +83,11 @@ flowchart TB
   class STS,JOB,EVICT ctrl
   class PVC0,TF store
   class NE,PROM obs
-  class PDBV,PDBR sec
-  class Q0V,Q0,I0,I1 tenant
+  class PDBV,PDBR,PDBT sec
+  class Q0,I0,I1 tenant
   class NP1 node
   class DRAIN ext
   style ROOT fill:#e6f4f5,stroke:#0e7c86,stroke-width:2px
-  style LLMS fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
   style DEV fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
 ```
 
@@ -97,20 +95,20 @@ flowchart TB
 
 ## 3. LLD
 
-### 3.1 Qdrant StatefulSet (inside llms)
+### 3.1 Qdrant StatefulSet (on the root)
 
 | Field | Value | Why |
 |---|---|---|
-| namespace | `llm-serving` in vCluster `llms` | counts against `serving-budget` (10 CPU · 80 Gi · 600 Gi) and the root `vcluster-budget` on `vc-llms` |
-| `serviceName` | `qdrant-headless` (`publishNotReadyAddresses: true`) | stable DNS per pod, answered by **llms's own CoreDNS**. Peers must find each other before they're ready |
-| image | `qdrant/qdrant:v1.13.4-unprivileged`, UID 1000 | runs non-root; passes PSA `baseline` (llm-serving) and the root's `privileged` on `vc-llms` |
-| resources | requests 250m · 1 Gi, limit 2 Gi | Burstable; the memory limit is what the root quota counts |
+| namespace | `llm-serving` on the root | counts against `serving-budget` (8 CPU · 90 Gi · 6 slices · 1 Ti), next to the model servers |
+| `serviceName` | `qdrant-headless` (`publishNotReadyAddresses: true`) | stable DNS per pod, answered by the **root's** CoreDNS. Peers must find each other before they're ready |
+| image | `qdrant/qdrant:v1.13.4-unprivileged`, UID 1000 | runs non-root; passes PSA `baseline` on `llm-serving` |
+| resources | requests 250m · 1 Gi, limit 2 Gi | Burstable. Not a GPU container, so request = limit isn't required; `serving-budget` counts 1 Gi of requests and 2 Gi of limits |
 | `volumeClaimTemplates` | `data`, `local-nvme-retain`, 20 Gi | PVC `data-qdrant-0` follows the pod forever |
 | `persistentVolumeClaimRetentionPolicy` | `Retain` on delete and on scale-down | deleting the StatefulSet never deletes vectors |
 | `updateStrategy.rollingUpdate.partition` | 0 | raise it to canary a new version on the highest ordinal only |
 | probes | `/readyz`, `/livez` | |
 | PDB `qdrant` | `maxUnavailable: 0` | one replica = only copy. Drain must stop |
-| PDB `mock-llm` | `minAvailable: 1` | the 2-replica mock API (Chapter 11) keeps one pod through a drain |
+| PDB `mock-llm` | `minAvailable: 1` | the 2-replica mock API (Chapter 11) keeps one pod through a drain. Same file as Qdrant |
 
 ### 3.2 Node probe DaemonSet (root)
 
@@ -138,13 +136,15 @@ flowchart TB
 
 ### 3.4 Names on both sides
 
+Qdrant needs no translation table: it's a root object, so `llm-serving/qdrant-0`, PVC `llm-serving/data-qdrant-0` and PDB `llm-serving/qdrant` are the real names, and its data lives at `/data/k8s/retain/llm-serving/data-qdrant-0`. Everything written inside a vCluster is translated:
+
 | Inside the vCluster | On the root (`kubectl --context spark-root`) |
 |---|---|
-| `llms` · `llm-serving/qdrant-0` | `vc-llms/qdrant-0-x-llm-serving-x-llms` |
-| `llms` · PVC `llm-serving/data-qdrant-0` | PVC `vc-llms/data-qdrant-0-x-llm-serving-x-llms` → PV with hostPath `/data/k8s/retain/vc-llms/data-qdrant-0-x-llm-serving-x-llms` |
-| `llms` · PDB `llm-serving/qdrant` | PDB `vc-llms/qdrant-x-llm-serving-x-llms` |
-| `llms` · StatefulSet `qdrant` | *nothing* — `kubectl --context spark-root -n vc-llms get sts` shows only `llms` (the vCluster's own control plane) |
-| `dev-lab` · Job `tenant-alpha/tokenize-shards` | *nothing* — only its pods, in `vc-dev-lab` |
+| `dev-lab` · Job `tenant-alpha/tokenize-shards` | *nothing* — only its pods, in `vc-dev-lab`, as `tokenize-shards-<i>-…-x-tenant-alpha-x-dev-lab` |
+| `dev-lab` · Deployment `lab-tools/echo` | *nothing* — only its pods, `echo-…-x-lab-tools-x-dev-lab` |
+| `dev-lab` · PDB `lab-tools/echo` (§5.5) | PDB `vc-dev-lab/echo-x-lab-tools-x-dev-lab` |
+| `dev-llms` · PVC `llm-sandbox/<pvc>` on `local-nvme-retain` | PVC `vc-dev-llms/<pvc>-x-llm-sandbox-x-dev-llms` → PV with hostPath `/data/k8s/retain/vc-dev-llms/<pvc>-x-llm-sandbox-x-dev-llms` |
+| any StatefulSet written inside a vCluster | *nothing* — `kubectl --context spark-root -n vc-dev-lab get sts` shows only `dev-lab` (the vCluster's own control plane) |
 
 Long names are shortened with a hash, so find a host copy through the annotations `vcluster.loft.sh/object-name` and `vcluster.loft.sh/object-namespace` (that's what `scripts/lib.sh` `host_pod` does) rather than by building the string.
 
@@ -152,10 +152,10 @@ Long names are shortened with a hash, so find a host copy through the annotation
 
 ## 4. Integrations
 
-- **Storage (Chapter 13)**: `local-nvme-retain` comes from the root (synced into llms with `sync.fromHost.storageClasses`). Qdrant's data ends up at `/data/k8s/retain/vc-llms/data-qdrant-0-x-llm-serving-x-llms` on the NVMe — the path uses the *root* namespace and PVC name, because the root's provisioner is the one that created it.
-- **RAG (modules 03 and 04)**: their retrieval services use `http://qdrant.llm-serving:6333` — a name that only resolves inside llms. From dev-lab the root's Cilium `vcluster-boundary` policy drops the connection anyway.
+- **Storage (Chapter 13)**: `local-nvme-retain` is a root StorageClass (the vClusters see it through `sync.fromHost.storageClasses`). Qdrant's data ends up at `/data/k8s/retain/llm-serving/data-qdrant-0` on the NVMe: namespace and PVC name. A PVC written in dev-llms would land under `vc-dev-llms/…-x-llm-sandbox-x-dev-llms` — the path always uses the *root* namespace and PVC name, because the root's provisioner is the one that creates it.
+- **RAG (modules 03 and 04)**: their retrieval services use `http://qdrant.llm-serving:6333`, a root Service name. The NetworkPolicy `allow-ingress-and-same-namespace` in `llm-serving` admits only `ingress`, `observability` and pods in `llm-serving` itself, so a retrieval service that queries Qdrant runs there too. From a vCluster the name doesn't resolve (its CoreDNS knows its own Services), and the policy and the root's Cilium `vcluster-boundary` policy drop the connection anyway.
 - **Observability (Chapter 17)**: the probe metrics appear next to the 01-Ansible `spark_gpu_*` metrics (scraped through `observability/spark-host-exporters`), and the Grafana dashboard uses both.
-- **Kueue (Chapter 07)**: the tokenizer job can be queued too — in llms, not dev-lab (Kueue is installed only there). Add `kueue.x-k8s.io/queue-name: train` and move it to `batch`.
+- **Kueue (Chapter 07)**: the tokenizer job can be queued too — on the root, in `batch`, not in dev-lab (the vClusters have no Kueue). Add `kueue.x-k8s.io/queue-name: train` and move it to `batch`.
 - **01-Ansible**: `playbooks/29.1-emergency-drain.yml` (role `node_drain`) automates cordon → capture → stop → reboot → validate → return for a root node.
 
 ---
@@ -168,35 +168,34 @@ All commands run from `02-Kubernetes/lab` with `KUBECONFIG` set to the lab file:
 cd "02-Kubernetes/lab"
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 scripts/install-addons.sh storage          # once: local-path + local-nvme classes on the root
-kubectl --context llms get sc              # the root's classes, seen from inside llms
+kubectl --context dev-lab get sc           # the root's classes, seen from inside a vCluster
 ```
 
 ### 5.1 StatefulSet: identity and data survive the pod
 
 ```bash
-kubectl --context llms apply -k manifests/llms/00-platform
-kubectl --context llms apply -k manifests/llms/10-tenancy
-kubectl --context llms apply -k manifests/llms/50-workloads
-kubectl --context llms -n llm-serving rollout status sts/qdrant
-kubectl --context llms -n llm-serving get pod qdrant-0 -o wide
-kubectl --context llms -n llm-serving get pvc
+kubectl --context spark-root apply -k manifests/root-llms/00-platform
+kubectl --context spark-root apply -k manifests/root-llms/10-tenancy
+kubectl --context spark-root apply -k manifests/root-llms/50-workloads
+kubectl --context spark-root -n llm-serving rollout status sts/qdrant
+kubectl --context spark-root -n llm-serving get sts,pod,pvc -o wide
 ```
 
-Now look at the same thing from the root:
+The StatefulSet, the pod `qdrant-0` and the PVC `data-qdrant-0` sit side by side in one root namespace, under the names you wrote. A workload written inside a vCluster looks different from the root — compare dev-lab's echo Deployment:
 
 ```bash
-kubectl --context spark-root -n vc-llms get sts                       # only 'llms' — qdrant's controller isn't here
-kubectl --context spark-root -n vc-llms get pods,pvc | grep qdrant
-kubectl --context spark-root -n vc-llms get pod qdrant-0-x-llm-serving-x-llms \
-  -o jsonpath='{.metadata.annotations.vcluster\.loft\.sh/object-name}{"  "}{.status.podIP}{"\n"}'
+kubectl --context spark-root -n vc-dev-lab get sts,deploy                  # only the StatefulSet 'dev-lab' — the vCluster's own control plane
+kubectl --context spark-root -n vc-dev-lab get pods -o custom-columns=HOST:.metadata.name,VIRTUAL:.metadata.annotations.vcluster\\.loft\\.sh/object-name,IP:.status.podIP \
+  | grep -E 'HOST|echo'
+kubectl --context dev-lab -n lab-tools get pods -l app=echo -o wide
 ```
 
-Expected: `qdrant-0` and the same pod IP you saw in llms. The pod IP and the node are real; the name is a translation.
+Expected: the same pod IPs on both sides. The pod IP and the node are real; the host name is a translation, and the Deployment and ReplicaSet behind it exist only in dev-lab.
 
-Write some vectors (port-forward goes through llms's API server to the root pod):
+Write some vectors (port-forward goes through the root's API server to the pod):
 
 ```bash
-kubectl --context llms -n llm-serving port-forward svc/qdrant 6333 &
+kubectl --context spark-root -n llm-serving port-forward svc/qdrant 6333 &
 sleep 2
 curl -s -X PUT localhost:6333/collections/spark -H 'Content-Type: application/json' \
   -d '{"vectors":{"size":4,"distance":"Cosine"}}' | jq .status
@@ -210,31 +209,31 @@ kill %1
 Kill the pod and check that the same identity and data come back:
 
 ```bash
-kubectl --context llms -n llm-serving delete pod qdrant-0
-kubectl --context llms -n llm-serving wait --for=condition=Ready pod/qdrant-0 --timeout=120s
-kubectl --context llms -n llm-serving port-forward svc/qdrant 6333 & sleep 2
+kubectl --context spark-root -n llm-serving delete pod qdrant-0
+kubectl --context spark-root -n llm-serving wait --for=condition=Ready pod/qdrant-0 --timeout=120s
+kubectl --context spark-root -n llm-serving port-forward svc/qdrant 6333 & sleep 2
 curl -s localhost:6333/collections/spark | jq '.result.points_count'        # 2
 kill %1
-sudo ls /data/k8s/retain/vc-llms/data-qdrant-0-x-llm-serving-x-llms/collections/   # on the Spark: spark
+sudo ls /data/k8s/retain/llm-serving/data-qdrant-0/collections/   # on the Spark: spark
 ```
 
-Who recreated `qdrant-0`? llms's StatefulSet controller, which saw its pod disappear. The root never knew a StatefulSet was involved — it just got a new pod from the syncer, with the same name and the same PVC, and the root scheduler put it back on dgx-spark-1 because that's where the local PV lives.
+Who recreated `qdrant-0`? The root's StatefulSet controller, which saw its pod disappear. It created a new pod with the same name and the same PVC, and the root scheduler put it back on dgx-spark-1 because that's where the local PV lives. Inside a vCluster the same recovery takes two controllers: the vCluster's StatefulSet controller recreates the virtual pod, and the syncer creates its host copy (Chapter 06 §5.6).
 
 ### 5.2 Canary a StatefulSet update with `partition`
 
 With one replica, `partition: 1` means *no pod updates*. That's useful for staging a new image spec without rolling it:
 
 ```bash
-kubectl --context llms -n llm-serving patch sts qdrant -p '{"spec":{"updateStrategy":{"rollingUpdate":{"partition":1}}}}'
-kubectl --context llms -n llm-serving set image sts/qdrant qdrant=qdrant/qdrant:v1.13.5-unprivileged
-kubectl --context llms -n llm-serving get pod qdrant-0 -o jsonpath='{.spec.containers[0].image}{"\n"}'   # still v1.13.4
-kubectl --context llms -n llm-serving get sts qdrant -o jsonpath='{.status.currentRevision} → {.status.updateRevision}{"\n"}'
+kubectl --context spark-root -n llm-serving patch sts qdrant -p '{"spec":{"updateStrategy":{"rollingUpdate":{"partition":1}}}}'
+kubectl --context spark-root -n llm-serving set image sts/qdrant qdrant=qdrant/qdrant:v1.13.5-unprivileged
+kubectl --context spark-root -n llm-serving get pod qdrant-0 -o jsonpath='{.spec.containers[0].image}{"\n"}'   # still v1.13.4
+kubectl --context spark-root -n llm-serving get sts qdrant -o jsonpath='{.status.currentRevision} → {.status.updateRevision}{"\n"}'
 # roll back the staged change
-kubectl --context llms -n llm-serving rollout undo sts/qdrant
-kubectl --context llms -n llm-serving patch sts qdrant -p '{"spec":{"updateStrategy":{"rollingUpdate":{"partition":0}}}}'
+kubectl --context spark-root -n llm-serving rollout undo sts/qdrant
+kubectl --context spark-root -n llm-serving patch sts qdrant -p '{"spec":{"updateStrategy":{"rollingUpdate":{"partition":0}}}}'
 ```
 
-The ControllerRevisions behind `currentRevision`/`updateRevision` live in llms's SQLite, not in the root's etcd: `kubectl --context spark-root -n vc-llms get controllerrevisions` shows only the vCluster's own. With 3 replicas (3 nodes), `partition: 2` updates only `qdrant-2`. Watch it, then lower the partition step by step.
+The ControllerRevisions behind `currentRevision`/`updateRevision` live in the root's etcd next to the StatefulSet: `kubectl --context spark-root -n llm-serving get controllerrevisions`. For a StatefulSet written inside a vCluster they would live in that vCluster's SQLite, and `kubectl --context spark-root -n vc-dev-lab get controllerrevisions` would show only the vCluster's own. With 3 replicas (3 nodes), `partition: 2` updates only `qdrant-2`. Watch it, then lower the partition step by step.
 
 ### 5.3 DaemonSet: one probe per GPU node (root)
 
@@ -311,57 +310,67 @@ The job is marked `Failed` only after the remaining indexes have finished (one f
 
 ### 5.5 PDBs and drain — across the nesting
 
-The PDBs were written in llms. Find them on the root:
+Two kinds of PDB meet at the root's Eviction API: the LLM stack's, which are root objects, and tenants', which a syncer copies down. Write a tenant PDB in dev-lab for its echo Deployment (3 replicas, Chapter 09), then list both kinds on the root:
 
 ```bash
-kubectl --context llms -n llm-serving get pdb
+kubectl --context spark-root -n llm-serving get pdb
+kubectl --context dev-lab apply -f - <<'EOF'
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: echo, namespace: lab-tools}
+spec:
+  minAvailable: 2
+  selector: {matchLabels: {app: echo}}
+EOF
 kubectl --context spark-root get pdb -A
 ```
 
 Expected on the root, among any platform PDBs:
 
 ```text
-NAMESPACE   NAME                             MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS
-vc-llms     mock-llm-x-llm-serving-x-llms    1               N/A               1
-vc-llms     qdrant-x-llm-serving-x-llms      N/A             0                 0
+NAMESPACE     NAME                          MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS
+llm-serving   mock-llm                      1               N/A               1
+llm-serving   qdrant                        N/A             0                 0
+vc-dev-lab    echo-x-lab-tools-x-dev-lab    2               N/A               1
 ```
 
-(`mock-llm` appears once Chapter 11's `llms/40-ingress` is applied.) The syncer copied them because [`vclusters/llms.yaml`](lab/vclusters/llms.yaml) sets `sync.toHost.podDisruptionBudgets.enabled: true`, and rewrote their selectors to match the host copies of the pods. Now ask the root what a drain would do:
+(`mock-llm` counts pods once Chapter 11's `root-llms/40-ingress` is applied.) The syncer copied the tenant's PDB because [`vclusters/dev-lab.yaml`](lab/vclusters/dev-lab.yaml) sets `sync.toHost.podDisruptionBudgets.enabled: true` (dev-llms too), and rewrote its selector to match the host copies of the pods. Now ask the root what a drain would do:
 
 ```bash
-scripts/breakfix.sh inject 11          # (re)applies llms/50-workloads and prints the drain command
-kubectl --context spark-root drain dgx-spark-1 --ignore-daemonsets --delete-emptydir-data --dry-run=server 2>&1 | grep -E 'qdrant|llms-0|dev-lab-0|disruption'
+scripts/breakfix.sh inject 11          # (re)applies root-llms/50-workloads and prints the drain command
+kubectl --context spark-root drain dgx-spark-1 --ignore-daemonsets --delete-emptydir-data --dry-run=server 2>&1 | grep -E 'qdrant|dev-lab-0|dev-llms-0|disruption'
 ```
 
 Expected:
 
 ```text
-evicting pod vc-llms/qdrant-0-x-llm-serving-x-llms (server dry run)
-error when evicting pods/"qdrant-0-x-llm-serving-x-llms" -n "vc-llms" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
-evicting pod vc-llms/llms-0 (server dry run)
+evicting pod llm-serving/qdrant-0 (server dry run)
+error when evicting pods/"qdrant-0" -n "llm-serving" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.
 evicting pod vc-dev-lab/dev-lab-0 (server dry run)
+evicting pod vc-dev-llms/dev-llms-0 (server dry run)
 ```
 
 Three things to read out of that:
 
-1. **The block is correct.** One replica, `maxUnavailable: 0` → zero allowed disruptions. Without PDB sync the root would have no idea the pod mattered and would evict a tenant's only copy of its data. That's exactly why the sync is switched on.
-2. **The vCluster control planes are evictable.** `llms-0` and `dev-lab-0` are ordinary StatefulSet pods on the root. A real drain takes both tenant API servers down; tenant pods that are already running are root pods and live on until they are evicted too. The root's own control plane is different: static pods are mirror pods, which `drain` skips.
-3. **One node is every cluster's only node.** Draining dgx-spark-1 for real is a full outage of all three clusters. With dgx-spark-2 joined, the same drain moves pods instead of stopping them, and the PDBs decide the pace.
+1. **The block is correct.** One replica, `maxUnavailable: 0` → zero allowed disruptions. Qdrant is a root object, so the root knew its PDB without help. A tenant's data is different: without PDB sync the root would have no idea a vCluster pod mattered and would evict a tenant's only copy. That's exactly why the sync is switched on for both vClusters.
+2. **The vCluster control planes are evictable.** `dev-lab-0` and `dev-llms-0` are ordinary StatefulSet pods on the root. A real drain takes both tenant API servers down; tenant pods that are already running are root pods and live on until they are evicted too. The root's own control plane is different: static pods are mirror pods, which `drain` skips.
+3. **One node is every cluster's only node.** Draining dgx-spark-1 for real is a full outage of all three clusters and of every model. With dgx-spark-2 joined, the same drain moves pods instead of stopping them, and the PDBs decide the pace.
 
 `scripts/breakfix.sh hint 11` / `answer 11` walk the same diagnosis. The runbook for planned maintenance on a single-replica store: **snapshot → scale to 0 (or delete the PDB) → drain → maintain → uncordon → restore**:
 
 ```bash
-kubectl --context llms -n llm-serving port-forward svc/qdrant 6333 & sleep 2
+kubectl --context spark-root -n llm-serving port-forward svc/qdrant 6333 & sleep 2
 curl -s -X POST localhost:6333/collections/spark/snapshots | jq -r .result.name
 kill %1
-kubectl --context llms -n llm-serving scale sts qdrant --replicas=0
+kubectl --context spark-root -n llm-serving scale sts qdrant --replicas=0
 kubectl --context spark-root drain dgx-spark-1 --ignore-daemonsets --delete-emptydir-data     # really, on maintenance day
 # … maintain, reboot …
 kubectl --context spark-root uncordon dgx-spark-1
-kubectl --context llms -n llm-serving scale sts qdrant --replicas=1
+kubectl --context spark-root -n llm-serving scale sts qdrant --replicas=1
+kubectl --context dev-lab -n lab-tools delete pdb echo                                        # the demo PDB
 ```
 
-Note who does what: the *tenant* (llms admin) scales Qdrant; the *platform* (root admin) drains. In a real organisation that's two teams, and the PDB is their contract. The snapshot lands in the pod's `emptyDir` at `/qdrant/snapshots`, so copy it out (`kubectl --context llms -n llm-serving cp`) before you scale to 0.
+Note who does what. Qdrant runs on the root, so whoever administers the root also operates it: one team scales and drains. For data inside a vCluster it's two teams — the *tenant* scales its store, the *platform* drains — and the synced PDB is their contract. The snapshot lands in the pod's `emptyDir` at `/qdrant/snapshots`, so copy it out (`kubectl --context spark-root -n llm-serving cp`) before you scale to 0.
 
 ---
 
@@ -370,13 +379,14 @@ Note who does what: the *tenant* (llms admin) scales Qdrant; the *platform* (roo
 | Check | Expected |
 |---|---|
 | `points_count` after deleting `qdrant-0` | 2 |
-| `kubectl --context spark-root -n vc-llms get sts` | only `llms` |
+| `kubectl --context spark-root -n llm-serving get sts` | `qdrant`, a root object |
+| `kubectl --context spark-root -n vc-dev-lab get sts` | only `dev-lab` |
 | DaemonSet `DESIRED = READY` | 1 (2 with dgx-spark-2) |
 | tokenizer at `parallelism: 3` | `FailedCreate … exceeded quota: tenant-budget` in dev-lab, still 2 pods running |
 | `completedIndexes` of a clean run | `0-7` |
 | corrupt-shard run | `failedIndexes: 3`, one pod for index 3 |
-| `kubectl --context spark-root get pdb -A` | `qdrant-x-llm-serving-x-llms` in `vc-llms` |
-| drain dry-run | blocked by that PDB |
+| `kubectl --context spark-root get pdb -A` | `qdrant` in `llm-serving`, `echo-x-lab-tools-x-dev-lab` in `vc-dev-lab` |
+| drain dry-run | blocked by the `qdrant` PDB |
 
 ---
 
@@ -384,9 +394,9 @@ Note who does what: the *tenant* (llms admin) scales Qdrant; the *platform* (roo
 
 | Symptom | Cause | Diagnose | Fix |
 |---|---|---|---|
-| StatefulSet stuck at `qdrant-0` Pending | PVC can't bind (StorageClass missing on the root, or node-affinity of an old PV) | `kubectl --context llms -n llm-serving describe pvc data-qdrant-0` (events copied from the root PVC) | `scripts/install-addons.sh storage`. Delete a stale PV on the root only if you mean to lose data |
-| `qdrant-0` Pending in llms with a sync error, no scheduler events | root quota on `vc-llms` spent (memory or `requests.storage`) | `kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget` | free capacity in llms or resize the vCluster (Chapter 04 §6.5) |
-| Rolling update stuck on the highest ordinal | new pod never Ready (bad image/config), and OrderedReady waits forever | `kubectl --context llms -n llm-serving rollout status sts/qdrant`, pod events | fix the spec, then **delete the stuck pod** (StatefulSets don't auto-replace a broken new revision) |
+| StatefulSet stuck at `qdrant-0` Pending | PVC can't bind (StorageClass missing on the root, or node-affinity of an old PV) | `kubectl --context spark-root -n llm-serving describe pvc data-qdrant-0` | `scripts/install-addons.sh storage`. Delete a stale PV on the root only if you mean to lose data |
+| `qdrant-0` never created; StatefulSet event `FailedCreate … exceeded quota: serving-budget` | `llm-serving`'s quota spent (the models hold the memory limits, or `requests.storage`) | `kubectl --context spark-root -n llm-serving describe resourcequota serving-budget` | scale a model down or park it ([Chapter 20 §9](20-vllm-high-throughput-llm-serving.md)) |
+| Rolling update stuck on the highest ordinal | new pod never Ready (bad image/config), and OrderedReady waits forever | `kubectl --context spark-root -n llm-serving rollout status sts/qdrant`, pod events | fix the spec, then **delete the stuck pod** (StatefulSets don't auto-replace a broken new revision) |
 | Data "lost" after `kubectl delete sts` | you also deleted PVCs, or reclaimPolicy was Delete | `kubectl --context spark-root get pv \| grep qdrant` | use `local-nvme-retain` + retention policy Retain (as in the lab) |
 | DaemonSet `DESIRED 0` | nodeSelector label missing (node joined without the role's kubelet labels) | `kubectl --context spark-root get nodes -L spark.lab/gpu` | re-run `19.1-kubernetes.yml`, or `kubectl --context spark-root label node dgx-spark-1 spark.lab/gpu=gb10` |
 | DaemonSet pod rejected by PSA | applied into a `baseline` namespace (e.g. a vCluster) | the `FailedCreate` event names `hostPath` | node-level tools go in root `platform-tools` |
@@ -404,14 +414,14 @@ Note who does what: the *tenant* (llms admin) scales Qdrant; the *platform* (roo
 | Qdrant ×1, `maxUnavailable: 0` | Qdrant ×3 with replication factor 2, `maxUnavailable: 1`, anti-affinity across nodes/racks, scheduled snapshots to S3 |
 | tenant PDBs synced into one root | the same contract between tenant and platform teams; drains automated by the platform and paced by PDBs |
 | node probe DaemonSet | dcgm-exporter + node-feature-discovery + NVIDIA health checks (GPU Operator), NPD (node-problem-detector) |
-| one root node, every drain is an outage | ≥ 2 worker nodes, so a drain moves vCluster control planes and tenant pods instead of stopping them |
+| one root node, every drain is an outage | ≥ 2 worker nodes, so a drain moves vCluster control planes, model servers and tenant pods instead of stopping them |
 | Indexed Job on one node | JobSet / Kueue with many nodes. Ray Data or Spark for truly large corpora (module 05-NeMo Curator) |
 
 ---
 
 ## 9. Checklist
 
-- [ ] I killed `qdrant-0` and got the same name, the same PVC and the same vectors back — and found its host copy, PVC and directory on the root.
+- [ ] I killed `qdrant-0` and got the same name, the same PVC and the same vectors back — and found its directory on the Spark's NVMe.
 - [ ] I can say which cluster's controller owns a StatefulSet, a Job, a DaemonSet and a PDB in this lab.
 - [ ] I staged a StatefulSet update with `partition` without restarting anything.
 - [ ] My DaemonSet runs on cordoned nodes and feeds Prometheus through the host textfile collector.

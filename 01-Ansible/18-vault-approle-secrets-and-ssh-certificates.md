@@ -441,7 +441,7 @@ And the expiry test of Chapter 04 §9: 16 minutes after a task, `docker compose 
 | Semaphore (Chapter 01, Chapter 04) | Variable group with AppRole `semaphore` → play 1 → token + certificate per task; ansible-vault password as a Key Store key |
 | `11.1 Containers` (Chapter 11) | NGC key from `hostvars['localhost'].vault_lab_secrets` (play 1), else `ngc_api_key` from ansible-vault |
 | AWX (Chapter 24) | Credential types **HashiCorp Vault Secret Lookup** (AppRole) + **HashiCorp Vault Signed SSH**, so AWX never stores the NGC key or a private SSH key |
-| Kubernetes pods (Chapter 20) | Vault Agent Injector or External Secrets; a Kubernetes auth method replaces AppRole for pods. Use one auth mount per cluster (`spark-root`, `dev-lab`, `llms`): each vCluster has its own API server and ServiceAccount token issuer |
+| Kubernetes pods (Chapter 20) | Vault Agent Injector or External Secrets; a Kubernetes auth method replaces AppRole for pods. Use one auth mount per cluster (`spark-root` for the model servers in `llm-serving`, `dev-lab`, `dev-llms`): each vCluster has its own API server and ServiceAccount token issuer |
 | Grafana / Prometheus (Chapter 12) | a `kv/spark-lab/grafana` secret, added to play 1's loop, feeding `gpu_telemetry_grafana_admin_password` |
 | CI (Chapter 25) | no Vault access at all for lint/test, or a separate AppRole with a lint-only policy; never AppRole `semaphore` |
 

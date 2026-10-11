@@ -255,7 +255,7 @@ The lesson carries over: **every storage client with a kernel module must be par
 
 | System | Integration |
 |---|---|
-| Kubernetes (Chapter 19) | On the root cluster (`spark-root`), expose `/mnt/models` to platform pods with a `hostPath` volume, or install `csi-driver-nfs` with `mountOptions: [vers=4.2, proto=rdma, port=20049]`. Inside the `llms` vCluster, `llm-serving` enforces Pod Security `baseline`, which forbids `hostPath`; use a PVC instead. The vCluster syncs it to the root (namespace `vc-llms`) and sees the root's StorageClasses, so an NFS-backed class on the root works there too |
+| Kubernetes (Chapter 19) | On the root cluster (`spark-root`), expose `/mnt/models` to platform pods with a `hostPath` volume, or install `csi-driver-nfs` with `mountOptions: [vers=4.2, proto=rdma, port=20049]`. The model servers run on the root too, but `llm-serving` enforces Pod Security `baseline`, which forbids `hostPath`; use a PVC there, backed by an NFS StorageClass on the root. A sandbox pod in the `dev-llms` vCluster does the same: the vCluster syncs its PVC to the root (namespace `vc-dev-llms`) and sees the root's StorageClasses, so the same NFS-backed class works there |
 | Slurm (Chapter 22) | Same path on every compute node, so jobs are location-independent |
 | Telemetry (Chapter 12) | node_exporter's `nfs`/`mountstats` collectors expose client RPC latency |
 | Drain (Chapter 29) | Drain the client **before** rebooting the server, or `hard` mounts will hang processes until it's back |

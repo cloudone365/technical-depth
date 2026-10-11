@@ -413,7 +413,7 @@ Run `ansible-playbook playbooks/17.1-vault.yml` with that token (on the MacBook,
 | Lab secrets (NGC key) | play 1's token reads `kv/data/spark-lab/*` when `vault_lab_secrets_enabled=true` | [`11.1-containers.yml`](lab/playbooks/11.1-containers.yml), [`18.1-vault-integration.yml`](lab/playbooks/18.1-vault-integration.yml), Chapters 11, 18 |
 | ansible-vault password | `kv/spark-lab/ansible-vault`, read by [`tools/vault-pass.sh`](lab/tools/vault-pass.sh) | Chapter 18 §3.4 |
 | AWX | "HashiCorp Vault Secret Lookup" and "HashiCorp Vault Signed SSH" credential types | Chapter 24 |
-| Kubernetes pods (root cluster or inside `dev-lab` / `llms`) | Vault Agent Injector or the External Secrets Operator; each vCluster has its own API server and ServiceAccount issuer, so it needs its own Kubernetes auth mount on vault01 | Chapter 20 |
+| Kubernetes pods (root cluster, including the model servers in `llm-serving`, or inside `dev-lab` / `dev-llms`) | Vault Agent Injector or the External Secrets Operator; each vCluster has its own API server and ServiceAccount issuer, so it needs its own Kubernetes auth mount on vault01 | Chapter 20 |
 
 ## 5. Production hardening
 

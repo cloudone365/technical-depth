@@ -7,7 +7,7 @@
 | **You will build** | Git as the only way to change the platform: CI validates every change without a GPU (on kind, with the same root + two vClusters shape), one Argo CD on the root syncs the lab layers to **three clusters** in dependency order, models and engines are promoted through canaries, and a rollback is `git revert` |
 | **Hardware** | dgx-spark-1 + a GitHub fork of this repo |
 | **Time** | 60 min |
-| **Clusters** | `spark-root` (Argo CD in `argocd`, the root layers, the vCluster budgets) · `dev-lab` and `llms` (Argo CD destinations, reached on their MetalLB API IPs `.111` / `.112`) |
+| **Clusters** | `spark-root` (Argo CD in `argocd`, the root layers, the vCluster budgets, the LLM stack from `manifests/root-llms`) · `dev-lab` and `dev-llms` (Argo CD destinations, reached on their MetalLB API IPs `.111` / `.112`) |
 | **Lab files** | [`gitops/applications.yaml`](lab/gitops/applications.yaml), [`scripts/argocd-register-vclusters.sh`](lab/scripts/argocd-register-vclusters.sh), [`scripts/install-addons.sh`](lab/scripts/install-addons.sh) `argocd`, [`.github/workflows/k8s-lab-ci.yml`](../.github/workflows/k8s-lab-ci.yml), [`tests/`](lab/tests/), [`versions.env`](lab/versions.env) |
 
 ---
@@ -20,16 +20,16 @@ flowchart LR
   subgraph CI["GitHub Actions (no GPU)"]
     direction TB
     S1["yamllint · kubeconform · budget_check<br/>promtool · shellcheck · py_compile"]
-    S2["kind root (fake GB10, 15 slices)<br/>+ vClusters dev-lab, llms<br/>apply · admission · Kueue gang test"]
+    S2["kind root (fake GB10, 15 slices, LLM stack)<br/>+ vClusters dev-lab, dev-llms<br/>apply · admission · Kueue gang test"]
     S1 --> S2
   end
   PR --> CI -->|green + review| MAIN["main"]
-  MAIN --> ARGO["Argo CD on spark-root<br/>20 Applications · sync waves"]
+  MAIN --> ARGO["Argo CD on spark-root<br/>23 Applications · sync waves"]
   subgraph DEST["three destinations"]
     direction TB
-    R["in-cluster<br/>kubernetes.default.svc<br/>root layers + vCluster budgets"]
+    R["in-cluster<br/>kubernetes.default.svc<br/>root layers + vCluster budgets<br/>+ LLM stack (root-llms)"]
     D["dev-lab<br/>https://192.168.0.111:443"]
-    L["llms<br/>https://192.168.0.112:443"]
+    L["dev-llms<br/>https://192.168.0.112:443"]
   end
   ARGO --> R & D & L
   DEST --> VER["scripts/verify.sh<br/>(post-sync gate)"]
@@ -50,34 +50,36 @@ flowchart LR
 
 | Concern | Lab mechanism | Where |
 |---|---|---|
-| Validation | static checks + `budget_check.py` (the vClusters' budgets add up, inner ceilings fit their vCluster) + kind-with-fake-GPU CI that builds the root and both vClusters | `k8s-lab-ci.yml`, `tests/` |
+| Validation | static checks + `budget_check.py` (the vCluster and LLM budgets add up, inner ceilings fit their vCluster, every GPU container in `root-llms` sets memory request = limit) + kind-with-fake-GPU CI that builds the root and both vClusters | `k8s-lab-ci.yml`, `tests/` |
 | Desired state | Git, one Argo CD Application per `manifests/<cluster>/<layer>` | `gitops/applications.yaml` |
 | Destinations | the root (`in-cluster`) and two vClusters registered as clusters | `scripts/argocd-register-vclusters.sh` |
-| Ordering | sync waves (-10 → 10): root platform → vCluster budgets → in-vCluster platform → policy → workloads. CRD-dependent layers last | annotations |
+| Ordering | sync waves (-10 → 10): root platform → vCluster budgets → LLM stack / in-vCluster platform → policy → workloads. CRD-dependent layers last | annotations |
 | Drift | `selfHeal: true`: a manual `kubectl edit` in any of the three clusters is reverted within minutes | Argo CD |
 | Safety | `prune: false` on namespaces, budgets and storage layers; the vClusters themselves (Helm releases) are **not** Argo CD apps | `applications.yaml` |
 | Secrets | never in Git. Vault (01-Ansible Chapter 18) → Kubernetes Secrets (Vault Agent / External Secrets) | `hf-token`, `llm-api-users`, TLS |
 | Versions | one file | `versions.env` |
-| Progressive delivery | HTTPRoute weights (90/10 → 50/50 → 0/100) on Traefik inside llms | Chapter 11 §5.7 |
+| Progressive delivery | HTTPRoute weights (90/10 → 50/50 → 0/100) on Traefik in the root's `ingress` | Chapter 11 §5.7 |
 | Rollback | `git revert` → auto-sync | Argo CD |
 
 ### 1.1 The Applications
 
-| Wave | Root (`in-cluster`) | dev-lab (`.111`) | llms (`.112`) |
-|---|---|---|---|
-| -10 | `spark-root-00-platform` | | |
-| -9 | `spark-root-05-vclusters` (namespaces, quotas, LimitRanges, Cilium boundary) | | |
-| -8 | | `spark-dev-lab-00-platform` | `spark-llms-00-platform` |
-| -5 | `spark-root-16-apf` | `spark-dev-lab-10-tenancy`, `-15-admission`, `-16-apf` | `spark-llms-10-tenancy`, `-15-admission` |
-| 0 | `spark-root-30-networking`, `-45-controller`, `-50-workloads`, `-70-gpu` | `spark-dev-lab-30-networking` | `spark-llms-60-storage` |
-| 5 | | | `spark-llms-40-ingress`, `-50-workloads`, `-20-scheduling` |
-| 10 | `spark-root-95-observability` | | |
+| Wave | Root platform (`in-cluster`) | Root LLM stack (`in-cluster`) | dev-lab (`.111`) | dev-llms (`.112`) |
+|---|---|---|---|---|
+| -10 | `spark-root-00-platform` | | | |
+| -9 | `spark-root-05-vclusters` (namespaces, quotas, LimitRanges, Cilium boundary) | | | |
+| -8 | | `spark-root-llms-00-platform` | `spark-dev-lab-00-platform` | `spark-dev-llms-00-platform` |
+| -5 | `spark-root-16-apf` | `spark-root-llms-10-tenancy`, `-15-admission` | `spark-dev-lab-10-tenancy`, `-15-admission`, `-16-apf` | `spark-dev-llms-10-tenancy`, `-15-admission` |
+| 0 | `spark-root-30-networking`, `-45-controller`, `-50-workloads`, `-70-gpu` | `spark-root-llms-60-storage` | `spark-dev-lab-30-networking` | |
+| 5 | | `spark-root-llms-40-ingress`, `-50-workloads`, `-20-scheduling` | | |
+| 10 | `spark-root-95-observability` | | | |
 
-Not in Git-driven sync on purpose: the vCluster Helm releases (an Application that can prune a whole vCluster is one typo away from deleting it — 01-Ansible `roles/vclusters` or `install-addons.sh vclusters` own them), the add-ons (`install-addons.sh`), and the labs you change by hand while learning (`root/12-cgroups`, `llms/80-distributed`, `llms/90-serving` — whose `vllm.yaml` also carries a placeholder `hf-token` Secret that GitOps would keep overwriting).
+The `spark-root-llms-*` apps have the same destination as the root's platform apps — the LLM stack is root namespaces (`llm-serving`, `batch`, `ingress`), so Argo CD writes its objects straight to the root API server, with no vCluster in between. dev-llms gets only its platform, tenancy and admission layers: what runs in its `llm-sandbox` is short-lived trial work, applied by hand.
+
+Not in Git-driven sync on purpose: the vCluster Helm releases (an Application that can prune a whole vCluster is one typo away from deleting it — 01-Ansible `roles/vclusters` or `install-addons.sh vclusters` own them), the add-ons (`install-addons.sh`), and the labs you change by hand while learning (`root/12-cgroups`, `root-llms/80-distributed`, `root-llms/90-serving` — whose `vllm.yaml` also carries a placeholder `hf-token` Secret that GitOps would keep overwriting).
 
 ### 1.2 How Argo CD reaches a vCluster
 
-Argo CD runs in the root's `argocd` namespace. For dev-lab and llms it's an ordinary external cluster: a `cluster` Secret holding the vCluster's API URL and the client certificate vCluster exported into Secret `vc-<name>` in `vc-<name>`. The script writes exactly what `argocd cluster add` would, without needing the `argocd` CLI. The traffic goes Argo CD pod → `192.168.0.11x:443` → (the root's kube-proxy turns the LoadBalancer IP into the vCluster pod) → the vCluster API server. Two consequences:
+Argo CD runs in the root's `argocd` namespace. For dev-lab and dev-llms it's an ordinary external cluster: a `cluster` Secret holding the vCluster's API URL and the client certificate vCluster exported into Secret `vc-<name>` in `vc-<name>`. The script writes exactly what `argocd cluster add` would, without needing the `argocd` CLI. The traffic goes Argo CD pod → `192.168.0.11x:443` → (the root's kube-proxy turns the LoadBalancer IP into the vCluster pod) → the vCluster API server. Two consequences:
 
 - Argo CD's watches and applies load the **vCluster's** API server (in its budget, behind its APF), not the root's. What reaches the root is the syncer's traffic, in the `spark-vcluster-syncers` APF lane.
 - Objects Argo CD creates in a vCluster carry its tracking annotation *inside* the vCluster. Their synced copies on the root are owned by the syncer, so the root-side `spark-root-*` apps never fight over them.
@@ -95,14 +97,14 @@ export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 
 ```bash
 scripts/install-addons.sh argocd                       # Argo CD (versions.env ARGOCD_VERSION) into argocd on spark-root
-scripts/argocd-register-vclusters.sh                   # cluster Secrets for dev-lab and llms
+scripts/argocd-register-vclusters.sh                   # cluster Secrets for dev-lab and dev-llms
 kubectl --context spark-root -n argocd get secret -l argocd.argoproj.io/secret-type=cluster \
   -o custom-columns=NAME:.metadata.name,SERVER:.data.server
 kubectl --context spark-root -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo
 kubectl --context spark-root -n argocd port-forward svc/argocd-server 8443:443 &      # https://localhost:8443  (admin / above)
 ```
 
-The `SERVER` column is base64; `echo <value> | base64 -d` shows `https://192.168.0.111:443` and `https://192.168.0.112:443`. In the UI, *Settings → Clusters* lists `in-cluster`, `dev-lab` and `llms`.
+The `SERVER` column is base64; `echo <value> | base64 -d` shows `https://192.168.0.111:443` and `https://192.168.0.112:443`. In the UI, *Settings → Clusters* lists `in-cluster`, `dev-lab` and `dev-llms`.
 
 ### 2.2 Point it at your fork and sync
 
@@ -113,7 +115,7 @@ kubectl --context spark-root -n argocd get applications \
   -o custom-columns=APP:.metadata.name,DEST:.spec.destination.server,WAVE:.metadata.annotations.argocd\\.argoproj\\.io/sync-wave,SYNC:.status.sync.status,HEALTH:.status.health.status
 ```
 
-Expected after a few minutes: every app `Synced` / `Healthy`. `spark-llms-40-ingress` and `spark-llms-20-scheduling` report `SyncFailed`/`Missing` until Traefik and Kueue are installed **inside llms** (`scripts/install-addons.sh traefik`, `kueue`) — the CRDs they need exist only in that vCluster. `spark-root-95-observability` needs kube-prometheus-stack's CRDs on the root (`install-addons.sh kps`).
+Expected after a few minutes: every app `Synced` / `Healthy`. `spark-root-llms-40-ingress` and `spark-root-llms-20-scheduling` report `SyncFailed`/`Missing` until Traefik and Kueue are installed on the root (`scripts/install-addons.sh traefik`, then `kueue`) — they need the Gateway API, Traefik and Kueue CRDs. `spark-root-95-observability` needs kube-prometheus-stack's CRDs on the root (`install-addons.sh kps`).
 
 Applied like this, the Applications all start at once, and the sync waves don't order them — waves order resources *within one sync*. The `retry` block (5 tries, backoff to 3 min) is what lets a layer whose namespace doesn't exist yet succeed on a later try. For real ordering, sync `applications.yaml` itself from a parent **app-of-apps**:
 
@@ -143,7 +145,7 @@ kubectl --context spark-root -n argocd get application spark-dev-lab-10-tenancy 
 kubectl --context dev-lab -n tenant-alpha get resourcequota tenant-budget -o jsonpath='{.spec.hard.limits\.cpu}{"\n"}'   # back to 500m
 ```
 
-Argo CD on the root noticed a change inside dev-lab's own API server and reverted it there. Even during those minutes, tenant-alpha could never have used 4 CPU: the root's `vcluster-budget` caps all of dev-lab at 2. Drift inside a vCluster is a policy problem; drift on the root (`spark-root-05-vclusters`) is a capacity problem — try the same patch on `vc-llms`'s `vcluster-budget` and watch it revert too. From now on, resizing a vCluster (Chapter 04 §6.5) is a Git change.
+Argo CD on the root noticed a change inside dev-lab's own API server and reverted it there. Even during those minutes, tenant-alpha could never have used 4 CPU: the root's `vcluster-budget` caps all of dev-lab at 2. Drift inside a vCluster is a policy problem; drift on the root (`spark-root-05-vclusters`) is a capacity problem — try the same patch on `vc-dev-llms`'s `vcluster-budget`, or on `llm-serving`'s `serving-budget` (`spark-root-llms-10-tenancy`), and watch it revert too. From now on, resizing a vCluster (Chapter 04 §6.5) is a Git change.
 
 > **Drills vs GitOps:** with `selfHeal: true`, Argo CD "fixes" most `breakfix.sh` injections by itself within minutes, which spoils the exercise. Pause the app first: `kubectl --context spark-root -n argocd patch application <app> --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}'`, then re-apply `gitops/applications.yaml` afterwards (`kubectl --context spark-root apply -n argocd -f gitops/applications.yaml`).
 
@@ -160,9 +162,9 @@ Argo CD on the root noticed a change inside dev-lab's own API server and reverte
 
 | Step | Change in Git | Gate |
 |---|---|---|
-| budget | does the canary fit? Two 32 Gi engines fit `llm-serving` (Chapter 20 §9), so old and new can run side by side if their util sum stays ≲ 0.70 (Chapter 20 §2). If a second engine is already running, park it, or raise `serving-budget` and the llms `vcluster-budget` in the same PR | `budget_check.py` in CI |
-| prefetch | `model-prefetch-job.yaml` `MODEL=`/`REVISION=` new revision (in llms) | Job completes |
-| canary | a second Deployment (e.g. `vllm-canary`) + HTTPRoute weight 10 on `lab-gateway` | `vllm bench serve` (Chapter 20 §5.5) + TTFT/TPOT alerts quiet for 1 h, filtered by `vcluster="llms"` |
+| budget | does the canary fit? Two 32 Gi engines fit `serving-budget`'s 90 Gi (Chapter 20 §9), so old and new can run side by side if their util sum stays ≲ 0.72 (Chapter 20 §2). A third 32 Gi engine doesn't fit: park it, or lower its `--gpu-memory-utilization` and memory request (request = limit) in the same PR. The scheduler enforces the rest — a canary that doesn't fit waits Pending and never squeezes the running model | `budget_check.py` in CI |
+| prefetch | `model-prefetch-job.yaml` `MODEL=`/`REVISION=` new revision (in the root's `llm-serving`) | Job completes |
+| canary | a second Deployment (e.g. `vllm-canary`) + HTTPRoute weight 10 on `lab-gateway` | `vllm bench serve` (Chapter 20 §5.5) + TTFT/TPOT alerts quiet for 1 h, filtered by `vcluster="root", vnamespace="llm-serving"` |
 | ramp | weights 50/50, then 0/100 | same |
 | cleanup | delete the old Deployment (and shrink the budgets back, if you raised them) | `verify.sh serving` |
 
@@ -176,7 +178,7 @@ Pin every image by tag (the admission policy forbids `:latest`). For immutable p
 - [ ] CI green: static checks + `budget_check.py` + kind apply on root and both vClusters + admission fixtures + gang test.
 - [ ] Secrets referenced, not committed.
 - [ ] Versions updated in `versions.env` and in the manifests.
-- [ ] Capacity changes touch both layers: the tenant ceiling inside the vCluster and the vCluster's root budget.
+- [ ] Capacity changes touch every layer they cross: the tenant ceiling inside the vCluster and the vCluster's root budget; for the LLM stack, `serving-budget`/`batch-budget` and Kueue's `spark-cq` together (`budget_check.py` checks both).
 - [ ] Post-sync `scripts/verify.sh` green. Dashboards and alerts checked.
 - [ ] Rollback path tested (revert, sync, verify).
 
@@ -188,7 +190,7 @@ Pin every image by tag (the admission policy forbids `:latest`). For immutable p
 |---|---|
 | one Argo CD on the root, three destinations | Argo CD ApplicationSets with a cluster generator (one template per layer, every registered cluster: spark pair, staging, prod), or Flux per cluster |
 | vClusters registered by a script | vCluster Platform or Cluster API creating clusters and registering them with Argo CD in the same pipeline |
-| add-ons via `install-addons.sh` | add-ons as Argo CD Helm Applications with pinned chart versions, destination = the vCluster that needs them (Kueue, KEDA, KServe → llms) |
+| add-ons via `install-addons.sh` | add-ons as Argo CD Helm Applications with pinned chart versions, destination = the cluster that needs them (Kueue, KEDA, KServe, Traefik → the root, next to the models) |
 | kind + fake GPU in CI | + a self-hosted arm64 GPU runner (a Spark) for smoke tests on real hardware (the 01-Ansible CI shows the pattern) |
 | manual canary steps | Argo Rollouts / Flagger with Prometheus analysis on TTFT/TPOT/error rate |
 | model files by HF revision | model registry (MLflow, NGC private registry, Hugging Face revisions pinned by commit hash) |

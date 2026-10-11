@@ -1,6 +1,6 @@
 # 02-Kubernetes · Kubernetes for AI Infrastructure on NVIDIA DGX Spark
 
-Twenty-eight chapters that turn one DGX Spark into a small but complete **AI datacenter platform**. The [01-Ansible](../01-Ansible/README.md) lab builds a **root Kubernetes cluster with kubeadm** (the Spark is its control plane *and* its worker) and two **virtual clusters** inside it: `dev-lab` for tenants and experiments, `llms` for model serving and training. On top of that you build a hardened control plane, budgeted tenants, GPU sharing, gang-scheduled training, an LLM API gateway, vLLM/Triton/SGLang serving, observability, drills and GitOps. Every chapter's document follows the same shape: **HLD → LLD → integrations → lab → verification with expected output → troubleshooting → scale-out path**. Every command runs against the files in [`lab/`](lab/README.md), and every chapter says which of the three clusters it uses.
+Twenty-eight chapters that turn one DGX Spark into a small but complete **AI datacenter platform**. The [01-Ansible](../01-Ansible/README.md) lab builds a **root Kubernetes cluster with kubeadm** (the Spark is its control plane *and* its worker) that runs model serving and training itself, and two small **virtual clusters** inside it: `dev-lab` for tenants and experiments, `dev-llms` as an LLM sandbox. On top of that you build a hardened control plane, budgeted tenants, GPU sharing, gang-scheduled training, an LLM API gateway, vLLM/Triton/SGLang serving, observability, drills and GitOps. Every chapter's document follows the same shape: **HLD → LLD → integrations → lab → verification with expected output → troubleshooting → scale-out path**. Every command runs against the files in [`lab/`](lab/README.md), and every chapter says which of the three clusters it uses.
 
 **Prerequisite:** the [01-Ansible step-by-step guide](../01-Ansible/00-ansible-step-by-step-guide.md) through Chapter 20, which leaves the root cluster, the GPU Operator and both vClusters running, and the kubeconfig on your MacBook (`01-Ansible/lab/tools/fetch-kubeconfig.sh sema01`).
 
@@ -27,19 +27,22 @@ References read "Chapter 08 §3.4" inside this module and "01-Ansible Chapter 19
 
 ## The lab in one picture: three clusters nested on one Spark
 
-![DGX Spark nested Kubernetes lab: your MacBook as a client, sema01 (Semaphore) and vault01 outside the Spark, a kubeadm root cluster on the Spark, and the dev-lab and llms vClusters inside it](diagrams/nested-lab-architecture.svg)
+![DGX Spark nested Kubernetes lab: your MacBook as a client, sema01 (Semaphore) and vault01 outside the Spark, a kubeadm root cluster on the Spark running the LLM stack, and the dev-lab and dev-llms vClusters inside it](diagrams/nested-lab-architecture.svg)
 
 Read it from the outside in:
 
 1. **Your MacBook is a client, nothing more.** It holds a browser, `git` and `kubectl` (+ `helm`), and one kubeconfig with three contexts. No Kubernetes component and no automation run on it; it reaches the lab over the home LAN — a browser to Semaphore, Grafana and the LLM gateway, `kubectl` to three API endpoints. Its kubeconfig is fetched from sema01 with `01-Ansible/lab/tools/fetch-kubeconfig.sh sema01` after each `19.1 Kubernetes` / `20.2 vClusters` run.
 2. **The management plane sits outside the Spark.** `sema01` (192.168.0.210) runs **every** lab playbook as a Semaphore task; `vault01` (192.168.0.211) hands each task a **15-minute SSH certificate** for `svc-ansible` and holds the lab's secrets. Both were built in [01-Ansible Chapter 01](../01-Ansible/01-management-plane-semaphore-and-vault.md), and [Chapter 04](../01-Ansible/04-dgx-spark-as-semaphore-target.md) made the Spark their target — so a reset or a rebuild of the Spark never takes the tool that rebuilds it.
-3. **The DGX Spark is the whole datacenter.** Every cluster, pod and GPU slice lives on this one box. DGX OS provides the driver, CUDA, containerd and Docker; swap is off.
+3. **The DGX Spark is the whole datacenter.** Every cluster, pod and GPU slice lives on this one box. DGX OS provides the driver, CUDA, containerd and Docker; it runs headless (no desktop) and swap is off.
 4. **The root cluster (`spark-root`) is the platform.** kubeadm installs a real control plane — API server, etcd, scheduler, controller-manager — and the Spark is also its only worker. It owns everything physical: the node and its kubelet/containerd, the network (Cilium, MetalLB), storage, the GPU (GPU Operator → 15 time-slices) and observability. Reach it at `192.168.0.100:6443` with `--context spark-root`.
-5. **Inside it, two virtual clusters.** `dev-lab` (`192.168.0.111`) and `llms` (`192.168.0.112`) each have their own API server, controller-manager, CoreDNS and datastore — so their users get their own namespaces, RBAC, CRDs and policies — but those run as ordinary pods in the root namespaces `vc-dev-lab` and `vc-llms`. They have no nodes of their own.
-6. **The syncer is the bridge.** When you create a pod in `llms`, the llms API server stores it and the llms syncer copies it to the root (`vllm-…-x-llm-serving-x-llms` in `vc-llms`). From there the **root** scheduler places it, the root kubelet starts it in containerd, Cilium wires its network and the GPU Operator's device plugin hands it a slice.
-7. **Budgets are enforced at the root.** A ResourceQuota on `vc-dev-lab` (2 CPU · 8 Gi · 2 slices) and `vc-llms` (12 CPU · 88 Gi · 11 slices) caps each vCluster as a whole; quotas inside a vCluster only divide its share among its own teams. After the kubelet reservations (3 CPU · 14 GiB), the root keeps the rest (3 CPU · ~9.7 GiB · 2 slices) for the platform. Memory is never overcommitted; llms is the large one because the models run there.
+5. **The root runs the LLMs.** Model serving and training live in ordinary root namespaces: `llm-serving` (vLLM, Triton, SGLang, KServe), `batch` (Kueue-managed training) and `ingress` (Traefik, the LLM gateway on `192.168.0.115`), with Kueue, KEDA, KServe and cert-manager installed on the root as well. A vLLM pod is `vllm-…` in `llm-serving` — no translation, no second quota.
+6. **Inside it, two small virtual clusters.** `dev-lab` (`192.168.0.111`) and `dev-llms` (`192.168.0.112`) each have their own API server, controller-manager, CoreDNS and datastore — so their users get their own namespaces, RBAC, CRDs and policies — but those run as ordinary pods in the root namespaces `vc-dev-lab` and `vc-dev-llms`. They have no nodes of their own. `dev-lab` holds the tenants (`tenant-alpha`, `tenant-beta`, `lab-tools`); `dev-llms` is a sandbox (`llm-sandbox`) for trying LLM manifests, the mock LLM or a tiny model before they go to the root.
+7. **The syncer is the bridge for the vClusters.** When you create a pod in `dev-lab`, the dev-lab API server stores it and the dev-lab syncer copies it to the root (`echo-…-x-lab-tools-x-dev-lab` in `vc-dev-lab`). From there the **root** scheduler places it, the root kubelet starts it in containerd, Cilium wires its network and the GPU Operator's device plugin hands it a slice.
+8. **Budgets are enforced at the root.** After the kubelet reservations (3 CPU · 12 GiB; DGX OS runs headless), 17 CPU · ~107.7 GiB · 15 slices are allocatable. A ResourceQuota on `vc-dev-lab` and `vc-dev-llms` (2 CPU · 4 Gi · 2 slices each) caps each vCluster as a whole; quotas inside a vCluster only divide its share among its own teams. The root keeps 13 CPU · ~99.7 GiB · 11 slices: 3 CPU · ~9.7 GiB · 2 slices for the platform, and one shared ~90 GiB memory pool for `llm-serving` (8 CPU · 6 slices) and `batch` (2 CPU · 3 slices). Memory is never overcommitted: every model and training container sets memory request = limit, so the scheduler keeps a job from squeezing a running model.
 
-So a tenant's request crosses **two** API servers — the vCluster's (who are you, what may you do, does it fit your team's quota) and then, through the syncer, the root's (does it fit the vCluster's budget, which node, which GPU). [Chapter 04](04-nested-clusters-with-vcluster.md) walks one pod through every hop; [Chapter 05](05-dgx-spark-datacenter-simulation-lab.md) builds the whole thing in order with a check after each stage.
+**Why this split.** The models are the Spark's main job, so they run on the cluster that owns the hardware: all the memory headroom, no syncer translation and no nested quota between them and the GPU. The two vClusters stay small and identical — one for tenancy and syncer drills, one as an LLM sandbox with its own API server. The trade-off: whoever administers the root also operates the LLM stack, which is isolated by namespaces (quotas, policies, PSA, NetworkPolicy), not by its own API server.
+
+So a tenant's request in a vCluster crosses **two** API servers — the vCluster's (who are you, what may you do, does it fit your team's quota) and then, through the syncer, the root's (does it fit the vCluster's budget, which node, which GPU); a model server on the root crosses one. [Chapter 04](04-nested-clusters-with-vcluster.md) walks one pod through every hop; [Chapter 05](05-dgx-spark-datacenter-simulation-lab.md) builds the whole thing in order with a check after each stage.
 
 > **Convention:** `ansible-playbook playbooks/<chapter>.<n>-….yml` in this module = run the Semaphore template `<chapter>.<n> …` in project `spark-lab` — the number is the 01-Ansible chapter that explains it (`00-vault-cert` and `site` are the exceptions) ([01-Ansible Chapter 04](../01-Ansible/04-dgx-spark-as-semaphore-target.md#8-build-the-lab-from-semaphore)); the CLI form is break-glass from the MacBook (`-l dgx-spark-1,localhost -K`).
 
@@ -55,30 +58,33 @@ flowchart TB
       subgraph CP["control plane"]
         API["API server<br/>RBAC · APF · audit"] <--> ETCD[("etcd · snapshots")]
       end
-      subgraph PLAT["platform · keeps 3 CPU · ~9.7 GiB · 2 slices"]
+      subgraph PLAT["platform · 3 CPU · ~9.7 GiB · 2 slices"]
         direction LR
         NET["Cilium · MetalLB"]
         GPU["GPU Operator<br/>15 slices"]
         OBS["kube-prometheus-stack<br/>dashboards · alerts"]
         PT["platform-tools<br/>probes · benchmarks"]
       end
-      subgraph DEV["vCluster dev-lab · 2 CPU · 8 Gi · 2 slices"]
-        TEN["tenant-alpha / tenant-beta<br/>lab-tools"]
-      end
-      subgraph LLM["vCluster llms · 12 CPU · 88 Gi · 11 slices"]
+      subgraph LLM["LLM stack on the root · shared pool ~90 GiB"]
         direction LR
         GW["Traefik gateway<br/>Ingress + Gateway API"]
-        SRV["llm-serving<br/>vLLM · Triton · SGLang · KServe · Qdrant"]
-        BAT["batch<br/>Kueue gangs · torchrun"]
+        SRV["llm-serving · 8 CPU · 6 slices<br/>vLLM · Triton · SGLang · KServe · Qdrant"]
+        BAT["batch · 2 CPU · 3 slices<br/>Kueue gangs · torchrun"]
+      end
+      subgraph DEV["vCluster dev-lab · 2 CPU · 4 Gi · 2 slices"]
+        TEN["tenant-alpha / tenant-beta<br/>lab-tools"]
+      end
+      subgraph DLL["vCluster dev-llms · 2 CPU · 4 Gi · 2 slices"]
+        SBX["llm-sandbox<br/>mock LLM · tiny model"]
       end
     end
     NV[("NVMe · model cache · PVCs")]
   end
   S2["dgx-spark-2 (optional)<br/>root worker · CX-7 200 GbE"]
   GW --> SRV
-  SRV & BAT & TEN & PT --> GPU
+  SRV & BAT & TEN & SBX & PT --> GPU
   SRV --> NV
-  DEV & LLM -. "pods synced, budgets enforced" .-> API
+  DEV & DLL -. "pods synced, budgets enforced" .-> API
   SPARK <-.-> S2
   classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
   classDef net fill:#8250df,stroke:#4c2889,color:#fff
@@ -92,14 +98,15 @@ flowchart TB
   class GPU,S2 gpu
   class ETCD,NV store
   class OBS obs
-  class SRV,BAT,TEN,PT tenant
+  class SRV,BAT,TEN,SBX,PT tenant
   class U ext
   style SPARK fill:#e6f4f5,stroke:#0e7c86,stroke-width:2px
   style ROOT fill:#ffffff,stroke:#1f6feb
   style CP fill:#ffffff,stroke:#1f6feb
   style PLAT fill:#ffffff,stroke:#8c959f
   style DEV fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
-  style LLM fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
+  style LLM fill:#f3fbe6,stroke:#3d6000
+  style DLL fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
 ```
 
 **Diagram colour key** (all chapters): blue = control plane · teal = host/node · green = GPU · purple = network · amber = storage · orange = observability · red = security/policy · black = external · grey = tenant workload.
@@ -117,8 +124,8 @@ Every document carries its chapter number. Work through them in order with the [
 | 01 | [Kubernetes core architecture](01-kubernetes-core-architecture.md) | read the kubeadm control plane, trace one `kubectl apply` through API → scheduler → kubelet → containerd → nvidia runtime, and through a vCluster |
 | 02 | [etcd database deep dive](02-etcd-database-deep-dive.md) | kubeadm's stacked etcd, SQLite in the vClusters, 3-member sandbox (elections, quorum loss, NOSPACE), restore drill |
 | 03 | [kube-apiserver internals](03-kube-apiserver-internals.md) | x509 users per cluster, 4 CEL policies with dry-run fixtures, fair-queuing lanes for tenants and syncers, audit queries |
-| 04 | [Nested clusters with vCluster](04-nested-clusters-with-vcluster.md) | the lab's shape: budgets, sync, names, the pod's path through three API servers, resize/add/back up a vCluster |
-| 05 | [DGX Spark datacenter simulation lab](05-dgx-spark-datacenter-simulation-lab.md) | the whole platform: root, both vClusters, gates, capacity plan, day-2 ops, dgx-spark-2 plan |
+| 04 | [Nested clusters with vCluster](04-nested-clusters-with-vcluster.md) | the lab's shape: why the LLMs run on the root, budgets and the shared memory pool, sync, names, the pod's path through the API servers, resize/add/back up a vCluster |
+| 05 | [DGX Spark datacenter simulation lab](05-dgx-spark-datacenter-simulation-lab.md) | the whole platform: root with the LLM stack, both vClusters, gates, capacity plan, day-2 ops, dgx-spark-2 plan |
 
 ### Part II — Controllers & scheduling
 
@@ -190,15 +197,15 @@ Every document carries its chapter number. Work through them in order with the [
 | Item | Value |
 |---|---|
 | Nodes | dgx-spark-1 `192.168.0.100` (kubeadm control plane + worker). Optional dgx-spark-2 `192.168.0.101` (worker) |
-| Clusters (contexts) | `spark-root` (kubeadm) · `dev-lab` (vCluster, `https://192.168.0.111`) · `llms` (vCluster, `https://192.168.0.112`) — one kubeconfig: `01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml` |
-| Budgets | dev-lab 2 CPU · 8 Gi · 2 slices · 200 Gi — llms 12 CPU · 88 Gi · 11 slices · 800 Gi — root keeps 3 CPU · ~9.7 GiB · 2 slices, after 3 CPU · 14 GiB of kubelet reservations ([Chapter 04](04-nested-clusters-with-vcluster.md)) |
+| Clusters (contexts) | `spark-root` (kubeadm, runs the LLM stack) · `dev-lab` (vCluster, `https://192.168.0.111`) · `dev-llms` (vCluster, `https://192.168.0.112`) — one kubeconfig: `01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml` |
+| Budgets | after 3 CPU · 12 GiB of kubelet reservations: dev-lab and dev-llms 2 CPU · 4 Gi · 2 slices · 200 Gi each — root keeps 13 CPU · ~99.7 GiB · 11 slices: platform 3 CPU · ~9.7 GiB · 2 slices, `llm-serving` 8 CPU · up to 90 Gi · 6 slices · 1 Ti, `batch` 2 CPU · up to 12 Gi · 3 slices · 200 Gi (one shared ~90 GiB memory pool) ([Chapter 04](04-nested-clusters-with-vcluster.md)) |
 | CX-7 | `192.168.100.0/24` + `192.168.101.0/24`, MTU 9000 |
 | Pods / Services / DNS | `10.42.0.0/16` / `10.43.0.0/16` / `10.43.0.10` (Cilium VXLAN, kube-proxy iptables) |
-| LoadBalancer IPs | MetalLB `192.168.0.110–119`: dev-lab API `.111`, llms API `.112`, llms gateway (Traefik) `.115` |
-| Entry points | root API `:6443` · Grafana `:32000` · Hubble UI `:31235` · llms gateway `192.168.0.115:80` |
+| LoadBalancer IPs | MetalLB `192.168.0.110–119`: dev-lab API `.111`, dev-llms API `.112`, LLM gateway (Traefik on the root) `.115` |
+| Entry points | root API `:6443` · Grafana `:32000` · Hubble UI `:31235` · LLM gateway `192.168.0.115:80` |
 | GPU | GB10, compute capability 12.1, 15 time-slices, no MIG |
 | Versions | [`lab/versions.env`](lab/versions.env) (Kubernetes v1.36.5, Cilium 1.20.2, vCluster 0.37.1, GPU Operator v26.7.1, Kueue v0.13.4, Traefik chart 34.4.1, kps 70.4.2, NGC 25.09 images) |
 
 ## How this module was verified
 
-Without a Spark attached, the lab was applied with **server-side dry-run against real Kubernetes 1.36 API servers** standing in for the root and the two vClusters, carrying the Cilium, Kueue, Gateway API, Traefik, Prometheus Operator and KEDA CRDs: every layer applies, the tenancy checks and the 11 allow/deny admission fixtures pass, and all 39 pod templates are admitted in their target cluster. Both vCluster values files validate against the vCluster 0.37.1 chart schema and the Traefik values against its chart schema; [`tests/budget_check.py`](lab/tests/budget_check.py) proves the budgets fit the Spark. The Python tools (mock OpenAI server, P/D proxy, slice-ledger controller, checkpoint/resume trainer, calculators) were run for real, and all Mermaid diagrams were rendered. CI ([`k8s-lab-ci.yml`](../.github/workflows/k8s-lab-ci.yml)) repeats the static checks, then builds the same shape on kind — kind as the root with a fake GB10, plus vCluster `dev-lab` and `llms` from the lab's own values — applies the lab to all three, runs the fixtures and the Kueue gang test on every PR. GPU-dependent results (TFLOPS, TTFT, NCCL bandwidth, the UMA cgroup experiment) are marked in the documents as **"record yours"**. Those are the numbers to measure on your Spark.
+Without a Spark attached, the lab was applied with **server-side dry-run against real Kubernetes 1.36 API servers** standing in for the root and the two vClusters, carrying the Cilium, Kueue, Gateway API, Traefik, Prometheus Operator and KEDA CRDs: every layer applies, the tenancy checks and the allow/deny admission fixtures pass, and all 39 pod templates are admitted in their target cluster. Both vCluster values files validate against the vCluster 0.37.1 chart schema and the Traefik values against its chart schema; [`tests/budget_check.py`](lab/tests/budget_check.py) proves the budgets fit the Spark. The Python tools (mock OpenAI server, P/D proxy, slice-ledger controller, checkpoint/resume trainer, calculators) were run for real, and all Mermaid diagrams were rendered. CI ([`k8s-lab-ci.yml`](../.github/workflows/k8s-lab-ci.yml)) repeats the static checks, then builds the same shape on kind — kind as the root with a fake GB10, plus vCluster `dev-lab` and `dev-llms` from the lab's own values — applies the lab to all three, runs the fixtures and the Kueue gang test on every PR. GPU-dependent results (TFLOPS, TTFT, NCCL bandwidth, the UMA cgroup experiment) are marked in the documents as **"record yours"**. Those are the numbers to measure on your Spark.

@@ -15,7 +15,7 @@
 
 ## 1. Why this matters on a Spark
 
-One GPU, three clusters, several tenants. The sharing mechanism decides **isolation** (can one tenant crash or starve another?), **accounting** (does the quota mean anything?) and **performance** (what does each tenant actually get?). GB10 has no MIG, so the realistic options are time-slicing and MPS. The lab runs time-slicing with **15 replicas**, which the 01-Ansible `gpu_operator` role configured, and splits them with root quotas: the root keeps 2, `dev-lab` gets 2, `llms` gets 11.
+One GPU, three clusters, several tenants. The sharing mechanism decides **isolation** (can one tenant crash or starve another?), **accounting** (does the quota mean anything?) and **performance** (what does each tenant actually get?). GB10 has no MIG, so the realistic options are time-slicing and MPS. The lab runs time-slicing with **15 replicas**, which the 01-Ansible `gpu_operator` role configured, and splits them with root quotas: `dev-lab` gets 2, `dev-llms` gets 2, the LLM stack on the root gets 6 (`llm-serving`) + 3 (`batch`), and the platform keeps the remaining 2.
 
 | | Time-slicing (lab) | MPS | MIG | Whole GPU |
 |---|---|---|---|---|
@@ -25,7 +25,7 @@ One GPU, three clusters, several tenants. The sharing mechanism decides **isolat
 | Fault isolation | none. One Xid can hit all | none | yes | n/a |
 | Best for | dev pods, small services, CI | many small inference processes | multi-tenant prod on datacenter GPUs | one big model |
 
-The vClusters add no GPU machinery of their own. A tenant pod that asks for `nvidia.com/gpu: 1` inside llms is synced to the root, scheduled by the root scheduler against the root node's 15 slices, and started by the root's kubelet and containerd. Everything in this chapter happens on the root.
+The vClusters add no GPU machinery of their own. A model pod that asks for `nvidia.com/gpu: 1` in the root's `llm-serving` is scheduled by the root scheduler against the root node's 15 slices and started by the root's kubelet and containerd; a tenant pod doing the same inside dev-lab or dev-llms is first synced to the root and then takes exactly the same path. Everything in this chapter happens on the root.
 
 ---
 
@@ -35,9 +35,10 @@ The vClusters add no GPU machinery of their own. A tenant pod that asks for `nvi
 flowchart LR
   subgraph APIS["API servers · who may ask for slices"]
     direction TB
-    RQ["root namespaces<br/>(no quota · keeps 2)"]
+    RQ["root platform namespaces<br/>(no quota · keeps 2)"]
+    SQ["root llm-serving · batch<br/>quota 6 · 3"]
     DQ["dev-lab → vc-dev-lab<br/>quota 2"]
-    LQ["llms → vc-llms<br/>quota 11"]
+    LQ["dev-llms → vc-dev-llms<br/>quota 2"]
   end
   subgraph ROOT["dgx-spark-1 · root node"]
     direction LR
@@ -50,7 +51,8 @@ flowchart LR
     NCR["nvidia-container-runtime<br/>/etc/nvidia-container-runtime/config.toml"]
     INJ["inject into OCI spec:<br/>/dev/nvidia0, /dev/nvidiactl, /dev/nvidia-uvm*<br/>libcuda.so, libnvidia-ml.so, nvidia-smi"]
   end
-  RQ & DQ & LQ -->|"pods (synced)"| DPAPI
+  RQ & SQ -->|"pods"| DPAPI
+  DQ & LQ -->|"pods (synced)"| DPAPI
   DP --> DPAPI
   DPAPI -->|"env NVIDIA_VISIBLE_DEVICES=GPU-uuid"| CTRD
   DOCKER --> CTRD
@@ -65,16 +67,16 @@ flowchart LR
   classDef ext fill:#24292f,stroke:#000,color:#fff
   class DP,NCR,INJ,GPU gpu
   class DPAPI,CTRD node
-  class RQ,DQ,LQ ctrl
+  class RQ,SQ,DQ,LQ ctrl
   class DOCKER ext
   style KUBELET fill:#e6f4f5,stroke:#0e7c86
   style ROOT fill:#ffffff,stroke:#0e7c86,stroke-width:2px
   style APIS fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
 ```
 
-**The split is admission, not hardware.** The device plugin knows nothing about vClusters: it advertises 15 identical slices on the node. The 2 / 2 / 11 split exists only as `requests.nvidia.com/gpu` in the root quotas on `vc-dev-lab` and `vc-llms` (the root's own namespaces are unlimited, so "root keeps 2" means "whatever the vClusters can't take").
+**The split is admission, not hardware.** The device plugin knows nothing about vClusters: it advertises 15 identical slices on the node. The 2 · 6 · 3 · 2 · 2 split exists only as `requests.nvidia.com/gpu` in root ResourceQuotas: `serving-budget` in `llm-serving` (6), `batch-budget` in `batch` (3), and `vcluster-budget` in `vc-dev-lab` and `vc-dev-llms` (2 each). The platform namespaces have no quota, so "platform keeps 2" means "whatever the quotas don't hand out".
 
-**The leak (breakfix 10).** With `default_runtime_name = "nvidia"`, every container on the node goes through `nvidia-container-runtime`. Any image that sets `NVIDIA_VISIBLE_DEVICES=all` (every CUDA base image does) gets the GPU injected, even though it never asked the device plugin — so neither the vCluster's quota nor the root scheduler counted it. Docker containers on the same box are the same story, without any Kubernetes accounting at all.
+**The leak (breakfix 10).** With `default_runtime_name = "nvidia"`, every container on the node goes through `nvidia-container-runtime`. Any image that sets `NVIDIA_VISIBLE_DEVICES=all` (every CUDA base image does) gets the GPU injected, even though it never asked the device plugin — so neither the namespace's quota nor the root scheduler counted it. Docker containers on the same box are the same story, without any Kubernetes accounting at all.
 
 ---
 
@@ -91,7 +93,7 @@ flowchart LR
 | CDI spec | `/etc/cdi/nvidia.yaml` (`nvidia-ctk cdi generate`) | regenerated by 01-Ansible `container_runtime` when the driver changes; used by Docker (`features.cdi: true`) |
 | GPU Operator | Helm values in 01-Ansible `roles/gpu_operator` | `driver.enabled=false`, `toolkit.enabled=false`, `cdi.enabled=false` — DGX OS owns them |
 | RuntimeClass `nvidia` (root) | created by the GPU Operator | handler `nvidia` |
-| RuntimeClass `nvidia` (dev-lab, llms) | [`manifests/common/runtimeclass/`](lab/manifests/common/runtimeclass), applied by each vCluster's `00-platform` | same name and handler |
+| RuntimeClass `nvidia` (dev-lab, dev-llms) | [`manifests/common/runtimeclass/`](lab/manifests/common/runtimeclass), applied by each vCluster's `00-platform` | same name and handler |
 | Time-slicing | ConfigMap `gpu-operator/time-slicing-config` | `replicas: 15`, `renameByDefault: false`, `failRequestsGreaterThanOne: true` |
 
 **Why a RuntimeClass inside each vCluster?** A vCluster has its own API server, and it validates `runtimeClassName` against its *own* objects: a pod naming `nvidia` is rejected there if no RuntimeClass `nvidia` exists in the vCluster. The copy only has to exist; the synced pod carries the name to the root, and the root's containerd resolves handler `nvidia` from `/etc/containerd/config.toml`.
@@ -109,7 +111,7 @@ flowchart LR
 
 ## 4. Integrations
 
-- **01-Ansible**: `kubeadm_cluster_default_runtime_nvidia` (role `kubeadm_cluster`) and `gpu_operator_timeslice_replicas` (role `gpu_operator`) are the two knobs; the vCluster split is `requests.nvidia.com/gpu` in [`manifests/root/05-vclusters/quotas.yaml`](lab/manifests/root/05-vclusters/quotas.yaml). Change the slice count and the quotas together and keep `tests/budget_check.py` green.
+- **01-Ansible**: `kubeadm_cluster_default_runtime_nvidia` (role `kubeadm_cluster`) and `gpu_operator_timeslice_replicas` (role `gpu_operator`) are the two knobs; the split is `requests.nvidia.com/gpu` in [`manifests/root/05-vclusters/quotas.yaml`](lab/manifests/root/05-vclusters/quotas.yaml) (the two vClusters) and [`manifests/root-llms/10-tenancy/quotas.yaml`](lab/manifests/root-llms/10-tenancy/quotas.yaml) (`llm-serving`, `batch`). Change the slice count and the quotas together and keep `tests/budget_check.py` green.
 - **Admission (Chapter 03)**: `spark-no-nvidia-env-bypass` stops explicit env bypasses in tenant namespaces (inside each vCluster). The hardened runtime closes the implicit one.
 - **Kueue / quotas (Chapters 07, 14)** count `nvidia.com/gpu` requests. The leak is exactly the GPU use they *don't* see — and so is the slice ledger in `platform-tools` (Chapter 06).
 - **Chapter 15** gives the single-slice baseline B that §5.3 compares against.
@@ -200,7 +202,7 @@ What to expect, with your baseline B from Chapter 15:
 | 2 | ≈ B/2 | ≈ B (minus switch overhead) |
 | 4 | ≈ B/4 | ≈ B, or a bit lower |
 
-**Time-slicing adds no capacity.** It shares one GPU fairly and costs some context-switch overhead. Fifteen `nvidia.com/gpu` slices don't mean fifteen GPUs. They mean fifteen tickets to one GPU — and the split gives llms 11 tickets, not 11/15 of the GPU's throughput. If llms runs one busy model server and dev-lab runs one, each gets about half while they're both computing, whatever the quota says. While the loop runs, `kubectl --context spark-root -n platform-tools get cm gpu-slice-ledger -o yaml` (Chapter 06) shows the slices in use across all three clusters.
+**Time-slicing adds no capacity.** It shares one GPU fairly and costs some context-switch overhead. Fifteen `nvidia.com/gpu` slices don't mean fifteen GPUs. They mean fifteen tickets to one GPU — and the split gives `llm-serving` 6 tickets, not 6/15 of the GPU's throughput. If `llm-serving` runs one busy model server and dev-lab runs one, each gets about half while they're both computing, whatever the quota says. While the loop runs, `kubectl --context spark-root -n platform-tools get cm gpu-slice-ledger -o yaml` (Chapter 06) shows the slices in use across all three clusters.
 
 ### 5.4 Reproduce and understand the leak
 
@@ -237,7 +239,7 @@ kubectl --context dev-lab apply -f manifests/dev-lab/70-gpu/gpu-smoke.yaml && sl
 kubectl --context dev-lab -n tenant-beta delete pod gpu-smoke
 ```
 
-After hardening, **every GPU pod must set `runtimeClassName: nvidia`**, in whichever cluster it's written. `gpu-smoke.yaml` does. The other lab manifests (the GEMM benchmarks, the UMA experiment, the node probe, the llms serving and training manifests) rely on the default runtime, so add the field to them. The GPU Operator's own pods are fine because the operator sets it. To undo: restore `config.toml.pre-hardening` and restart containerd.
+After hardening, **every GPU pod must set `runtimeClassName: nvidia`**, in whichever cluster it's written. `gpu-smoke.yaml` does. The other lab manifests (the GEMM benchmarks, the UMA experiment, the node probe, the serving and training manifests in `root-llms`) rely on the default runtime, so add the field to them. The GPU Operator's own pods are fine because the operator sets it. To undo: restore `config.toml.pre-hardening` and restart containerd.
 
 ---
 
@@ -250,7 +252,7 @@ scripts/verify.sh gpu
 ```text
 ── gpu
 [PASS] GB10 node: dgx-spark-1
-[PASS] allocatable nvidia.com/gpu=15 (root 2 · dev-lab 2 · llms 11)
+[PASS] allocatable nvidia.com/gpu=15 (platform 2 · llm-serving 6 · batch 3 · dev-lab 2 · dev-llms 2)
 [PASS] operator-validator Running
 [....] gpu-smoke from INSIDE dev-lab (tenant-beta → syncer → root scheduler → nvidia runtime)
 [PASS] gpu-smoke: GPU 0: NVIDIA GB10 (UUID: GPU-…)
@@ -260,7 +262,7 @@ scripts/verify.sh gpu
 |---|---|
 | `sudo nvidia-ctk cdi list` | `nvidia.com/gpu=all` present |
 | allocatable | `nvidia.com/gpu: 15` |
-| root quotas | `requests.nvidia.com/gpu` 2 on `vc-dev-lab`, 8 on `vc-llms` |
+| root quotas | `requests.nvidia.com/gpu` 2 on `vc-dev-lab`, 2 on `vc-dev-llms`, 6 on `llm-serving`, 3 on `batch` |
 | RuntimeClass `nvidia` | on the root and in both vClusters |
 | contention table | aggregate ≈ baseline, per-pod ≈ baseline/N |
 | hardened mode | `bf10-leak` no longer sees the GPU, `gpu-smoke` still does |
@@ -278,6 +280,7 @@ scripts/verify.sh gpu
 | `no runtime for "nvidia" is configured` on the root | runtime not registered in `/etc/containerd/config.toml` | `grep -n nvidia /etc/containerd/config.toml` | `sudo nvidia-ctk runtime configure --runtime=containerd` + restart containerd, or re-run playbook 05 |
 | allocatable `nvidia.com/gpu: 1` instead of 15 | time-slicing ConfigMap not applied or wrong key | `kubectl --context spark-root -n gpu-operator get cm time-slicing-config -o yaml`, device-plugin logs | fix and restart the device-plugin DaemonSet (or re-run playbook 06) |
 | Pod Pending in a vCluster, no scheduler events, slices free on the node | that vCluster's root GPU quota is spent | `kubectl --context spark-root -n vc-<v> describe resourcequota vcluster-budget` | by design (break/fix 02); move slices between vClusters in `manifests/root/05-vclusters/quotas.yaml` |
+| Model pod never appears in `llm-serving`; ReplicaSet event `exceeded quota: serving-budget` | the namespace's 6 slices are in use | `kubectl --context spark-root -n llm-serving describe resourcequota serving-budget` | scale another model down, or move slices in `manifests/root-llms/10-tenancy/quotas.yaml` (keep `tests/budget_check.py` green) |
 | Pod asks for 2 GPUs → `UnexpectedAdmissionError` | `failRequestsGreaterThanOne: true` | pod events | request 1 (2 slices of one GPU are not 2 GPUs) |
 | Tenant's pod is slow at random times | another tenant's (or another cluster's) kernels share the GPU | `nvidia-smi` process list on the host. Grafana *GPU slices in use* | Kueue/priorities, or a dedicated time window |
 | Pod sees GPU without requesting | the leak | §5.4 | hardened mode §5.5 |
@@ -291,7 +294,7 @@ scripts/verify.sh gpu
 | time-slicing ×15, split by root quotas | MIG on H100/B200 (hardware isolation) for multi-tenant inference. Whole GPUs for training |
 | envvar device list, nvidia default runtime | CDI everywhere (`cdi-cri`), no default nvidia runtime |
 | device plugin integer counts | DRA (`ResourceClaim`s) with the NVIDIA DRA driver: sharing strategies and MIG profiles as claim parameters |
-| one node's slices shared by every vCluster | GPU node pools per tenant cluster (vCluster node selectors / dedicated nodes), so "11 slices" can become "these 11 GPUs" |
+| one node's slices shared by the LLM stack and every vCluster | GPU node pools per workload or tenant cluster (node selectors / dedicated nodes), so "6 slices" can become "these 6 GPUs" |
 | vGPU? | vGPU is for VMs (virtual desktops, VM-per-tenant clouds). For containers on bare metal, the stack above is simpler and faster, and there's no hypervisor tax |
 
 ---
@@ -300,6 +303,6 @@ scripts/verify.sh gpu
 
 - [ ] I can explain both injection paths (legacy hook and CDI) and find their config files — including the one containerd that Kubernetes and Docker share.
 - [ ] I can say why each vCluster needs its own RuntimeClass object, and where its handler is resolved.
-- [ ] I measured that time-slices share one GPU's throughput rather than multiplying it, and know the 2 / 2 / 11 split is a quota, not a partition.
+- [ ] I measured that time-slices share one GPU's throughput rather than multiplying it, and know the 2 · 6 · 3 · 2 · 2 split is a quota, not a partition.
 - [ ] I reproduced the GPU leak from inside a vCluster and know the two changes that close it.
 - [ ] I know which sharing modes GB10 supports and which it doesn't.

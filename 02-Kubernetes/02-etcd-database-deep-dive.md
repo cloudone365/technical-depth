@@ -8,16 +8,16 @@
 | **Hardware** | dgx-spark-1 (Docker is already installed by 01-Ansible `container_runtime`; the sandbox uses it) |
 | **Time** | 2 h |
 | **Risk** | **Medium.** The restore step rolls the root cluster's state back and stops its control plane for a minute or two. Snapshot first, and do it when nothing important is running |
-| **Clusters** | `spark-root` (etcd, snapshots, restore) · `dev-lab` (where a tenant's Secret really lives, PVC backup of its SQLite) · `llms` (survives a root restore untouched) |
+| **Clusters** | `spark-root` (etcd, snapshots, restore) · `dev-lab` (where a tenant's Secret really lives, PVC backup of its SQLite) · `dev-llms` (survives a root restore untouched) · the root's LLM stack (rolled back by a root restore) |
 | **Lab files** | [`scripts/etcd-drill.sh`](lab/scripts/etcd-drill.sh), [`scripts/etcd-sandbox.sh`](lab/scripts/etcd-sandbox.sh), [`etcd-sandbox/compose.yaml`](lab/etcd-sandbox/compose.yaml), [`manifests/root/95-observability/rules.yaml`](lab/manifests/root/95-observability/rules.yaml), [`addons/kube-prometheus-stack-values.yaml`](lab/addons/kube-prometheus-stack-values.yaml), [`manifests/root/60-storage/fio-job.yaml`](lab/manifests/root/60-storage/fio-job.yaml), [`vclusters/dev-lab.yaml`](lab/vclusters/dev-lab.yaml), 01-Ansible [`kubeadm-init.yaml.j2`](../01-Ansible/lab/roles/kubeadm_cluster/templates/kubeadm-init.yaml.j2) and [`etcd-snapshot.sh.j2`](../01-Ansible/lab/roles/kubeadm_cluster/templates/etcd-snapshot.sh.j2) |
 
 ---
 
 ## 1. Why this matters on a Spark
 
-etcd is the root cluster's only source of truth. If it's lost, every Deployment, Secret, root quota, CiliumNetworkPolicy, GPU Operator `ClusterPolicy` and vCluster control-plane StatefulSet is gone. If it's slow, the API server is slow, leases expire, and controllers thrash. On a Spark it shares **one NVMe** with 60 GB model downloads, checkpoint writes and `fio`. That makes fsync latency, not capacity, the thing to watch.
+etcd is the root cluster's only source of truth. If it's lost, every Deployment, Secret, root quota, CiliumNetworkPolicy, GPU Operator `ClusterPolicy` and vCluster control-plane StatefulSet is gone — and so is the whole LLM stack (model Deployments, InferenceServices, Kueue queues, Traefik routes), which runs on the root. If it's slow, the API server is slow, leases expire, and controllers thrash. On a Spark it shares **one NVMe** with 60 GB model downloads, checkpoint writes and `fio`. That makes fsync latency, not capacity, the thing to watch.
 
-The nesting adds a second lesson: **this lab has three databases, not one.** The root's etcd holds the root's objects — including the *host copies* of every tenant pod the syncers created. But each vCluster's own objects (its Deployments, Jobs, Kueue queues, RBAC, CRDs, Secrets) live in that vCluster's **embedded SQLite database on a PVC**. An etcd snapshot doesn't contain them, and an etcd restore doesn't roll them back.
+The nesting adds a second lesson: **this lab has three databases, not one.** The root's etcd holds the root's objects — the LLM stack in `llm-serving` and `batch` among them — including the *host copies* of every tenant pod the syncers created. But each vCluster's own objects (its Deployments, Jobs, RBAC, CRDs, Secrets) live in that vCluster's **embedded SQLite database on a PVC**. An etcd snapshot doesn't contain them, and an etcd restore doesn't roll them back.
 
 | Datastore choice | When | This lab |
 |---|---|---|
@@ -45,7 +45,7 @@ flowchart LR
   TIMER --> DISK[("/var/lib/etcd-snapshots/")]
   DISK -. "copy off-box (§5.7)" .-> NAS[("MacBook / NAS / S3")]
   PROM["Prometheus kps<br/>(observability)"] -->|":2381/metrics"| ET
-  subgraph VC["root namespace vc-dev-lab (same for vc-llms)"]
+  subgraph VC["root namespace vc-dev-lab (same for vc-dev-llms)"]
     VAPI["dev-lab-0<br/>API server + controllers + syncer"] --> SQL[("SQLite on PVC data-dev-lab-0<br/>/data/k8s/vc-dev-lab/…")]
   end
   VAPI -->|"syncer = a root API client"| API
@@ -113,13 +113,14 @@ Quorum is ⌊n/2⌋+1. **1 member tolerates 0 failures, 2 members tolerate 0, an
 
 | Prefix | Holds |
 |---|---|
-| `/registry/pods/<ns>/<name>` | Pods (protobuf, prefix `k8s\x00`). Includes the synced tenant pods: `/registry/pods/vc-dev-lab/echo-…-x-lab-tools-x-dev-lab` |
+| `/registry/pods/<ns>/<name>` | Pods (protobuf, prefix `k8s\x00`). Includes the model servers under their own names (`/registry/pods/llm-serving/vllm-…`) and the synced tenant pods: `/registry/pods/vc-dev-lab/echo-…-x-lab-tools-x-dev-lab` |
 | `/registry/secrets/<ns>/<name>` | Secrets, encrypted: value starts `k8s:enc:aescbc:v1:key1:` |
 | `/registry/leases/kube-system/*` | leader-election leases (renewed every ~2 s) |
 | `/registry/leases/kube-node-lease/dgx-spark-1` | node heartbeat (every 10 s) |
 | `/registry/events/…` | Events, with a 1 h TTL. Often the biggest churn |
-| `/registry/resourcequotas/vc-*/vcluster-budget` | the vClusters' budgets — the objects that size dev-lab and llms (Chapter 04 §3.2) |
-| `/registry/apiextensions.k8s.io/customresourcedefinitions/…` | the **root's** CRDs: Cilium, MetalLB, GPU Operator, Prometheus Operator, Argo CD. Kueue, KEDA, KServe and Traefik CRDs are *not* here — they were installed into llms |
+| `/registry/resourcequotas/vc-*/vcluster-budget` | the vClusters' budgets — the objects that size dev-lab and dev-llms (Chapter 04 §3.2) |
+| `/registry/resourcequotas/{llm-serving,batch}/*` | `serving-budget` and `batch-budget`, the LLM stack's budgets |
+| `/registry/apiextensions.k8s.io/customresourcedefinitions/…` | the **root's** CRDs: Cilium, MetalLB, GPU Operator, Prometheus Operator, Argo CD, and the LLM stack's Kueue, KEDA, KServe, cert-manager, Traefik and Gateway API. CRDs a tenant installs *inside* a vCluster are not here |
 
 ### 3.3 Health targets on NVMe
 
@@ -136,7 +137,7 @@ Quorum is ⌊n/2⌋+1. **1 member tolerates 0 failures, 2 members tolerate 0, an
 |---|---|---|---|---|
 | `spark-root` | stacked etcd, `/var/lib/etcd` | Secrets: yes (aescbc) | `etcd-snapshot.timer` + §5.7 | `scripts/etcd-drill.sh restore` (§5.6) |
 | `dev-lab` | SQLite in the `dev-lab-0` pod, PVC `vc-dev-lab/data-dev-lab-0` (`local-nvme`, 5 Gi) | no — dev-lab's API server has no `--encryption-provider-config` | PVC copy or `vcluster snapshot` (§5.8) | replace the PVC contents (§5.8) |
-| `llms` | same, PVC `vc-llms/data-llms-0` | no | same | same |
+| `dev-llms` | same, PVC `vc-dev-llms/data-dev-llms-0` | no | same | same |
 
 What the syncer copies to the root (pods, Services, PVCs, and the Secrets/ConfigMaps those pods use) **is** in root etcd — as host copies under translated names. That's why a root restore and a vCluster's own state can disagree, and why §5.6 shows you what the syncer does about it.
 
@@ -158,14 +159,14 @@ What the syncer copies to the root (pods, Services, PVCs, and the Secrets/Config
 
 ## 5. Lab
 
-All commands run on the Spark, from a checkout of this repo, in `02-Kubernetes/lab`: the `etcdctl` lines need the root's etcd client certificate, which only exists there. The scripts call `kubectl --context spark-root|dev-lab|llms`. The Spark's own `~/.kube/config` (written by 01-Ansible) is `admin.conf` with its context renamed to `spark-root`, which is enough for every root step; for the vCluster steps bring the full lab kubeconfig along:
+All commands run on the Spark, from a checkout of this repo, in `02-Kubernetes/lab`: the `etcdctl` lines need the root's etcd client certificate, which only exists there. The scripts call `kubectl --context spark-root|dev-lab|dev-llms`. The Spark's own `~/.kube/config` (written by 01-Ansible) is `admin.conf` with its context renamed to `spark-root`, which is enough for every root step; for the vCluster steps bring the full lab kubeconfig along:
 
 ```bash
 # on your MacBook (after 01-Ansible/lab/tools/fetch-kubeconfig.sh sema01)
 scp "01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml" dgxadmin@192.168.0.100:.kube/spark-lab.yaml
 # on the Spark
 export KUBECONFIG=~/.kube/spark-lab.yaml
-kubectl config get-contexts -o name          # spark-root, dev-lab, llms
+kubectl config get-contexts -o name          # spark-root, dev-lab, dev-llms
 ```
 
 ### 5.1 Meet the stacked etcd
@@ -356,7 +357,7 @@ scripts/verify.sh platform vclusters
 
 The last two lines are where the nesting gets interesting. After the restore, root etcd describes the world as it was at snapshot time, but each vCluster's database describes *now*. The syncer is a controller (Chapter 06 §5.6): it compares the two and repairs host copies — expect host copies of tenant objects created or deleted since the snapshot to be recreated or removed over the next minute or two. Watch it rather than assume it; anything it can't repair shows up as a sync error event on the object inside the vCluster.
 
-Workbook Ex 20 asks you to doom a namespace, a ConfigMap and a Kueue LocalQueue. The first two go in the root; a LocalQueue lives in **llms** (Kueue is installed there), so a root restore will *not* remove it. Put the third doomed object in a root CRD instead (for example a `CiliumNetworkPolicy` in `platform-tools`), or restore llms's PVC (§5.8) as well.
+Workbook Ex 20 asks you to doom a namespace, a ConfigMap and a Kueue LocalQueue. All three live in root etcd — Kueue runs on the root with the LLM stack, so a LocalQueue in `batch` is rolled back like any root object. The same goes for the models: a vLLM Deployment created in `llm-serving` after the snapshot is gone after the restore. Only objects inside a vCluster (`dev-lab`, `dev-llms`) survive it; to roll those back too, restore their PVCs (§5.8).
 
 > **Clients that remember revisions.** A restore moves etcd's revision *backwards*. A controller whose informer watched at revision N+100 now talks to an etcd at revision N. Restarting the whole control plane (what the drill does) fixes the root's own components; long-running clients elsewhere (the vCluster syncers, `slice-ledger`, Argo CD) may need a restart or a re-list. etcd ≥ 3.5.10's `etcdutl snapshot restore --bump-revision <n> --mark-compacted` makes that automatic: every client's next watch gets `410 Gone` and re-lists. The lab script doesn't use it — add it when you run this on a cluster with many external controllers.
 
@@ -384,7 +385,7 @@ Treat that tarball like a password: it holds the key that decrypts every Secret 
 
 ### 5.8 Back up a vCluster's own state
 
-None of §5.6–5.7 covers dev-lab's or llms's objects. Each keeps them in SQLite on a `local-nvme` PVC, which local-path-provisioner placed at `/data/k8s/<namespace>/<pvc>` ([`addons/local-path-nvme.yaml`](lab/addons/local-path-nvme.yaml)). The lab supports two ways to back it up:
+None of §5.6–5.7 covers dev-lab's or dev-llms' objects. Each keeps them in SQLite on a `local-nvme` PVC, which local-path-provisioner placed at `/data/k8s/<namespace>/<pvc>` ([`addons/local-path-nvme.yaml`](lab/addons/local-path-nvme.yaml)). The lab supports two ways to back it up:
 
 **PVC copy (what the lab tests, Chapter 04 §6.7).** Stop the writer, copy the directory, start it again:
 
@@ -396,7 +397,7 @@ kubectl --context spark-root -n vc-dev-lab scale statefulset dev-lab --replicas=
 kubectl --context spark-root -n vc-dev-lab rollout status statefulset dev-lab
 ```
 
-While the control plane is at 0 replicas, tenant pods keep running — they are root pods — but `kubectl --context dev-lab` fails and nothing new syncs. Scaling to 0 matters: copying a live SQLite file (with its `-wal` file being written) can give you an inconsistent copy. Restore is the same dance with the directory replaced. Repeat for `vc-llms` / `data-llms-0`, and copy the tarballs off-box with the etcd ones.
+While the control plane is at 0 replicas, tenant pods keep running — they are root pods — but `kubectl --context dev-lab` fails and nothing new syncs. Scaling to 0 matters: copying a live SQLite file (with its `-wal` file being written) can give you an inconsistent copy. Restore is the same dance with the directory replaced. Repeat for `vc-dev-llms` / `data-dev-llms-0`, and copy the tarballs off-box with the etcd ones. The LLM stack needs no PVC copy of this kind: its objects are in etcd; its model weights live on `model-cache` PVCs and can be downloaded again.
 
 **`vcluster snapshot` (optional CLI).** [`scripts/preflight.sh`](lab/scripts/preflight.sh) reports whether the `vcluster` CLI is installed. Recent CLIs can snapshot a running vCluster without scaling it down; the syntax has changed between releases, so check `vcluster snapshot --help` for the version matching `VCLUSTER_VERSION` in [`versions.env`](lab/versions.env) before scripting it.
 

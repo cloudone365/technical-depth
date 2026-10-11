@@ -38,7 +38,7 @@ flowchart LR
   subgraph S1["dgx-spark-1 · 192.168.0.100"]
     direction TB
     S1A["kubeadm root cluster spark-root (control plane + worker)<br/>Cilium · MetalLB · GPU Operator · AWX (optional)"]
-    S1V["vClusters dev-lab (192.168.0.111) · llms (192.168.0.112)"]
+    S1V["LLM stack on the root: llm-serving · batch · Traefik (192.168.0.115)<br/>vClusters dev-lab (192.168.0.111) · dev-llms (192.168.0.112)"]
     S1B["slurmctld + slurmd"]
     S1C["Prometheus · Grafana · Loki · ARA"]
     S1D["NFS/RDMA server /srv/models"]
@@ -62,7 +62,7 @@ flowchart LR
 
 One Spark is the default. `dgx-spark-2` is commented out in [`lab/inventory/hosts.yml`](lab/inventory/hosts.yml), so Semaphore templates and break-glass runs need no `--limit`; if you do limit a run, keep `localhost` in it (`-l dgx-spark-1,localhost`). The fabric, NCCL and NFS/RDMA chapters (13–15) skip themselves, and `dgx-spark-1` alone is a complete Kubernetes cluster (no control-plane taint). When a second Spark joins, uncomment `dgx-spark-2` (192.168.0.101) in `spark` and in the groups it belongs to.
 
-The Kubernetes end-state is one **kubeadm** root cluster (`spark-root`) with two **vClusters** inside it, `dev-lab` and `llms`. Ansible builds it in three stages: `19.1-kubernetes.yml` (kubeadm, Cilium, MetalLB) → `20.1-gpu-operator.yml` (15 GPU time-slices) → `20.2-vclusters.yml` (the two vClusters, applied from the [02-Kubernetes lab](../02-Kubernetes/lab/README.md)). All three contexts land in one file, `kubeconfig-spark-lab.yaml`, on sema01's state volume; `lab/tools/fetch-kubeconfig.sh sema01` copies it to `lab/.cache/` on your MacBook, where the 02-Kubernetes labs expect it.
+The Kubernetes end-state is one **kubeadm** root cluster (`spark-root`) that runs the LLM stack itself (namespaces `llm-serving`, `batch`, `ingress`), with two small **vClusters** inside it: `dev-lab` for tenancy drills and `dev-llms`, an LLM sandbox. Ansible builds it in three stages: `19.1-kubernetes.yml` (kubeadm, Cilium, MetalLB) → `20.1-gpu-operator.yml` (15 GPU time-slices) → `20.2-vclusters.yml` (the LLM namespaces and budgets on the root and the two vClusters, applied from the [02-Kubernetes lab](../02-Kubernetes/lab/README.md)); the 02 lab then installs the LLM stack on the root. All three contexts land in one file, `kubeconfig-spark-lab.yaml`, on sema01's state volume; `lab/tools/fetch-kubeconfig.sh sema01` copies it to `lab/.cache/` on your MacBook, where the 02-Kubernetes labs expect it.
 
 > **Convention used in every chapter.** "**Semaphore UI:** `NN Name`" means run that template in project `spark-lab`; template names follow the playbook names (`19.1 Kubernetes` ↔ `19.1-kubernetes.yml`). The same playbook from the MacBook, `ansible-playbook playbooks/NN-….yml -K` in `01-Ansible/lab`, is the **break-glass** path: without the Semaphore variable group, play 1 is skipped and you log in as `dgxadmin` with your own key ([Chapter 04 §11](04-dgx-spark-as-semaphore-target.md)). Only `03.1-bootstrap.yml`, `04.1-semaphore-target.yml` and `17.1-vault.yml` run from the MacBook as the normal path. A template's number is `<chapter>.<n>`, the chapter that explains it: **`19.1 Kubernetes`** is the first template of **Chapter 19**. The exceptions are `00-vault-cert.yml` and `site`.
 

@@ -8,7 +8,8 @@
 #   2. The namespace's: serving-budget allows 90 Gi for ALL model servers in
 #      llm-serving (root-llms/10-tenancy/quotas.yaml), shared with batch. The
 #      request equals the limit (32 Gi), so the scheduler counts what the engine
-#      really holds; two more engines of this size still fit.
+#      really holds; one more engine of this size still fits next to it and the
+#      always-on helpers (Qdrant, mock LLM).
 #      Whether CUDA memory
 #      is charged to this limit is measured in Chapter 14 §5.5 — size as if it is.
 apiVersion: v1

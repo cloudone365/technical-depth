@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| **You will build** | A Triton deployment inside the `llms` vCluster serving a two-step **ensemble** (tokenise on CPU → score on the GB10), fed from a GitOps-friendly model repository. You'll measure dynamic batching with Triton's own metrics (scraped by the root's Prometheus), load-test it with `perf_analyzer` over gRPC, and find Triton's GPU process on the root |
+| **You will build** | A Triton deployment in the root's `llm-serving` namespace serving a two-step **ensemble** (tokenise on CPU → score on the GB10), fed from a GitOps-friendly model repository. You'll measure dynamic batching with Triton's own metrics (scraped by the root's Prometheus), load-test it with `perf_analyzer` over gRPC, and trace Triton's GPU process on the Spark back to its pod |
 | **Hardware** | dgx-spark-1 |
 | **Time** | 75 min |
-| **Risk** | Low. Triton's 12 Gi limit fits `llm-serving` next to vLLM's 32 Gi (48.4 of 80 Gi, Chapter 20 §9); vLLM can stay up |
-| **Clusters** | `llms` (Triton, the perf Job, the `serving-budget` quota) · `spark-root` (the real pod, `nvidia-smi`, Prometheus) |
-| **Lab files** | [`manifests/llms/90-serving/triton/`](lab/manifests/llms/90-serving/triton/) (`triton.yaml`, `kustomization.yaml`, `model_repository/{preprocess,scorer,pipeline}`), [`manifests/root/95-observability/vcluster-workloads.yaml`](lab/manifests/root/95-observability/vcluster-workloads.yaml) |
+| **Risk** | Low. Triton's 12 Gi (request = limit) fits `llm-serving` next to vLLM's 32 Gi (48.4 of 90 Gi, Chapter 20 §9); vLLM can stay up |
+| **Clusters** | `spark-root` (Triton, the perf Job, the `serving-budget` quota, Prometheus) · the Spark itself (`nvidia-smi`) |
+| **Lab files** | [`manifests/root-llms/90-serving/triton/`](lab/manifests/root-llms/90-serving/triton/) (`triton.yaml`, `kustomization.yaml`, `model_repository/{preprocess,scorer,pipeline}`), [`manifests/root/95-observability/vcluster-workloads.yaml`](lab/manifests/root/95-observability/vcluster-workloads.yaml) |
 
 ---
 
@@ -25,7 +25,7 @@ vLLM is an LLM engine. Triton is a **general inference server**: many models, ma
 | Ensembles / BLS | multi-step pipelines server-side, no client round trips |
 | HTTP/REST + gRPC (KServe v2 protocol) | same API for every model |
 
-On one Spark, Triton is also the *cheap* engine: the lab's toy pipeline needs 4 Gi requested / 12 Gi limit and one slice, against vLLM's 32 Gi. That's why it shares `llm-serving` with the mocks, Qdrant and a 32 Gi LLM engine without either being parked.
+On one Spark, Triton is also the *cheap* engine: the lab's toy pipeline needs 12 Gi (request = limit, like every GPU container in the LLM stack) and one slice, against vLLM's 32 Gi. That's why it shares `llm-serving` with the mocks, Qdrant and a 32 Gi LLM engine without either being parked.
 
 ---
 
@@ -34,7 +34,7 @@ On one Spark, Triton is also the *cheap* engine: the lab's toy pipeline needs 4 
 ```mermaid
 flowchart LR
   C["client<br/>HTTP :8000 / gRPC :8001"] --> SCHED
-  subgraph LLMS["vCluster llms · ns llm-serving"]
+  subgraph LLMS["root spark-root · ns llm-serving"]
     direction LR
     subgraph TRITON["Deployment triton · priority spark-serving"]
       direction LR
@@ -47,13 +47,12 @@ flowchart LR
     REPO[("model repository<br/>ConfigMaps → init container → /repo")] --> TRITON
     PA["perf_analyzer Job triton-perf<br/>(SDK image)"] -->|gRPC| C
   end
-  subgraph ROOT["root spark-root"]
+  subgraph ROOT["root spark-root · ns observability · the GB10"]
     direction LR
-    HP["real pod triton-…-x-llm-serving-x-llms<br/>ns vc-llms"]
     GPU["GB10 slice<br/>triton_python_backend_stub"]
-    PROM["Prometheus<br/>ServiceMonitor vcluster-workloads<br/>port 'metrics'"]
+    PROM["Prometheus<br/>ServiceMonitor llm-workloads<br/>port 'metrics'"]
   end
-  TRITON -. "syncer" .-> HP --> GPU
+  S --> GPU
   MET --> PROM
   classDef gpu fill:#76b900,stroke:#3d6000,color:#000
   classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
@@ -61,7 +60,7 @@ flowchart LR
   classDef obs fill:#fb8500,stroke:#9a5200,color:#000
   classDef tenant fill:#eaeef2,stroke:#57606a,color:#000
   class S,GPU gpu
-  class SCHED,ENS,P,HP ctrl
+  class SCHED,ENS,P ctrl
   class REPO store
   class MET,PROM obs
   class C,PA tenant
@@ -83,7 +82,7 @@ flowchart LR
 └── pipeline/              config.pbtxt   1/           # ensemble: preprocess → scorer
 ```
 
-In the lab, the files are kustomize-generated ConfigMaps (`triton-preprocess`, `triton-scorer`, `triton-pipeline`), which the `layout` init container copies into an `emptyDir`. ConfigMaps are synced to the root like everything a pod mounts, so the kubelet that mounts them is the root's. In production the repository lives on a PVC, S3 or GCS (`--model-repository=s3://…`), and models are TensorRT engines or ONNX files.
+In the lab, the files are kustomize-generated ConfigMaps (`triton-preprocess`, `triton-scorer`, `triton-pipeline`), which the `layout` init container copies into an `emptyDir`. They live in `llm-serving` next to the pod, and the kubelet on dgx-spark-1 mounts them. In production the repository lives on a PVC, S3 or GCS (`--model-repository=s3://…`), and models are TensorRT engines or ONNX files.
 
 ### 3.2 Key config
 
@@ -103,18 +102,18 @@ In the lab, the files are kustomize-generated ConfigMaps (`triton-preprocess`, `
 | 8001 | gRPC | Service `appProtocol: kubernetes.io/h2c` (Chapter 11 §5.9) |
 | 8002 | Prometheus | `nv_inference_request_success`, `nv_inference_count`, `nv_inference_exec_count`, `nv_inference_queue_duration_us`, `nv_inference_compute_infer_duration_us` |
 
-**Average batch size = `nv_inference_count / nv_inference_exec_count`.** That's the number that proves dynamic batching works. The root's ServiceMonitor scrapes the `metrics` port of the synced `triton` Service and labels the series `vcluster="llms"`, `vnamespace="llm-serving"`, so the same ratio works as a PromQL query on the root.
+**Average batch size = `nv_inference_count / nv_inference_exec_count`.** That's the number that proves dynamic batching works. The root's ServiceMonitor `llm-workloads` scrapes the `metrics` port of the `triton` Service and labels the series `vcluster="root"`, `vnamespace="llm-serving"`, so the same ratio works as a PromQL query on the root.
 
 ### 3.4 Budget
 
 | | CPU request | Memory limit | Slices |
 |---|---|---|---|
-| `triton` (init container `layout`: 50m / 64 Mi, counted as the max with the main container) | 1 | 12 Gi | 1 |
+| `triton` (init container `layout`: 50m / 64 Mi, counted as the max with the main container) | 1 | 12 Gi (= request) | 1 |
 | `triton-perf` Job (created suspended) | 500m | 2 Gi | 0 |
 | always-on in `llm-serving` (mocks, Qdrant) | 400m | 2.4 Gi | 0 |
-| **total** against `serving-budget` (10 CPU · 80 Gi · 8) | 1.9 | 16.4 Gi | 1 |
+| **total** against `serving-budget` (8 CPU · 90 Gi · 6) | 1.9 | 16.4 Gi | 1 |
 
-With vLLM's 1.5 CPU / 32 Gi / 1 slice on top: 3.4 CPU, 48.4 Gi, 2 slices — it fits, so vLLM keeps running in §5.1. In UMA the toy pipeline adds little to vLLM's 0.20; a real Triton model counts toward the util sum ≲ 0.70 like any engine (Chapter 20 §2).
+With vLLM's 1.5 CPU / 32 Gi / 1 slice on top: 3.4 CPU, 48.4 Gi, 2 slices — it fits, so vLLM keeps running in §5.1. In UMA the toy pipeline adds little to vLLM's 0.20; a real Triton model counts toward the util sum ≲ 0.72 like any engine (Chapter 20 §2).
 
 ---
 
@@ -122,8 +121,8 @@ With vLLM's 1.5 CPU / 32 Gi / 1 slice on top: 3.4 CPU, 48.4 Gi, 2 slices — it 
 
 - **Image choice:** `tritonserver:25.09-pyt-python-py3` ships PyTorch for the Python backend (the scorer uses `torch.cuda`). The plain `-py3` image would fall back to CPU. The SDK image `-py3-sdk` carries `perf_analyzer`.
 - **TensorRT-LLM backend (modules 03–06)**: the same Deployment with the `-trtllm-python-py3` image and an engine built for sm_121 — and a 32 Gi-class memory limit, so it counts as one of the two engines `serving-budget` holds side by side (Chapter 20 §9).
-- **Guardrails / RAG (module 05)**: rerankers and embedding models are natural Triton tenants next to vLLM; on one Spark they fit `serving-budget` beside one or two engines, as long as the util sum stays ≲ 0.70.
-- **Gateway (Chapter 11 §5.9)**: Traefik inside llms routes gRPC to Triton with a `GRPCRoute`.
+- **Guardrails / RAG (module 05)**: rerankers and embedding models are natural Triton tenants next to vLLM; on one Spark they fit `serving-budget` beside one or two engines, as long as the util sum stays ≲ 0.72.
+- **Gateway (Chapter 11 §5.9)**: Traefik on the root (namespace `ingress`) routes gRPC to Triton with a `GRPCRoute`.
 
 ---
 
@@ -139,11 +138,11 @@ export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 vLLM can stay running: both fit `serving-budget` (§3.4).
 
 ```bash
-kubectl --context llms -n llm-serving describe resourcequota serving-budget | grep -E 'requests.cpu|limits.memory|gpu'
-kubectl --context llms apply -k manifests/llms/90-serving/triton
-kubectl --context llms -n llm-serving logs deploy/triton -c layout
-kubectl --context llms -n llm-serving rollout status deploy/triton --timeout=15m     # first pull ≈ 15 GB
-kubectl --context llms -n llm-serving logs deploy/triton | grep -E 'successfully loaded|READY|Started'
+kubectl --context spark-root -n llm-serving describe resourcequota serving-budget | grep -E 'requests.cpu|limits.memory|gpu'
+kubectl --context spark-root apply -k manifests/root-llms/90-serving/triton
+kubectl --context spark-root -n llm-serving logs deploy/triton -c layout
+kubectl --context spark-root -n llm-serving rollout status deploy/triton --timeout=15m     # first pull ≈ 15 GB
+kubectl --context spark-root -n llm-serving logs deploy/triton | grep -E 'successfully loaded|READY|Started'
 ```
 
 Expected:
@@ -158,12 +157,12 @@ I… Started HTTPService at 0.0.0.0:8000
 I… Started Metrics Service at 0.0.0.0:8002
 ```
 
-If the rollout never starts, look for `exceeded quota: serving-budget` in `kubectl --context llms -n llm-serving get events` — other engines hold more than ~65 Gi of the 80 (vLLM + P/D, for example); park one (Chapter 20 §9). With two 32 Gi engines up, Triton itself still fits (78.4 Gi) but the perf Job in §5.3 does not.
+If the rollout never starts, look for `exceeded quota: serving-budget` (other engines hold more than ~75 Gi of the 90) or, on a Pending pod, `Insufficient memory` (a batch job holds the rest of the shared LLM memory pool) in `kubectl --context spark-root -n llm-serving get events`; park an engine (Chapter 20 §9). With two 32 Gi engines up, or vLLM + P/D, Triton and the perf Job in §5.3 still fit (80.4 and 88.6 Gi).
 
 ### 5.2 Talk to it
 
 ```bash
-kubectl --context llms -n llm-serving port-forward svc/triton 8000 8002 &
+kubectl --context spark-root -n llm-serving port-forward svc/triton 8000 8002 &
 curl -s localhost:8000/v2/health/ready -o /dev/null -w '%{http_code}\n'           # 200
 curl -s -X POST localhost:8000/v2/repository/index | jq -c '.[]'
 curl -s localhost:8000/v2/models/pipeline/config | jq '.ensemble_scheduling.step[].model_name'
@@ -173,22 +172,22 @@ curl -s -X POST localhost:8000/v2/models/pipeline/infer -H 'Content-Type: applic
 
 Expected: `{"name":"SCORE","datatype":"FP32","shape":[2,1],"data":[0.5…,0.4…]}`.
 
-Confirm the scorer really runs on the GPU, and that the GPU process belongs to the root pod the syncer created:
+Confirm the scorer really runs on the GPU, and that the GPU process belongs to the Triton pod:
 
 ```bash
 ssh dgxadmin@192.168.0.100 'for p in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader); do
   echo "$p $(cat /proc/$p/comm) $(grep -o "pod[0-9a-f_-]*" /proc/$p/cgroup | head -1)"; done'
-kubectl --context spark-root -n vc-llms get pods -o custom-columns=UID:.metadata.uid,NAME:.metadata.name | grep triton
+kubectl --context spark-root -n llm-serving get pods -o custom-columns=UID:.metadata.uid,NAME:.metadata.name | grep triton
 ```
 
-Expected: `triton_python_backend_stub` processes whose cgroup contains `pod<uid>` (dashes become underscores under the systemd cgroup driver) with the UID of `triton-…-x-llm-serving-x-llms`. The llms API server has its own UID for the virtual pod; the kernel only knows the root's.
+Expected: `triton_python_backend_stub` processes whose cgroup contains `pod<uid>` (dashes become underscores under the systemd cgroup driver) with the UID of `triton-…`. The pod runs directly on the root, so the UID the API server shows is the one the kernel's cgroup path carries. (For a pod in a vCluster, such as the `dev-llms` sandbox, you would look up the translated pod in `vc-dev-llms` instead: the vCluster's API server has its own UID for the virtual pod.)
 
 ### 5.3 Load test and batching efficiency
 
 ```bash
 before=$(curl -s localhost:8002/metrics | awk '/^nv_inference_(count|exec_count)\{model="scorer"/ {print $2}' | paste -sd' ')
-kubectl --context llms -n llm-serving patch job triton-perf -p '{"spec":{"suspend":false}}'
-kubectl --context llms -n llm-serving logs -f job/triton-perf | grep -E 'Concurrency|Throughput|p99 latency'
+kubectl --context spark-root -n llm-serving patch job triton-perf -p '{"spec":{"suspend":false}}'
+kubectl --context spark-root -n llm-serving logs -f job/triton-perf | grep -E 'Concurrency|Throughput|p99 latency'
 after=$(curl -s localhost:8002/metrics | awk '/^nv_inference_(count|exec_count)\{model="scorer"/ {print $2}' | paste -sd' ')
 echo "$before | $after" | awk '{printf "scorer average batch size during the test: %.1f\n", ($4-$1)/($5-$2)}'
 ```
@@ -196,16 +195,16 @@ echo "$before | $after" | awk '{printf "scorer average batch size during the tes
 The same number from the root's Prometheus (`kubectl --context spark-root -n observability port-forward svc/kps-prometheus 9090 &`):
 
 ```promql
-sum(rate(nv_inference_count{vcluster="llms", model="scorer"}[5m]))
-  / sum(rate(nv_inference_exec_count{vcluster="llms", model="scorer"}[5m]))
+sum(rate(nv_inference_count{vcluster="root", model="scorer"}[5m]))
+  / sum(rate(nv_inference_exec_count{vcluster="root", model="scorer"}[5m]))
 ```
 
 Expected shape: throughput rises with concurrency until the GPU or Python stub saturates, and **average batch size climbs well above 1**. Now set `max_queue_delay_microseconds: 0` in `model_repository/scorer/config.pbtxt`, then re-apply and restart (the init container only copies the repository at start):
 
 ```bash
-kubectl --context llms -n llm-serving delete job triton-perf
-kubectl --context llms apply -k manifests/llms/90-serving/triton
-kubectl --context llms -n llm-serving rollout restart deploy/triton && kubectl --context llms -n llm-serving rollout status deploy/triton
+kubectl --context spark-root -n llm-serving delete job triton-perf
+kubectl --context spark-root apply -k manifests/root-llms/90-serving/triton
+kubectl --context spark-root -n llm-serving rollout restart deploy/triton && kubectl --context spark-root -n llm-serving rollout status deploy/triton
 ```
 
 and repeat. Batch size falls towards 1, and throughput at high concurrency falls with it. That's the latency/throughput trade dynamic batching makes. The re-apply creates `triton-perf` suspended again, ready for the next run.
@@ -216,10 +215,10 @@ Change `count: 2` → `count: 1` for `scorer`, re-apply and restart as above, an
 
 ### 5.5 gRPC: east-west and through the gateway
 
-Inside llms, straight to the Service (east-west, routed by the root's kube-proxy):
+Inside the cluster, straight to the Service (east-west, routed by kube-proxy):
 
 ```bash
-kubectl --context llms -n llm-serving run grpc-test --rm -it --restart=Never --image=nvcr.io/nvidia/tritonserver:25.09-py3-sdk -- \
+kubectl --context spark-root -n llm-serving run grpc-test --rm -it --restart=Never --image=nvcr.io/nvidia/tritonserver:25.09-py3-sdk -- \
   perf_analyzer -m pipeline -u triton:8001 -i grpc --string-data "hello spark" --concurrency-range 4
 ```
 
@@ -235,7 +234,7 @@ Compare p99 latency between the two: the difference is the gateway hop (laptop �
 ### 5.6 Clean up
 
 ```bash
-kubectl --context llms delete -k manifests/llms/90-serving/triton
+kubectl --context spark-root delete -k manifests/root-llms/90-serving/triton
 ```
 
 ---
@@ -248,8 +247,8 @@ kubectl --context llms delete -k manifests/llms/90-serving/triton
 | repository index | 3 models `READY` |
 | inference | 2 scores returned for 2 inputs |
 | average scorer batch size under load | > 1 (typically several), same from `/metrics` and from the root's Prometheus |
-| `nvidia-smi` on the Spark | Triton Python stub listed as a GPU process, in the cgroup of the root pod |
-| `serving-budget` | Triton and vLLM both counted, within 10 CPU · 80 Gi · 8 |
+| `nvidia-smi` on the Spark | Triton Python stub listed as a GPU process, in the cgroup of the `triton-…` pod |
+| `serving-budget` | Triton and vLLM both counted, within 8 CPU · 90 Gi · 6 |
 
 ---
 
@@ -257,15 +256,15 @@ kubectl --context llms delete -k manifests/llms/90-serving/triton
 
 | Symptom | Cause | Diagnose | Fix |
 |---|---|---|---|
-| Deployment 0/1, `exceeded quota: serving-budget` | other engines hold most of `llm-serving` (vLLM + P/D, or two 32 Gi engines for the perf Job) | `kubectl --context llms -n llm-serving describe resourcequota serving-budget` | park one engine (Chapter 20 §9) |
+| Deployment 0/1, `exceeded quota: serving-budget` | other engines hold most of `llm-serving` (vLLM + P/D, or two 32 Gi engines for the perf Job) | `kubectl --context spark-root -n llm-serving describe resourcequota serving-budget` | park one engine (Chapter 20 §9) |
 | `failed to load 'scorer' … ModuleNotFoundError: torch` | image without PyTorch | model load log | `-pyt-python-py3` image (lab default). The code falls back to CPU otherwise |
 | model `UNAVAILABLE: Invalid argument: … dims` | config dims don't match the tensors the model returns | `/v2/models/<m>/config` | fix `config.pbtxt`. Remember `max_batch_size > 0` adds an implicit batch dim |
 | ensemble error `unable to find … output` | step `output_map` key mismatch | `pipeline/config.pbtxt` | the map key is the *model's* tensor name, the value is the ensemble-internal name |
-| config change has no effect | ConfigMap updated but the init container ran before | `kubectl --context llms -n llm-serving logs deploy/triton -c layout` | `rollout restart deploy/triton` |
+| config change has no effect | ConfigMap updated but the init container ran before | `kubectl --context spark-root -n llm-serving logs deploy/triton -c layout` | `rollout restart deploy/triton` |
 | gRPC `UNAVAILABLE` via Traefik | h2c not negotiated | Service `appProtocol` | `kubernetes.io/h2c` |
 | batch size stays 1 | `max_queue_delay` 0, or clients too slow to overlap | metrics ratio | allow 1–5 ms delay. Raise client concurrency |
 | pod Ready but model not | readiness checks server, not model | `/v2/models/pipeline/ready` | use a model-level readiness endpoint in the probe for single-model servers |
-| no `nv_inference_*` series in Prometheus | Service port not named `metrics`, or Triton not in the ServiceMonitor's keep-list | `kubectl --context spark-root -n vc-llms get svc -o yaml \| grep -A3 object-name` | keep the port name; the regex in `vcluster-workloads.yaml` matches `triton` |
+| no `nv_inference_*` series in Prometheus | Service port not named `metrics`, or Triton not in the ServiceMonitor's keep-list | `kubectl --context spark-root -n llm-serving get svc triton -o jsonpath='{.spec.ports[*].name}'` | keep the port name; the regex in the `llm-workloads` ServiceMonitor (`vcluster-workloads.yaml`) matches `triton` |
 
 ---
 
@@ -285,5 +284,5 @@ kubectl --context llms delete -k manifests/llms/90-serving/triton
 - [ ] I can lay out a Triton repository and explain every field in a `config.pbtxt`.
 - [ ] My ensemble runs CPU and GPU steps server-side in one call.
 - [ ] I proved dynamic batching with `nv_inference_count / nv_inference_exec_count`, locally and in the root's Prometheus.
-- [ ] I traced Triton's GPU process on the Spark back to the root pod — and the virtual pod in llms.
-- [ ] I know when to put a model in Triton rather than vLLM, and what it costs in the llms budget.
+- [ ] I traced Triton's GPU process on the Spark back to its pod in `llm-serving`.
+- [ ] I know when to put a model in Triton rather than vLLM, and what it costs in `serving-budget`.

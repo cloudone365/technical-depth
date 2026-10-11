@@ -2,8 +2,8 @@
 
 Everything the 28 chapters of the [step-by-step guide](../00-kubernetes-step-by-step-guide.md) teach, as manifests, scripts and drills. The [01-Ansible lab](../../01-Ansible/lab/README.md) builds the base on one DGX Spark (a second Spark is optional):
 
-- a **root cluster** with kubeadm — dgx-spark-1 is control plane *and* worker — with Cilium, MetalLB and the GPU Operator (15 time-slices), and
-- two **vClusters** inside it ([Chapter 04](../04-nested-clusters-with-vcluster.md)): `dev-lab` (2 CPU · 8 Gi · 2 slices) and `llms` (12 CPU · 88 Gi · 11 slices); the root keeps 3 CPU · ~10 GiB · 2 slices for its platform.
+- a **root cluster** with kubeadm — dgx-spark-1 is control plane *and* worker — with Cilium, MetalLB and the GPU Operator (15 time-slices); it also runs the **LLM stack** (`llm-serving`, `batch`, `ingress` with Traefik, Kueue, KEDA, KServe) in one shared ~90 GiB memory pool, and
+- two small, identical **vClusters** inside it ([Chapter 04](../04-nested-clusters-with-vcluster.md)): `dev-lab` (tenants) and `dev-llms` (an LLM sandbox), 2 CPU · 4 Gi · 2 slices each; of the root's 13 CPU · ~99.7 GiB · 11 slices, the platform keeps 3 CPU · ~9.7 GiB · 2 slices and the LLM stack gets the rest.
 
 This directory holds their definitions and everything that runs on them. Every code block in the chapters is taken from here.
 
@@ -13,13 +13,13 @@ This directory holds their definitions and everything that runs on them. Every c
 lab/
 ├── versions.env                 # every pinned version, in one place
 ├── kubeadm/                     # audit policy of the root API server (copy of 01-Ansible's)          (Chapter 03)
-├── vclusters/                   # Helm values: dev-lab.yaml, llms.yaml (vCluster 0.37, k8s distro)    (Chapter 04)
+├── vclusters/                   # Helm values: dev-lab.yaml, dev-llms.yaml (vCluster 0.37, k8s distro) (Chapter 04)
 ├── addons/                      # Helm values (kps, metrics-server, Traefik) + StorageClasses         (Chapters 04, 11, 13, 17)
 ├── manifests/
 │   ├── common/                  # shared: PriorityClasses, CEL admission policies, RuntimeClass nvidia
 │   ├── root/                    # → context spark-root (the platform)
 │   │   ├── 00-platform/         #   observability + platform-tools namespaces, PriorityClasses        (Chapters 05, 07)
-│   │   ├── 05-vclusters/        #   vc-dev-lab / vc-llms: namespaces, root budgets, Cilium boundary   (Chapter 04)
+│   │   ├── 05-vclusters/        #   vc-dev-lab / vc-dev-llms: namespaces, root budgets, Cilium boundary (Chapter 04)
 │   │   ├── 12-cgroups/          #   QoS trio, CPU throttling, the UMA cgroup experiment               (Chapter 14)
 │   │   ├── 16-apf/              #   API fairness lane for the vCluster syncers                        (Chapter 03)
 │   │   ├── 20-scheduling/       #   preemption demo (needs the node full)                             (Chapter 07)
@@ -28,8 +28,9 @@ lab/
 │   │   ├── 50-workloads/        #   node-probe DaemonSet                                              (Chapter 12)
 │   │   ├── 60-storage/          #   fio AI profiles                                                   (Chapter 13)
 │   │   ├── 70-gpu/              #   GEMM benchmark, time-slice contention, torch.compile              (Chapters 15–17, 24)
-│   │   ├── 85-network-operator/ #   NicClusterPolicy + macvlan RDMA network for 2 Sparks              (Chapter 17)
-│   │   └── 95-observability/    #   host exporters, vCluster workload scraping, alerts, dashboard     (Chapters 17, 26)
+│   │   ├── 85-network-operator/ #   NicClusterPolicy + macvlan RDMA network (in batch) for 2 Sparks   (Chapter 17)
+│   │   └── 95-observability/    #   host exporters, LLM + vCluster workload scraping, alerts, dashboard (Chapters 17, 26)
+│   ├── root-llms/               # → context spark-root (the LLM stack, root namespaces)
 │   ├── dev-lab/                 # → context dev-lab (vCluster #1)
 │   │   ├── 00-platform/         #   tenant-alpha, tenant-beta, lab-tools                              (Chapter 14)
 │   │   ├── 10-tenancy/          #   tenant quotas, LimitRanges, RBAC, NetworkPolicies                 (Chapters 03, 08, 14)
@@ -39,24 +40,27 @@ lab/
 │   │   ├── 30-networking/       #   netshoot, echo + headless Service, ndots lab                      (Chapters 08–10)
 │   │   ├── 50-workloads/        #   sharded tokenizer Indexed Job                                     (Chapter 12)
 │   │   └── 70-gpu/              #   gpu-smoke: a tenant pod through the whole chain                   (Chapters 16, 17)
-│   └── llms/                    # → context llms (vCluster #2)
-│       ├── 00-platform/         #   llm-serving, batch, ingress                                       (Chapter 20)
-│       ├── 10-tenancy/          #   serving budget, LimitRanges, CI deployer, NetworkPolicy           (Chapter 14)
-│       ├── 15-admission/        #   CEL policies (common)                                             (Chapter 03)
-│       ├── 20-scheduling/       #   Kueue flavors/queues, gang demo                                   (Chapter 07)
-│       ├── 40-ingress/          #   mock OpenAI API, Traefik middlewares, Ingress, HTTPRoute          (Chapter 11)
-│       ├── 50-workloads/        #   Qdrant StatefulSet + PDBs                                         (Chapter 12)
-│       ├── 60-storage/          #   model-cache PVC, prefetch Job                                     (Chapter 13)
-│       ├── 80-distributed/      #   torchrun all-reduce (1 Spark gloo · 2 Sparks NCCL/RoCE), resilient/ (Chapters 18, 25)
-│       ├── 85-network-operator/ #   RDMA test pod                                                     (Chapter 17)
-│       └── 90-serving/          #   vLLM, Triton ensemble, SGLang, KServe, prefill/decode split, KEDA (Chapters 20–23)
+│   │   ├── 00-platform/         #   llm-serving, batch, ingress                                       (Chapter 20)
+│   │   ├── 10-tenancy/          #   serving-budget, batch-budget, LimitRanges, CI deployer, NetworkPolicy (Chapter 14)
+│   │   ├── 15-admission/        #   CEL policies (common)                                             (Chapter 03)
+│   │   ├── 20-scheduling/       #   Kueue flavors/queues, gang demo                                   (Chapter 07)
+│   │   ├── 40-ingress/          #   mock OpenAI API, Traefik middlewares, Ingress, HTTPRoute          (Chapter 11)
+│   │   ├── 50-workloads/        #   Qdrant StatefulSet + PDBs                                         (Chapter 12)
+│   │   ├── 60-storage/          #   model-cache PVC, prefetch Job                                     (Chapter 13)
+│   │   ├── 80-distributed/      #   torchrun all-reduce (1 Spark gloo · 2 Sparks NCCL/RoCE), resilient/ (Chapters 18, 25)
+│   │   ├── 85-network-operator/ #   RDMA test pod                                                     (Chapter 17)
+│   │   └── 90-serving/          #   vLLM, Triton ensemble, SGLang, KServe, prefill/decode split, KEDA (Chapters 20–23)
+│   └── dev-llms/                # → context dev-llms (vCluster #2, the LLM sandbox)
+│       ├── 00-platform/         #   llm-sandbox                                                       (Chapter 04)
+│       ├── 10-tenancy/          #   sandbox-budget, LimitRange                                        (Chapters 04, 14)
+│       └── 15-admission/        #   CEL policies (common)                                             (Chapter 03)
 ├── etcd-sandbox/                # throw-away 3-member etcd (docker compose) for Raft drills           (Chapter 02)
 ├── gitops/                      # Argo CD app-of-apps across the three clusters                      (Chapter 28)
 ├── scripts/                     # preflight, install-addons, apply-lab, verify, breakfix, diag, etcd drill/sandbox,
 │                                #   cgroup/netns/iptables inspectors (vCluster-aware), make-user, uma-watch,
 │                                #   merge-vcluster-kubeconfig, argocd-register-vclusters,
 │                                #   ttft_probe.py, fabric_calc.py, mtbf_calc.py
-├── breakfix/                    # 15 fault-injection scenarios across root, dev-lab and llms           (Chapters 26, 27)
+├── breakfix/                    # 15 fault-injection scenarios across root (incl. llm-serving) and dev-lab (Chapters 26, 27)
 └── tests/                       # local checks, budget check, admission fixtures, fake-GPU node, Kueue gang test (CI)
 ```
 
@@ -65,7 +69,7 @@ lab/
 ```mermaid
 flowchart LR
   subgraph CTL["Your MacBook · client (browser · git · kubectl)"]
-    K["kubectl · helm<br/>KUBECONFIG = 01-Ansible .cache/kubeconfig-spark-lab.yaml<br/>contexts: spark-root · dev-lab · llms"]
+    K["kubectl · helm<br/>KUBECONFIG = 01-Ansible .cache/kubeconfig-spark-lab.yaml<br/>contexts: spark-root · dev-lab · dev-llms"]
   end
   subgraph MGMT["management plane · outside the Spark (01-Ansible Chapters 01 and 04)"]
     SEMA["sema01 · 192.168.0.210<br/>Semaphore :3000 · runs every playbook<br/>state volume: kubeconfig"]
@@ -75,13 +79,14 @@ flowchart LR
     direction TB
     CP["API server · etcd · scheduler<br/>controller-manager (static pods)"]
     PL["Cilium · MetalLB · GPU Operator<br/>kps (Grafana :32000) · platform-tools"]
+    LLM["LLM stack · llm-serving · batch<br/>Traefik .115 · Kueue · KEDA · ~90 GiB pool"]
     subgraph VD["vc-dev-lab"]
       DV["vCluster dev-lab · API .111<br/>tenant-alpha · tenant-beta · lab-tools"]
     end
-    subgraph VL["vc-llms"]
-      LV["vCluster llms · API .112<br/>llm-serving · batch · Traefik .115"]
+    subgraph VL["vc-dev-llms"]
+      LV["vCluster dev-llms · API .112<br/>llm-sandbox"]
     end
-    GPU["GB10 → 15 time-slices<br/>root 2 · dev-lab 2 · llms 11"]
+    GPU["GB10 → 15 time-slices<br/>platform 2 · llm-serving 6 · batch 3<br/>dev-lab 2 · dev-llms 2"]
   end
   subgraph S2["dgx-spark-2 · 192.168.0.101 · optional root worker"]
     G2["GB10 → 15 slices"]
@@ -94,7 +99,7 @@ flowchart LR
   K -->|443| DV
   K -->|443| LV
   DV & LV -->|syncer| CP
-  PL --> GPU
+  PL & LLM --> GPU
   DV & LV --> GPU
   S1 <-->|"CX-7 200 GbE · NCCL/RoCE"| S2
   classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
@@ -103,7 +108,7 @@ flowchart LR
   classDef tenant fill:#eaeef2,stroke:#57606a,color:#000
   classDef ext fill:#24292f,stroke:#000,color:#fff
   class CP,DV,LV ctrl
-  class GPU,G2 gpu
+  class GPU,G2,LLM gpu
   class PL net
   class K ext
   classDef mgmt fill:#fff3e6,stroke:#fb8500,color:#000
@@ -132,8 +137,8 @@ tests/run-local-checks.sh                   # proves your toolchain, no Spark ne
 
 # 1. On the Spark
 scripts/preflight.sh                        # host, kubeadm, Cilium, MetalLB, 15 slices, vCluster contexts
-scripts/install-addons.sh all               # root: storage, metrics-server, kps, vClusters · llms: Traefik, Kueue, KEDA
-scripts/apply-lab.sh                        # root → dev-lab → llms, layer by layer
+scripts/install-addons.sh all               # all on the root: storage, metrics-server, kps, vClusters, Traefik, Kueue, KEDA
+scripts/apply-lab.sh                        # root (incl. root-llms) → dev-lab → dev-llms, layer by layer
 scripts/verify.sh                           # PASS/WARN/FAIL for every layer of every cluster
 ```
 
@@ -151,10 +156,11 @@ Every script and every command in the chapters names a context. The rule of thum
 | You are … | Context | Examples |
 |---|---|---|
 | the platform team | `spark-root` | nodes, etcd, CNI, GPU Operator, storage classes, root budgets, benchmarks in `platform-tools` |
+| the ML / serving team (production) | `spark-root` | `llm-serving`, `batch`, `ingress`: vLLM, Triton, Kueue, KEDA, Traefik — the same cluster as the platform |
 | a tenant / developer | `dev-lab` | `tenant-alpha`, `tenant-beta`, `lab-tools`: quotas, RBAC, admission, networking labs |
-| the ML / serving team | `llms` | `llm-serving`, `batch`, `ingress`: vLLM, Triton, Kueue, KEDA, Traefik |
+| the ML team, trying something | `dev-llms` | `llm-sandbox`: a new manifest, the mock LLM or a tiny model before it goes to the root |
 
-`scripts/cgroup-inspect.sh`, `pod-netns.sh`, `svc-trace.sh` and `uma-watch.sh` take an optional context as the last argument and find a vCluster pod's real copy on the root for you.
+`scripts/cgroup-inspect.sh`, `pod-netns.sh`, `svc-trace.sh` and `uma-watch.sh` take an optional context as the last argument and find a vCluster pod's real copy on the root for you; LLM pods are root pods and need no lookup.
 
 ## The Spark is the playground
 

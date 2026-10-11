@@ -1,8 +1,9 @@
 # THE question for a UMA box (Chapter 14 §5.5): is a CUDA allocation charged to
 # the pod's memory cgroup? Memory limit 4 Gi, GPU allocation 16 GiB.
-# Runs on the ROOT (platform-tools). The answer decides how the vCluster memory
-# budgets in root/05-vclusters/quotas.yaml must be read: if CUDA memory is NOT
-# charged, a vCluster's 88 Gi does not cap what its model servers put on the GPU.
+# Runs on the ROOT (platform-tools). The answer decides how the memory budgets
+# (root-llms/10-tenancy/quotas.yaml, root/05-vclusters/quotas.yaml) must be read:
+# if CUDA memory is NOT charged, serving-budget's 90 Gi does not cap what the
+# model servers put on the GPU.
 #  - If it OOMKills at ~4 Gi   → CUDA memory IS charged: pod limits protect the node.
 #  - If it holds 16 GiB happily → it is NOT charged: only engine flags
 #    (--gpu-memory-utilization, --mem-fraction-static) and node-level alerts protect you.

@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | Proof that you can operate the platform without the chapter documents open. Twenty timed challenges, each with a goal, constraints, a success check you can run, and a pointer to the volume with the answer |
-| **Clusters** | all three. Each exercise says which: `spark-root` (node, platform, budgets), `dev-lab` (tenants, `lab-tools`), `llms` (serving, batch, Traefik, Kueue) |
+| **Clusters** | all three. Each exercise says which: `spark-root` (node, platform, budgets, and the LLM stack: `llm-serving`, `batch`, Traefik, Kueue), `dev-lab` (tenants, `lab-tools`), `dev-llms` (`llm-sandbox`) |
 | **Hardware** | dgx-spark-1 |
 | **Time** | 6–8 h total. Do 2–3 per session |
 | **Risk** | as per the referenced volume. Ex 20 restores root etcd |
@@ -17,7 +17,7 @@
 
 ```mermaid
 flowchart LR
-  R["Read the goal<br/>+ constraints"] --> W["Which cluster?<br/>spark-root · dev-lab · llms"] --> T["Start a timer"] --> D["Do it<br/>(no copy-paste from the chapter documents)"] --> C["Run the success check"]
+  R["Read the goal<br/>+ constraints"] --> W["Which cluster?<br/>spark-root · dev-lab · dev-llms"] --> T["Start a timer"] --> D["Do it<br/>(no copy-paste from the chapter documents)"] --> C["Run the success check"]
   C -->|pass| L["Log time + first<br/>useful command"]
   C -->|fail| H["Hint = the chapter's §<br/>then retry"] --> D
   classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
@@ -31,7 +31,7 @@ flowchart LR
 Start from a clean, verified platform:
 
 ```bash
-export KUBECONFIG="$PWD/01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"   # contexts spark-root, dev-lab, llms
+export KUBECONFIG="$PWD/01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"   # contexts spark-root, dev-lab, dev-llms
 cd "02-Kubernetes/lab"
 tests/run-local-checks.sh && scripts/verify.sh && scripts/breakfix.sh reset all
 ```
@@ -74,9 +74,9 @@ Progress log (copy into your notes):
 **Answer:** [Chapter 03 §5 Task 3–4](03-kube-apiserver-internals.md).
 
 ### Ex 05 · Write and prove a new CEL policy (30 min)
-**Cluster:** llms (the policy file is shared with dev-lab).
+**Cluster:** spark-root (the policy file is shared with both vClusters).
 **Goal:** in `llm-serving`, every container must set `resources.limits.memory`. Add it to `manifests/common/15-admission/policies.yaml` with a binding that selects `spark.lab/tier: serving`.
-**Success check:** add `tests/policy/deny-serving-no-memory-limit.yaml` (`# expect: deny`, `# cluster: llms`) and an `allow-…` fixture (`# expect: allow`). After `kubectl --context llms apply -k manifests/llms/15-admission`, `scripts/verify.sh admission` passes with your new fixtures. Then explain why the root's LimitRange on `vc-llms` would have filled in a limit anyway — and why the policy is still worth having.
+**Success check:** add `tests/policy/deny-serving-no-memory-limit.yaml` (`# expect: deny`, `# cluster: spark-root`) and an `allow-…` fixture (`# expect: allow`). After `kubectl --context spark-root apply -k manifests/root-llms/15-admission`, `scripts/verify.sh admission` passes with your new fixtures. Then explain why `llm-serving`'s LimitRange `defaults` would have filled in a limit anyway — and why the policy is still worth having (hint: request = limit is what keeps models from overcommitting the shared memory pool).
 **Answer:** [Chapter 03 §5 Task 5](03-kube-apiserver-internals.md), [Chapter 14 §3.3](14-multi-tenancy-resource-quotas-and-cgroups.md).
 
 ### Ex 06 · Trace a reconciliation cascade across two control planes (20 min)
@@ -94,9 +94,9 @@ Progress log (copy into your notes):
 **Answer:** [Chapter 07 §5.6](07-kube-scheduler-and-ai-batch-scheduling.md).
 
 ### Ex 08 · Gang scheduling with Kueue (30 min)
-**Cluster:** dev-lab (deadlock), llms (Kueue).
-**Goal:** reproduce the partial-gang deadlock without Kueue (`manifests/dev-lab/20-scheduling/no-kueue-deadlock.yaml`), then run gangs through `batch/train` in llms. Bonus: reproduce "Kueue admitted, root refused" from Chapter 18 §5.3.
-**Success check:** `tests/kueue-gang-test.sh` → `PASS`. For the bonus, you can point at the syncer event that names `vcluster-budget`.
+**Cluster:** dev-lab (deadlock), spark-root (Kueue).
+**Goal:** reproduce the partial-gang deadlock without Kueue (`manifests/dev-lab/20-scheduling/no-kueue-deadlock.yaml`), then run gangs through `batch/train` on the root. Bonus: reproduce "Kueue admitted, quota refused" from Chapter 18 §5.3.
+**Success check:** `tests/kueue-gang-test.sh` → `PASS`. For the bonus, you can point at the Job controller's `FailedCreate` event that names `batch-budget`, and say which other gate (the node's memory) would have kept rank 1 Pending instead.
 **Answer:** [Chapter 07 §5.4–5.5](07-kube-scheduler-and-ai-batch-scheduling.md), [Chapter 18 §5.3](18-distributed-ai-training-and-nccl.md).
 
 ## Part C — Networking
@@ -114,23 +114,23 @@ Progress log (copy into your notes):
 **Answer:** [Chapter 09 §5.1](09-kube-proxy-and-cluster-ip-mechanics.md), `scripts/svc-trace.sh lab-tools echo dev-lab`.
 
 ### Ex 11 · Fix the ndots tax for a model server (25 min)
-**Cluster:** llms (pod), root host (capture).
-**Goal:** patch llms's `llm-serving/mock-llm` (`dnsConfig.options ndots: "1"`) so an external lookup produces 2 DNS queries instead of ~10.
-**Success check:** on the Spark, capture on the mock-llm pod's host veth (`sudo tcpdump -nli <lxc…> udp dst port 53`) while `kubectl --context llms -n llm-serving exec deploy/mock-llm -- python3 -c "import socket; socket.getaddrinfo('huggingface.co', 443)"` runs: ≤ 2 queries after the patch. Say which CoreDNS answered them (llms's own, not the root's).
+**Cluster:** spark-root (pod), root host (capture).
+**Goal:** patch the root's `llm-serving/mock-llm` (`dnsConfig.options ndots: "1"`) so an external lookup produces 2 DNS queries instead of ~10.
+**Success check:** on the Spark, capture on the mock-llm pod's host veth (`sudo tcpdump -nli <lxc…> udp dst port 53`) while `kubectl --context spark-root -n llm-serving exec deploy/mock-llm -- python3 -c "import socket; socket.getaddrinfo('huggingface.co', 443)"` runs: ≤ 2 queries after the patch. Say which CoreDNS answered them (the root's `10.43.0.10` — and which one would have answered the same pod in dev-llms' `llm-sandbox`).
 **Answer:** [Chapter 10 §3.2, §5.3](10-coredns-and-service-discovery.md).
 
 ### Ex 12 · Streaming through the gateway (25 min)
-**Cluster:** llms.
-**Goal:** add a new HTTPRoute `api.lab.local` → `mock-llm` on Traefik's Gateway in llms with a 900 s request timeout, and prove a 1,000-token stream through `192.168.0.115` isn't buffered.
+**Cluster:** spark-root.
+**Goal:** add a new HTTPRoute `api.lab.local` → `mock-llm` in `llm-serving` on Traefik's Gateway (namespace `ingress`) with a 900 s request timeout, and prove a 1,000-token stream through `192.168.0.115` isn't buffered.
 **Success check:** `curl -s -o /dev/null -w '%{time_starttransfer} %{time_total}\n' -H 'Host: api.lab.local' http://192.168.0.115/v1/chat/completions -d '{"stream":true,"max_tokens":1000}'` shows TTFB < 0.5 s and total ≈ 50 s.
 **Answer:** [Chapter 11 §5.3–5.4, §5.7](11-ingress-controllers-and-gateway-api.md).
 
 ## Part D — Workloads & storage
 
 ### Ex 13 · Stateful vector DB survives (25 min)
-**Cluster:** llms.
-**Goal:** insert 100 points into Qdrant (`llm-serving/qdrant`), delete `qdrant-0`, then delete the whole StatefulSet (keep PVCs), re-apply `manifests/llms/50-workloads`, and count the points.
-**Success check:** `points_count == 100` after both deletions. You can name the root PV that held the data and its directory under `/data/k8s/vc-llms/`.
+**Cluster:** spark-root.
+**Goal:** insert 100 points into Qdrant (`llm-serving/qdrant`), delete `qdrant-0`, then delete the whole StatefulSet (keep PVCs), re-apply `manifests/root-llms/50-workloads`, and count the points.
+**Success check:** `points_count == 100` after both deletions. You can name the PV that held the data and its directory under `/data/k8s/retain/llm-serving/`.
 **Answer:** [Chapter 12 §5.1](12-advanced-workload-controllers.md), [Chapter 12 §3.4](12-advanced-workload-controllers.md).
 
 ### Ex 14 · Sharded preprocessing with a bad shard (25 min)
@@ -160,44 +160,44 @@ Progress log (copy into your notes):
 **Answer:** [Chapter 16 §5.1, §5.4–5.5](16-nvidia-container-toolkit-and-gpu-virtualization.md).
 
 ### Ex 18 · Device-plugin profile per node (20 min)
-**Cluster:** spark-root (switch, benchmark), llms (observe).
-**Goal:** switch dgx-spark-1 to `whole-gpu`, show allocatable 1 on the root **and** in llms, run `gemm-solo` in `platform-tools`, then switch back.
-**Success check:** allocatable goes 15 → 1 → 15 in both contexts while `vc-llms`'s quota keeps saying 8. GEMM TFLOPS equals your baseline.
+**Cluster:** spark-root (switch, benchmark), dev-llms (observe).
+**Goal:** switch dgx-spark-1 to `whole-gpu`, show allocatable 1 on the root **and** in dev-llms, run `gemm-solo` in `platform-tools`, then switch back.
+**Success check:** allocatable goes 15 → 1 → 15 in both contexts while `serving-budget` keeps saying 6 and `vc-dev-llms`'s `vcluster-budget` keeps saying 2. GEMM TFLOPS equals your baseline.
 **Answer:** [Chapter 17 §5.3](17-nvidia-gpu-operator-and-network-operator.md).
 
 ### Ex 19 · Multi-tenant GPU contention report (40 min)
-**Cluster:** spark-root (`gemm-contention`), llms (`mock-llm`).
-**Goal:** produce a table of per-pod and aggregate TFLOPS for 1, 2, 3 and 4 concurrent `platform-tools/gemm-contention` pods, plus p95 TTFT of llms's `mock-llm` (through `192.168.0.115`) measured at the same time.
-**Success check:** aggregate stays within ~10 % of the single-pod baseline. You can explain why — and why the vCluster budgets can't prevent this contention.
+**Cluster:** spark-root (`gemm-contention`, `mock-llm`).
+**Goal:** produce a table of per-pod and aggregate TFLOPS for 1, 2, 3 and 4 concurrent `platform-tools/gemm-contention` pods, plus p95 TTFT of `llm-serving/mock-llm` (through `192.168.0.115`) measured at the same time.
+**Success check:** aggregate stays within ~10 % of the single-pod baseline. You can explain why — and why the slice budgets (`serving-budget`, the `vc-*` budgets) can't prevent this contention.
 **Answer:** [Chapter 16 §5.3](16-nvidia-container-toolkit-and-gpu-virtualization.md).
 
 ## Part F — Disaster recovery
 
 ### Ex 20 · Full etcd restore under time pressure (45 min)
-**Cluster:** spark-root (etcd), llms.
-**Goal:** snapshot (`scripts/etcd-drill.sh snapshot`), then create three "doomed" objects: a root namespace, a ConfigMap in `platform-tools`, and a Kueue LocalQueue in llms's `batch`. Restore the snapshot (`scripts/etcd-drill.sh restore <file>`).
-**Success check:** `scripts/verify.sh` all PASS after the restore. The two root objects are gone; the LocalQueue is **still there**, and you can explain why (llms keeps its state in SQLite on its PVC) and how you would have rolled it back too.
+**Cluster:** spark-root (etcd), dev-llms.
+**Goal:** snapshot (`scripts/etcd-drill.sh snapshot`), then create four "doomed" objects: a root namespace, a ConfigMap in `platform-tools`, a Kueue LocalQueue in the root's `batch`, and a ConfigMap in dev-llms' `llm-sandbox`. Restore the snapshot (`scripts/etcd-drill.sh restore <file>`).
+**Success check:** `scripts/verify.sh` all PASS after the restore. The three root objects — the LocalQueue included, because the LLM stack lives in root etcd — are gone; the sandbox ConfigMap is **still there**, and you can explain why (dev-llms keeps its state in SQLite on its PVC) and how you would have rolled it back too.
 **Answer:** [Chapter 02 §5.6, §5.8](02-etcd-database-deep-dive.md), [Chapter 04 §6.7](04-nested-clusters-with-vcluster.md).
 
 ---
 
 ## Capstone — the 60-minute rebuild
 
-Tear down the 02 layer — the root's lab objects and the whole `dev-lab` vCluster — keeping 01-Ansible's base (kubeadm root, Cilium, MetalLB, GPU Operator), the add-ons (storage, metrics-server, kps) and `llms`'s model cache. Then rebuild to green:
+Tear down the 02 layer — the root's lab objects and the whole `dev-lab` vCluster — keeping 01-Ansible's base (kubeadm root, Cilium, MetalLB, GPU Operator), the add-ons (storage, metrics-server, kps, Traefik, Kueue, KEDA) and the LLM stack's model cache. Then rebuild to green:
 
 ```bash
 # root lab layers (never delete root/00-platform or root/05-vclusters: they hold observability and the vc-* namespaces)
 for d in 95-observability 70-gpu 50-workloads 45-controller 30-networking 16-apf; do
   kubectl --context spark-root delete -k manifests/root/$d --ignore-not-found --wait=false; done
-# llms lab layers (keep 00-platform: the ingress namespace holds Traefik; keep 60-storage: model-cache)
+# the root's LLM-stack layers (keep 00-platform: the ingress namespace holds Traefik; keep 60-storage: model-cache)
 for d in 20-scheduling 50-workloads 40-ingress 15-admission 10-tenancy; do
-  kubectl --context llms delete -k manifests/llms/$d --ignore-not-found --wait=false; done
+  kubectl --context spark-root delete -k manifests/root-llms/$d --ignore-not-found --wait=false; done
 # the whole dev-lab vCluster: control plane, SQLite, every synced object
 helm --kube-context spark-root uninstall dev-lab -n vc-dev-lab
 kubectl --context spark-root delete namespace vc-dev-lab --wait=true
 # start the clock
 kubectl --context spark-root apply -k manifests/root/05-vclusters      # vc-dev-lab namespace, budget, LimitRange, boundary policy
-scripts/install-addons.sh vclusters                                    # reinstalls dev-lab (llms: no-op upgrade), re-merges contexts
+scripts/install-addons.sh vclusters                                    # reinstalls dev-lab (dev-llms: no-op upgrade), re-merges contexts
 scripts/apply-lab.sh && scripts/verify.sh
 ```
 
@@ -207,7 +207,7 @@ scripts/apply-lab.sh && scripts/verify.sh
 
 ## CI: the workbook for your laptop
 
-Everything that doesn't need a GPU is checked on every PR by [`.github/workflows/k8s-lab-ci.yml`](../.github/workflows/k8s-lab-ci.yml). It runs lint, kubeconform, promtool and shellcheck, then builds the same shape on kind: kind plays the root (context `spark-root`, a fake GB10 with 15 slices from `tests/fake-gpu-node.sh`), the two vClusters come from `vclusters/*.yaml` (ClusterIP + port-forward instead of MetalLB), Kueue runs inside `llms`, and it applies the lab to all three clusters, runs the budget, tenancy and admission checks and the Kueue gang test. Run the same on a laptop:
+Everything that doesn't need a GPU is checked on every PR by [`.github/workflows/k8s-lab-ci.yml`](../.github/workflows/k8s-lab-ci.yml). It runs lint, kubeconform, promtool and shellcheck, then builds the same shape on kind: kind plays the root (context `spark-root`, a fake GB10 with 15 slices from `tests/fake-gpu-node.sh`), the two vClusters come from `vclusters/*.yaml` (ClusterIP + port-forward instead of MetalLB), Kueue runs on the root with the LLM stack, and it applies the lab to all three clusters, runs the budget, tenancy and admission checks and the Kueue gang test. Run the same on a laptop:
 
 ```bash
 kind create cluster --name spark-sim --image kindest/node:v1.34.0

@@ -23,7 +23,7 @@ On a DGX Spark, four things differ from a textbook cluster:
 |---|---|---|
 | 3+ control-plane VMs, separate workers | **One node** is control plane *and* worker — kubeadm was told not to taint it (`nodeRegistration.taints: []`) | A runaway pod competes with etcd and the API server for CPU, memory and NVMe. Kubelet reservations (§3.3) matter |
 | (same) — kubeadm runs each component as a **static pod** | apiserver, etcd, scheduler and controller-manager are pods the kubelet starts from `/etc/kubernetes/manifests/`; kubelet and containerd are systemd services | The control plane is visible with `kubectl -n kube-system get pods` *and* `crictl ps`. Its pods' requests count against allocatable |
-| One cluster | **Three API servers**: the root, plus vCluster `dev-lab` and `llms` running as pods inside it (Chapter 04) | A tenant's pod passes through two API servers before the kubelet sees it |
+| One cluster | **Three API servers**: the root (which also runs the LLM stack), plus vCluster `dev-lab` and `dev-llms` running as pods inside it (Chapter 04) | A tenant's pod passes through two API servers before the kubelet sees it; a model server on the root passes through one |
 | GPU memory is separate from host RAM | **128 GB unified memory** shared by CPU and GB10 | A pod's memory limit may not cap its CUDA allocations (Chapter 14 measures it). Node memory pressure also starves the GPU |
 | x86-64 | **aarch64** (Grace: 10× Cortex-X925 + 10× Cortex-A725) | Every image needs an `arm64` manifest. `exec format error` means you pulled an amd64-only image |
 
@@ -34,7 +34,7 @@ On a DGX Spark, four things differ from a textbook cluster:
 ```mermaid
 flowchart TB
   subgraph LAPTOP["Your MacBook · kubectl client"]
-    KC["kubectl<br/>contexts spark-root · dev-lab · llms"]
+    KC["kubectl<br/>contexts spark-root · dev-lab · dev-llms"]
   end
   subgraph SPARK["dgx-spark-1 · 192.168.0.100 · DGX OS 7 (Ubuntu 24.04 arm64)"]
     direction TB
@@ -50,7 +50,7 @@ flowchart TB
       KP["kube-proxy<br/>iptables"]
       CIL["Cilium agent<br/>VXLAN :8472/udp"]
     end
-    subgraph VC["vCluster pods (vc-dev-lab, vc-llms)"]
+    subgraph VC["vCluster pods (vc-dev-lab, vc-dev-llms)"]
       VAPI["vCluster API server + syncer<br/>:443 via MetalLB .111 / .112"]
     end
     KL["kubelet (systemd) :10250<br/>/var/lib/kubelet/config.yaml"]
@@ -121,29 +121,32 @@ Rule of thumb: **only the API server talks to etcd.** Every other component is a
 | `deploy/metrics-server` | `kubectl top`, HPAs (proxied into both vClusters) | `scripts/install-addons.sh metrics-server` |
 | namespaces `metallb-system`, `local-path-storage`, `gpu-operator` | LoadBalancer IPs, local PVs on NVMe, NFD/GFD/device plugin/validator | 01-Ansible (MetalLB, GPU Operator), lab add-ons |
 | `runtimeclass/nvidia` | Explicit GPU runtime | GPU Operator (and `common/runtimeclass` inside each vCluster) |
-| namespaces `vc-dev-lab`, `vc-llms` | the two vClusters and every pod they sync | Chapter 04 |
+| namespaces `llm-serving`, `batch`, `ingress` (+ `kueue-system`, `keda`, `kserve`, `cert-manager`) | the LLM stack: model servers, training jobs, Traefik on `192.168.0.115` | Chapters 04, 20 |
+| namespaces `vc-dev-lab`, `vc-dev-llms` | the two vClusters and every pod they sync | Chapter 04 |
 
 ### 3.3 Capacity vs allocatable on a GB10
 
-The 01-Ansible kubeadm config sets `systemReserved: {cpu: 2, memory: 8Gi}`, `kubeReserved: {cpu: 1, memory: 2Gi}` and `evictionHard: memory.available: 4Gi` in the KubeletConfiguration:
+The 01-Ansible kubeadm config sets `systemReserved: {cpu: 2, memory: 6Gi}`, `kubeReserved: {cpu: 1, memory: 2Gi}` and `evictionHard: memory.available: 4Gi` in the KubeletConfiguration:
 
 | | CPU | Memory | Why |
 |---|---|---|---|
 | Capacity | 20 | ≈119.7 GiB | What the kernel reports (part of the 128 GB is firmware/carve-outs) |
-| − system-reserved | 2 | 8 Gi | DGX OS, DGX Dashboard, sshd, journald, Docker |
+| − system-reserved | 2 | 6 Gi | DGX OS (headless — no desktop session), DGX Dashboard, sshd, journald, Docker |
 | − kube-reserved | 1 | 2 Gi | kubelet + containerd |
 | − eviction threshold | — | 4 Gi | kubelet starts evicting below this |
-| **Allocatable** | **17** | **≈105.7 GiB** | What the scheduler hands out, **CPU and GPU combined** |
+| **Allocatable** | **17** | **≈107.7 GiB** | What the scheduler hands out, **CPU and GPU combined** |
 
-Unlike k3s, the control plane is *not* inside kube-reserved: the static pods request ~0.65 CPU and a few hundred MiB themselves (apiserver 250m, controller-manager 200m, scheduler 100m, etcd 100m + 100Mi) out of allocatable. `kubectl --context spark-root describe node dgx-spark-1 | grep -A12 'Allocated resources'` shows them alongside the vCluster pods.
+System-reserved is 6 Gi because 01-Ansible's `04.3 Baseline` (role `spark_baseline`, `spark_baseline_headless: true`) switches DGX OS to `multi-user.target`: no graphical session holds memory.
+
+Unlike k3s, the control plane is *not* inside kube-reserved: the static pods request ~0.65 CPU and a few hundred MiB themselves (apiserver 250m, controller-manager 200m, scheduler 100m, etcd 100m + 100Mi) out of allocatable. `kubectl --context spark-root describe node dgx-spark-1 | grep -A12 'Allocated resources'` shows them alongside the model servers and the vCluster pods.
 
 ### 3.4 Three API servers, one node
 
 | API server | Stores in | Runs as | You use it to |
 |---|---|---|---|
-| root `kube-apiserver` | etcd | static pod | manage the node, platform, GPU, and the vClusters' budgets |
+| root `kube-apiserver` | etcd | static pod | manage the node, platform, GPU and the vClusters' budgets — and run serving and training (`llm-serving`, `batch`) |
 | `dev-lab` | SQLite (PVC) | container in pod `dev-lab-0` (ns `vc-dev-lab`) | run tenants: `tenant-alpha`, `tenant-beta`, `lab-tools` |
-| `llms` | SQLite (PVC) | container in pod `llms-0` (ns `vc-llms`) | run serving and training |
+| `dev-llms` | SQLite (PVC) | container in pod `dev-llms-0` (ns `vc-dev-llms`) | try LLM manifests and tiny models in `llm-sandbox` |
 
 There is still only **one scheduler that places pods on the GB10 node: the root's.** The vClusters run no scheduler (vCluster's default); their syncers hand pods to the root.
 
@@ -220,7 +223,7 @@ Expected (abridged):
 [PASS] Cilium agent ready
 [PASS] dgx-spark-1 allocatable nvidia.com/gpu=15 (time-slices)
 [PASS] vCluster dev-lab answers
-[PASS] vCluster llms answers
+[PASS] vCluster dev-llms answers
 ```
 
 ### Task 2 · See the control plane as static pods

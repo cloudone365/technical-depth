@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **You will build** | Observed reconciliation (Deployment → ReplicaSet → Pod, quota status, garbage collection) in a vCluster and at the root, an outage of the root's controller-manager that dev-lab doesn't notice, the vCluster syncer seen as just another controller, and a working controller in ~150 lines of dependency-free Python. It watches every GPU pod on the Spark — the platform's and the ones both vClusters synced — and keeps a live "who holds which GB10 slice" ledger |
+| **You will build** | Observed reconciliation (Deployment → ReplicaSet → Pod, quota status, garbage collection) in a vCluster and at the root, an outage of the root's controller-manager that dev-lab doesn't notice, the vCluster syncer seen as just another controller, and a working controller in ~150 lines of dependency-free Python. It watches every GPU pod on the Spark — the platform's, the root's model servers and training jobs, and the ones both vClusters synced — and keeps a live "who holds which GB10 slice" ledger |
 | **Hardware** | dgx-spark-1. The controller also runs on the fake-GPU kind cluster (`tests/fake-gpu-node.sh`) |
 | **Time** | 90 min |
 | **Risk** | Low. §5.3 stops the root's controller-manager for a minute (the kubelet restarts it when you put the manifest back) |
@@ -66,7 +66,7 @@ flowchart TB
   end
   subgraph ROOT["root control plane · static pods on dgx-spark-1"]
     RAPI["root API server<br/>(etcd)"]
-    RKCM["root controller-manager<br/>node lifecycle · node IPAM · PV binding · quota on vc-* · GC<br/>+ Deployments of the platform"]
+    RKCM["root controller-manager<br/>node lifecycle · node IPAM · PV binding · quota on vc-*, llm-serving, batch · GC<br/>+ Deployments of the platform and the LLM stack"]
     RS["root scheduler"]
     RKCM <--> RAPI
     RS <--> RAPI
@@ -74,16 +74,18 @@ flowchart TB
   SYN -->|"create/delete pods, Services, PVCs<br/>(APF lane spark-vcluster-syncers)"| RAPI
   RAPI -->|"pod status, events, nodes"| SYN
   OPS["platform controllers<br/>GPU Operator · Cilium · MetalLB · kps · slice-ledger"] <--> RAPI
-  KUE["llms: Kueue · KEDA · KServe"] -.-|"inside llms only"| LLMS[("llms API server")]
+  KUE["LLM stack controllers<br/>Kueue · KEDA · KServe"] <--> RAPI
   classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
   classDef tenant fill:#eaeef2,stroke:#57606a,color:#000
   classDef gpu fill:#76b900,stroke:#3d6000,color:#000
   class RAPI,RKCM,RS ctrl
-  class DAPI,DKCM,SYN,KUE,LLMS tenant
-  class OPS gpu
+  class DAPI,DKCM,SYN tenant
+  class OPS,KUE gpu
   style DEV fill:#f6f8fa,stroke:#57606a,stroke-dasharray: 4 3
   style ROOT fill:#e6f4f5,stroke:#0e7c86,stroke-width:2px
 ```
+
+dev-llms (`vc-dev-llms/dev-llms-0`) is built the same way as dev-lab. The LLM stack's controllers (Kueue, KEDA, KServe) are not inside a vCluster: they run on the root next to the models, and their objects and pods are ordinary root objects.
 
 A tenant's Deployment never reaches the root. Its **ReplicaSet and Pods are created by dev-lab's controller-manager**; only the Pods are copied down by the syncer. At the root, a tenant pod is a bare pod with no ReplicaSet owner — so the root's controllers don't heal it. If it dies, the dev-lab ReplicaSet replaces it, and the syncer creates the new copy.
 
@@ -98,14 +100,14 @@ A tenant's Deployment never reaches the root. Its **ReplicaSet and Pods are crea
 | Deployment | kube-controller-manager | each cluster for its own Deployments | Deployments, ReplicaSets | ReplicaSets | `kubectl --context dev-lab rollout history` |
 | ReplicaSet | kube-controller-manager | each | ReplicaSets, Pods | Pods | `FailedCreate` events (quota, admission) |
 | Job (+ Indexed) | kube-controller-manager | each | Jobs, Pods | Pods, Job status | `JOB_COMPLETION_INDEX`, `backoffLimitPerIndex` |
-| ResourceQuota | kube-controller-manager | **both layers**: dev-lab computes `tenant-budget`, the root computes `vcluster-budget` | quota'd objects | `status.used` | §5.3 |
+| ResourceQuota | kube-controller-manager | **both layers**: dev-lab computes `tenant-budget`, the root computes `vcluster-budget` (and `serving-budget`, `batch-budget` for the LLM stack) | quota'd objects | `status.used` | §5.3 |
 | Garbage collector | kube-controller-manager | each | everything with `ownerReferences` | deletes | cascade vs orphan (§5.4) |
 | Node lifecycle, node IPAM | kube-controller-manager | **root only** (vClusters have no real nodes) | Nodes, Leases in `kube-node-lease` | taints `not-ready`/`unreachable`, `spec.podCIDR` | Chapter 26, Chapter 08 |
 | PV binder | kube-controller-manager | **root only** (a tenant PVC is bound as its host copy) | PVCs, PVs | bindings | Chapter 13 |
-| vCluster syncer | `dev-lab-0` / `llms-0` pods | vCluster ⇄ root | pods, Services, PVCs, Secrets, ConfigMaps, NetworkPolicies, PriorityClasses, PDBs (virtual); nodes, StorageClasses, pod status (host) | host copies; virtual status/events | §5.6 |
+| vCluster syncer | `dev-lab-0` / `dev-llms-0` pods | vCluster ⇄ root | pods, Services, PVCs, Secrets, ConfigMaps, NetworkPolicies, PriorityClasses, PDBs (virtual); nodes, StorageClasses, pod status (host) | host copies; virtual status/events | §5.6 |
 | NVIDIA GPU Operator | `gpu-operator` ns | root | ClusterPolicy, Nodes | DaemonSets, labels | Chapter 17 |
-| Kueue | `kueue-system` ns | **llms** | Jobs, Workloads, ClusterQueues | `suspend`, admission | Chapter 07 |
-| **slice-ledger** (ours) | `platform-tools` ns | root | Pods (all namespaces, including `vc-*`) | one ConfigMap | §5.5 |
+| Kueue | `kueue-system` ns | root (LLM stack) | Jobs, Workloads, ClusterQueues | `suspend`, admission | Chapter 07 |
+| **slice-ledger** (ours) | `platform-tools` ns | root | Pods (all namespaces, including `vc-*`, `llm-serving`, `batch`) | one ConfigMap | §5.5 |
 
 ### 3.2 Leases
 
@@ -123,7 +125,7 @@ A tenant's Deployment never reaches the root. Its **ReplicaSet and Pods are crea
 | Where | the **root**, Deployment `platform-tools/slice-ledger`: only the root sees every pod that holds a slice (a vCluster only sees its own) |
 | Informer | raw `LIST /api/v1/pods` + `WATCH ?resourceVersion=…&allowWatchBookmarks=true` |
 | 410 Gone | re-LIST (the resourceVersion was compacted, Chapter 02 §5.5) |
-| Desired state | ConfigMap `platform-tools/gpu-slice-ledger`: one key per node (`used`/`capacity` + holders, with the virtual name of synced pods) and `by-namespace` (compare `vc-dev-lab`/`vc-llms` with their root quotas of 2 / 8) |
+| Desired state | ConfigMap `platform-tools/gpu-slice-ledger`: one key per node (`used`/`capacity` + holders, with the virtual name of synced pods) and `by-namespace` (compare `llm-serving` / `batch` / `vc-dev-lab` / `vc-dev-llms` with their quotas of 6 / 3 / 2 / 2) |
 | Capacity | `SLICES_PER_NODE=15` (GPU Operator time-slicing) |
 | Idempotency | compares with last write, so there's no write when nothing changed |
 | Resync | every 60 s (`RESYNC_SECONDS`), even with no events |
@@ -133,7 +135,7 @@ A tenant's Deployment never reaches the root. Its **ReplicaSet and Pods are crea
 
 ## 4. Integrations
 
-- **Kueue (Chapter 07)** is the same pattern at production quality, inside llms. It watches Jobs, keeps its own cache of quota usage, and flips `spec.suspend`. Its pods then go through the syncer like any other.
+- **Kueue (Chapter 07)** is the same pattern at production quality, on the root. It watches Jobs in `batch`, keeps its own cache of quota usage, and flips `spec.suspend`. The Job controller then creates ordinary root pods: no syncer in between.
 - **The GPU Operator (Chapter 17)** reconciles a single `ClusterPolicy` into about ten DaemonSets on the root. When a DaemonSet is deleted by hand, it comes back. That's the controller doing its job.
 - **The vCluster syncer (Chapter 04)** is a controller pair: virtual → host for workloads, host → virtual for status, events and nodes. It writes to the root through APF lane `spark-vcluster-syncers` (Chapter 03 §3.4).
 - **Grafana (Chapter 17)** can show the ledger's numbers without the ConfigMap: kube-state-metrics' `kube_pod_container_resource_limits{resource="nvidia_com_gpu"}` by namespace. The ledger exists to *teach* the pattern.
@@ -167,7 +169,7 @@ pgrep -a kube-controller | cut -c1-160          # on the Spark
 sudo crictl ps --name 'kube-controller-manager|syncer' -o table
 ```
 
-Expected: **three** `kube-controller-manager` processes — the root's static pod and one inside each vCluster's control-plane pod (`dev-lab-0`, `llms-0`). Containers are just processes with namespaces; the host sees them all. Compare their flags:
+Expected: **three** `kube-controller-manager` processes — the root's static pod and one inside each vCluster's control-plane pod (`dev-lab-0`, `dev-llms-0`). Containers are just processes with namespaces; the host sees them all. Compare their flags:
 
 ```bash
 for p in $(pgrep kube-controller); do echo "== $p"; tr '\0' '\n' < /proc/$p/cmdline | grep -E -- '--(controllers|leader-elect|kubeconfig|cluster-cidr|allocate-node-cidrs)' ; done
@@ -275,7 +277,7 @@ kubectl --context spark-root -n platform-tools get cm gpu-slice-ledger -o jsonpa
 kubectl --context spark-root -n platform-tools get cm gpu-slice-ledger -o jsonpath='{.data.by-namespace}' | jq
 ```
 
-Expected log and ledger (counts include anything else holding slices, such as serving pods in llms):
+Expected log and ledger (counts include anything else holding slices, such as model servers in the root's `llm-serving`):
 
 ```text
 relist: 0 GPU pods, resourceVersion=81234
@@ -359,7 +361,7 @@ Two managers on every host pod: the syncer (spec, labels, annotations) and the k
 | Root objects don't reconcile: deleted platform pods not replaced, root quotas never release | root controller-manager not running or not leader | Lease `renewTime` stale. `sudo crictl ps -a --name kube-controller-manager`, `sudo crictl logs <id>` | fix `/etc/kubernetes/manifests/kube-controller-manager.yaml` (the kubelet restarts it). Check CPU starvation of the node |
 | A vCluster's Deployments/Jobs don't reconcile, root is fine | that vCluster's control-plane pod is down or crash-looping | `kubectl --context spark-root -n vc-dev-lab get pods`; `kubectl --context spark-root -n vc-dev-lab logs dev-lab-0` | Chapter 04 §8. Its memory limit (1 Gi in [`vclusters/dev-lab.yaml`](lab/vclusters/dev-lab.yaml)) counts against the vCluster's own budget |
 | Pod exists in a vCluster, never appears at the root; sync error event | the syncer's write was refused by the root (quota, PSA, LimitRange) | `kubectl --context dev-lab -n <ns> describe pod <p>` → events | free budget or fix the spec (break/fix 02) |
-| Object flips between two states every few seconds | two controllers own the same field (HPA **and** you both set `replicas`; KEDA **and** Argo CD in llms) | `kubectl get <obj> -o yaml --show-managed-fields` shows two managers on the same field | give the field one owner (drop `replicas` from Git when an autoscaler owns it) |
+| Object flips between two states every few seconds | two controllers own the same field (HPA **and** you both set `replicas`; KEDA **and** Argo CD on vLLM in `llm-serving`) | `kubectl get <obj> -o yaml --show-managed-fields` shows two managers on the same field | give the field one owner (drop `replicas` from Git when an autoscaler owns it) |
 | Hand edit of a host copy at the root keeps reverting | the syncer owns those fields; the virtual object is the source of truth | `managedFields` on the host object | edit the object inside the vCluster |
 | etcd churn, API latency up, events spam | hot loop: a controller writes every reconcile | `apiserver_request_total{verb="PUT"}` by `resource`; root audit log grouped by `user.username` (a syncer SA means the loop is inside that vCluster) | make writes conditional (compare first), add backoff |
 | Custom controller logs `410 Gone` repeatedly | watching from a compacted resourceVersion without re-listing | controller logs | re-LIST on 410 (slice_ledger does). Use bookmarks |

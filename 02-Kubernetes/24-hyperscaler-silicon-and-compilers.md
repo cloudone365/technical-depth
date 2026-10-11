@@ -8,7 +8,7 @@
 | **Hardware** | dgx-spark-1 |
 | **Time** | 60 min |
 | **Risk** | None. The benchmark takes one of the root's 2 GPU slices for a few minutes |
-| **Clusters** | `spark-root` (namespace `platform-tools`: benchmarking the hardware is a platform job) · `llms` (only to compare what a tenant sees) |
+| **Clusters** | `spark-root` (namespace `platform-tools`: benchmarking the hardware is a platform job) · `dev-llms` (only to compare what a vCluster tenant sees) |
 | **Lab files** | [`manifests/root/70-gpu/compile_compare.py`](lab/manifests/root/70-gpu/compile_compare.py), [`compile-compare.yaml`](lab/manifests/root/70-gpu/compile-compare.yaml), [`kustomization.yaml`](lab/manifests/root/70-gpu/kustomization.yaml) (ConfigMap `gemm-bench`), [`manifests/root/45-controller/`](lab/manifests/root/45-controller/) (slice ledger) |
 
 ---
@@ -31,7 +31,7 @@ Your Spark runs the same software stack as NVIDIA's datacenter systems (CUDA, cu
 
 ### 1.1 Why the benchmark runs on the root
 
-The lab puts hardware benchmarking in the root's `platform-tools` namespace, not in a vCluster. A compiler benchmark measures the *GB10*, and its result is a platform fact (like the baseline TFLOPS in Chapter 05 §4 Task 6) that every tenant's numbers are compared against. `platform-tools` has no ResourceQuota: the root's share of the Spark (3 CPU, ~9.7 GiB, 2 of the 15 time-slices) is kept by convention and watched by the slice ledger, not enforced. That is the usual platform-team trade — more freedom, more responsibility. Take a 3rd slice and a tenant pod inside llms or dev-lab gets `Insufficient nvidia.com/gpu` from the root scheduler even though its vCluster quota still has room. This Job alone asks for more than that share (4 CPU requested, 16 Gi memory limit, §3.2): CPU can burst into idle cores, but memory can't, so run it while the vClusters' engines and batch jobs are quiet.
+The lab puts hardware benchmarking in the root's `platform-tools` namespace, not in a vCluster. A compiler benchmark measures the *GB10*, and its result is a platform fact (like the baseline TFLOPS in Chapter 05 §4 Task 6) that every workload's numbers are compared against. `platform-tools` has no ResourceQuota: the root's share of the Spark (3 CPU, ~9.7 GiB, 2 of the 15 time-slices) is kept by convention and watched by the slice ledger, not enforced. That is the usual platform-team trade — more freedom, more responsibility. Take a 3rd slice and a model in `llm-serving`, a training rank in `batch` or a pod inside dev-lab or dev-llms gets `Insufficient nvidia.com/gpu` from the root scheduler even though its own quota still has room. This Job alone asks for more than that share (4 CPU requested, 16 Gi memory limit, §3.2): CPU can burst into idle cores, but memory can't, so run it while the engines in `llm-serving` and the batch jobs are quiet.
 
 ---
 
@@ -84,7 +84,7 @@ The benchmark block is `Linear(D→4D) → GELU → Linear(4D→D) + residual �
 | `torch.compile` (default) | ~4 (2 GEMMs + 1–2 fused Triton kernels) | GELU, residual and norm fused: fewer memory round trips |
 | `mode="max-autotune"` | same or fewer, + CUDA graphs | autotuned GEMM/Triton configs. Launch overhead gone |
 
-On a **memory-bandwidth-limited** part like GB10 (≈273 GB/s shared), fusion that removes memory traffic matters proportionally more than on an HBM GPU. And because that bandwidth is shared with the CPU, a noisy neighbour in *any* cluster (a vLLM decode loop in llms, a page-cache-heavy job on the host) moves your eager numbers more than your fused ones.
+On a **memory-bandwidth-limited** part like GB10 (≈273 GB/s shared), fusion that removes memory traffic matters proportionally more than on an HBM GPU. And because that bandwidth is shared with the CPU, a noisy neighbour in *any* cluster (a vLLM decode loop in `llm-serving`, a page-cache-heavy job on the host) moves your eager numbers more than your fused ones.
 
 ### 3.2 The Job
 
@@ -122,7 +122,7 @@ resources:
 | who sees the device | the root's device plugin; a vCluster only sees the count on the synced node | the node's device plugin | the node's device plugin |
 | image | CUDA arm64/x86 | JAX/PyTorch-XLA for TPU | Neuron SDK DLCs |
 
-The middle row is the nested-cluster version of a cloud fact: device plugins, DRA drivers and the TPU/Neuron node agents belong to whoever owns the nodes. In this lab that's the root; a vCluster tenant writes `nvidia.com/gpu: 1` and the root's scheduler and kubelet do the rest. On GKE or EKS it's the cloud provider.
+The middle row is the nested-cluster version of a cloud fact: device plugins, DRA drivers and the TPU/Neuron node agents belong to whoever owns the nodes. In this lab that's the root; a model server in `llm-serving` or a vCluster tenant writes `nvidia.com/gpu: 1`, and the root's scheduler and kubelet do the rest. On GKE or EKS it's the cloud provider.
 
 ---
 
@@ -161,7 +161,7 @@ device=NVIDIA GB10 cc=(12, 1) torch=2.9.0a0+…
 compile time: default 35s, max-autotune 180s
 ```
 
-While it runs, compare the two views of the GPU: `kubectl --context spark-root describe node dgx-spark-1 | grep -A8 'Allocated resources'` counts the slice you just took, and `kubectl --context llms describe node dgx-spark-1 | grep -A8 'Allocated resources'` shows the same node as a tenant sees it — real allocatable and real labels, synced from the root.
+While it runs, compare the two views of the GPU: `kubectl --context spark-root describe node dgx-spark-1 | grep -A8 'Allocated resources'` counts the slice you just took, and `kubectl --context dev-llms describe node dgx-spark-1 | grep -A8 'Allocated resources'` shows the same node as a vCluster tenant sees it — real allocatable and real labels, synced from the root.
 
 ### 5.2 See the generated kernels
 
@@ -201,7 +201,7 @@ kubectl --context spark-root -n platform-tools delete job compile-compare --igno
 | compile-compare | compiled modes faster than eager. Numbers recorded |
 | generated code | at least one fused `triton_` kernel containing GELU + reduction |
 | recompile probe | first shapes slow, later shapes fast |
-| slice accounting | the benchmark's slice visible on the root node (and in the ledger), not in any vCluster quota |
+| slice accounting | the benchmark's slice visible on the root node (and in the ledger), not in any ResourceQuota (namespace or vCluster) |
 
 ---
 
@@ -210,11 +210,11 @@ kubectl --context spark-root -n platform-tools delete job compile-compare --igno
 | Symptom | Cause | Fix |
 |---|---|---|
 | `torch.compile` errors about Triton / `sm_121` | Triton in the image lacks Blackwell (sm_120/121) support | use the NGC PyTorch image for DGX Spark (25.09+) |
-| Job Pending, `Insufficient nvidia.com/gpu` | all 15 slices taken across the three clusters | `kubectl --context spark-root get cm -n platform-tools gpu-slice-ledger -o yaml`; stop the root's `gemm-contention` before touching tenants |
+| Job Pending, `Insufficient nvidia.com/gpu` | all 15 slices taken across the root (platform, `llm-serving`, `batch`) and the two vClusters | `kubectl --context spark-root get cm -n platform-tools gpu-slice-ledger -o yaml`; stop the root's `gemm-contention` before touching serving or tenants |
 | `configmap "gemm-bench" not found` | `compile-compare.yaml` applied without the kustomization | `kubectl --context spark-root apply -k manifests/root/70-gpu` |
 | max-autotune takes very long | exhaustive GEMM/Triton config search | cache: set `TORCHINDUCTOR_CACHE_DIR` to a PVC so pods reuse results |
 | compiled slower than eager | graph breaks (Python side effects), tiny shapes | `TORCH_LOGS=graph_breaks`. Compile larger regions |
-| out of memory during compile | autotune benchmarks many configs | smaller batch while tuning. Leave UMA headroom — check what the vClusters' engines hold first |
+| out of memory during compile | autotune benchmarks many configs | smaller batch while tuning. Leave UMA headroom — check what the engines in `llm-serving` hold first |
 
 ---
 
@@ -235,4 +235,4 @@ kubectl --context spark-root -n platform-tools delete job compile-compare --igno
 - [ ] I found a fused kernel in the generated code.
 - [ ] I can read a TPU or Trainium pod spec and map it to the GPU equivalent — and say who owns the device plugin.
 - [ ] I know the operational costs of compilation (cold start, recompiles, caches).
-- [ ] I can explain why the root's slices are a convention, and what happens to tenants when the platform takes too many.
+- [ ] I can explain why the root's slices are a convention, and what happens to serving, batch and tenants when the platform takes too many.

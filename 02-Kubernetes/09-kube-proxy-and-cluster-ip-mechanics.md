@@ -8,7 +8,7 @@
 | **Hardware** | dgx-spark-1 |
 | **Time** | 75 min |
 | **Risk** | None |
-| **Clusters** | `spark-root` (kube-proxy, iptables, conntrack, MetalLB, the synced Services), `dev-lab` (echo Services), `llms` (mock-llm streams, Traefik LoadBalancer) |
+| **Clusters** | `spark-root` (kube-proxy, iptables, conntrack, MetalLB, the synced Services, and the LLM stack: mock-llm streams in `llm-serving`, the Traefik LoadBalancer in `ingress`), `dev-lab` (echo Services) |
 | **Lab files** | [`manifests/dev-lab/30-networking/echo-service.yaml`](lab/manifests/dev-lab/30-networking/echo-service.yaml), [`scripts/svc-trace.sh`](lab/scripts/svc-trace.sh), [`manifests/root/30-networking/netshoot-host.yaml`](lab/manifests/root/30-networking/netshoot-host.yaml), [`addons/traefik-values.yaml`](lab/addons/traefik-values.yaml), 01-Ansible [`kubeadm-init.yaml.j2`](../01-Ansible/lab/roles/kubeadm_cluster/templates/kubeadm-init.yaml.j2) (`KubeProxyConfiguration`: `mode: iptables`, `conntrack.maxPerCore`) |
 
 ---
@@ -21,7 +21,7 @@ A ClusterIP such as `10.43.87.12` isn't bound to any interface. It exists only a
 - **Readiness decides membership.** A loading model that reports ready too early gets traffic and returns 503s.
 - **Terminating pods keep their conntrack entries** until those connections close. Without a `preStop` delay, in-flight streams are cut.
 
-In this lab there's a twist: there is exactly **one kube-proxy** — the root's DaemonSet in `kube-system`. A vCluster has an API server, controllers and DNS, but no kube-proxy and no kernel of its own. A Service a tenant creates in `dev-lab` or `llms` only works because the syncer copies it to the root, where it becomes an ordinary root Service with a ClusterIP from the root's 10.43.0.0/16, and the root's kube-proxy programs that IP.
+In this lab there's a twist: there is exactly **one kube-proxy** — the root's DaemonSet in `kube-system`. A vCluster has an API server, controllers and DNS, but no kube-proxy and no kernel of its own. A Service a tenant creates in `dev-lab` or `dev-llms` only works because the syncer copies it to the root, where it becomes an ordinary root Service with a ClusterIP from the root's 10.43.0.0/16, and the root's kube-proxy programs that IP. The LLM stack skips that step: `llm-serving/vllm` and `ingress/traefik-lab` are root Services from the start, with no copy and no translated name.
 
 Cilium is the CNI, but with `kubeProxyReplacement=false` (01-Ansible `roles/cilium`): Cilium moves packets between pod IPs, kube-proxy turns ClusterIPs into pod IPs in iptables. That split is what lets this chapter read Services with `iptables-save`.
 
@@ -68,7 +68,7 @@ flowchart LR
 
 The probabilities cascade: with N endpoints, rule *i* matches with probability 1/(N−i+1). Each endpoint ends up with exactly 1/N of *new connections*.
 
-There are **two EndpointSlice controllers** in the picture. dev-lab's controller-manager builds slices from the tenant's pods (they feed dev-lab's DNS, e.g. the headless Service in §5.4, and Traefik in llms). The root's controller builds slices for the synced Service from the real pods in `vc-dev-lab`. kube-proxy only ever reads the root's.
+There are **two EndpointSlice controllers** in the picture. dev-lab's controller-manager builds slices from the tenant's pods (they feed dev-lab's DNS, e.g. the headless Service in §5.4). The root's controller builds slices for the synced Service from the real pods in `vc-dev-lab`. kube-proxy only ever reads the root's.
 
 ---
 
@@ -80,14 +80,14 @@ There are **two EndpointSlice controllers** in the picture. dev-lab's controller
 |---|---|---|---|---|
 | `lab-tools/echo` (dev-lab) | `vc-dev-lab/echo-x-lab-tools-x-dev-lab` | ClusterIP | `KUBE-SVC-*` DNAT chain; same ClusterIP on both sides | in-cluster clients |
 | `lab-tools/echo-headless` (dev-lab) | `…/echo-headless-x-lab-tools-x-dev-lab` | ClusterIP **None** | **nothing**. dev-lab's DNS returns pod IPs | StatefulSets, torchrun rendezvous, clients doing their own balancing |
-| `ingress/traefik-lab` (llms) | `vc-llms/traefik-lab-x-ingress-x-llms` | LoadBalancer | MetalLB assigns **192.168.0.115** (annotation `metallb.io/loadBalancerIPs`), its speaker answers ARP on `enP7s7`; kube-proxy adds a `KUBE-EXT-*` chain for the LB IP | the llms API gateway (Chapter 11) |
-| vCluster API `dev-lab` / `llms` | `vc-dev-lab/dev-lab`, `vc-llms/llms` (created by the Helm chart, not synced) | LoadBalancer | MetalLB **.111** / **.112** | `kubectl --context dev-lab` / `llms` |
-| `default/prometheus` (llms) | the root's own `observability/kps-prometheus` | ClusterIP | replicated *into* llms (`networking.replicateServices.fromHost`); one set of rules, two names | KEDA in llms queries the root's Prometheus |
-| `llm-serving/vllm` (llms) | `vc-llms/vllm-x-llm-serving-x-llms` | ClusterIP | same as echo | behind Traefik |
+| `ingress/traefik-lab` (root) | the same object — no copy | LoadBalancer | MetalLB assigns **192.168.0.115** (annotation `metallb.io/loadBalancerIPs`), its speaker answers ARP on `enP7s7`; kube-proxy adds a `KUBE-EXT-*` chain for the LB IP | the LLM API gateway (Chapter 11) |
+| vCluster API `dev-lab` / `dev-llms` | `vc-dev-lab/dev-lab`, `vc-dev-llms/dev-llms` (created by the Helm chart, not synced) | LoadBalancer | MetalLB **.111** / **.112** | `kubectl --context dev-lab` / `dev-llms` |
+| `observability/kps-prometheus` (root) | the same object | ClusterIP | `KUBE-SVC-*` chain | KEDA on the root queries it directly at `http://kps-prometheus.observability.svc:9090` |
+| `llm-serving/vllm` (root) | the same object | ClusterIP | `KUBE-SVC-*` chain commented `llm-serving/vllm:http` — the real name | behind Traefik |
 
-The ClusterIP a tenant sees is a root address: the root API server allocates it from 10.43.0.0/16 when the syncer creates the host Service, and the vCluster's Service carries the same IP. That's why a pod can use the IP its own DNS returns even though the vCluster has no kube-proxy.
+The ClusterIP a tenant sees is a root address: the root API server allocates it from 10.43.0.0/16 when the syncer creates the host Service, and the vCluster's Service carries the same IP. That's why a pod can use the IP its own DNS returns even though the vCluster has no kube-proxy. For the root's own Services there is only one side: the name in `kubectl`, in `iptables-save` and in Hubble is the same.
 
-Every LoadBalancer Service counts against the root quota of its `vc-*` namespace: `services.loadbalancers` is 1 for dev-lab (its API) and 2 for llms (API + Traefik), and `services.nodeports` is 2 and 4 ([`manifests/root/05-vclusters/quotas.yaml`](lab/manifests/root/05-vclusters/quotas.yaml)). Why any NodePorts at all? A LoadBalancer Service allocates one NodePort per port by default and quota counts them — the vCluster API Service has two ports (https, kubelet), Traefik two (web, websecure). The small number still keeps tenants from publishing plain NodePort Services through the syncer.
+Every LoadBalancer Service in a vCluster's host namespace counts against that namespace's root quota: `services.loadbalancers` is 1 for each vCluster (its API) and `services.nodeports` is 2 ([`manifests/root/05-vclusters/quotas.yaml`](lab/manifests/root/05-vclusters/quotas.yaml)). Why any NodePorts at all? A LoadBalancer Service allocates one NodePort per port by default and quota counts them — the vCluster API Service has two ports (https, kubelet). The small number still keeps tenants from publishing LoadBalancer or plain NodePort Services through the syncer. Traefik's Service is the root admin's own, in the root namespace `ingress`, which has a LimitRange but no ResourceQuota; the only limit on it is the MetalLB pool.
 
 ### 3.2 Modes
 
@@ -122,9 +122,9 @@ There's one conntrack table per kernel. Every vCluster's connections, the root's
 ## 4. Integrations
 
 - **Readiness → EndpointSlice → iptables, across two clusters.** The root kubelet runs the `readinessProbe` (enforced on serving Deployments by the `spark-serving-needs-readiness` policy, Chapter 03) and marks the *root* pod Ready. The root's EndpointSlice controller adds it to the synced Service's slice and kube-proxy adds a `KUBE-SEP`. The syncer copies the status back into the vCluster, whose own controller updates the tenant's slice. A half-loaded model stays out of the chain either way.
-- **Ingress (Chapter 11)**: Traefik runs inside llms, watches *llms'* EndpointSlices and connects to pod IPs directly, balancing **per request**. It never uses the ClusterIP — that's the fix for the "keep-alive sticks to one pod" problem. The pod IPs it gets are real root pod IPs, so this works through the vCluster.
-- **LoadBalancer path and source IPs**: a request to `192.168.0.115` arrives on the mgmt NIC (MetalLB answered the ARP), hits `KUBE-SERVICES` → `KUBE-EXT-*` → `KUBE-SVC-*` and is DNAT'd to the Traefik pod. With the default `externalTrafficPolicy: Cluster`, kube-proxy also **masquerades** it, so Traefik sees the node's address, not your laptop's. The same happens to a pod that calls the LB IP from inside the cluster — which is why, to Cilium, that traffic comes from the node (identity `host`) and not from a `vc-*` namespace (Chapter 08 §5.5, §5.7 here).
-- **torchrun (Chapter 18)** uses the headless Service `ddp-workers` in llms' `batch` namespace so `ddp-0.ddp-workers` resolves straight to rank 0's pod IP.
+- **Ingress (Chapter 11)**: Traefik runs on the root next to the models, watches the EndpointSlices in `llm-serving` and `ingress` (the only namespaces it is configured to watch) and connects to pod IPs directly, balancing **per request**. It never uses the ClusterIP — that's the fix for the "keep-alive sticks to one pod" problem.
+- **LoadBalancer path and source IPs**: a request to `192.168.0.115` arrives on the mgmt NIC (MetalLB answered the ARP), hits `KUBE-SERVICES` → `KUBE-EXT-*` → `KUBE-SVC-*` and is DNAT'd to the Traefik pod. With the default `externalTrafficPolicy: Cluster`, kube-proxy also **masquerades** it, so Traefik sees the node's address, not your laptop's. The same happens to a pod that calls the LB IP from inside the cluster — which is why, to Cilium, that traffic comes from the node (identity `host`) and not from a `vc-*` namespace (§5.7).
+- **torchrun (Chapter 18)** uses the headless Service `ddp-workers` in the root's `batch` namespace so `ddp-0.ddp-workers` resolves straight to rank 0's pod IP.
 
 ---
 
@@ -230,11 +230,11 @@ sudo conntrack -C
 
 ### 5.6 Graceful termination (no dropped streams)
 
-The mock LLM streams 20 tokens/s. Start a long stream inside llms, delete the pod serving it, and see what the client gets:
+The mock LLM streams 20 tokens/s. Start a long stream inside `llm-serving` on the root, delete the pod serving it, and see what the client gets:
 
 ```bash
-kubectl --context llms apply -k manifests/llms/40-ingress
-kubectl --context llms -n llm-serving exec deploy/mock-llm-canary -- python3 - <<'PY' &
+kubectl --context spark-root apply -k manifests/root-llms/40-ingress
+kubectl --context spark-root -n llm-serving exec deploy/mock-llm-canary -- python3 - <<'PY' &
 import json, urllib.request
 req = urllib.request.Request("http://mock-llm:8000/v1/chat/completions", data=json.dumps({"stream": True, "max_tokens": 400}).encode())
 n = 0
@@ -245,10 +245,10 @@ try:
 except Exception as e:
     print("stream CUT after", n, "events:", e)
 PY
-sleep 3; kubectl --context llms -n llm-serving delete pod -l app=mock-llm --wait=false; wait
+sleep 3; kubectl --context spark-root -n llm-serving delete pod -l app=mock-llm --wait=false; wait
 ```
 
-With no `preStop` and a 30 s grace period, the Python server gets SIGTERM and exits immediately, so you'll see **stream CUT**. The delete is a vCluster API call; the syncer deletes the root pod, the root kubelet sends SIGTERM, and the root EndpointSlice marks it `terminating` — all in parallel, which is why the pod can die before every client has stopped using it. The production pattern (applied to vLLM in Chapter 20):
+With no `preStop` and a 30 s grace period, the Python server gets SIGTERM and exits immediately, so you'll see **stream CUT**. The delete marks the pod for deletion; the kubelet sends SIGTERM and the EndpointSlice controller marks the endpoint `terminating` — in parallel, which is why the pod can die before every client has stopped using it. (In a vCluster there is one more hop in front: the syncer has to delete the root pod first.) The production pattern (applied to vLLM in Chapter 20):
 
 ```yaml
 lifecycle:
@@ -260,8 +260,7 @@ terminationGracePeriodSeconds: 120      # > longest expected generation
 ### 5.7 The front door: a LoadBalancer IP, from outside and inside
 
 ```bash
-kubectl --context llms -n ingress get svc traefik-lab                                     # EXTERNAL-IP 192.168.0.115
-kubectl --context spark-root -n vc-llms get svc traefik-lab-x-ingress-x-llms               # the synced copy MetalLB serves
+kubectl --context spark-root -n ingress get svc traefik-lab                               # EXTERNAL-IP 192.168.0.115 — a root Service, MetalLB serves it as is
 kubectl --context spark-root -n metallb-system logs -l app.kubernetes.io/component=speaker --tail=50 | grep -i 192.168.0.115
 sudo iptables-save -t nat | grep -E '192.168.0.115|KUBE-EXT' | head
 # on your laptop, after one request to .115: `ip neigh show 192.168.0.115` (or `arp -n`) lists the Spark's mgmt MAC
@@ -271,10 +270,10 @@ The `KUBE-EXT-*` chain marks the packet for masquerade before jumping to the sam
 
 ```bash
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- curl -s -m3 -o /dev/null -w '%{http_code}\n' -H 'Host: llm.lab.local' http://192.168.0.115/v1/models
-kubectl --context spark-root -n kube-system exec ds/cilium -c cilium-agent -- hubble observe --namespace vc-llms --port 8000 --last 5
+kubectl --context spark-root -n kube-system exec ds/cilium -c cilium-agent -- hubble observe --namespace ingress --port 8000 --last 5
 ```
 
-Predict first, then check. Pod → Traefik pod IP was dropped by `vcluster-boundary` in Chapter 08. Through the LB IP the packet is masqueraded on the node before Cilium delivers it, so Hubble shows the source as the node (`host` / the node's router IP), not `vc-dev-lab/…` — and the boundary, which denies the `vc-dev-lab` identity, doesn't match. The public front door stays public; the private pod IPs stay private. If your result differs, the Hubble line tells you which identity Cilium used.
+Predict first, then check. Through the LB IP the packet is masqueraded on the node before Cilium delivers it, so Hubble shows the source as the node (`host` / the node's router IP), not `vc-dev-lab/…`. A policy keyed on namespaces can't tell this caller from a client on the LAN — which is fine for the front door, because it is meant to be public. The model pods behind it are the private part: `allow-ingress-and-same-namespace` in `llm-serving` admits Traefik, not `vc-dev-lab` (Chapter 08 §5.5), so a vCluster pod reaches a model only through the gateway. If your result differs, the Hubble line tells you which identity Cilium used.
 
 ---
 
@@ -296,11 +295,11 @@ Predict first, then check. Pod → Traefik pod IP was dropped by `vcluster-bound
 
 | Symptom | Cause | Diagnose | Fix |
 |---|---|---|---|
-| `curl: (7) Failed to connect` to ClusterIP, pods fine | no ready endpoints (selector/port mismatch) | `kubectl --context <vc> -n X get endpointslices -l kubernetes.io/service-name=Y` | fix the selector/targetPort (drill `breakfix 08`, llms) |
+| `curl: (7) Failed to connect` to ClusterIP, pods fine | no ready endpoints (selector/port mismatch) | `kubectl --context <vc> -n X get endpointslices -l kubernetes.io/service-name=Y` | fix the selector/targetPort (drill `breakfix 08`, spark-root `llm-serving`) |
 | Service exists in the vCluster but `svc-trace.sh` finds no `KUBE-SVC` chain | the Service wasn't synced, or kube-proxy isn't in iptables mode | `kubectl --context spark-root -n vc-<vc> get svc \| grep <name>`; syncer logs; `kube-proxy` ConfigMap `mode` | fix the sync error (often a root quota or admission refusal in `vc-<vc>`); `scripts/verify.sh platform` |
-| LoadBalancer Service stays `<pending>` | MetalLB pool exhausted / IP not in the pool, or the root quota refused the synced copy | `kubectl --context spark-root -n metallb-system get ipaddresspool`; `kubectl --context spark-root -n vc-<vc> describe resourcequota vcluster-budget` | free an IP from 192.168.0.110–119; `services.loadbalancers` allows 1 (dev-lab) / 2 (llms) |
-| `exceeded quota: vcluster-budget … services.nodeports` on a LoadBalancer | a LoadBalancer Service allocates NodePorts by default, and the root quota only has room for the API and Traefik ones | the syncer's event on the vCluster Service | `spec.allocateLoadBalancerNodePorts: false` (MetalLB L2 doesn't need NodePorts) |
-| 502/503 during rollouts | old pod killed while connections are open, or new pod ready too early | Traefik logs, `kubectl --context llms rollout status` timing | `preStop` sleep + startupProbe + `maxUnavailable: 0` |
+| LoadBalancer Service stays `<pending>` | MetalLB pool exhausted / IP not in the pool, or (for a vCluster Service) the root quota refused the synced copy | `kubectl --context spark-root -n metallb-system get ipaddresspool`; `kubectl --context spark-root -n vc-<vc> describe resourcequota vcluster-budget` | free an IP from 192.168.0.110–119; `services.loadbalancers` allows 1 per vCluster (its API) |
+| `exceeded quota: vcluster-budget … services.nodeports` on a LoadBalancer | a LoadBalancer Service allocates NodePorts by default, and the root quota on `vc-<vc>` only has room for the API Service's ones | the syncer's event on the vCluster Service | `spec.allocateLoadBalancerNodePorts: false` (MetalLB L2 doesn't need NodePorts) |
+| 502/503 during rollouts | old pod killed while connections are open, or new pod ready too early | Traefik logs, `kubectl --context spark-root -n llm-serving rollout status` timing | `preStop` sleep + startupProbe + `maxUnavailable: 0` |
 | One replica hot, others idle | client keep-alive / HTTP/2 pinning | per-pod request metrics (`vllm:num_requests_running` by `vpod`) | L7 balancing (Traefik, gateway), or shorter keep-alive on the client |
 | Random new-connection drops at load | conntrack table full (shared by every cluster on the node) | `dmesg \| grep 'nf_conntrack: table full'` | raise `conntrack.maxPerCore`, find the leak |
 | Client IPs all look like the node in Traefik logs | masquerade with `externalTrafficPolicy: Cluster` | Traefik access log `ClientHost` | `externalTrafficPolicy: Local` on the Traefik Service (one node: no downside) |

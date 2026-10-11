@@ -8,8 +8,8 @@
 | **Hardware** | dgx-spark-1 |
 | **Time** | 60 min |
 | **Risk** | Low. The outage drill (`breakfix 07`) breaks name resolution for root pods for ~5 min |
-| **Clusters** | `spark-root` (CoreDNS at 10.43.0.10, its Corefile, `netshoot-host`), `dev-lab` (its own CoreDNS, the ndots pods, echo), `llms` (the replicated `default/prometheus`) |
-| **Lab files** | [`manifests/root/30-networking/coredns-corefile.yaml`](lab/manifests/root/30-networking/coredns-corefile.yaml), [`manifests/dev-lab/30-networking/dns-lab.yaml`](lab/manifests/dev-lab/30-networking/dns-lab.yaml), [`manifests/dev-lab/30-networking/echo-service.yaml`](lab/manifests/dev-lab/30-networking/echo-service.yaml), [`manifests/root/30-networking/netshoot-host.yaml`](lab/manifests/root/30-networking/netshoot-host.yaml), [`vclusters/llms.yaml`](lab/vclusters/llms.yaml) (`replicateServices`) |
+| **Clusters** | `spark-root` (CoreDNS at 10.43.0.10, its Corefile, `netshoot-host`, and the LLM stack's pods in `llm-serving`, which use it), `dev-lab` (its own CoreDNS, the ndots pods, echo) |
+| **Lab files** | [`manifests/root/30-networking/coredns-corefile.yaml`](lab/manifests/root/30-networking/coredns-corefile.yaml), [`manifests/dev-lab/30-networking/dns-lab.yaml`](lab/manifests/dev-lab/30-networking/dns-lab.yaml), [`manifests/dev-lab/30-networking/echo-service.yaml`](lab/manifests/dev-lab/30-networking/echo-service.yaml), [`manifests/root/30-networking/netshoot-host.yaml`](lab/manifests/root/30-networking/netshoot-host.yaml), [`vclusters/dev-lab.yaml`](lab/vclusters/dev-lab.yaml) (a vCluster's own CoreDNS, Chapter 04) |
 
 ---
 
@@ -71,13 +71,12 @@ Two resolvers, one network: the dev-lab CoreDNS pod and its Service are ordinary
 
 | Query (asked inside the cluster that owns the Service) | Answer | Example |
 |---|---|---|
-| `svc.ns.svc.cluster.local` A | ClusterIP | in llms: `vllm.llm-serving.svc.cluster.local → 10.43.x.y` |
+| `svc.ns.svc.cluster.local` A | ClusterIP | on the root: `vllm.llm-serving.svc.cluster.local → 10.43.x.y` |
 | headless `svc.ns.svc.cluster.local` A | every ready pod IP | in dev-lab: `echo-headless.lab-tools… → 3 IPs` |
-| `pod-hostname.subdomain.ns.svc.cluster.local` A | that pod | in llms: `ddp-0.ddp-workers.batch.svc.cluster.local` (Chapter 18) |
-| `qdrant-0.qdrant-headless.llm-serving.svc.cluster.local` | StatefulSet pod | in llms, Chapter 12 |
+| `pod-hostname.subdomain.ns.svc.cluster.local` A | that pod | on the root: `ddp-0.ddp-workers.batch.svc.cluster.local` (Chapter 18) |
+| `qdrant-0.qdrant-headless.llm-serving.svc.cluster.local` | StatefulSet pod | on the root, Chapter 12 |
 | `_http._tcp.echo.lab-tools.svc.cluster.local` SRV | port + target | in dev-lab, named ports |
-| `prometheus.default.svc.cluster.local` | the root's `kps-prometheus` ClusterIP | in llms only: replicated with `networking.replicateServices.fromHost` |
-| `kps-prometheus.observability.svc.cluster.local` | NXDOMAIN from inside a vCluster | that namespace exists only on the root |
+| `kps-prometheus.observability.svc.cluster.local` | the root's Prometheus ClusterIP | on the root (KEDA, the model servers); NXDOMAIN from inside a vCluster — that namespace exists only on the root |
 
 ### 3.2 Query amplification with `ndots:5`
 
@@ -116,8 +115,8 @@ Three fixes, in order of preference:
 ## 4. Integrations
 
 - **01-Ansible site DNS (`dns_servers: [192.168.0.1, …]`)**: the root's `lab.local` forward zone lets platform pods resolve `dgx-spark-2.lab.local` and your NAS by name.
-- **Model downloads (Chapter 20, modules 03–06)**: set `HF_ENDPOINT`/`HF_HUB_*` and any registry mirrors as FQDNs. These pods live in llms, so it's llms' CoreDNS that pays the ndots tax.
-- **KEDA in llms (Chapter 20)** queries `http://prometheus.default:9090`: a name that only exists because llms replicates the root's `observability/kps-prometheus` into itself. DNS is how a vCluster is given *selected* root services and nothing else.
+- **Model downloads (Chapter 20, modules 03–06)**: set `HF_ENDPOINT`/`HF_HUB_*` and any registry mirrors as FQDNs. The model servers run in the root's `llm-serving`, so it's the root's CoreDNS that pays their ndots tax — it shows up in the query log of §5.3 and in the root's CoreDNS metrics. A small model tried in dev-llms' `llm-sandbox` pays it to dev-llms' CoreDNS instead.
+- **KEDA on the root (Chapter 20)** queries `http://kps-prometheus.observability.svc:9090`: an ordinary root name, because KEDA and Prometheus are in the same cluster. A vCluster could only reach a root Service by name if the root Service were replicated into it (`networking.replicateServices.fromHost`); this lab replicates none, so the vClusters see their own Services and nothing else.
 - **Prometheus (Chapter 17)**: the root's CoreDNS exposes `coredns_dns_requests_total{type}` and `coredns_dns_responses_total{rcode}`. An NXDOMAIN ratio > 50 % is the ndots tax showing up in a graph. The vClusters' CoreDNS pods are not in the root's `vcluster-workloads` ServiceMonitor; adding them is an exercise.
 - **NetworkPolicy (Chapter 08)**: a tenant that restricts egress must allow UDP/TCP 53 to *its vCluster's* CoreDNS. Inside the vCluster that's `kube-system`, the same selector a tenant would write in a normal cluster.
 
@@ -242,11 +241,13 @@ kubectl --context spark-root -n platform-tools exec deploy/netshoot-host -- dig 
 
 Expected: a ClusterIP, three pod IPs, an SRV record pointing at `echo.lab-tools.svc.cluster.local` port 80, dev-lab's own `kubernetes` ClusterIP — and empty answers for names that belong to another cluster. The last-but-one shows the same ClusterIP as the first: one Service, two names, two DNS servers.
 
-If you have llms set up, the one deliberate exception:
+The model servers are on the other side of that boundary: they run in the root's `llm-serving`, so the root's CoreDNS answers them and root names resolve. If you applied `root-llms/40-ingress` (Chapter 08 §5.5), compare:
 
 ```bash
-kubectl --context llms -n default get svc prometheus -o wide
-kubectl --context spark-root -n observability get svc kps-prometheus -o wide      # same ClusterIP
+kubectl --context spark-root -n llm-serving exec deploy/mock-llm-canary -- \
+  python3 -c "import socket;print(socket.gethostbyname('kps-prometheus.observability.svc.cluster.local'))"   # a root ClusterIP
+kubectl --context spark-root -n observability get svc kps-prometheus -o jsonpath='{.spec.clusterIP}{"\n"}'     # the same IP
+kubectl --context spark-root -n llm-serving exec deploy/mock-llm-canary -- cat /etc/resolv.conf             # nameserver 10.43.0.10, search llm-serving.svc.cluster.local …
 ```
 
 ### 5.5 Outage drill
@@ -267,7 +268,7 @@ scripts/breakfix.sh reset 07
 
 The key triage move: **try by IP**. If the IP works and the name doesn't, it's DNS, not networking.
 
-The second lesson is the blast radius. Root pods lose all name resolution at once. Tenants keep resolving their own cluster names because their vCluster's CoreDNS is still up. Whether their *external* names break depends on the `forward` line you read in §5.1. A shared dependency with an uneven, delayed failure is the hardest kind to spot from a tenant's ticket: "some lookups fail, the cluster looks fine".
+The second lesson is the blast radius. Root pods lose all name resolution at once — and on this lab the root pods include the model servers, Traefik and KEDA. KEDA's query to `kps-prometheus.observability.svc` fails, so autoscaling stops; a model that is already loaded keeps answering, because Traefik reaches it by pod IP from its EndpointSlices; a model server that restarts now can't resolve `huggingface.co`. Tenants keep resolving their own cluster names because their vCluster's CoreDNS is still up. Whether their *external* names break depends on the `forward` line you read in §5.1. A shared dependency with an uneven, delayed failure is the hardest kind to spot from a tenant's ticket: "some lookups fail, the cluster looks fine".
 
 Turn query logging off when you're done (it's chatty) — re-apply the lab Corefile without the `log` line, or restore kubeadm's original:
 
@@ -301,10 +302,10 @@ sed '/^        log$/d' manifests/root/30-networking/coredns-corefile.yaml | kube
 | CoreDNS `CrashLoopBackOff`, log `Loop … detected` | upstream is a local stub (127.0.0.53) forwarding back to itself | `kubectl --context spark-root -n kube-system logs deploy/coredns` | kubelet `resolvConf: /run/systemd/resolve/resolv.conf` (kubeadm sets it when systemd-resolved is active) |
 | Corefile change "didn't take" | edited the vCluster's ConfigMap (vCluster owns it), or `kubeadm upgrade` reset the root's | compare `get cm coredns` before/after; CoreDNS logs `Reloading` | root: re-apply `coredns-corefile.yaml`. vCluster: `controlPlane.coredns.overwriteConfig` + `helm upgrade` |
 | Root's `lab.local` zone works on the root, not in tenants | tenants use their vCluster's CoreDNS | §5.1 resolv.conf | add the zone to the vCluster's CoreDNS config, or use FQDNs the upstream resolves |
-| Tenant can't resolve a root Service | by design: vCluster DNS only knows its own API | `dig` from inside | replicate the Service into the vCluster (`networking.replicateServices.fromHost`, as llms does for Prometheus) |
+| Tenant can't resolve a root Service | by design: vCluster DNS only knows its own API | `dig` from inside | use the published entry point (the gateway at 192.168.0.115), or replicate the Service into the vCluster (`networking.replicateServices.fromHost` in `vclusters/<vc>.yaml`; this lab replicates none) |
 | Intermittent `EAI_AGAIN` / 5 s stalls in Python | UDP conntrack race on parallel A+AAAA queries | `conntrack -S` `insert_failed` counter rises | `single-request-reopen` option (in `dns-ndots1`, glibc images), NodeLocal DNSCache |
 | Slow first request to HF/NGC, fast afterwards | ndots amplification + cold cache | §5.3 | trailing dots / `ndots:1` |
-| `ddp-0.ddp-workers…` NXDOMAIN at job start | pod not Ready yet and Service lacks `publishNotReadyAddresses` | `dig` from another pod in llms | set `publishNotReadyAddresses: true` on rendezvous Services (the lab's does) |
+| `ddp-0.ddp-workers…` NXDOMAIN at job start | pod not Ready yet and Service lacks `publishNotReadyAddresses` | `dig` from another pod in the root's `batch` namespace | set `publishNotReadyAddresses: true` on rendezvous Services (the lab's does) |
 
 ---
 
@@ -316,7 +317,7 @@ sed '/^        log$/d' manifests/root/30-networking/coredns-corefile.yaml | kube
 | query logging on demand | CoreDNS metrics + sampled logs to Loki, for the root and every virtual cluster |
 | `ndots` per pod | NodeLocal DNSCache on every node, plus an admission policy that sets `ndots:2` on serving namespaces |
 | forward zone to site DNS | split-horizon DNS, ExternalDNS publishing Ingress/Gateway hosts |
-| one replicated Service (`default/prometheus`) | a deliberate catalogue of platform services exposed into tenant clusters, everything else invisible |
+| no replicated Services: a vCluster sees only its own | a deliberate catalogue of platform services exposed into tenant clusters, everything else invisible |
 
 ---
 

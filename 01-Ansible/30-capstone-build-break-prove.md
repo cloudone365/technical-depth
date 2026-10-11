@@ -496,7 +496,7 @@ Complete them in order. "Evidence" is what the scorecard or a reviewer checks.
 | 16 | 21 | Pod-to-pod RDMA over Multus | `ib_write_bw` from pods |
 | 17 | 16 | GDS assessment + cold/warm load comparison | `gds_summary` |
 | 18 | 15 | NFS over RDMA model cache | `/proc/mounts` `proto=rdma` |
-| 19 | 19 | kubeadm root cluster with Cilium (VXLAN) and MetalLB; both vClusters answer on `.111` / `.112`; reset and rebuild once with `19.2-reset-kubernetes.yml` | `ip -d link show cilium_vxlan`; `kubectl --context dev-lab get ns` and `kubectl --context llms get ns` |
+| 19 | 19 | kubeadm root cluster with Cilium (VXLAN) and MetalLB; both vClusters answer on `.111` / `.112`; reset and rebuild once with `19.2-reset-kubernetes.yml` | `ip -d link show cilium_vxlan`; `kubectl --context dev-lab get ns` and `kubectl --context dev-llms get ns` |
 | 20 | 20 | 15 time-slices on one GB10, and the vCluster budget holds: with two 1-slice pods running in `dev-lab`, a third is accepted by the vCluster API but stays `Pending`, because the root quota in `vc-dev-lab` refuses the synced pod | `kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}'` = 15; `kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget` |
 | 21 | 22 | Slurm: confinement proven; 2-node NCCL job | job output |
 | 22 | 18 | Every build template runs with only the AppRole in Semaphore's variable group; SSH as `svc-ansible` via a 15-minute vault01 certificate; `18.1 Vault integration` reads `kv/spark-lab/ngc` without printing it | vault01 audit log (`auth/approle/login`, `sign/ansible`, the KV read) per task; `ED25519-CERT` lines in the Spark's sshd log; scorecard check `17/18` |
@@ -552,7 +552,7 @@ The lesson from fault 3 is why the lab ships a **staleness** alert, `SparkGPUMet
 
 1. `site` (everything, idempotently), then `site` again: `changed=0` across the board.
 2. `30.1 Validate`, and on the MacBook `tools/drift-cycle.sh; echo "drift exit=$?"` → 0.
-3. Kubernetes from zero: `19.2 Reset Kubernetes` (extra variable `reset_confirm: RESET`), then `19.1 Kubernetes` → `20.1 GPU Operator` → `20.2 vClusters` bring back `spark-root`, `dev-lab` and `llms`; `tools/fetch-kubeconfig.sh sema01` on the MacBook.
+3. Kubernetes from zero: `19.2 Reset Kubernetes` (extra variable `reset_confirm: RESET`), then `19.1 Kubernetes` → `20.1 GPU Operator` → `20.2 vClusters` bring back `spark-root` (with the LLM namespaces and budgets), `dev-lab` and `dev-llms`; `tools/fetch-kubeconfig.sh sema01` on the MacBook.
 4. `28.1 Firmware inventory`.
 5. The scorecard on sema01 (§1.3): target 10/10.
 

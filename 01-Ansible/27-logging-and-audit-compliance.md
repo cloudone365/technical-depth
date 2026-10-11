@@ -22,7 +22,7 @@
 | "Who read the NGC key?" | **vault01's audit log**, `/var/log/vault_audit.log` on vault01 (Chapter 01 §3.5): the `kv/data/spark-lab/ngc` read by the `semaphore` AppRole token, or by an admin |
 | "Who ran `29.1 Emergency drain` on Saturday, with which extra variables, and did it succeed?" | **Semaphore task history** on sema01 (task log, user, start/end, status), kept in its PostgreSQL |
 | "Which credential did that run log in with?" | **sshd** on the Spark: `Accepted publickey for svc-ansible … ED25519-CERT ID vault-… serial N CA …`, matched by time to the `sign/ansible` entry in vault01's audit log |
-| "Who raised the `vc-llms` GPU quota, and what did the request body say?" | **Kubernetes API audit log** on dgx-spark-1, `/var/log/kubernetes/audit/audit.log` (written by the root kube-apiserver; §4.5) |
+| "Who raised the `llm-serving` GPU quota (`serving-budget`), and what did the request body say?" | **Kubernetes API audit log** on dgx-spark-1, `/var/log/kubernetes/audit/audit.log` (written by the root kube-apiserver; §4.5) |
 | "Who launched the remediation job and who approved it?" | **Semaphore** task history (this lab); **AWX** activity stream + job history if you run AWX (Chapter 24) |
 
 ## 2. Architecture
@@ -455,17 +455,17 @@ tools/drift-cycle.sh      # drift reports the fabric template (and doesn't auto-
 
 ### 4.5 The Kubernetes API audit log: root vs vCluster
 
-auditd sees *files* changing. It can't see `kubectl patch resourcequota`, which only touches etcd. For that, the `kubeadm_cluster` role starts the root kube-apiserver with `--audit-policy-file=/etc/kubernetes/audit/audit-policy.yaml` (from `roles/kubeadm_cluster/files/audit-policy.yaml`) and `--audit-log-path=/var/log/kubernetes/audit/audit.log`. The policy logs Secrets and ConfigMaps at `Metadata` only (never payloads), drops kubelet and health-check noise, and records **full request and response** for every write in `vc-dev-lab`, `vc-llms`, `gpu-operator` and `platform-tools`.
+auditd sees *files* changing. It can't see `kubectl patch resourcequota`, which only touches etcd. For that, the `kubeadm_cluster` role starts the root kube-apiserver with `--audit-policy-file=/etc/kubernetes/audit/audit-policy.yaml` (from `roles/kubeadm_cluster/files/audit-policy.yaml`) and `--audit-log-path=/var/log/kubernetes/audit/audit.log`. The policy logs Secrets and ConfigMaps at `Metadata` only (never payloads), drops kubelet and health-check noise, and records **full request and response** for every write in `vc-dev-lab`, `vc-dev-llms`, `llm-serving`, `batch`, `gpu-operator` and `platform-tools`.
 
-The nesting adds one twist. Each vCluster has its **own** API server. A tenant's `kubectl --context dev-lab create …` is decided by that API server, and the root only sees the result: the vCluster's syncer writing a translated object into `vc-dev-lab` under its own ServiceAccount.
+The model servers in `llm-serving` and `batch` are root objects, so the root's log names whoever created or changed them. The nesting adds one twist. Each vCluster has its **own** API server. A tenant's `kubectl --context dev-lab create …` is decided by that API server, and the root only sees the result: the vCluster's syncer writing a translated object into `vc-dev-lab` under its own ServiceAccount.
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
-# 1. A platform change on the root: who touched the llms budget?
-kubectl --context spark-root -n vc-llms annotate resourcequota vcluster-budget spark.lab/audit-test="$(date +%s)" --overwrite
+# 1. A platform change on the root: who touched the LLM serving budget?
+kubectl --context spark-root -n llm-serving annotate resourcequota serving-budget spark.lab/audit-test="$(date +%s)" --overwrite
 ssh dgxadmin@192.168.0.100 "sudo tail -n 2000 /var/log/kubernetes/audit/audit.log | jq -c 'select(.objectRef.resource==\"resourcequotas\" and .verb==\"patch\") | {user: .user.username, verb, ns: .objectRef.namespace, name: .objectRef.name}' | tail -1"
-# → {"user":"kubernetes-admin","verb":"patch","ns":"vc-llms","name":"vcluster-budget"}
+# → {"user":"kubernetes-admin","verb":"patch","ns":"llm-serving","name":"serving-budget"}
 
 # 2. A tenant write inside dev-lab: the root logs the syncer, not the tenant
 kubectl --context dev-lab -n default create configmap audit-probe --from-literal=k=v
@@ -487,8 +487,8 @@ The 4-layer stack above does **not** ship this file yet: Alloy tails `/var/log/a
 | Kernel/NVRM | Bursts during faults | Keep. It's the evidence |
 | auditd `root-cmd` (every root execve) | Automation runs generate many | Keep in Loki with 30d retention; exclude noisy automation users with `-F auid!=<ansible uid>` if you must |
 | Container stdout (Docker) | Model servers can be chatty | Not shipped by default (journald only). Add a `loki.source.docker` block selectively |
-| Pod logs (root and vCluster pods) | Under `/var/log/pods/<ns>_<pod>_<uid>/` on the node; vCluster pods use their translated root names (`<pod>-x-<ns>-x-<vcluster>` in `vc-<vcluster>`) | Not shipped by default; the root's kube-prometheus-stack covers metrics, not logs |
-| Kubernetes API audit | Every write in the `vc-*` namespaces at `RequestResponse` | Rotated by kube-apiserver (`--audit-log-maxsize`/`maxbackup` in the kubeadm config); ship it per §4.5 |
+| Pod logs (root and vCluster pods) | Under `/var/log/pods/<ns>_<pod>_<uid>/` on the node; model pods keep their own names (`llm-serving_vllm-…`), vCluster pods use their translated root names (`<pod>-x-<ns>-x-<vcluster>` in `vc-<vcluster>`) | Not shipped by default; the root's kube-prometheus-stack covers metrics, not logs |
+| Kubernetes API audit | Every write in the `vc-*`, `llm-serving` and `batch` namespaces at `RequestResponse` | Rotated by kube-apiserver (`--audit-log-maxsize`/`maxbackup` in the kubeadm config); ship it per §4.5 |
 | Labels | `host`, `unit`, `ident`, `level`, `transport` only | **Never** use request IDs, PIDs or pod UIDs as labels. That's how you get a high-cardinality Loki meltdown; filter those in queries with `\|=` instead |
 
 ## 6. Integrations
@@ -520,4 +520,4 @@ The 4-layer stack above does **not** ship this file yet: Alloy tails `/var/log/a
 - [ ] For one Semaphore task you can show all three records: the task in Semaphore's history, the `sign/ansible` entry in vault01's audit log, and the `ED25519-CERT` login on the Spark.
 - [ ] `ara playbook list` shows your last runs, with per-task changed results.
 - [ ] A manual netplan edit is visible in `ausearch -k network` **and** in the drift report.
-- [ ] A change to the `vc-llms` ResourceQuota is in `/var/log/kubernetes/audit/audit.log` with the user who made it, and a tenant write in `dev-lab` shows up there as the syncer's ServiceAccount.
+- [ ] A change to the `serving-budget` ResourceQuota in `llm-serving` is in `/var/log/kubernetes/audit/audit.log` with the user who made it, and a tenant write in `dev-lab` shows up there as the syncer's ServiceAccount.

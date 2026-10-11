@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **You will build** | The whole "AI datacenter in a box" on one Spark: a kubeadm **root cluster** that owns the hardware, two **vClusters** with hard budgets (`dev-lab` for tenants, `llms` for serving and training), a serving tier behind an API gateway, a gang-scheduled batch tier, observability across all three clusters, backups and a scripted verification gate after every layer. Everything is designed to add dgx-spark-2 without rework |
+| **You will build** | The whole "AI datacenter in a box" on one Spark: a kubeadm **root cluster** that owns the hardware and runs the LLMs, two small **vClusters** with hard budgets (`dev-lab` for tenants, `dev-llms` as an LLM sandbox), a serving tier behind an API gateway, a gang-scheduled batch tier, observability across all three clusters, backups and a scripted verification gate after every layer. Everything is designed to add dgx-spark-2 without rework |
 | **Hardware** | 1 DGX Spark (2 optional) · `sema01` (Semaphore, runs every playbook) and `vault01` (SSH CA, lab secrets) outside the Spark, from 01-Ansible [Chapter 01](../01-Ansible/01-management-plane-semaphore-and-vault.md) and [Chapter 04](../01-Ansible/04-dgx-spark-as-semaphore-target.md) · your MacBook as a client (browser, git, kubectl) |
 | **Time** | 4–6 h the first time, ~45 min once practised |
 | **Risk** | Medium. Everything is rebuildable: Semaphore template `19.2 Reset Kubernetes` wipes Kubernetes, `19.1 Kubernetes` → `20.1 GPU Operator` → `20.2 vClusters` rebuild it; sema01 and vault01 are outside the Spark and untouched |
@@ -19,16 +19,17 @@ The goal isn't scale. It's the **same shape and the same failure modes** as a pr
 | Datacenter concept | Simulated here by | Volume |
 |---|---|---|
 | Platform cluster run by a platform team | kubeadm root cluster: static-pod control plane, Cilium, MetalLB, GPU Operator, observability | 01, 16 |
-| Separate clusters per team, upgraded independently | vCluster `dev-lab` and `llms`, each with its own API server and admins | 27 |
-| Hard budgets per cluster | root ResourceQuotas on `vc-dev-lab` (2 CPU · 8 Gi · 2 slices) and `vc-llms` (12 CPU · 88 Gi · 11 slices) | 12, 27 |
+| Separate clusters per team, upgraded independently | vCluster `dev-lab` and `dev-llms`, each with its own API server and admins | 27 |
+| Hard budgets per cluster | root ResourceQuotas on `vc-dev-lab` and `vc-dev-llms` (2 CPU · 4 Gi · 2 slices each) | 12, 27 |
+| Production tier on the platform cluster | the LLM stack in root namespaces `llm-serving`, `batch`, `ingress`, isolated by quotas, policies and PSA | 12, 20 |
 | Control plane with backed-up datastore | stacked etcd, 6-hourly snapshots, off-box copy, restore drill; vCluster SQLite on PVCs | 03 |
 | Identity, RBAC, admission policy, audit | per-cluster x509 users, tenant ClusterRoles, 4 CEL policies, PSA, root audit log | 02 |
 | Teams with budgets inside a cluster | `tenant-alpha` / `tenant-beta` in dev-lab (500m · 2 Gi · 1 slice each) | 12 |
-| Shared GPU pool with scheduling policy | 15 time-slices, one root scheduler, PriorityClasses, Kueue in llms | 05, 14 |
-| Serving tier behind an API gateway | Traefik in llms on `192.168.0.115` (Ingress + Gateway API), mock OpenAI API, vLLM/Triton/SGLang | 09, 21–23 |
-| Batch/training tier | `batch` namespace in llms, Kueue gangs, torchrun Indexed Jobs | 05, 17 |
+| Shared GPU pool with scheduling policy | 15 time-slices, one root scheduler, PriorityClasses, Kueue on the root | 05, 14 |
+| Serving tier behind an API gateway | Traefik on the root on `192.168.0.115` (Ingress + Gateway API), mock OpenAI API, vLLM/Triton/SGLang | 09, 21–23 |
+| Batch/training tier | root namespace `batch`, Kueue gangs, torchrun Indexed Jobs | 05, 17 |
 | Storage tiers | NVMe local PVs (Delete/Retain) offered to both vClusters, model cache, NFS for 2 nodes | 11 |
-| Observability & alerting | one kube-prometheus-stack on the root that also scrapes the vClusters' workloads | 16 |
+| Observability & alerting | one kube-prometheus-stack on the root that scrapes the LLM stack and the vClusters' workloads | 16 |
 | Change safety | server-side dry runs, CI on kind with the same root + 2 vClusters, break/fix drills | 19, 20 |
 
 ---
@@ -38,7 +39,7 @@ The goal isn't scale. It's the **same shape and the same failure modes** as a pr
 ```mermaid
 flowchart TB
   USER(["Users · SDKs · Open WebUI"]) --> EDGE
-  ADMIN(["Your MacBook · browser · git · kubectl<br/>contexts spark-root · dev-lab · llms"])
+  ADMIN(["Your MacBook · browser · git · kubectl<br/>contexts spark-root · dev-lab · dev-llms"])
   subgraph MGMT["management plane · outside the Spark"]
     direction LR
     SEMA["sema01 · 192.168.0.210<br/>Semaphore · runs every playbook"]
@@ -53,24 +54,28 @@ flowchart TB
         API["API server<br/>RBAC · APF · audit · encryption"]
         ETCD[("etcd<br/>snapshots /6 h")]
       end
-      subgraph PLATFORM["Platform tier · root keeps 3 CPU · ~9.7 GiB · 2 slices"]
+      subgraph PLATFORM["Platform tier · 3 CPU · ~9.7 GiB · 2 slices"]
         direction LR
         NET["Cilium + kube-proxy<br/>MetalLB .110–.119"]
         OBS["Prometheus · Grafana · Alertmanager<br/>+ host node-exporter :9100"]
         GPUOP["GPU Operator<br/>device plugin ×15 slices · GFD"]
         PT["platform-tools<br/>ledger · probes · benchmarks"]
       end
-      subgraph DEV["vc-dev-lab · vCluster dev-lab (.111) · 2 CPU · 8 Gi · 2 slices"]
+      subgraph LLM["LLM stack on the root · shared memory pool ~90 GiB"]
+        direction LR
+        EDGE["Traefik .115<br/>Ingress + Gateway API"]
+        SERVE["llm-serving · 8 CPU · ≤90 Gi · 6 slices<br/>mock-llm · vLLM · Triton · Qdrant"]
+        BATCH["batch · 2 CPU · ≤12 Gi · 3 slices<br/>Kueue spark-cq · torchrun"]
+      end
+      subgraph DEV["vc-dev-lab · vCluster dev-lab (.111) · 2 CPU · 4 Gi · 2 slices"]
         direction LR
         TA["tenant-alpha<br/>500m · 2 Gi · 1 slice"]
         TB["tenant-beta<br/>500m · 2 Gi · 1 slice"]
         LT["lab-tools<br/>netshoot · echo · drills"]
       end
-      subgraph LLM["vc-llms · vCluster llms (.112) · 12 CPU · 88 Gi · 11 slices"]
+      subgraph DLL["vc-dev-llms · vCluster dev-llms (.112) · 2 CPU · 4 Gi · 2 slices"]
         direction LR
-        EDGE["Traefik .115<br/>Ingress + Gateway API"]
-        SERVE["llm-serving<br/>mock-llm · vLLM · Triton · Qdrant"]
-        BATCH["batch<br/>Kueue spark-cq · torchrun"]
+        SBX["llm-sandbox<br/>mock LLM · tiny model"]
       end
     end
     NVME[("NVMe 4 TB<br/>/data/k8s · model-cache")]
@@ -82,10 +87,11 @@ flowchart TB
   SEMA -->|"AppRole → cert"| VLT
   SEMA -->|"SSH svc-ansible · helm/kubectl"| SPARK
   EDGE --> SERVE
-  SERVE & BATCH & TA & TB & PT --> GB10
+  SERVE & BATCH & TA & TB & SBX & PT --> GB10
   SERVE --> NVME
   API <--> ETCD
-  DEV & LLM -. "syncer → root API" .-> API
+  DEV & DLL -. "syncer → root API" .-> API
+  LLM -- "root API directly" --> API
   SPARK <-.-> S2
   classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
   classDef net fill:#8250df,stroke:#4c2889,color:#fff
@@ -99,7 +105,7 @@ flowchart TB
   class GB10,GPUOP,S2 gpu
   class ETCD,NVME store
   class OBS obs
-  class SERVE,BATCH,TA,TB,LT,PT tenant
+  class SERVE,BATCH,TA,TB,LT,SBX,PT tenant
   class USER,ADMIN ext
   classDef mgmt fill:#fff3e6,stroke:#fb8500,color:#000
   class SEMA,VLT mgmt
@@ -108,9 +114,12 @@ flowchart TB
   style PLATFORM fill:#ffffff,stroke:#8c959f
   style CP fill:#ffffff,stroke:#1f6feb
   style DEV fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
-  style LLM fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
+  style LLM fill:#f3fbe6,stroke:#3d6000
+  style DLL fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
   style MGMT fill:#fffaf3,stroke:#fb8500,stroke-dasharray:5 3
 ```
+
+**Why the LLMs run on the root.** The models are the Spark's main job, so they run in the cluster that owns the hardware: they get all the memory headroom (one ~90 GiB pool, no vCluster control plane or second quota on top), no syncer translation (a vLLM pod is `vllm-…` in `llm-serving` everywhere — kubectl, Prometheus, Traefik) and no nested quota. Two small, identical vClusters remain: `dev-lab` for tenancy and syncer drills, `dev-llms` as an LLM sandbox with its own API server where manifests and tiny models are tried before they go to the root. The trade-off: whoever administers the root also operates the LLM stack, and it is isolated by namespaces (quotas, LimitRanges, NetworkPolicy, CEL admission, PSA, PriorityClasses), not by its own API server. Chapter 04 §1.2 has the full reasoning.
 
 ---
 
@@ -122,8 +131,8 @@ flowchart TB
 |---|---|---|
 | Root API server (`spark-root`) | `https://192.168.0.100:6443` | kubeconfig from 01-Ansible `.cache/kubeconfig-spark-lab.yaml` |
 | dev-lab API (`dev-lab`) | `https://192.168.0.111:443` | MetalLB IP of the vCluster's Service; same kubeconfig |
-| llms API (`llms`) | `https://192.168.0.112:443` | same |
-| llms gateway (Traefik) | `192.168.0.115:80`, `:443` | hosts `llm.lab.local`, `gw.lab.local` in your MacBook's `/etc/hosts` |
+| dev-llms API (`dev-llms`) | `https://192.168.0.112:443` | same |
+| LLM gateway (Traefik on the root) | `192.168.0.115:80`, `:443` | hosts `llm.lab.local`, `gw.lab.local` in your MacBook's `/etc/hosts` |
 | Grafana (kps) | `http://192.168.0.100:32000` | admin / `adminPassword` in the kps values (keep the real one in vault01 KV) |
 | Hubble UI | `http://192.168.0.100:31235` | Cilium flow visibility |
 | Host Grafana (01-Ansible) | `http://192.168.0.100:3000` | node/GPU view that survives a Kubernetes outage |
@@ -135,29 +144,31 @@ flowchart TB
 
 | Cluster · namespace | PSA | Budget | Admission policies | Priority |
 |---|---|---|---|---|
-| root · `vc-dev-lab` | baseline | **2 CPU req · 8 Gi · 2 slices · 200 Gi · 1 LB** | — (Cilium boundary, APF lane) | — |
-| root · `vc-llms` | privileged (warn: baseline) | **12 CPU req · 88 Gi · 11 slices · 800 Gi · 2 LB** | — (Cilium boundary, APF lane) | — |
+| root · `vc-dev-lab` | baseline | **2 CPU req · 4 Gi · 2 slices · 200 Gi · 1 LB** | — (Cilium boundary, APF lane) | — |
+| root · `vc-dev-llms` | baseline | **2 CPU req · 4 Gi · 2 slices · 200 Gi · 1 LB** | — (Cilium boundary, APF lane) | — |
+| root · `llm-serving` | baseline | `serving-budget`: **8 CPU req · up to 90 Gi · 6 slices · 1 Ti** | no-latest, readiness required; NetworkPolicy `allow-ingress-and-same-namespace` | serving |
+| root · `batch` | privileged (warn: baseline). RDMA needs hostNetwork/IPC_LOCK | `batch-budget` = Kueue `spark-cq`: **2 CPU · up to 12 Gi · 3 slices · 200 Gi** | no-latest | batch |
+| root · `ingress` | baseline | none (platform share) | — | platform |
 | root · `platform-tools` | privileged | none (platform team) | — | platform / preemptible |
 | root · `observability`, `gpu-operator`, `metallb-system` | privileged | none | — | platform |
 | dev-lab · `tenant-alpha`, `tenant-beta` | restricted | 500m · 2 Gi · 1 slice · 100 Gi · 10 pods | no-latest, ≤1 slice, no NVIDIA env | interactive |
 | dev-lab · `lab-tools` | baseline | none inside (the root caps it) | — | mixed |
-| llms · `llm-serving` | baseline | 10 CPU req · 80 Gi lim · 8 slices · 600 Gi | no-latest, readiness required | serving |
-| llms · `batch` | privileged (warn: baseline). RDMA needs hostNetwork/IPC_LOCK | Kueue `spark-cq`: 10 CPU · 80 Gi · 3 slices | no-latest | batch |
-| llms · `ingress` | baseline | none inside | — | platform |
+| dev-llms · `llm-sandbox` | baseline | 1500m · 3 Gi · 2 slices · 150 Gi | no-latest, readiness required | — |
 
 ### 3.3 Capacity plan (one Spark)
 
 | Consumer | CPU | Memory (UMA) | GPU slices |
 |---|---|---|---|
-| kubelet reservations (system 2 + kube 1 CPU; 8 + 2 Gi + 4 Gi eviction) | 3 | 14 Gi | — |
-| root platform (Cilium, MetalLB, kps, metrics-server, GPU Operator, platform-tools) | 3 | ~9.7 GiB | 2 |
-| vCluster dev-lab (control plane ~0.3 CPU · 0.5–1 Gi included) | 2 | 8 Gi | 2 |
-| vCluster llms (control plane, Traefik, Kueue, KEDA included) | 12 | 88 Gi | 11 |
+| kubelet reservations (system 2 + kube 1 CPU; system 6 + kube 2 + eviction 4 Gi) | 3 | 12 Gi | — |
+| root platform (Cilium, MetalLB, kps, metrics-server, GPU Operator, Traefik, Kueue, KEDA, platform-tools) | 3 | ~9.7 GiB | 2 |
+| LLM memory pool on the root: `llm-serving` (8 CPU · 6 slices) and `batch` (2 CPU · 3 slices) | 10 | ~90 GiB, shared | 9 |
+| vCluster dev-lab (control plane ~0.3 CPU · 0.5–1 Gi included) | 2 | 4 Gi | 2 |
+| vCluster dev-llms (control plane included) | 2 | 4 Gi | 2 |
 | **total** | **20** | **~119.7 GiB** | **15** |
 
-Memory is split without overcommit: what pods may use (~105.7 GiB allocatable) is exactly dev-lab + llms + the root platform. CPU may burst into idle cores. dev-lab stays small (tools, tenancy drills); llms gets the rest because the models run there: about 84 GiB for model servers after its own ≈1 CPU · 4 Gi of control plane and add-ons, so the `--gpu-memory-utilization` values of the models running at the same time should add up to ≲ 0.70 (Chapter 20 §2). The root's 2 slices are for `platform-tools` (GPU probes, the Chapter 14 §5.5 UMA experiment, the preemption demo's fillers).
+Memory is split without overcommit: of ~107.7 GiB allocatable, the vClusters take 4 + 4 Gi and the root keeps ~99.7 GiB — ~9.7 GiB for its platform and ~90 GiB for the models. The kubelet's system reservation is 6 Gi because DGX OS runs headless (01-Ansible `04.3 Baseline`). CPU may burst into idle cores. The root's 2 platform slices are for `platform-tools` (GPU probes, the Chapter 14 §5.5 UMA experiment, the preemption demo's fillers).
 
-Inside llms, serving (8 slices · 80 Gi) + batch (3 slices · 80 Gi) add up to more than its 88 Gi by design: either side can use most of llms while the other is idle, and the root quota, Kueue and priorities decide who waits. The slices are not oversubscribed: 8 + 3 = 11. `tests/budget_check.py` keeps these numbers honest.
+CPU and slices are split exactly (3 + 8 + 2 = 13 CPU, 2 + 6 + 3 = 11 slices on the root). Only memory is shared: `serving-budget` allows up to 90 Gi and `batch-budget` up to 12 Gi of the same pool, so serving can use all of it while nothing trains. The **scheduler** keeps the two from overcommitting unified memory: every GPU container in the LLM stack sets memory request = limit, so a pod that doesn't fit waits `Pending` and never squeezes a running model; a Kueue-admitted training job waits for serving, never the reverse. ~90 GiB is 0.75 of the GPU, so the `--gpu-memory-utilization` values of the models running at the same time should add up to ≲ 0.72 (Chapter 20 §2). `tests/budget_check.py` keeps these numbers honest and checks request = limit on every GPU container in `manifests/root-llms` (Chapter 04 §3.2).
 
 ---
 
@@ -171,7 +182,7 @@ The 01-Ansible stages run as **Semaphore templates** in project `spark-lab` on s
 flowchart LR
   G0["0 · Toolchain<br/>run-local-checks"] --> G1["1 · Root<br/>Semaphore 19.1 + 20.1: kubeadm · Cilium · MetalLB · GPU Op"]
   G1 --> G2["2 · Control plane<br/>etcd · audit · encryption"]
-  G2 --> G3["3 · Platform + vClusters<br/>storage · metrics · kps · dev-lab · llms"]
+  G2 --> G3["3 · Platform + vClusters<br/>storage · metrics · kps · dev-lab · dev-llms<br/>Traefik · Kueue · KEDA"]
   G3 --> G4["4 · Tenancy<br/>ns · quotas · RBAC · CEL · APF · netpol"]
   G4 --> G5["5 · Workloads<br/>networking · Traefik · Qdrant · probes"]
   G5 --> G6["6 · GPU<br/>smoke · baseline · contention"]
@@ -220,21 +231,21 @@ systemctl list-timers etcd-snapshot.timer
 ### Task 3 · Platform add-ons and vClusters
 
 ```bash
-scripts/install-addons.sh all          # root: storage metrics-server kps vclusters · llms: traefik kueue keda
+scripts/install-addons.sh all          # all on the root: storage metrics-server kps vclusters traefik kueue keda
 kubectl --context spark-root get pods -A | grep -vE 'Running|Completed|^NAMESPACE' || echo 'root: all pods Running/Completed'
 scripts/verify.sh vclusters
 ```
 
-**Gate:** no root pods outside `Running/Completed`. Both vClusters answer and show their budgets. Grafana answers on :32000.
+**Gate:** no root pods outside `Running/Completed`. Both vClusters answer and show their budgets (`2 4Gi 2`). Traefik has `192.168.0.115`. Grafana answers on :32000.
 
 ### Task 4–5 · Tenancy, policies and workloads
 
 ```bash
-scripts/apply-lab.sh                   # root → dev-lab → llms
-scripts/verify.sh platform vclusters tenancy admission storage
+scripts/apply-lab.sh                   # root (incl. root-llms) → dev-lab → dev-llms
+scripts/verify.sh platform vclusters llm-budget tenancy admission storage
 ```
 
-**Gate:** all PASS.
+**Gate:** all PASS, including `llm-serving serving-budget: 8 90Gi 6`, `batch batch-budget: 2 12Gi 3` and `Kueue spark-cq: 2 12Gi 3`.
 
 ### Task 6 · GPU
 
@@ -249,10 +260,10 @@ kubectl --context spark-root -n platform-tools logs -f job/gemm-solo
 ### Task 7 · Serving
 
 ```bash
-kubectl --context llms apply -f manifests/llms/60-storage/model-prefetch-job.yaml
-kubectl --context llms -n llm-serving wait --for=condition=complete job/model-prefetch --timeout=30m
-kubectl --context llms apply -k manifests/llms/90-serving/vllm
-kubectl --context llms -n llm-serving rollout status deploy/vllm --timeout=30m
+kubectl --context spark-root apply -f manifests/root-llms/60-storage/model-prefetch-job.yaml
+kubectl --context spark-root -n llm-serving wait --for=condition=complete job/model-prefetch --timeout=30m
+kubectl --context spark-root apply -k manifests/root-llms/90-serving/vllm
+kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=30m
 scripts/verify.sh ingress serving
 ```
 
@@ -262,11 +273,11 @@ scripts/verify.sh ingress serving
 
 ```bash
 tests/kueue-gang-test.sh
-kubectl --context llms apply -k manifests/llms/80-distributed/base
-kubectl --context llms -n batch logs -f -l job-name=ddp --prefix
+kubectl --context spark-root apply -k manifests/root-llms/80-distributed/base
+kubectl --context spark-root -n batch logs -f -l job-name=ddp --prefix
 ```
 
-**Gate:** gang test PASS. DDP prints `correctness OK`.
+**Gate:** gang test PASS. DDP prints `correctness OK` (2 ranks × 1 CPU · 6 Gi · 1 slice fill `spark-cq` exactly).
 
 ### Task 9 · Operations
 
@@ -277,7 +288,7 @@ scripts/collect-diag.sh                     # know how to produce a bundle befor
 scripts/breakfix.sh list                    # then do at least three drills (Chapters 26/27)
 ```
 
-**Gate:** `verify.sh` all PASS. Dashboard *Spark · Kubernetes* shows data in every row, including `vcluster="llms"` serving metrics.
+**Gate:** `verify.sh` all PASS. Dashboard *Spark · Kubernetes* shows data in every row, including the model servers' metrics (`vcluster="root", vnamespace="llm-serving"`, ServiceMonitor `llm-workloads`).
 
 ---
 
@@ -286,7 +297,7 @@ scripts/breakfix.sh list                    # then do at least three drills (Cha
 | Module | Uses this platform for |
 |---|---|
 | 01-Ansible | builds the base (kubeadm root, Cilium, MetalLB, GPU Operator, the vClusters, NFS, telemetry) as Semaphore tasks on sema01, with 15-minute certificates and lab secrets from vault01, and owns node-level config |
-| 03-DeepSeek · 04-Qwen · 05-NeMo · 06-Gemma | overlays on `llms/90-serving` (model, engine flags, quantisation), RAG on Qdrant, fine-tuning Jobs in llms `batch` — sized to the llms budget |
+| 03-DeepSeek · 04-Qwen · 05-NeMo · 06-Gemma | overlays on `root-llms/90-serving` (model, engine flags, quantisation), RAG on Qdrant, fine-tuning Jobs in the root's `batch` — sized to `serving-budget` (≈90 GiB, sum of `--gpu-memory-utilization` ≲ 0.72); tried first in `dev-llms` with a tiny model |
 | 07-Nvidia | profiling (nsys/ncu) in root `platform-tools` pods on the same GPU |
 | 08-Storage | benchmarks and caches behind `model-cache` and checkpoint PVCs (real PVs on the root) |
 
@@ -301,12 +312,13 @@ scripts/verify.sh
 ```text
 ── platform (root, context spark-root) …
 ── vclusters …
+── llm-budget (the LLM stack on the root, context spark-root) …
 ── tenancy (inside dev-lab) …
 ── admission (server-side dry-run inside each vCluster, nothing is created) …
 ── gpu …
-── ingress (Traefik inside llms) …
+── ingress (Traefik on the root, context spark-root) …
 ── storage …
-── serving (inside llms) …
+── serving (root, llm-serving) …
 ── observability (root) …
 
 58 passed, 0 warnings, 0 failed
@@ -325,9 +337,9 @@ scripts/verify.sh
 | Restore rehearsal | monthly | `scripts/etcd-drill.sh restore …` on a quiet day; one vCluster PVC restore |
 | Version review | monthly | `versions.env` vs upstream releases. Test in CI (kind + 2 vClusters) first |
 | Kubernetes upgrade | per minor release | 01-Ansible `kubeadm_cluster_version` → `kubeadm upgrade plan/apply` (Chapter 01 §8) → `scripts/verify.sh`; vCluster supports host 1.34–1.36 |
-| vCluster upgrade | per release | bump `VCLUSTER_VERSION`, `helm upgrade` dev-lab first, then llms (Chapter 04) |
+| vCluster upgrade | per release | bump `VCLUSTER_VERSION`, `helm upgrade` dev-lab first, then dev-llms (Chapter 04); the LLM stack is not affected |
 | DGX OS / driver upgrade | per NVIDIA release | Semaphore template `10.2 DGX OS upgrade` (drain → upgrade → validate) → Chapter 14 UMA experiment again |
-| Capacity review | weekly | Grafana *vCluster CPU/memory used / hard* panels. `VClusterQuotaNearlyExhausted`, `PodsPendingOnGPU` history; resize with one `kubectl patch` (Chapter 04 §6.5) |
+| Capacity review | weekly | Grafana *vCluster CPU/memory used / hard* panels and `serving-budget` / `batch-budget` usage. `VClusterQuotaNearlyExhausted`, `PodsPendingOnGPU` history; resize with one `kubectl patch` (Chapter 04 §6.5) |
 | Drills | weekly | one `breakfix` scenario, timed |
 | Drift check · validation | nightly · weekly | scheduled Semaphore templates `26.1 Drift check` and `30.1 Validate`; a failed task is the alert (01-Ansible Chapter 04 §10) |
 | Full rebuild | when needed | Semaphore `19.2 Reset Kubernetes` (`reset_confirm=RESET`) → `19.1 Kubernetes` → `20.1 GPU Operator` → `20.2 vClusters`, then `fetch-kubeconfig.sh sema01` and `scripts/install-addons.sh all` |
@@ -346,8 +358,10 @@ scripts/verify.sh
 | 3 | `context dev-lab` unreachable | MetalLB didn't assign `.111` (pool, `services.loadbalancers` quota) → Chapter 04 §8 |
 | 4 | admission tests fail | a policy binding namespace label missing → re-apply `<vcluster>/00-platform` |
 | 6 | gpu-smoke Pending with no events | dev-lab's 2 slices are in use → drill 02 explains it; scale down demos |
-| 7 | vLLM never Ready | `kubectl --context llms logs deploy/vllm`: model download, wrong image arch, `--gpu-memory-utilization` too high for free UMA, or `serving-budget` (80 Gi) spent by two other engines (Chapter 20 §9) |
-| 8 | DDP hangs | Kueue not installed in llms → both jobs started partially (Chapter 07). NCCL on 1 node needs `BACKEND=gloo` |
+| 7 | vLLM never Ready | `kubectl --context spark-root -n llm-serving logs deploy/vllm`: model download, wrong image arch, `--gpu-memory-utilization` too high for free UMA (sum ≲ 0.72), or `serving-budget` (90 Gi) spent by other engines (Chapter 20 §9) |
+| 7 | vLLM `Pending` with `Insufficient memory` | the shared pool is full (request = limit): other models or a training job hold it → stop one, or wait for the job |
+| 8 | DDP hangs | Kueue not installed on the root → both jobs started partially (Chapter 07). NCCL on 1 node needs `BACKEND=gloo` |
+| 8 | Kueue admitted the job, pods `Pending` | models fill the shared memory pool; by design training waits for serving |
 
 ---
 
@@ -373,9 +387,9 @@ flowchart LR
 
 1. Cable the QSFP ports. Run 01-Ansible `13.1-fabric.yml` (CX-7 addressing, MTU 9000) and `13.2-rdma-perftest.yml` (≥ 180 Gb/s gate).
 2. Uncomment `dgx-spark-2` under `k8s_workers` in the inventory and run `19.1-kubernetes.yml` (kubeadm join, Cilium agent) and `20.1-gpu-operator.yml`.
-3. `kubectl --context spark-root get nodes` → 2 Ready, 30 slices allocatable. Both vClusters see the new node at once (node sync). Raise the root budgets you want to grow (`root/05-vclusters/quotas.yaml`, then `tests/budget_check.py` with `SPARK` doubled) and `spark-cq`.
+3. `kubectl --context spark-root get nodes` → 2 Ready, 30 slices allocatable. Both vClusters see the new node at once (node sync). Raise the budgets you want to grow (`root-llms/10-tenancy/quotas.yaml` with `spark-cq`, `root/05-vclusters/quotas.yaml`, then `tests/budget_check.py` with `SPARK` doubled).
 4. Serve weights from NFS (Chapter 13 §8) instead of per-node local PVs.
-5. Run `manifests/llms/80-distributed/two-spark` (NCCL over RoCE, Chapter 18).
+5. Run `manifests/root-llms/80-distributed/two-spark` (NCCL over RoCE, Chapter 18; the NetworkAttachmentDefinitions live in `batch`).
 6. The root control plane still has one etcd voter. For real HA you need three control-plane nodes (Chapter 02 §8).
 
 ---
@@ -383,7 +397,7 @@ flowchart LR
 ## 10. Checklist
 
 - [ ] Every gate passed in order, and I know which volume to open when one fails.
-- [ ] I can say which of the three clusters any object lives in — and find a vCluster pod's real copy on the root.
+- [ ] I can say which of the three clusters any object lives in — and find a vCluster pod's real copy on the root (LLM pods have no copy: they are root pods).
 - [ ] I can rebuild the whole platform from `lab/` (`19.2` → `19.1` → `20.1` → `20.2` → `install-addons.sh all` → `apply-lab.sh`) in under an hour.
 - [ ] Backups and a restore rehearsal exist for etcd **and** for a vCluster, not just the backups.
 - [ ] I have a written plan (and the inventory change ready) for dgx-spark-2.

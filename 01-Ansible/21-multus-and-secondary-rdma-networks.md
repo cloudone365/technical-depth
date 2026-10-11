@@ -6,12 +6,12 @@
 
 | | |
 |---|---|
-| **You will build** | Pods with **two** interfaces: `eth0` on Cilium for control traffic, `net1` on the 200G CX-7 fabric. RDMA verbs access comes through an extended resource, proven with a pod-to-pod `ib_write_bw` across Sparks. The same fabric is then reachable from a pod in the `llms` vCluster |
+| **You will build** | Pods with **two** interfaces: `eth0` on Cilium for control traffic, `net1` on the 200G CX-7 fabric. RDMA verbs access comes through an extended resource, proven with a pod-to-pod `ib_write_bw` across Sparks. The same fabric is then reachable from a training pod in the root's `batch` namespace, next to the models |
 | **Hardware** | 2× DGX Spark in the root cluster (single Spark works too; both pods then land on one node) |
 | **Time** | 60–90 min |
 | **Risk** | Low–medium. Adds a CNI meta-plugin in front of Cilium; the pod network itself is untouched |
-| **Clusters** | `spark-root` (Multus, device plugin, NADs, test pods in `platform-tools`), `llms` (§3.3, a pod in `batch`) |
-| **Lab files** | [`playbooks/21.1-multus-rdma.yml`](lab/playbooks/21.1-multus-rdma.yml), [`playbooks/templates/rdma-shared-dp.yaml.j2`](lab/playbooks/templates/rdma-shared-dp.yaml.j2), [`roles/cilium`](lab/roles/cilium) (`cni.exclusive=false`), 02-Kubernetes [`manifests/llms/85-network-operator/`](../02-Kubernetes/lab/manifests/llms/85-network-operator) (the Network Operator alternative) |
+| **Clusters** | `spark-root` (Multus, device plugin, NADs, test pods in `platform-tools`, a training pod in `batch` in §3.2–§3.3) |
+| **Lab files** | [`playbooks/21.1-multus-rdma.yml`](lab/playbooks/21.1-multus-rdma.yml), [`playbooks/templates/rdma-shared-dp.yaml.j2`](lab/playbooks/templates/rdma-shared-dp.yaml.j2), [`roles/cilium`](lab/roles/cilium) (`cni.exclusive=false`), 02-Kubernetes [`manifests/root-llms/85-network-operator/`](../02-Kubernetes/lab/manifests/root-llms/85-network-operator) (the Network Operator alternative) |
 
 ---
 
@@ -37,7 +37,7 @@ flowchart TB
     MD -->|"default network<br/>(delegates 05-cilium.conflist)"| CIL["Cilium → eth0 10.42.x.x"]
     MD -->|"annotation cx7-a → NAD in the pod's namespace"| MACVLAN["macvlan on enp1s0f1np1 → net1<br/>192.168.100.2xx/24, MTU 9000"]
     DP["rdma-shared-dp-ds<br/>resource rdma/rdma_shared_cx7"] -->|"device plugin API"| KUBELET
-    subgraph POD["Pod (root ns platform-tools, or vc-llms for an llms pod)"]
+    subgraph POD["Pod (root ns platform-tools or batch)"]
       E0["eth0"]
       N1["net1"]
       DEV["/dev/infiniband/uverbs*<br/>+ IPC_LOCK"]
@@ -68,33 +68,35 @@ flowchart TB
 | Secondary CNI | `macvlan` bridge mode, master = CX-7 netdev, MTU 9000 | `host-device` (a whole netdev per pod), or SR-IOV VFs (one VF per pod, hardware isolation) |
 | IPAM | `static`, IP given per pod in the annotation (deterministic for a lab) | `whereabouts` (cluster-wide ranges), as in the Network Operator path |
 | RDMA exposure | `k8s-rdma-shared-dev-plugin`, selecting netdevs `enp1s0f1np1`, `enP2p1s0f1np1`, up to 64 pods per device (`rdmaHcaMax`) | SR-IOV network device plugin (exclusive VFs) |
-| NADs | `cx7-a` (`enp1s0f1np1`, 192.168.100.0/24), `cx7-b` (`enP2p1s0f1np1`, 192.168.101.0/24) in **`platform-tools`** and **`vc-llms`** | One per tenant namespace, created by the platform team |
+| NADs | `cx7-a` (`enp1s0f1np1`, 192.168.100.0/24), `cx7-b` (`enP2p1s0f1np1`, 192.168.101.0/24) in **`platform-tools`** and **`batch`** | One per tenant namespace, created by the platform team |
 | CNI paths | kubeadm standard: config `/etc/cni/net.d`, binaries `/opt/cni/bin` (the reference plugins `macvlan` and `static` come with the `kubernetes-cni` package that is installed alongside kubeadm) | Same |
 
 > **Why macvlan works for RoCE:** the mlx5 driver installs RoCE GIDs for IPs on macvlan upper devices, so a pod's `net1` IP gets its own RoCEv2 GID on the physical port. Check it with `show_gids` on the host after a pod starts.
 
-### 2.3 NADs are namespaced, and the vCluster's namespace is `vc-llms`
+### 2.3 NADs are namespaced: `batch` on the root, `vc-*` for a vCluster
 
 A pod asks for a secondary network with the annotation `k8s.v1.cni.cncf.io/networks: cx7-a`. Multus runs on the root, reads the pod from the **root** API server, and looks up the NetworkAttachmentDefinition named `cx7-a` **in the pod's namespace**.
 
-For a pod in the `llms` vCluster, that namespace is not `batch`:
+The LLM stack runs directly on the root, so a training pod in `batch` is a root pod in the root namespace `batch`, and the playbook creates the NADs there. Tenants of the stack can't create NADs themselves: the platform team decides which fabrics a namespace may use by deciding which NADs exist in it.
+
+A vCluster pod is different, because its host copy lives in the vCluster's host namespace under a translated name:
 
 ```text
-inside llms:   batch / rdma-llms                    annotation k8s.v1.cni.cncf.io/networks: [{"name":"cx7-a",…}]
-on the root:   vc-llms / rdma-llms-x-batch-x-llms   same annotation, copied unchanged by the syncer
-Multus:        NAD vc-llms/cx7-a                    ← created by playbook 21.1 on the root
+inside dev-llms:  llm-sandbox / rdma-sbx                          annotation k8s.v1.cni.cncf.io/networks: [{"name":"cx7-a",…}]
+on the root:      vc-dev-llms / rdma-sbx-x-llm-sandbox-x-dev-llms same annotation, copied unchanged by the syncer
+Multus:           NAD vc-dev-llms/cx7-a                           ← would have to exist on the root
 ```
 
-So the playbook creates the NADs in `vc-llms`, where the llms pods really run. Tenants can't create them: NetworkAttachmentDefinition is a CRD on the root, and the vCluster neither has it nor syncs it. The platform team decides which fabrics a vCluster may use by deciding which NADs exist in its host namespace. `dev-lab` gets none, so a dev-lab pod that asks for `cx7-a` stays in `ContainerCreating` with a Multus "NAD not found" error.
+NetworkAttachmentDefinition is a CRD on the root; the vCluster neither has it nor syncs it. The lab creates no NADs in `vc-dev-lab` or `vc-dev-llms`, so a vCluster pod that asks for `cx7-a` stays in `ContainerCreating` with a Multus "NAD not found" error. To give a vCluster the fabric, add its `vc-*` namespace to `multus_nad_namespaces`.
 
 What this does **not** give you, and what to add for real tenants:
 
 | Gap | Why | Fix |
 |---|---|---|
 | A pod can name a NAD in *another* namespace (`platform-tools/cx7-a`) | The upstream daemon config doesn't enable Multus's `namespaceIsolation` | Add `"namespaceIsolation": true` (and `globalNamespaces` if needed) to the `multus-daemon-config` ConfigMap |
-| Cilium policies (`vcluster-boundary`, tenant NetworkPolicies) don't apply on `net1` | macvlan traffic never passes through Cilium | Separate subnets/VLANs per tenant, or SR-IOV VFs with switch-side ACLs |
-| `rdma/rdma_shared_cx7` isn't in the vCluster budget | `vcluster-budget` lists CPU, memory, GPU, storage | Add `requests.rdma/rdma_shared_cx7` to the root quota on `vc-llms` |
-| Static IPs collide across namespaces silently | `static` IPAM has no shared state | A convention (here: `.201–.209` platform, `.211–.229` llms) or whereabouts |
+| Cilium policies (`vcluster-boundary`, the `llm-serving` NetworkPolicy, tenant NetworkPolicies) don't apply on `net1` | macvlan traffic never passes through Cilium | Separate subnets/VLANs per tenant, or SR-IOV VFs with switch-side ACLs |
+| `rdma/rdma_shared_cx7` isn't in any budget | `batch-budget` and `vcluster-budget` list CPU, memory, GPU, storage | Add `requests.rdma/rdma_shared_cx7` to `batch-budget` |
+| Static IPs collide across namespaces silently | `static` IPAM has no shared state | A convention (here: `.201–.209` platform, `.211–.229` batch) or whereabouts |
 
 ---
 
@@ -121,9 +123,9 @@ What this does **not** give you, and what to add for real tenants:
     multus_rdma_ifnames: [enp1s0f1np1, enP2p1s0f1np1]
     multus_rdma_dp_image: ghcr.io/mellanox/k8s-rdma-shared-dev-plugin:latest   # pin a release tag
     multus_test_image: ubuntu:24.04          # perftest + verbs utils installed at start (readiness waits for it)
-    # NADs are namespaced: platform-tools for the platform test pods below, vc-llms
-    # because that is where the llms vCluster's batch pods really run on the root.
-    multus_nad_namespaces: [platform-tools, vc-llms]
+    # NADs are namespaced: platform-tools for the platform test pods below, batch
+    # for the training pods of the root's LLM stack (02-Kubernetes manifests/root-llms).
+    multus_nad_namespaces: [platform-tools, batch]
     multus_test_namespace: platform-tools
     multus_nads:
       - { name: cx7-a, master: enp1s0f1np1, subnet: 192.168.100.0/24 }
@@ -177,7 +179,7 @@ What this does **not** give you, and what to add for real tenants:
               spark.lab/tier: platform
               pod-security.kubernetes.io/enforce: privileged
 
-    - name: Which NAD namespaces exist (vc-llms appears once playbook 20.2 has run)?
+    - name: Which NAD namespaces exist (batch appears once playbook 20.2 has run)?
       kubernetes.core.k8s_info:
         kind: Namespace
       register: multus_ns
@@ -273,7 +275,7 @@ What this does **not** give you, and what to add for real tenants:
 Things worth noticing:
 
 - **`module_defaults` pins the cluster.** Every `kubernetes.core` task gets `context: spark-root` from the action group, so none of them can land in a vCluster even though the lab kubeconfig's other contexts are one typo away.
-- **The NAD namespaces are discovered, not assumed.** Run 21.1 before 20.2 and you get NADs in `platform-tools` only. Run it again after 20.2 and `vc-llms` gets its pair. `product()` builds the namespace × fabric matrix in one loop.
+- **The NAD namespaces are discovered, not assumed.** Run 21.1 before 20.2 and you get NADs in `platform-tools` only. Run it again after 20.2 and `batch` gets its pair. `product()` builds the namespace × fabric matrix in one loop.
 - **The test pods live in `platform-tools`** (privileged PSA). It is the root namespace for the platform team's node-level tools, and it holds no tenant workloads.
 - **Pin what you download.** The playbook pins the *manifest* to the `v4.3.0` tag, but check the image tag inside `.cache/multus-v4.3.0.yml` (`grep image:`). Upstream manifests have pointed at a moving `snapshot` tag before; replace it with the release tag if so. The RDMA device plugin is on `:latest` until you pin it.
 
@@ -337,7 +339,7 @@ spec:
 cd "01-Ansible/lab"
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
 ansible-playbook playbooks/21.1-multus-rdma.yml
-kubectl --context spark-root get net-attach-def -A                  # cx7-a, cx7-b in platform-tools (and vc-llms after 20.2)
+kubectl --context spark-root get net-attach-def -A                  # cx7-a, cx7-b in platform-tools (and batch after 20.2)
 kubectl --context spark-root get nodes -o custom-columns=NAME:.metadata.name,RDMA:.status.allocatable.rdma/rdma_shared_cx7,GPU:.status.allocatable.nvidia\\.com/gpu
 ssh dgxadmin@192.168.0.100 'ls /etc/cni/net.d; ls /opt/cni/bin | grep -E "multus|macvlan|static|cilium"'
 ```
@@ -365,10 +367,10 @@ kubectl --context spark-root -n platform-tools get pod rdma-test-dgx-spark-1 \
 
 ### 3.2 A GPU + RDMA pod (what real workloads request)
 
-Real training pods belong to a tenant, so this one runs in the `llms` vCluster's `batch` namespace. Inside `llms`, `batch` enforces `privileged` PSA, because `IPC_LOCK` is not allowed under `baseline`. On the root, `vc-llms` is privileged for the same reason. PSA is checked twice, once by each API server, and both must allow it.
+Real training pods belong to the LLM stack, so this one runs in the root's `batch` namespace, next to the models in `llm-serving`. `batch` enforces `privileged` PSA, because `IPC_LOCK` is not allowed under `baseline` (it warns at `baseline`, so you see the exception on every apply).
 
 ```yaml
-# nccl-worker-0.yaml (apply with --context llms)
+# nccl-worker-0.yaml (apply with --context spark-root)
 apiVersion: v1
 kind: Pod
 metadata:
@@ -388,38 +390,33 @@ spec:
         - { name: NCCL_DEBUG,         value: INFO }
       securityContext: { capabilities: { add: [IPC_LOCK] } }
       resources:
-        requests: { cpu: 500m }
+        requests: { cpu: 500m, memory: 6Gi }
         limits:
           nvidia.com/gpu: 1
           rdma/rdma_shared_cx7: 1
-          memory: 16Gi                                         # the root quota caps limits.memory; set it yourself
+          memory: 6Gi                                          # request = limit; batch-budget caps memory at 12 Gi
 ```
 
-Every limit on this pod is checked in a different place. `nvidia.com/gpu: 1` passes the llms CEL policy (at most one slice) and is then charged against `vc-llms`'s 11 slices by the root quota. `memory: 16Gi` counts against the 88 Gi budget. `rdma/rdma_shared_cx7` is checked by nobody until the kubelet's device plugin, which is the quota gap from §2.3.
+Every limit on this pod is checked in a different place. `nvidia.com/gpu: 1` is charged against `batch-budget`'s 3 slices by the root API server. `memory: 6Gi` counts against the 12 Gi `batch` may take from the LLM memory pool it shares with `llm-serving`; with request = limit, the scheduler places the pod only if those 6 GiB are free on the node, so it never squeezes a running model. `rdma/rdma_shared_cx7` is checked by nobody until the kubelet's device plugin, which is the quota gap from §2.3. The pod carries no Kueue queue label, so Kueue leaves it alone; a real training Job goes through the ClusterQueue `spark-cq` (02-Kubernetes Chapter 07).
 
-### 3.3 Follow the annotation from the vCluster to the NIC
+### 3.3 Follow the annotation to the NIC
 
 ```bash
 # ▶ MacBook · any folder
 # in the folder where you saved nccl-worker-0.yaml
-kubectl --context llms apply -f nccl-worker-0.yaml
-kubectl --context llms -n batch get pod nccl-worker-0 -o wide                  # Running, IP 10.42.x.x (eth0)
-HOSTPOD=$(kubectl --context spark-root -n vc-llms get pods -o json \
-  | jq -r '.items[] | select(.metadata.annotations["vcluster.loft.sh/object-name"]=="nccl-worker-0") | .metadata.name')
-echo "$HOSTPOD"                                                                # nccl-worker-0-x-batch-x-llms
-kubectl --context spark-root -n vc-llms get pod "$HOSTPOD" \
-  -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/networks}{"\n"}'  # copied unchanged
-kubectl --context spark-root -n vc-llms get pod "$HOSTPOD" \
-  -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}' | jq -c '.[] | {name, interface, ips}'   # cilium/eth0, vc-llms/cx7-a/net1, vc-llms/cx7-b/net2
-kubectl --context llms -n batch exec nccl-worker-0 -- sh -c 'ip -br addr; ls /dev/infiniband'
-kubectl --context llms -n batch exec nccl-worker-0 -- bash -c \
+kubectl --context spark-root apply -f nccl-worker-0.yaml
+kubectl --context spark-root -n batch get pod nccl-worker-0 -o wide           # Running, IP 10.42.x.x (eth0)
+kubectl --context spark-root -n batch get pod nccl-worker-0 \
+  -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}' | jq -c '.[] | {name, interface, ips}'   # cilium/eth0, batch/cx7-a/net1, batch/cx7-b/net2
+kubectl --context spark-root -n batch exec nccl-worker-0 -- sh -c 'ip -br addr; ls /dev/infiniband'
+kubectl --context spark-root -n batch exec nccl-worker-0 -- bash -c \
   'apt-get update -qq && apt-get install -y -qq iputils-ping >/dev/null; ping -c3 -I net1 192.168.100.201'   # platform-tools pod from §3
-kubectl --context llms -n batch delete pod nccl-worker-0
+kubectl --context spark-root -n batch delete pod nccl-worker-0
 ```
 
-Read the result as a chain. The tenant wrote an annotation in `llms`. The syncer copied it to the root pod in `vc-llms`. Multus on the node read the **root** pod and resolved `cx7-a` in `vc-llms`. It created `net1` and `net2` (macvlan), and `network-status` lands on the root copy, the object Multus knows about. Read it there. The tenant's `kubectl exec` works through the vCluster, which proxies it to the root kubelet.
+Read the result as a chain. You wrote an annotation on a root pod in `batch`. Multus on the node read that pod and resolved `cx7-a` in `batch`. It created `net1` and `net2` (macvlan), and wrote `network-status` back onto the same pod. No syncer is involved: the pod keeps its name, and the object you created is the object Multus knows about. For a pod in a vCluster, `network-status` would land on the translated host copy in `vc-*` (§2.3), and you would read it there.
 
-The ping shows the §2.3 gap. A pod in `llms` reaches a `platform-tools` pod on the fabric subnet: Cilium policies, the root's `vcluster-boundary` included, only govern `eth0`. Two macvlan pods on the same master talk to each other in bridge mode, even on one node; only the node's own host can't reach them. Use the `.202` pod on dgx-spark-2 for a cross-node test. The 02 lab's [`rdma-test-pod.yaml`](../02-Kubernetes/lab/manifests/llms/85-network-operator/rdma-test-pod.yaml) does the same with the Network Operator's NAD `cx7-rdma` (whereabouts IPAM, no `ips` needed). That NAD exists only on the Network Operator path, so with this playbook use `cx7-a` as above.
+The ping shows the §2.3 gap. A pod in `batch` reaches a `platform-tools` pod on the fabric subnet: Cilium policies only govern `eth0`. Two macvlan pods on the same master talk to each other in bridge mode, even on one node; only the node's own host can't reach them. Use the `.202` pod on dgx-spark-2 for a cross-node test. The 02 lab's [`rdma-test-pod.yaml`](../02-Kubernetes/lab/manifests/root-llms/85-network-operator/rdma-test-pod.yaml) does the same with the Network Operator's NAD `cx7-rdma` (whereabouts IPAM, no `ips` needed). That NAD exists only on the Network Operator path, so with this playbook use `cx7-a` as above.
 
 ---
 
@@ -430,7 +427,7 @@ The ping shows the §2.3 gap. A pod in `llms` reaches a `platform-tools` pod on 
 | Root cluster (Chapter 19) | Cilium `cni.exclusive=false`; Multus uses the standard kubeadm CNI paths |
 | GPU Operator (Chapter 20) | Independent: GPU via `nvidia.com/gpu`, RDMA via `rdma/*`. Both limits go on the same container |
 | Time-slicing (Chapter 20) | Several pods can share the GPU **and** the shared RDMA device. Neither is isolated, and that's fine for a lab |
-| vClusters (Chapter 19 §3.4) | NADs in `vc-llms` only; tenants consume them by name, never create them |
+| LLM stack and vClusters (Chapter 19 §3.4) | NADs in `batch` only (none in `vc-dev-lab` / `vc-dev-llms`); workloads consume them by name, never create them |
 | Slurm (Chapter 22) | Bare-metal jobs don't need any of this; it's the Kubernetes equivalent |
 | Network Operator | For production, one Helm chart replaces §3: `NicClusterPolicy` with `rdmaSharedDevicePlugin`, `secondaryNetwork.multus`, `ipamPlugin` (02-Kubernetes Chapter 17 §5.6) |
 
@@ -440,22 +437,22 @@ The ping shows the §2.3 gap. A pod in `llms` reaches a `platform-tools` pod on 
 |---|---|---|
 | Pod stuck `ContainerCreating`: `failed to find plugin "macvlan"` | `ls /opt/cni/bin` on the node | Reference plugins missing: `sudo apt-get install kubernetes-cni` (from pkgs.k8s.io; keep it at the version kubeadm pulled in) |
 | Multus DS ready, but pods have no `net1` | `kubectl --context spark-root describe pod …` events; `ls /etc/cni/net.d` | `00-multus.conf` gone: Cilium renamed it (`cni.exclusive` not `false`; re-run 19.1). Or an annotation typo |
-| vCluster pod: `cannot find a network-attachment-definition (cx7-a) in namespace (vc-llms)` | `kubectl --context spark-root -n vc-llms get net-attach-def` | Playbook 21.1 ran before 20.2. Run it again |
-| Tenant used `batch/cx7-a` in the annotation | Same error, namespace `batch` | `batch` doesn't exist on the root. Use the bare name |
+| `batch` pod: `cannot find a network-attachment-definition (cx7-a) in namespace (batch)` | `kubectl --context spark-root -n batch get net-attach-def` | Playbook 21.1 ran before 20.2 (no `batch` namespace yet). Run it again |
+| vCluster pod: same error, namespace `vc-dev-llms` or `vc-dev-lab` | `kubectl --context spark-root -n vc-dev-llms get net-attach-def` | By design: the lab gives the vClusters no fabric. Add the `vc-*` namespace to `multus_nad_namespaces` if one needs it |
 | All pods stuck `ContainerCreating` after installing Multus | `kubectl --context spark-root -n kube-system logs ds/kube-multus-ds` | The daemon can't reach the API server or read `05-cilium.conflist`. Fix and restart the DS. Every pod's CNI ADD now passes through it |
 | `net1` exists, ping to the other pod fails | `ip -d link show net1` in the pod; host `ip link show enp1s0f1np1` | Master netdev down or wrong; macvlan can't reach **its own host** (a known macvlan property). Test pod-to-pod across nodes |
 | Node doesn't advertise `rdma/rdma_shared_cx7` | `kubectl --context spark-root -n kube-system logs ds/rdma-shared-dp-ds` | `ifNames` don't match the node's netdevs; image arch (`exec format error`) → use a multi-arch tag |
 | `ibv_devices` empty in the pod | Resource not requested / plugin not mounting | Add the `rdma/…` limit; check `/dev/infiniband` inside the pod |
 | `ib_write_bw: Couldn't allocate MR` / `Cannot allocate memory` | Locked-memory limit | `IPC_LOCK` capability; container `ulimit -l unlimited` (containerd default may be low) |
-| llms pod rejected: `violates PodSecurity "baseline"` | Which namespace, which API server? | `IPC_LOCK` needs privileged PSA in **both** the inner namespace (`batch`) and the root namespace (`vc-llms`) |
+| Pod rejected: `violates PodSecurity "baseline"` | Which namespace, which API server? | `IPC_LOCK` needs privileged PSA: `batch` has it, `llm-serving` doesn't. In a vCluster it would be needed in **both** the inner namespace and the root `vc-*` namespace |
 | RDMA works but slower than on the host | MTU on the NAD vs the host netdev; QPs | NAD `mtu: 9000` must be ≤ the master's MTU; `-q 4` |
 
 ## 6. Validation
 
 - [ ] `00-multus.conf` precedes `05-cilium.conflist` in `/etc/cni/net.d`, and survives a Cilium agent restart.
 - [ ] Every node advertises `rdma/rdma_shared_cx7`.
-- [ ] `cx7-a`/`cx7-b` exist in `platform-tools` and `vc-llms`, not in `vc-dev-lab`.
+- [ ] `cx7-a`/`cx7-b` exist in `platform-tools` and `batch`, not in `vc-dev-lab` or `vc-dev-llms`.
 - [ ] `rdma-test-*` pods have `net1` with the expected IPs and `/dev/infiniband/uverbs*`.
 - [ ] Pod-to-pod `ib_write_bw` is close to host-level perftest.
-- [ ] A pod in `llms`/`batch` gets `net1` + `net2`, and you found its `network-status` on the root copy.
-- [ ] (Stretch) Enable `namespaceIsolation` in Multus and show that `platform-tools/cx7-a` is refused from `vc-llms`; replace static IPAM with whereabouts, or swap the whole stack for the NVIDIA Network Operator.
+- [ ] A pod in the root's `batch` gets `net1` + `net2`, and you read its `network-status` on the pod itself.
+- [ ] (Stretch) Enable `namespaceIsolation` in Multus and show that `platform-tools/cx7-a` is refused from `batch`; replace static IPAM with whereabouts, or swap the whole stack for the NVIDIA Network Operator.

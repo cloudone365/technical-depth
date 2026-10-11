@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **You will build** | A triage method you can follow under pressure across three API servers, a support bundle, runbooks for the failures that actually happen on a Spark (static-pod control plane, etcd, kubeadm certificates, Cilium, DNS, GPU/Xid, unified memory, stragglers) and for the ones the nesting adds (syncer down, root quota refusing a synced pod, MetalLB pool exhausted), and fifteen injectable drills to practise them |
-| **Clusters** | all three: `spark-root` (control plane, node, GPU, budgets), `dev-lab` and `llms` (tenant symptoms). Every drill names the cluster it breaks |
+| **Clusters** | all three: `spark-root` (control plane, node, GPU, budgets, and the LLM stack in `llm-serving`/`batch`/`ingress`), `dev-lab` and `dev-llms` (tenant symptoms). Every drill names the cluster it breaks |
 | **Hardware** | dgx-spark-1 |
 | **Time** | 2 h (plus drills over time) |
 | **Risk** | Drills are reversible. BF-15 (UMA pressure) and the etcd restore are the only risky ones, and both ask first |
@@ -15,18 +15,18 @@
 
 ## 1. The triage method
 
-Work **outside-in** and **top-down**. Prove each layer before blaming the next. In this lab there is a question before all the others: **which cluster reported the symptom, and which cluster owns the layer that failed?** A tenant sees a Pending pod in `dev-lab`; the cause is almost always one level down, on the root.
+Work **outside-in** and **top-down**. Prove each layer before blaming the next. In this lab there is a question before all the others: **which cluster reported the symptom, and which cluster owns the layer that failed?** A tenant sees a Pending pod in `dev-lab`; the cause is almost always one level down, on the root. A symptom in the LLM stack (`llm-serving`, `batch`, `ingress`) is already on the root: no vCluster, no syncer, the pod has its own name — skip `Qv` and the translation half of `Q3`.
 
 ```mermaid
 flowchart TD
-  S(["Symptom reported<br/>(context dev-lab · llms · spark-root)"]) --> Q0{"root /readyz OK?<br/>kubectl --context spark-root get --raw /readyz"}
+  S(["Symptom reported<br/>(context dev-lab · dev-llms · spark-root)"]) --> Q0{"root /readyz OK?<br/>kubectl --context spark-root get --raw /readyz"}
   Q0 -- no --> CP["ROOT CONTROL PLANE<br/>static pods · kubelet · etcd · certs · disk<br/>§3.1–3.3"]
-  Q0 -- yes --> Qv{"the vCluster's API answers?<br/>context dev-lab / llms"}
+  Q0 -- yes --> Qv{"the vCluster's API answers?<br/>context dev-lab / dev-llms<br/>(skip for llm-serving · batch)"}
   Qv -- no --> VC["vCLUSTER CONTROL PLANE<br/>pod &lt;name&gt;-0 in vc-&lt;name&gt; · MetalLB IP · SANs<br/>§3.11"]
   Qv -- yes --> Q2{"node Ready?<br/>conditions clean?"}
   Q2 -- no --> ND["NODE<br/>kubelet · pressure · containerd<br/>§3.6–3.7"]
-  Q2 -- yes --> Q3{"pod exists on the root?<br/>(vc-&lt;name&gt;, via annotations)"}
-  Q3 -- "no" --> SY["SYNC / ROOT ADMISSION<br/>vcluster-budget · LimitRange · PSA on vc-*<br/>§3.11, Chapter 04"]
+  Q2 -- yes --> Q3{"pod exists on the root?<br/>(vc-&lt;name&gt; via annotations;<br/>llm-serving · batch as is)"}
+  Q3 -- "no" --> SY["SYNC / ROOT ADMISSION<br/>vcluster-budget · serving-budget · LimitRange · PSA<br/>§3.11, Chapter 04"]
   Q3 -- "yes, Pending" --> SC["SCHEDULING<br/>slices · taints · PVC · priorities<br/>Chapters 07, 13, 14"]
   Q3 -- "yes, not Running" --> RT["RUNTIME<br/>image · probes · OOM · GPU injection<br/>Chapters 15, 16"]
   Q3 -- "yes, Running" --> Q5{"reachable by IP?"}
@@ -58,15 +58,15 @@ cd "02-Kubernetes/lab"
 scripts/verify.sh                   # which layer is red, in which cluster?
 scripts/collect-diag.sh             # freeze the evidence before you change anything (run it ON the Spark for host facts)
 kubectl --context spark-root get events -A --sort-by=.lastTimestamp | tail -30
-kubectl --context <dev-lab|llms> get events -A --sort-by=.lastTimestamp | tail -30
+kubectl --context <dev-lab|dev-llms> get events -A --sort-by=.lastTimestamp | tail -30
 ```
 
 [`collect-diag.sh`](lab/scripts/collect-diag.sh) writes `diag-<timestamp>.tar.gz` with three parts:
 
 | Part | Contents |
 |---|---|
-| `root/` | version, nodes (+ describe), all pods, events, every ResourceQuota/LimitRange, NetworkPolicies **and** CiliumNetworkPolicies, `/readyz?verbose`, APF rejected/in-queue metrics, and a describe + logs (+ previous logs) of every pod in `kube-system`, `gpu-operator`, `metallb-system`, `observability`, `platform-tools`, `vc-dev-lab`, `vc-llms` (or the root namespaces you pass as arguments) |
-| `dev-lab/`, `llms/` | pods, events, quotas, ValidatingAdmissionPolicies/Bindings, and per-namespace dumps — or a `<context>-UNREACHABLE.txt` marker if that API server didn't answer |
+| `root/` | version, nodes (+ describe), all pods, events, every ResourceQuota/LimitRange, NetworkPolicies **and** CiliumNetworkPolicies, `/readyz?verbose`, APF rejected/in-queue metrics, and a describe + logs (+ previous logs) of every pod in `kube-system`, `gpu-operator`, `metallb-system`, `observability`, `platform-tools`, `llm-serving`, `batch`, `ingress`, `kueue-system`, `vc-dev-lab`, `vc-dev-llms` (or the root namespaces you pass as arguments) |
+| `dev-lab/`, `dev-llms/` | pods, events, quotas, ValidatingAdmissionPolicies/Bindings, and per-namespace dumps — or a `<context>-UNREACHABLE.txt` marker if that API server didn't answer |
 | host (when run on the Spark) | `/proc/meminfo`, `nvidia-smi -q`, 2 h of `journalctl -u kubelet -u containerd`, `crictl ps -a`, `dmesg` filtered for Xid/NVRM/OOM/NVMe, conntrack count |
 
 ---
@@ -76,23 +76,24 @@ kubectl --context <dev-lab|llms> get events -A --sort-by=.lastTimestamp | tail -
 | Layer | Primary evidence | Command |
 |---|---|---|
 | Static-pod control plane | kubelet journal, container logs, pod log files | `sudo journalctl -u kubelet --since -30m -p warning` · `sudo crictl ps -a --name 'kube-apiserver\|etcd'` · `sudo crictl logs <id>` · `sudo ls /var/log/pods/ \| grep kube-system_` |
-| API decisions (root) | audit log | `sudo jq -c 'select(.responseStatus.code>=400) \| [.user.username,.verb,.objectRef.namespace,.objectRef.resource,.responseStatus.code]' /var/log/kubernetes/audit/audit.log \| tail` |
-| API decisions (vCluster) | the vCluster's own API server | `kubectl --context spark-root -n vc-llms logs llms-0 -c syncer --since=30m` |
+| API decisions (root, incl. the LLM stack) | audit log (`RequestResponse` for `llm-serving`, `batch`, `vc-*`) | `sudo jq -c 'select(.responseStatus.code>=400) \| [.user.username,.verb,.objectRef.namespace,.objectRef.resource,.responseStatus.code]' /var/log/kubernetes/audit/audit.log \| tail` |
+| API decisions (vCluster) | the vCluster's own API server | `kubectl --context spark-root -n vc-dev-llms logs dev-llms-0 -c syncer --since=30m` |
 | etcd (root only) | endpoint status, alarms, metrics | `scripts/etcd-drill.sh status` |
 | Sync (vCluster → root) | syncer log, events on the virtual pod | `kubectl --context spark-root -n vc-<v> logs <v>-0 -c syncer --since=30m \| grep -iE 'error\|forbidden\|quota'` |
 | Root admission of synced pods | the virtual pod's events, root quota | `kubectl --context <v> -n <ns> describe pod <p>` · `kubectl --context spark-root -n vc-<v> describe resourcequota vcluster-budget` |
-| Scheduling | pod events (the root scheduler; copied into the vCluster) | `kubectl --context <ctx> describe pod` → Events |
+| Admission in the LLM stack | ReplicaSet/Job events, namespace quota | `kubectl --context spark-root -n llm-serving describe rs` · `kubectl --context spark-root -n llm-serving describe resourcequota serving-budget` (`batch-budget` in `batch`) |
+| Scheduling | pod events (the root scheduler; copied into a vCluster for its pods) | `kubectl --context <ctx> describe pod` → Events |
 | Controllers | object events, `.status.conditions` | `kubectl --context <ctx> describe rs/job/deploy` |
 | Containers | logs (current + previous), lastState | `kubectl --context <ctx> logs --previous`, `-o jsonpath='{.status.containerStatuses}'` |
 | Node | conditions, kubelet, dmesg | `kubectl --context spark-root describe node`, `sudo dmesg -T` |
 | Pod network | Cilium agent, Hubble flows | `kubectl --context spark-root -n kube-system exec ds/cilium -- cilium-dbg status --brief` · `… -- hubble observe --verdict DROPPED --last 20` |
 | GPU | Xid, nvidia-smi, validator | `sudo dmesg -T \| grep -i xid`, `nvidia-smi -q`, `kubectl --context spark-root -n gpu-operator get pods` |
-| Metrics / alerts | Prometheus, Grafana | dashboard *Spark · Kubernetes* (root kps, `vcluster` labels for tenant workloads) |
+| Metrics / alerts | Prometheus, Grafana | dashboard *Spark · Kubernetes* (root kps, `vcluster`/`vnamespace` labels: `root` for the LLM stack, `dev-llms`/`dev-lab` for vCluster workloads) |
 
-Finding the root copy of a vCluster pod is a step you'll do constantly. The lab's scripts do it through vCluster's annotations (`host_pod` in `lib.sh`); by hand:
+Finding the root copy of a vCluster pod is a step you'll do constantly (the LLM stack's pods need no lookup: they are root pods under their own names). The lab's scripts do it through vCluster's annotations (`host_pod` in `lib.sh`); by hand:
 
 ```bash
-kubectl --context spark-root -n vc-llms get pods \
+kubectl --context spark-root -n vc-dev-llms get pods \
   -o custom-columns=ROOT:.metadata.name,VNS:.metadata.annotations.vcluster\\.loft\\.sh/object-namespace,VPOD:.metadata.annotations.vcluster\\.loft\\.sh/object-name
 ```
 
@@ -114,7 +115,7 @@ kubeadm runs the control plane as static pods: the **kubelet** reads `/etc/kuber
 
 Fixes: free disk (`sudo crictl rmi --prune`, old etcd snapshots in `/var/lib/etcd-snapshots`, rotated audit logs); revert the last edit to a manifest (keep backups **outside** `/etc/kubernetes/manifests`); restore etcd (Chapter 02 §5.6) as a last resort.
 
-What the vClusters do meanwhile: their own API servers keep answering (`kubectl --context dev-lab get pods` works, from SQLite), but their syncers can't reach the root. Existing pods keep running; new pods stay Pending inside the vCluster, and status stops updating. A tenant reports "my pods are stuck" while the root is down — always check `Q0` first.
+What the vClusters do meanwhile: their own API servers keep answering (`kubectl --context dev-lab get pods` works, from SQLite), but their syncers can't reach the root. Existing pods keep running; new pods stay Pending inside the vCluster, and status stops updating. The LLM stack has no such buffer: with the root API down, running model servers keep serving, but nothing in `llm-serving` or `batch` can be changed, scaled or scheduled. A tenant reports "my pods are stuck" while the root is down — always check `Q0` first.
 
 ### 3.2 etcd: NOSPACE or slow
 
@@ -128,7 +129,7 @@ sudo crictl logs --tail 50 $(sudo crictl ps -q --name '^etcd$')
 
 `mvcc: database space exceeded` → compact → defrag → `alarm disarm` (Chapter 02 §5.5). Slow fsync (`EtcdSlowFsync`, `apply request took too long` in the etcd log) → find the competing writer (`sudo iotop -oa`: checkpoint jobs, fio in `platform-tools`, model downloads to `/data/k8s`). Rehearse NOSPACE in the sandbox, never on the root: `scripts/etcd-sandbox.sh fill`.
 
-Remember what etcd *doesn't* hold: the vClusters' objects live in SQLite on their PVCs (`data-dev-lab-0`, `data-llms-0` under `/data/k8s`). A vCluster whose API server logs `database is locked` or `disk I/O error` has a storage problem on its PVC, not an etcd problem. A root etcd restore doesn't roll vClusters back (Chapter 04 §6.7).
+Remember what etcd *doesn't* hold: the vClusters' objects live in SQLite on their PVCs (`data-dev-lab-0`, `data-dev-llms-0` under `/data/k8s`). A vCluster whose API server logs `database is locked` or `disk I/O error` has a storage problem on its PVC, not an etcd problem. A root etcd restore doesn't roll vClusters back (Chapter 04 §6.7).
 
 ### 3.3 Certificates
 
@@ -165,19 +166,19 @@ sudo tcpdump -ni enP7s7 udp port 8472 -c 5                  # VXLAN between Spar
 kubectl --context spark-root -n kube-system exec ds/cilium -- hubble observe --verdict DROPPED --last 20
 ```
 
-Usual causes: `ip_forward=0` after a hardening change; ufw blocking 8472/udp between the Sparks; MTU mismatch on the VXLAN path; **leftover CNI configs** from an earlier cluster (flannel files from an old k3s install in `/etc/cni/net.d` win by sort order — run 01-Ansible `19.2-reset-kubernetes.yml -e reset_remove_k3s=true`). Hubble `DROPPED` with `Policy denied` is not a partition: it's a NetworkPolicy, possibly one a tenant wrote inside a vCluster and the syncer copied to `vc-*` (break/fix 06), or the root's `vcluster-boundary` doing its job between `vc-dev-lab` and `vc-llms`.
+Usual causes: `ip_forward=0` after a hardening change; ufw blocking 8472/udp between the Sparks; MTU mismatch on the VXLAN path; **leftover CNI configs** from an earlier cluster (flannel files from an old k3s install in `/etc/cni/net.d` win by sort order — run 01-Ansible `19.2-reset-kubernetes.yml -e reset_remove_k3s=true`). Hubble `DROPPED` with `Policy denied` is not a partition: it's a NetworkPolicy, possibly `llm-serving`'s own policies on the root (break/fix 06), one a tenant wrote inside a vCluster that the syncer copied to `vc-*`, or the root's `vcluster-boundary` doing its job between `vc-dev-lab` and `vc-dev-llms`.
 
 ### 3.5 DNS
 
-There are three CoreDNS instances: the root's (`kube-system/coredns`, `10.43.0.10`) for root pods, and one inside each vCluster for its tenants. Find out which one the failing pod uses before you touch anything:
+There are three CoreDNS instances: the root's (`kube-system/coredns`, `10.43.0.10`) for root pods — including every model server in `llm-serving` and `batch` — and one inside each vCluster for its tenants. Find out which one the failing pod uses before you touch anything:
 
 ```bash
 kubectl --context <ctx> -n <ns> exec <pod> -- cat /etc/resolv.conf     # nameserver = root 10.43.0.10, or a vCluster DNS Service IP
 kubectl --context spark-root -n kube-system get deploy coredns; kubectl --context spark-root -n kube-system logs deploy/coredns --tail=20
-kubectl --context llms -n kube-system get pods                          # the vCluster's own CoreDNS (runs on the root in vc-llms)
+kubectl --context dev-llms -n kube-system get pods                      # the vCluster's own CoreDNS (runs on the root in vc-dev-llms)
 ```
 
-Then try by IP, then by name (Chapter 10 §5.5). Common faults: replicas at 0 (break/fix 07), a syntax error in an edited Corefile (`root/30-networking/coredns-corefile.yaml` — kubeadm has no `coredns-custom` import), upstream loops. Break/fix 07 shows the uneven blast radius: the root's CoreDNS down breaks platform pods at once, while cluster names inside a vCluster keep resolving through that vCluster's own CoreDNS.
+Then try by IP, then by name (Chapter 10 §5.5). Common faults: replicas at 0 (break/fix 07), a syntax error in an edited Corefile (`root/30-networking/coredns-corefile.yaml` — kubeadm has no `coredns-custom` import), upstream loops. Break/fix 07 shows the uneven blast radius: the root's CoreDNS down breaks platform pods and the LLM stack at once, while cluster names inside a vCluster keep resolving through that vCluster's own CoreDNS.
 
 ### 3.6 Node NotReady
 
@@ -198,12 +199,12 @@ One node, three clusters: when dgx-spark-1 is NotReady, both vClusters show it N
 |---|---|
 | `SparkUMAPressure`, `SparkNodeMemoryPressureCondition` alerts | Alertmanager (root kps) |
 | `MemAvailable` low, `Cached` high | `scripts/uma-watch.sh <ns> <pod> [context]`, Grafana UMA row |
-| CUDA OOM in serving logs while pods are under their limits | `kubectl --context llms -n llm-serving logs deploy/vllm` |
-| `Evicted` events — in every cluster | `kubectl --context spark-root get events -A --field-selector reason=Evicted` (and the same with `--context dev-lab`, `--context llms`) |
+| CUDA OOM in serving logs while pods are under their limits | `kubectl --context spark-root -n llm-serving logs deploy/vllm` |
+| `Evicted` events — in every cluster | `kubectl --context spark-root get events -A --field-selector reason=Evicted` (and the same with `--context dev-lab`, `--context dev-llms`) |
 
-The vCluster memory budgets are quotas, not reservations: they cap what each vCluster may *ask for*, and protect nothing against a root pod (or a host process, or the page cache) that eats the pool. The kubelet evicts by QoS and usage once `memory.available < 4Gi` (the 01-Ansible `evictionHard`), and it doesn't care which cluster a pod came from.
+The memory budgets are quotas, not reservations: they cap what each vCluster or namespace may *ask for*, and protect nothing against a platform pod without a quota (or a host process, or the page cache) that eats the pool. Inside the LLM stack the scheduler does the protecting: every GPU container sets memory request = limit, so a model that doesn't fit stays Pending instead of squeezing a running one — the ~90 GiB pool is shared by `serving-budget` and `batch-budget`, and training waits for serving. What it can't see is vLLM allocating more than its pod declares: keep the sum of `--gpu-memory-utilization` ≲ 0.72. The kubelet evicts by QoS and usage once `memory.available < 4Gi` (the 01-Ansible `evictionHard`), and it doesn't care which cluster a pod came from.
 
-Order of actions: (1) stop or scale down `spark-preemptible` and `spark-batch` work (root `platform-tools`, `llms` `batch`), (2) drop page cache (`sync; echo 3 | sudo tee /proc/sys/vm/drop_caches`, or 01-Ansible `29.2-uma-relief.yml`), (3) lower engine memory fractions (`--gpu-memory-utilization`), (4) revisit the capacity plan (Chapter 05 §3.3). Drill: BF-15.
+Order of actions: (1) stop or scale down `spark-preemptible` and `spark-batch` work (root `platform-tools` and `batch`), (2) drop page cache (`sync; echo 3 | sudo tee /proc/sys/vm/drop_caches`, or 01-Ansible `29.2-uma-relief.yml`), (3) lower engine memory fractions (`--gpu-memory-utilization`), (4) revisit the capacity plan (Chapter 05 §3.3). Drill: BF-15.
 
 ### 3.8 GPU errors (Xid)
 
@@ -225,33 +226,33 @@ kubectl --context spark-root -n gpu-operator get pods; kubectl --context spark-r
 | 119 / 120 | GSP RPC timeout / GSP error | firmware/driver | reboot. Update DGX OS. Report |
 | 74 | NVLink error | not applicable to GB10 (no external NVLink) | — |
 
-Which tenant triggered it? Xid lines usually carry the PID of the process that owned the GPU context. `sudo cat /proc/<PID>/cgroup` shows its kubepods path, which contains the pod UID (with `_` instead of `-`); `kubectl --context spark-root get pods -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,UID:.metadata.uid | grep <uid>` then gives the root name — and `vc-llms` / `-x-<ns>-x-<vcluster>` tell you whose it was.
+Which tenant triggered it? Xid lines usually carry the PID of the process that owned the GPU context. `sudo cat /proc/<PID>/cgroup` shows its kubepods path, which contains the pod UID (with `_` instead of `-`); `kubectl --context spark-root get pods -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,UID:.metadata.uid | grep <uid>` then gives the root name — `llm-serving`/`batch` mean the LLM stack, `vc-<vcluster>` and `-x-<ns>-x-<vcluster>` a vCluster tenant.
 
 Drain procedure: 01-Ansible `playbooks/29.1-emergency-drain.yml` (cordon → capture → stop → reboot → validate → return). A root drain evicts vCluster pods too, and respects their PDBs (synced to `vc-*`, break/fix 11).
 
 ### 3.9 Stragglers and hangs (distributed jobs)
 
-From Chapter 18 §5.4: all ranks stuck in a collective means find the absent rank. A rank that is `Pending` inside `llms` with a quota event isn't hung — the gang never formed (Chapter 18 §5.3). Per-rank step-time spread above ~10 % means a straggler. Check that rank's CPU throttling (`scripts/cgroup-inspect.sh batch <pod> llms`, Chapter 14), its GPU clocks (`nvidia-smi -q -d PERFORMANCE`), its NIC counters (Chapter 19) and its data loader.
+From Chapter 18 §5.4: all ranks stuck in a collective means find the absent rank. A rank that is `Pending` in the root's `batch` (or suspended by Kueue) isn't hung — the gang never formed (Chapter 18 §5.3). Per-rank step-time spread above ~10 % means a straggler. Check that rank's CPU throttling (`scripts/cgroup-inspect.sh batch <pod>`, Chapter 14), its GPU clocks (`nvidia-smi -q -d PERFORMANCE`), its NIC counters (Chapter 19) and its data loader.
 
 ### 3.10 Serving SLO breaches
 
-| Symptom | Metric (labels `vcluster`, `vnamespace`, `vpod` from `vcluster-workloads`) | Cause |
+| Symptom | Metric (labels `vcluster="root"`, `vnamespace="llm-serving"`, `vpod` from `llm-workloads`) | Cause |
 |---|---|---|
-| TTFT p95 up, queue up | `vllm:num_requests_waiting`, `spark:vllm_ttft_p95_seconds` | load > capacity. Scale (if the `llms` budget allows), or lower `max-num-seqs` to protect latency |
-| TPOT up | `spark:vllm_tpot_p95_seconds` | GPU contention (other slices busy — possibly another cluster's), thermal throttling |
+| TTFT p95 up, queue up | `vllm:num_requests_waiting`, `spark:vllm_ttft_p95_seconds` | load > capacity. Scale (if `serving-budget` and the memory pool allow), or lower `max-num-seqs` to protect latency |
+| TPOT up | `spark:vllm_tpot_p95_seconds` | GPU contention (other slices busy — `batch`, or a vCluster's), thermal throttling |
 | KV cache ~100 %, preemptions | `vllm:kv_cache_usage_perc` (`vllm:gpu_cache_usage_perc` on older releases) | context lengths grew. Raise utilisation or lower `max-model-len` |
-| 5xx at ingress | Traefik metrics (`traefik-lab-metrics` in `llms`) | readiness flaps, timeouts, empty EndpointSlices (Chapter 11, break/fix 08) |
-| HPA/KEDA doesn't scale | `kubectl --context llms -n llm-serving describe scaledobject` | `default/prometheus` missing in `llms`, or new replicas refused by the root quota |
+| 5xx at ingress | Traefik metrics (`traefik-lab-metrics` in the root's `ingress`) | readiness flaps, timeouts, empty EndpointSlices (Chapter 11, break/fix 08) |
+| HPA/KEDA doesn't scale | `kubectl --context spark-root -n llm-serving describe scaledobject` | wrong `serverAddress` (must be `http://kps-prometheus.observability.svc:9090`), no `vcluster="root"` series, or new replicas refused by `serving-budget` / Pending on memory |
 
 ### 3.11 vCluster-specific failures
 
 | Failure | Symptom (tenant side) | Evidence (root side) | Fix |
 |---|---|---|---|
 | **Syncer / vCluster control plane down** | `kubectl --context dev-lab …` times out or `connection refused`; existing pods keep serving | `kubectl --context spark-root -n vc-dev-lab get pods` → `dev-lab-0` not Running (OOMKilled at its memory limit, PVC Pending, evicted) · `kubectl --context spark-root -n vc-dev-lab logs dev-lab-0 -c syncer --previous` | fix the cause (memory limit in `vclusters/<name>.yaml`, storage), then `kubectl --context spark-root -n vc-dev-lab delete pod dev-lab-0`. Tenant pods are root pods: they survive, but nobody can change them until it's back |
-| **Root quota rejects a synced pod** | pod `Pending` in the vCluster with **no scheduler events**; a syncer warning naming `vcluster-budget` | the pod is absent from `vc-<name>`; `kubectl --context spark-root -n vc-<name> describe resourcequota vcluster-budget` shows the resource at its hard limit; `VClusterQuotaNearlyExhausted` | free budget inside the vCluster, queue with Kueue (llms), or resize (Chapter 04 §6.5). Drill: BF-02 |
-| **Root LimitRange / PSA rejects a synced pod** | same "Pending, no events"; the warning says `maximum memory usage per Container is 8Gi` or `violates PodSecurity` | root LimitRange `vcluster-defaults` (`max` 8 Gi in dev-lab, 40 Gi in llms), PSA labels on `vc-*` | right-size the container; RDMA/hostNetwork work belongs in `llms` (privileged), not `dev-lab` (baseline) |
+| **Root quota rejects a synced pod** | pod `Pending` in the vCluster with **no scheduler events**; a syncer warning naming `vcluster-budget` | the pod is absent from `vc-<name>`; `kubectl --context spark-root -n vc-<name> describe resourcequota vcluster-budget` shows the resource at its hard limit; `VClusterQuotaNearlyExhausted` | free budget inside the vCluster, or resize (Chapter 04 §6.5). Drill: BF-02 |
+| **Root LimitRange / PSA rejects a synced pod** | same "Pending, no events"; the warning says `maximum memory usage per Container is 4Gi` or `violates PodSecurity` | root LimitRange `vcluster-defaults` (`max` 4 Gi in both vClusters), PSA `baseline` on `vc-*` | right-size the container; RDMA/hostNetwork work belongs in the root's `batch` (privileged), not in a vCluster |
 | **MetalLB pool exhausted** | a LoadBalancer Service stays `<pending>`; `kubectl --context <v>` for a *new* vCluster never works | `kubectl --context spark-root get svc -A --field-selector spec.type=LoadBalancer` (10 addresses, `.110–.119`); `kubectl --context spark-root -n metallb-system logs -l app.kubernetes.io/component=controller \| grep -i alloc`; `kubectl --context spark-root get ipaddresspool -n metallb-system lab-pool -o yaml` | delete an unused LB Service, or grow the pool in 01-Ansible `metallb_pool_addresses` (and reserve it in DHCP); pin new vCluster IPs with `metallb.io/loadBalancerIPs` |
-| **`services.loadbalancers` quota** | tenant's LoadBalancer Service rejected | root quota allows 1 (dev-lab: its API) / 2 (llms: API + Traefik) | by design; tenants publish through Traefik in `llms`, not their own LBs |
+| **`services.loadbalancers` quota** | tenant's LoadBalancer Service rejected | root quota allows 1 per vCluster (its API) | by design; the only other LoadBalancer is Traefik (`.115`) in the root's `ingress`, for the LLM stack |
 | **Node sync / StorageClass sync stale** | tenant sees an old node state, or no StorageClass | syncer log; `kubectl --context <v> get nodes,sc` vs root | restart `<v>-0`; check `sync.fromHost` in `vclusters/<name>.yaml` |
 | **SQLite PVC full** | vCluster API errors on writes, `database or disk is full` in the syncer log | `kubectl --context spark-root -n vc-<v> exec <v>-0 -c syncer -- df -h /data` | grow the PVC (5 Gi in the lab values) or clean up churny objects (Events, old Jobs) |
 
@@ -267,19 +268,19 @@ These are exactly the scenarios in [`scripts/breakfix.sh`](lab/scripts/breakfix.
 | 02 | dev-lab | Pending in the vCluster, nothing on the root | sync / root admission | 02 | syncer event `vcluster-budget` on the virtual pod; pod absent from `vc-dev-lab` |
 | 03 | dev-lab | Image pull failure | runtime | 03 | pod events (`manifest unknown`), copied from the root pod |
 | 04 | dev-lab | OOMKilled | runtime | 04 | `lastState.terminated`; `memory.events` via `cgroup-inspect.sh lab-tools bf04-oom dev-lab` |
-| 05 | llms | Liveness probe kills a slow-loading model | runtime | 05 | probe events in `llm-serving`; missing startupProbe |
-| 06 | llms | NetworkPolicy blocks the ingress controller | network | 06 | `kubectl --context llms -n llm-serving get netpol`; Hubble `DROPPED` on the root |
+| 05 | spark-root | Liveness probe kills a slow-loading model | runtime | 05 | probe events in `llm-serving`; missing startupProbe |
+| 06 | spark-root | NetworkPolicy blocks the ingress controller | network | 06 | `kubectl --context spark-root -n llm-serving get netpol`; Hubble `DROPPED` |
 | 07 | spark-root | Root cluster DNS down | DNS | 07 | root CoreDNS 0/0; by IP vs by name from `platform-tools/netshoot-host` vs dev-lab `netshoot` |
-| 08 | llms | Service with no endpoints | network | 08 | empty EndpointSlice for `bf08-api` (selector typo) |
-| 09 | llms | Streaming arrives in one blob | ingress | 09 | TTFB ≈ total; Traefik buffering middleware |
+| 08 | spark-root | Service with no endpoints | network | 08 | empty EndpointSlice for `bf08-api` (selector typo) |
+| 09 | spark-root | Streaming arrives in one blob | ingress | 09 | TTFB ≈ total; Traefik buffering middleware |
 | 10 | dev-lab | GPU visible to a pod that didn't ask for one | GPU runtime | 10 | default runtime `nvidia` + image `NVIDIA_VISIBLE_DEVICES=all`; quota doesn't count it |
-| 11 | spark-root | Drain blocked by a PodDisruptionBudget | ops | 11 | `kubectl --context spark-root get pdb -A` → qdrant's PDB, written in `llms`, synced to `vc-llms` |
+| 11 | spark-root | Drain blocked by a PodDisruptionBudget | ops | 11 | `kubectl --context spark-root get pdb -A` → qdrant's PDB in the root's `llm-serving` |
 | 12 | dev-lab | PVC stuck Pending | storage | 12 | PVC events: StorageClass `fast-nvme` not found; `kubectl --context dev-lab get sc` |
 | 13 | spark-root | Node tainted NoSchedule | scheduling | 13 | `kubectl --context spark-root describe node \| grep -i taint` — all three clusters stop |
 | 14 | dev-lab | Deployment creates no pods | admission (CEL) | 14 | ReplicaSet `FailedCreate`: `spark-no-latest-tag` in `tenant-beta` |
 | 15 | spark-root | Unified-memory pressure (RISKY) | node/GPU | 15 | node `MemoryPressure`, evictions in every cluster |
 
-Two of these (02 and 11) only exist because of the nesting, and three (07, 13, 15) are injected into the root but felt in every cluster. Practise them until "which cluster?" is a reflex.
+One of these (02) only exists because of the nesting, and three (07, 13, 15) are injected into the root but felt in every cluster. 05, 06, 08, 09 and 11 hit the LLM stack, which lives on the root. Practise them until "which cluster?" is a reflex.
 
 How to drill properly: have someone else inject (or pick a random number), **time yourself**, write down the first command that showed the cause, then `answer` to compare. Reset with `scripts/breakfix.sh reset all`.
 
@@ -341,7 +342,7 @@ The last Service waits with a MetalLB allocation-failure event. If that had been
 
 | Check | Expected |
 |---|---|
-| `collect-diag.sh` | tarball with `root/` (nodes, events, quotas, CNPs, readyz, APF, per-namespace describes/logs), `dev-lab/`, `llms/` (or an UNREACHABLE marker), and host files (meminfo, nvidia-smi, kubelet/containerd journal, crictl, filtered dmesg) |
+| `collect-diag.sh` | tarball with `root/` (nodes, events, quotas, CNPs, readyz, APF, per-namespace describes/logs), `dev-lab/`, `dev-llms/` (or an UNREACHABLE marker), and host files (meminfo, nvidia-smi, kubelet/containerd journal, crictl, filtered dmesg) |
 | 5 drills done | each fixed within 10 min, first diagnostic command recorded, at least one from each cluster |
 | vCluster failures | syncer-down, quota-reject and pool-exhausted rehearsed; you named the cluster that owned each |
 | `breakfix.sh reset all` then `verify.sh` | all PASS |
@@ -357,7 +358,7 @@ The last Service waits with a MetalLB allocation-failure event. If that had been
 | `kubectl delete pod` in a loop | the controller recreates the same broken pod | read events/lastState, fix the spec |
 | edit synced objects on the root (`vc-*`) | the syncer owns them and puts the virtual spec back | change the object inside the vCluster |
 | leave backups in `/etc/kubernetes/manifests` | the kubelet runs every file there | keep copies elsewhere |
-| raise every limit "to be safe" | hides leaks and breaks the UMA budget; the root quota refuses it anyway | measure, then size (Chapter 14) |
+| raise every limit "to be safe" | hides leaks and breaks the UMA budget; with request = limit in the LLM stack it also leaves models Pending; the quota refuses it anyway | measure, then size (Chapter 14) |
 | disable NetworkPolicies / admission to "test" | you'll forget to re-enable them | server-side dry-run tests (`scripts/apply-lab.sh --dry-run`), targeted exceptions |
 
 ---

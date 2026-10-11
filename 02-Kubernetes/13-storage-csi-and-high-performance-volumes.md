@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| **You will build** | A storage tier the root cluster owns and both vClusters consume: local-path-provisioner on the Spark's NVMe with two extra StorageClasses (scratch/Delete and models/Retain), a shared `model-cache` PVC in llms pre-filled by a prefetch Job, an in-pod fio benchmark with AI-shaped I/O profiles, and a measured view of what the page cache does to unified memory when you load a model |
+| **You will build** | A storage tier the root cluster owns and both vClusters consume: local-path-provisioner on the Spark's NVMe with two extra StorageClasses (scratch/Delete and models/Retain), a shared `model-cache` PVC in the root's `llm-serving` namespace pre-filled by a prefetch Job, an in-pod fio benchmark with AI-shaped I/O profiles, and a measured view of what the page cache does to unified memory when you load a model |
 | **Hardware** | dgx-spark-1 (4 TB NVMe on the Founders Edition). §8 needs dgx-spark-2 |
 | **Time** | 90 min |
 | **Risk** | Low. fio writes 16 GiB of scratch data (deleted afterwards) |
-| **Clusters** | `spark-root` (provisioner, StorageClasses, real PVs, fio), `llms` (model cache, prefetch), `dev-lab` (Retain vs Delete) |
-| **Lab files** | [`addons/local-path-nvme.yaml`](lab/addons/local-path-nvme.yaml), [`addons/local-path-config-patch.yaml`](lab/addons/local-path-config-patch.yaml), `scripts/install-addons.sh storage`, [`manifests/llms/60-storage/`](lab/manifests/llms/60-storage) (`pvcs.yaml`, `model-prefetch-job.yaml`), [`manifests/root/60-storage/fio-job.yaml`](lab/manifests/root/60-storage/fio-job.yaml), [`vclusters/llms.yaml`](lab/vclusters/llms.yaml) (`sync.fromHost.storageClasses`), [`scripts/uma-watch.sh`](lab/scripts/uma-watch.sh) |
+| **Clusters** | `spark-root` (provisioner, StorageClasses, real PVs, fio, and the LLM stack's model cache and prefetch in `llm-serving`), `dev-lab` (the two-layer storage quota, Retain vs Delete), `dev-llms` (the copied StorageClasses) |
+| **Lab files** | [`addons/local-path-nvme.yaml`](lab/addons/local-path-nvme.yaml), [`addons/local-path-config-patch.yaml`](lab/addons/local-path-config-patch.yaml), `scripts/install-addons.sh storage`, [`manifests/root-llms/60-storage/`](lab/manifests/root-llms/60-storage) (`pvcs.yaml`, `model-prefetch-job.yaml`), [`manifests/root/60-storage/fio-job.yaml`](lab/manifests/root/60-storage/fio-job.yaml), [`vclusters/dev-llms.yaml`](lab/vclusters/dev-llms.yaml) (`sync.fromHost.storageClasses`), [`scripts/uma-watch.sh`](lab/scripts/uma-watch.sh) |
 
 ---
 
@@ -20,7 +20,7 @@ Every model server's start time is dominated by one number: **how fast can N gig
 - **One NVMe** holds DGX OS, container images (containerd for Kubernetes *and* Docker), the root's etcd data and WAL (`/var/lib/etcd`), both vClusters' SQLite databases, model weights and checkpoints. Isolation is by directory and I/O priority, not by device.
 - **Unified memory** means the page cache and the GPU compete for the same pool — about 119.7 GiB visible of the 128 GB installed. Reading a 60 GB checkpoint through the page cache can briefly need 60 GB of cache *plus* 60 GB of model. NVIDIA's Spark guidance is to drop caches before loading big models, and `scripts/uma-watch.sh` shows why.
 - **GPUDirect Storage** matters less here than on a discrete-GPU server. GDS avoids a CPU "bounce buffer" copy across PCIe into HBM, and on GB10 there's no separate HBM to copy into. O_DIRECT loaders and avoiding double-buffering in the page cache give the gains (module 08 goes deeper).
-- **Storage is a root service.** A vCluster has no CSI driver, no provisioner and no PVs of its own. Tenants pick a class the root offers; their PVC is copied to the root, and the root's provisioner makes the directory. That gives one place to manage disks — and one more layer of quota (§3.4).
+- **Storage is a root service.** A vCluster has no CSI driver, no provisioner and no PVs of its own. Tenants pick a class the root offers; their PVC is copied to the root, and the root's provisioner makes the directory. That gives one place to manage disks — and one more layer of quota for vCluster claims (§3.4). The LLM stack runs on the root, so its claims are root PVCs from the start.
 
 ---
 
@@ -28,9 +28,8 @@ Every model server's start time is dominated by one number: **how fast can N gig
 
 ```mermaid
 flowchart LR
-  subgraph LLMS["vCluster llms · llm-serving"]
-    PVCV["PVC model-cache<br/>local-nvme-retain"]
-    PODV["prefetch Job · vLLM"]
+  subgraph VC["vCluster dev-lab · lab-tools"]
+    PVCV["PVC throwaway<br/>local-nvme"]
     SCV["StorageClasses (read-only copies)<br/>sync.fromHost.storageClasses"]
   end
   subgraph ROOT["Root cluster spark-root"]
@@ -38,37 +37,44 @@ flowchart LR
     SC1["SC local-nvme-retain<br/>WaitForFirstConsumer · Retain"]
     SC2["SC local-nvme<br/>WaitForFirstConsumer · Delete"]
     SC0["SC local-path (default)"]
-    PVCR["PVC model-cache-x-llm-serving-x-llms<br/>namespace vc-llms"]
+    subgraph LLMS["ns llm-serving (LLM stack, no syncer)"]
+      PODV["prefetch Job · vLLM"]
+      PVCM["PVC model-cache<br/>local-nvme-retain · 300Gi"]
+    end
+    PVCR["PVC throwaway-x-lab-tools-x-dev-lab<br/>namespace vc-dev-lab"]
     PVC2["PVC fio-scratch<br/>platform-tools · 64Gi"]
     SCHED["root scheduler<br/>picks the node"]
     PROV["local-path-provisioner<br/>namespace local-path-storage"]
   end
   subgraph HOST["dgx-spark-1 · 4 TB NVMe (ext4, /)"]
-    D1[("/data/k8s/retain/vc-llms/<br/>model-cache-x-llm-serving-x-llms")]
+    D1[("/data/k8s/retain/llm-serving/<br/>model-cache")]
+    D4[("/data/k8s/vc-dev-lab/<br/>throwaway-x-lab-tools-x-dev-lab")]
     D2[("/data/k8s/platform-tools/fio-scratch")]
     D3[("/var/lib/etcd · /var/lib/containerd<br/>/data/k8s/vc-*/data-*-0 (vCluster SQLite)")]
     PC["page cache<br/>(part of the ~119.7 GiB UMA pool)"]
   end
   SC1 & SC2 & SC0 -. "copied in" .-> SCV
-  PODV -->|mount| PVCV
+  PODV -->|mount| PVCM
+  PVCM --> SC1 --> PROV
   PVCV -. "syncer" .-> PVCR
-  PVCR --> SC1 --> PROV
+  PVCR --> SC2
   PVC2 --> SC2 --> PROV
-  SCHED -->|"selected-node annotation"| PVCR
-  PROV -->|"helper pod: mkdir + hostPath PV<br/>nodeAffinity: dgx-spark-1"| D1 & D2
+  SCHED -->|"selected-node annotation"| PVCM
+  PROV -->|"helper pod: mkdir + hostPath PV<br/>nodeAffinity: dgx-spark-1"| D1 & D2 & D4
   D1 <--> PC
   PC <--> GPU["GB10 reads weights<br/>from the same memory"]
   classDef store fill:#bf8700,stroke:#7a5600,color:#fff
   classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
   classDef gpu fill:#76b900,stroke:#3d6000,color:#000
   classDef tenant fill:#eaeef2,stroke:#57606a,color:#000
-  class PVCV,PVCR,PVC2,D1,D2,D3,PC store
+  class PVCV,PVCM,PVCR,PVC2,D1,D2,D3,D4,PC store
   class SC0,SC1,SC2,SCV,PROV,SCHED ctrl
   class GPU gpu
   class PODV tenant
   style HOST fill:#e6f4f5,stroke:#0e7c86,stroke-width:2px
   style ROOT fill:#ffffff,stroke:#1f6feb
-  style LLMS fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
+  style VC fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
+  style LLMS fill:#f6f8fa,stroke:#57606a
 ```
 
 ---
@@ -85,7 +91,7 @@ flowchart LR
 
 kubeadm ships no storage at all (K3s used to bundle local-path). `scripts/install-addons.sh storage` installs local-path-provisioner `$LOCAL_PATH_VERSION` from `versions.env` into namespace `local-path-storage`, merge-patches its ConfigMap to root everything at `/data/k8s`, applies the two `local-nvme*` classes and marks `local-path` as the default.
 
-`<ns>` and `<pvc>` are the **root's** names. For a PVC from a vCluster, that's `vc-<vcluster>` and `<pvc>-x-<namespace>-x-<vcluster>`, so llms's `model-cache` lands at `/data/k8s/retain/vc-llms/model-cache-x-llm-serving-x-llms`. Readable, and it tells you which vCluster and namespace own every directory on the disk.
+`<ns>` and `<pvc>` are the **root's** names. The LLM stack's claims are root PVCs, so `model-cache` in `llm-serving` lands at `/data/k8s/retain/llm-serving/model-cache`. For a PVC from a vCluster, the names are `vc-<vcluster>` and `<pvc>-x-<namespace>-x-<vcluster>`, so dev-lab's `throwaway` in `lab-tools` (§5.3) lands at `/data/k8s/vc-dev-lab/throwaway-x-lab-tools-x-dev-lab`. Readable, and it tells you which namespace — and which vCluster, if any — owns every directory on the disk.
 
 **Why WaitForFirstConsumer?** A local volume lives on one node. Binding at PVC creation (Immediate) could pick a node where the pod can't run (e.g. no free GPU slice). WFFC waits for the scheduler to choose the node, then provisions the volume there. With vClusters, "the scheduler" is the **root's**: it sets `volume.kubernetes.io/selected-node` on the root copy of the PVC when it places the root copy of the pod. Tenants see the result, not the mechanism.
 
@@ -113,26 +119,28 @@ All use `direct=1` to measure the device, not the page cache. The Job runs on th
 | vCluster backing stores | PVC `data-<name>-0` (5 Gi, `local-nvme`) → `/data/k8s/vc-<name>/data-<name>-0` |
 | kubelet disk eviction | 01-Ansible `kubeadm_cluster_eviction_hard`: `nodefs.available<10%`, `nodefs.inodesFree<5%`, `imagefs.available<15%` → image GC, then pod eviction |
 
-### 3.4 Storage quota applies twice
+### 3.4 Storage quota: one layer on the root, two in a vCluster
 
-| Layer | Object | `requests.storage` | Also counts |
+| Cluster | Object | `requests.storage` | Counts |
 |---|---|---|---|
-| inside llms | ResourceQuota `llm-serving/serving-budget` | 600 Gi | only PVCs in `llm-serving` |
-| root | ResourceQuota `vc-llms/vcluster-budget` | 800 Gi | **every** PVC of the vCluster: its own `data-llms-0` (5 Gi), Qdrant's `data-qdrant-0` (20 Gi), `model-cache`, anything in `batch` |
-| inside dev-lab | `tenant-budget` per tenant | 100 Gi (+ LimitRange max 50 Gi per PVC) | |
-| root | `vc-dev-lab/vcluster-budget` | 200 Gi | `data-dev-lab-0` (5 Gi) and all tenant PVCs |
+| root (LLM stack) | ResourceQuota `llm-serving/serving-budget` | 1 Ti | PVCs in `llm-serving`: `model-cache` (300 Gi), Qdrant's `data-qdrant-0` (20 Gi) |
+| root (LLM stack) | ResourceQuota `batch/batch-budget` | 200 Gi | PVCs in `batch`: the checkpoint claim `ckpt` (20 Gi) |
+| inside dev-lab | `tenant-budget` per tenant | 100 Gi (+ LimitRange max 50 Gi per PVC) | that tenant's PVCs |
+| root | `vc-dev-lab/vcluster-budget` | 200 Gi | **every** PVC of the vCluster: its own `data-dev-lab-0` (5 Gi) and all tenant PVCs |
+| inside dev-llms | `llm-sandbox/sandbox-budget` | 150 Gi (+ LimitRange max 100 Gi per PVC) | the sandbox's PVCs |
+| root | `vc-dev-llms/vcluster-budget` | 200 Gi | `data-dev-llms-0` (5 Gi) and all sandbox PVCs |
 
-A PVC has to fit **both**. The inner refusal comes from the vCluster's API server, so the PVC is never created. The root refusal comes later: the PVC exists in the vCluster but stays `Pending`, and the syncer reports that the root quota refused its copy. §5.1 checks both before anything is created.
+A claim in the LLM stack meets one quota, checked by the root API server when you apply it. A claim in a vCluster has to fit **both** layers. The inner refusal comes from the vCluster's API server, so the PVC is never created. The root refusal comes later: the PVC exists in the vCluster but stays `Pending`, and the syncer reports that the root quota refused its copy. The inner quotas are ceilings, not reservations: dev-lab's two tenants may claim 100 + 100 Gi, but the root budget is 200 Gi and already holds the vCluster's own 5 Gi, so the last claim to arrive when both tenants are full is refused by the root while its tenant quota still says yes. §5.1 shows both cases.
 
 ---
 
 ## 4. Integrations
 
-- **Serving (Chapters 20, 22, 23)** mounts `model-cache` at `/models` with `HF_HOME=/models/hf`. The prefetch Job fills it once. vLLM, SGLang and the P/D pair all read it — all inside llms, in `llm-serving`.
+- **Serving (Chapters 20, 22, 23)** mounts `model-cache` at `/models` with `HF_HOME=/models/hf`. The prefetch Job fills it once. vLLM, SGLang and the P/D pair all read it — all on the root, in `llm-serving`. A small model tried in dev-llms can't mount it (a vCluster pod can only use claims made in its own vCluster); give it its own claim in `llm-sandbox`, within the sandbox's 150 Gi.
 - **Workloads (Chapter 12)**: Qdrant's `volumeClaimTemplates` use `local-nvme-retain` the same way.
 - **01-Ansible NFS-over-RDMA (`playbooks/15.1-nfs-rdma.yml`)** exports `/srv/models` from dgx-spark-1 to dgx-spark-2. For 2 Sparks, back the model cache with a static NFS PV (§8) so both nodes share one copy.
 - **Module 08-Storage** benchmarks the same NVMe with deeper tools (GDS, `gdsio`, MinIO, JuiceFS).
-- **etcd (Chapter 02)**: run §5.4 while watching `etcd_disk_wal_fsync_duration_seconds` to see checkpoint-sized writes hurt the root control plane — and with it both vClusters, whose syncers write through it.
+- **etcd (Chapter 02)**: run §5.4 while watching `etcd_disk_wal_fsync_duration_seconds` to see checkpoint-sized writes hurt the root control plane — and with it the LLM stack, which the root API server runs directly, and both vClusters, whose syncers write through it.
 
 ---
 
@@ -145,54 +153,68 @@ cd "02-Kubernetes/lab"
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 ```
 
-### 5.1 StorageClasses, the WFFC lifecycle, and the double quota
+### 5.1 StorageClasses, the WFFC lifecycle, and the quotas
 
 ```bash
 sudo mkdir -p /data/k8s            # on the Spark (the 01-Ansible vclusters role already did)
 scripts/install-addons.sh storage
 kubectl --context spark-root get sc
 kubectl --context spark-root -n local-path-storage get cm local-path-config -o jsonpath='{.data.config\.json}{"\n"}'
-kubectl --context llms get sc       # the same three classes, copied in
+kubectl --context dev-llms get sc   # the same three classes, copied in
 ```
 
-Expected: `local-path (default)`, `local-nvme`, `local-nvme-retain` on the root; the same names in llms. They are copies: the root owns the real objects, and a change to a class is made on the root.
+Expected: `local-path (default)`, `local-nvme`, `local-nvme-retain` on the root; the same names in dev-llms. They are copies: the root owns the real objects, and a change to a class is made on the root.
 
-Before creating the model cache, let both API servers check it. A server-side dry run runs quota admission without persisting anything:
+Before creating the model cache, let the root API server check it. A server-side dry run runs quota admission without persisting anything:
 
 ```bash
-kubectl --context llms apply -k manifests/llms/10-tenancy
-kubectl --context llms apply -k manifests/llms/60-storage --dry-run=server
-kubectl --context llms -n llm-serving describe resourcequota serving-budget | grep storage
-kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget | grep storage
+kubectl --context spark-root apply -k manifests/root-llms/10-tenancy
+kubectl --context spark-root apply -k manifests/root-llms/60-storage --dry-run=server
+kubectl --context spark-root -n llm-serving describe resourcequota serving-budget | grep storage
 ```
 
-Do the arithmetic yourself: the PVC's request must be ≤ what's left of `serving-budget` (600 Gi) *and* ≤ what's left of the root's 800 Gi after the vCluster's own 5 Gi PVC and Qdrant's 20 Gi. `model-cache` asks for 300 Gi: 300 + 20 (Qdrant) fits the 600 Gi inner ceiling, and 5 + 300 + 20 + 20 (`ckpt` in `batch`) = 345 Gi fits the root's 800 Gi — and 300 Gi still holds a few quantised 70B-class checkpoints. Change the size and the dry run tells you which layer says no (`exceeded quota: serving-budget, …` is the inner one; a root refusal shows up as a syncer event). Then:
+Do the arithmetic yourself: the PVC's request must be ≤ what's left of `serving-budget` (1 Ti). `model-cache` asks for 300 Gi; with Qdrant's 20 Gi that's 320 Gi of 1024 Gi — and 300 Gi still holds a few quantised 70B-class checkpoints. Change the size past what's left and the dry run answers `exceeded quota: serving-budget, …`. One API server, one quota: there's no second layer around the LLM stack.
+
+A vCluster claim meets two. Ask dev-lab's API server about a claim in `tenant-alpha`, then read both budgets:
 
 ```bash
-kubectl --context llms apply -k manifests/llms/60-storage
-kubectl --context llms -n llm-serving get pvc model-cache
-kubectl --context llms -n llm-serving describe pvc model-cache | tail -3
-kubectl --context spark-root -n vc-llms get pvc | grep model-cache
+kubectl --context dev-lab apply -k manifests/dev-lab/00-platform
+kubectl --context dev-lab apply -k manifests/dev-lab/10-tenancy
+kubectl --context dev-lab -n tenant-alpha apply --dry-run=server -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: big}
+spec: {storageClassName: local-nvme, accessModes: [ReadWriteOnce], resources: {requests: {storage: 60Gi}}}
+EOF
+kubectl --context dev-lab -n tenant-alpha describe resourcequota tenant-budget | grep storage
+kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget | grep storage
 ```
 
-Expected: `model-cache  Pending  …  local-nvme-retain` on both sides, with event `WaitForFirstConsumer: waiting for first consumer to be created before binding`. **Pending is correct here.** The root copy exists, but no PV yet: nothing will be provisioned until a pod that uses it is scheduled.
+Expected: the inner layer says no — the LimitRange caps one claim at 50 Gi. At 50 Gi the dry run passes, because dev-lab's API server only knows its own quotas; the root's check happens later, when the syncer creates the copy in `vc-dev-lab`, and a refusal there shows up as a syncer event on a `Pending` PVC (§3.4: 100 + 100 + 5 > 200). Now create the model cache:
+
+```bash
+kubectl --context spark-root apply -k manifests/root-llms/60-storage
+kubectl --context spark-root -n llm-serving get pvc model-cache
+kubectl --context spark-root -n llm-serving describe pvc model-cache | tail -3
+```
+
+Expected: `model-cache  Pending  …  local-nvme-retain`, with event `WaitForFirstConsumer: waiting for first consumer to be created before binding`. **Pending is correct here.** The claim exists, but no PV yet: nothing will be provisioned until a pod that uses it is scheduled.
 
 ### 5.2 Prefetch the model (binds the PVC)
 
 ```bash
-kubectl --context llms -n llm-serving create secret generic hf-token --from-literal=token="$HF_TOKEN" 2>/dev/null || true
-kubectl --context llms apply -f manifests/llms/60-storage/model-prefetch-job.yaml
-kubectl --context llms -n llm-serving logs -f job/model-prefetch
-kubectl --context llms -n llm-serving get pvc model-cache
+kubectl --context spark-root -n llm-serving create secret generic hf-token --from-literal=token="$HF_TOKEN" 2>/dev/null || true
+kubectl --context spark-root apply -f manifests/root-llms/60-storage/model-prefetch-job.yaml
+kubectl --context spark-root -n llm-serving logs -f job/model-prefetch
+kubectl --context spark-root -n llm-serving get pvc model-cache
 ```
 
-Follow the binding to the disk on the root, where the real PV lives:
+Follow the binding to the disk:
 
 ```bash
-HPVC=model-cache-x-llm-serving-x-llms
-kubectl --context spark-root -n vc-llms get pvc $HPVC \
+kubectl --context spark-root -n llm-serving get pvc model-cache \
   -o jsonpath='{.metadata.annotations.volume\.kubernetes\.io/selected-node}{"\n"}'
-PV=$(kubectl --context spark-root -n vc-llms get pvc $HPVC -o jsonpath='{.spec.volumeName}')
+PV=$(kubectl --context spark-root -n llm-serving get pvc model-cache -o jsonpath='{.spec.volumeName}')
 kubectl --context spark-root get pv "$PV" -o jsonpath='{.spec.hostPath.path}{"  "}{.spec.persistentVolumeReclaimPolicy}{"  "}{.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values}{"\n"}'
 ```
 
@@ -202,10 +224,10 @@ Expected:
 downloaded Qwen/Qwen2.5-0.5B-Instruct@main in 9s
 model-cache   Bound   pvc-…   …   RWO   local-nvme-retain
 dgx-spark-1
-/data/k8s/retain/vc-llms/model-cache-x-llm-serving-x-llms  Retain  ["dgx-spark-1"]
+/data/k8s/retain/llm-serving/model-cache  Retain  ["dgx-spark-1"]
 ```
 
-The download time is illustrative. `kubectl --context llms get pv` may show a PV object too, but that's a stand-in the syncer keeps so the claim looks bound inside the vCluster; the authoritative PV, with the hostPath and node affinity, is the root's. To fetch a larger model for modules 03–06, edit `MODEL` and re-run (delete the finished Job first).
+The download time is illustrative. Claim and PV are both root objects here, so there's nothing to translate. A claim made in a vCluster is different: `kubectl --context dev-lab get pv` may show a PV object while §5.3's claim exists, but that's a stand-in the syncer keeps so the claim looks bound inside the vCluster; the authoritative PV, with the hostPath and node affinity, is always the root's. To fetch a larger model for modules 03–06, edit `MODEL` and re-run (delete the finished Job first).
 
 ### 5.3 Retain vs Delete (dev-lab)
 
@@ -239,7 +261,7 @@ Deleting the PVC in dev-lab deletes its root copy; the root PV's reclaim policy 
 kubectl --context spark-root patch pv <pv-name> --type json -p '[{"op":"remove","path":"/spec/claimRef"}]'
 ```
 
-A recreated claim in llms can then bind to it again (same class, compatible size and access mode — check with `kubectl --context spark-root get pv` that it took the old PV and not a fresh one). That's how you keep 60 GB of weights across a vCluster rebuild.
+A recreated claim in `llm-serving` can then bind to it again (same class, compatible size and access mode — check with `kubectl --context spark-root get pv` that it took the old PV and not a fresh one). That's how you keep 60 GB of weights across a teardown of the LLM namespaces; a claim from a vCluster rebinds the same way, through its root copy, across a vCluster rebuild.
 
 ### 5.4 Measure the NVMe from inside a pod (root)
 
@@ -261,18 +283,18 @@ Clean up: `kubectl --context spark-root delete -f manifests/root/60-storage/fio-
 
 ### 5.5 What loading a model does to unified memory
 
-`uma-watch.sh` takes the vCluster pod's name and context, finds its host copy, and prints the host pool next to that pod's cgroup:
+`uma-watch.sh` takes a pod's namespace, name and context (for a vCluster pod it finds the host copy first) and prints the host pool next to that pod's cgroup:
 
 ```bash
 # terminal A (on the Spark): watch the pool while vLLM (Chapter 20) loads
-POD=$(kubectl --context llms -n llm-serving get pod -l app=vllm -o jsonpath='{.items[0].metadata.name}')
-scripts/uma-watch.sh llm-serving "$POD" llms 2
+POD=$(kubectl --context spark-root -n llm-serving get pod -l app=vllm -o jsonpath='{.items[0].metadata.name}')
+scripts/uma-watch.sh llm-serving "$POD" spark-root 2
 # terminal B: restart vLLM once with a warm cache, once after dropping it
-kubectl --context llms -n llm-serving rollout restart deploy/vllm
-sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'; kubectl --context llms -n llm-serving rollout restart deploy/vllm
+kubectl --context spark-root -n llm-serving rollout restart deploy/vllm
+sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'; kubectl --context spark-root -n llm-serving rollout restart deploy/vllm
 ```
 
-The restart creates a new pod, so re-run terminal A with the new name once it's scheduled. Watch the `Cached` column climb by roughly the model size while `MemAvailable` falls by about twice that during load. The page cache is reclaimable, and it isn't charged to anyone's quota: neither llms's 88 Gi budget nor any pod limit sees it. A CUDA allocation that arrives while the cache is full can still fail before the kernel reclaims. The 01-Ansible `playbooks/29.2-uma-relief.yml -e uma_drop_caches=true` automates the cache drop for big-model starts.
+The restart creates a new pod, so re-run terminal A with the new name once it's scheduled. Watch the `Cached` column climb by roughly the model size while `MemAvailable` falls by about twice that during load. The page cache is reclaimable, and it isn't charged to anyone's quota: neither `serving-budget`'s 90 Gi nor any pod limit sees it. A CUDA allocation that arrives while the cache is full can still fail before the kernel reclaims. The 01-Ansible `playbooks/29.2-uma-relief.yml -e uma_drop_caches=true` automates the cache drop for big-model starts.
 
 ---
 
@@ -287,14 +309,14 @@ scripts/verify.sh storage
 [PASS] StorageClass local-path (root)
 [PASS] StorageClass local-nvme (root)
 [PASS] StorageClass local-nvme-retain (root)
-[PASS] llms sees the root StorageClasses (sync.fromHost.storageClasses)
-[PASS] model-cache Bound (llms)
+[PASS] dev-llms sees the root StorageClasses (sync.fromHost.storageClasses)
+[PASS] model-cache Bound (root, llm-serving)
 ```
 
 | Check | Expected |
 |---|---|
-| 3 StorageClasses on the root, same 3 in llms and dev-lab | `local-path`, `local-nvme`, `local-nvme-retain` |
-| `model-cache` | `Bound` in llms; root PV hostPath `/data/k8s/retain/vc-llms/model-cache-x-llm-serving-x-llms`, Retain |
+| 3 StorageClasses on the root, same 3 in dev-lab and dev-llms | `local-path`, `local-nvme`, `local-nvme-retain` |
+| `model-cache` | `Bound` in `llm-serving` (root); PV hostPath `/data/k8s/retain/llm-serving/model-cache`, Retain |
 | fio `weights-seqread-1m` | multi-GB/s. Save the JSON as your baseline |
 
 ---
@@ -305,7 +327,7 @@ scripts/verify.sh storage
 |---|---|---|---|
 | PVC `Pending` forever **with** a pod using it | StorageClass missing/typo, provisioner down | `kubectl --context <v> describe pvc` (drill `breakfix 12`), `kubectl --context spark-root -n local-path-storage logs deploy/local-path-provisioner` | fix the SC name (PVC spec is immutable → recreate) |
 | PVC `Pending` and no pod yet | WFFC | event `waiting for first consumer` | expected. Create the pod |
-| `exceeded quota: serving-budget, requested: requests.storage=…` on apply | the PVC is larger than the inner ceiling | `kubectl --context llms -n llm-serving describe resourcequota serving-budget` | shrink the claim; the inner quota is the llms admin's |
+| `exceeded quota: serving-budget` (or `tenant-budget`, `sandbox-budget`), `requested: requests.storage=…` on apply | the PVC is larger than what's left of that namespace's quota | `kubectl --context <ctx> -n <ns> describe resourcequota` | shrink the claim or delete an unused one; `serving-budget` is the root admin's, the tenant quotas are the vCluster admin's |
 | PVC exists in the vCluster but `Pending` with a sync error mentioning `vcluster-budget` | the root's storage budget for the whole vCluster is spent | `kubectl --context spark-root -n vc-<name> describe resourcequota vcluster-budget` | delete unused PVCs (Released Retain PVs don't count; their claims did) or resize the vCluster |
 | `kubectl get sc` in a vCluster is empty | `sync.fromHost.storageClasses` off | `vclusters/<name>.yaml` | enable, `helm upgrade` |
 | Pod `Pending`: `volume node affinity conflict` | local PV lives on another node (dgx-spark-2 joined) | `kubectl --context spark-root get pv <pv> -o yaml` → `nodeAffinity` | schedule to that node, or use shared storage (NFS, §8) |
@@ -329,7 +351,7 @@ scripts/verify.sh storage
 
 When dgx-spark-2 joins the root as a worker, a `local-nvme-retain` PV pins every model server to dgx-spark-1. The fix is a volume both nodes can mount. 01-Ansible's `nfs_rdma` role exports `/srv/models` from dgx-spark-1 over NFSv4.2 on RDMA (port 20049) across the CX-7 link (`192.168.100.11`), and installs the client side on dgx-spark-2.
 
-The PV is a **root** object — tenants can't create PVs — and a vCluster can't name a root PV directly (`spec.volumeName` inside the vCluster refers to its own objects). So match by class: the root offers a class with no provisioner, the platform team creates the PV in that class, and a tenant claim in that class binds to it.
+The PV is a **root** object. The LLM stack's claim is on the root too, so it could name the PV with `spec.volumeName`; matching by class works for every claimant, though — a vCluster can't name a root PV (`spec.volumeName` inside the vCluster refers to its own objects), but it can claim from a class the root offers. So: the root offers a class with no provisioner, the platform team creates the PV in that class, and a claim in that class binds to it.
 
 ```yaml
 # on the root: kubectl --context spark-root apply -f -
@@ -353,17 +375,17 @@ spec:
 ```
 
 ```yaml
-# inside llms: kubectl --context llms apply -f -
+# on the root, for the LLM stack: kubectl --context spark-root apply -f -
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata: {name: models-shared, namespace: llm-serving}
 spec:
-  storageClassName: nfs-models                 # copied in by sync.fromHost.storageClasses
+  storageClassName: nfs-models                 # matches the PV by class (a vCluster claim would see the class through sync.fromHost.storageClasses)
   accessModes: [ReadOnlyMany]
   resources: {requests: {storage: 100Gi}}
 ```
 
-The claim's root copy binds to `models-nfs`, and every kubelet that runs a pod using it mounts the export itself — so both nodes need the NFS client and the `rpcrdma` module (the role handles that). Note the quota detail: `requests.storage` counts the **claim's** 100 Gi, not the PV's 2 Ti, against `serving-budget` and the root budget. Write the model once from dgx-spark-1 (a prefetch Job on a read-write claim, or directly into `/srv/models`), then serve it read-only from both nodes. With only one Spark, the role's TCP fallback works the same way — just drop `proto=rdma,port=20049`.
+The claim binds to `models-nfs` (a claim from a vCluster does so through its root copy), and every kubelet that runs a pod using it mounts the export itself — so both nodes need the NFS client and the `rpcrdma` module (the role handles that). Note the quota detail: `requests.storage` counts the **claim's** 100 Gi, not the PV's 2 Ti, against `serving-budget` (for a claim from a vCluster: against its tenant quota and the root's `vcluster-budget`). Write the model once from dgx-spark-1 (a prefetch Job on a read-write claim, or directly into `/srv/models`), then serve it read-only from both nodes. With only one Spark, the role's TCP fallback works the same way — just drop `proto=rdma,port=20049`.
 
 ---
 
@@ -371,7 +393,7 @@ The claim's root copy binds to `models-nfs`, and every kubelet that runs a pod u
 
 - [ ] I can explain why a local PVC is Pending until a pod exists, and who decides the node when the PVC came from a vCluster.
 - [ ] I found a vCluster PVC's root copy, its PV and its directory on the NVMe.
-- [ ] I checked a claim against both storage quotas with a server-side dry run.
+- [ ] I checked a claim against its storage quota with a server-side dry run, and know where the root's second check on a vCluster claim shows up.
 - [ ] My model weights live on a Retain volume that survives PVC deletion.
 - [ ] I have a saved fio baseline for my NVMe with AI-shaped profiles.
 - [ ] I watched the page cache and a model load compete for unified memory.

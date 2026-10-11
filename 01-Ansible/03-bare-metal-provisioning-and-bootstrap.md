@@ -55,7 +55,7 @@ flowchart LR
     SA["svc-ansible + NOPASSWD sudo"] --> CA["trust vault01's SSH CA"]
   end
   subgraph D2["Day 1½ (Semaphore: 04.3 Baseline)"]
-    F["spark.fact"] --> B["packages · NVIDIA holds ·<br/>sysctl · sshd · chrony · journald"]
+    F["spark.fact"] --> B["packages · NVIDIA holds ·<br/>sysctl · sshd · chrony · journald ·<br/>headless (multi-user.target)"]
   end
   D0 --> D1 --> D1b --> D2 --> Rest["Chapters 10–30"]
 ```

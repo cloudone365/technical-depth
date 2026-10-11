@@ -36,7 +36,7 @@ lab/
 │   ├── cilium                  # Cilium CNI (VXLAN, kube-proxy kept), Hubble UI :31235          (Chapter 19)
 │   ├── metallb                 # MetalLB L2 pool 192.168.0.110-119                               (Chapter 19)
 │   ├── gpu_operator            # Helm, driver/toolkit disabled, 15 time-slices                  (Chapter 20)
-│   ├── vclusters               # vClusters dev-lab + llms from ../../02-Kubernetes/lab           (Chapters 19, 20)
+│   ├── vclusters               # LLM budgets on the root + vClusters dev-lab, dev-llms (02 lab) (Chapters 19, 20)
 │   ├── slurm_cluster           # munge, slurm.conf, gres.conf, cgroup v2, health check          (Chapter 22)
 │   ├── vault_config            # adds to vault01: KV kv/, policy spark-lab-read → AppRole semaphore (Chapter 18)
 │   ├── nfs_rdma                # NFSv4.2 over RDMA model cache                                   (Chapter 15)
@@ -88,7 +88,7 @@ flowchart LR
   subgraph MGMT["Mgmt LAN 192.168.0.0/24 (10GbE enP7s7)"]
   end
   subgraph S1["dgx-spark-1 · 192.168.0.100"]
-    S1a["kubeadm control plane + worker (spark-root)<br/>vClusters dev-lab · llms<br/>slurmctld+slurmd · Prometheus/Grafana<br/>NFS server /srv/models"]
+    S1a["kubeadm control plane + worker (spark-root)<br/>LLM stack (llm-serving · batch)<br/>vClusters dev-lab · dev-llms<br/>slurmctld+slurmd · Prometheus/Grafana<br/>NFS server /srv/models"]
   end
   subgraph S2["dgx-spark-2 · 192.168.0.101"]
     S2a["root worker (k8s_workers) · slurmd<br/>NFS client /mnt/models"]
@@ -114,20 +114,21 @@ Kubernetes plays run there. Fabric, NCCL and NFS-over-RDMA playbooks skip
 themselves; everything else runs. `dgx-spark-1` keeps no control-plane taint, so on
 its own it is a complete cluster.
 
-## Kubernetes: one root cluster, two vClusters
+## Kubernetes: one root cluster with the LLM stack, two vClusters
 
 **Semaphore UI:** in project `spark-lab`, run the templates `19.1 Kubernetes` (kubeadm root
 cluster + Cilium + MetalLB), `20.1 GPU Operator` (node advertises `nvidia.com/gpu: 15`)
-and `20.2 vClusters` (dev-lab on 192.168.0.111, llms on 192.168.0.112). They write the
+and `20.2 vClusters` (the LLM namespaces and budgets on the root; dev-lab on 192.168.0.111,
+dev-llms on 192.168.0.112). They write the
 kubeconfig to sema01's state volume. Then, on your MacBook:
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
 tools/fetch-kubeconfig.sh sema01                         # → .cache/kubeconfig-spark-lab.yaml (0600)
-export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml   # contexts: spark-root, dev-lab, llms
+export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml   # contexts: spark-root, dev-lab, dev-llms
 kubectl --context spark-root get nodes -o wide
 kubectl --context dev-lab get namespaces
-kubectl --context llms get namespaces
+kubectl --context dev-llms get namespaces
 ```
 
 Start over with the template `19.2 Reset Kubernetes` (extra variable
@@ -136,10 +137,13 @@ Never schedule it. Break-glass from the MacBook:
 `ansible-playbook playbooks/19.2-reset-kubernetes.yml -l dgx-spark-1,localhost -K` (type `RESET`).
 
 `20.2-vclusters.yml` applies the vCluster values and the root kustomize directories
-`manifests/root/00-platform` and `manifests/root/05-vclusters` (budgets included) from
+`manifests/root/00-platform`, `manifests/root/05-vclusters`, `manifests/root-llms/00-platform`
+and `manifests/root-llms/10-tenancy` (budgets included) from
 [`../../02-Kubernetes/lab`](../../02-Kubernetes/lab/README.md), so that lab must
 be checked out next to this one. It also writes `kubeconfig-dev-lab.yaml`
-and `kubeconfig-llms.yaml` to the state folder for anyone who should only see one vCluster.
+and `kubeconfig-dev-llms.yaml` to the state folder for anyone who should only see one vCluster.
+The LLM stack itself (Traefik, Kueue, KEDA, the model servers) runs on the root and is installed
+by the 02 lab's `scripts/install-addons.sh` and `scripts/apply-lab.sh`.
 
 ## Quick start
 

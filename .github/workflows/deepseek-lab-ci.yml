@@ -45,9 +45,9 @@ jobs:
           # surface the failing command and its stderr as an annotation
           exec 2> >(tee /tmp/step.err >&2)
           trap 'echo "::error title=platform step failed::${BASH_COMMAND} :: $(tail -c 1800 /tmp/step.err | tr "\n" " ")"' ERR
-          # The 03 lab runs inside the llms vCluster. Here one kind cluster plays both
-          # the root (fake GB10, StorageClasses) and llms; the real nesting is tested by
-          # k8s-lab CI. Contexts get the lab's names so 02's scripts work unchanged.
+          # The 02 lab now runs the LLM stack on the root (manifests/root-llms). One kind
+          # cluster plays the root; the 'llms' context is kept as an alias for the 03 lab
+          # until 03 is moved to spark-root.
           kubectl config rename-context kind-spark-sim spark-root
           kubectl config set-context llms --cluster=kind-spark-sim --user=kind-spark-sim
           kubectl config use-context llms
@@ -67,7 +67,10 @@ jobs:
           done
           # webhooks must be serving before apply-lab.sh creates Kueue/LWS objects
           kubectl -n lws-system rollout status deploy/lws-controller-manager --timeout=5m
-          scripts/apply-lab.sh llms
+          kubectl apply -k manifests/common/runtimeclass        # RuntimeClass nvidia (the GPU Operator's job on a Spark)
+          for d in 00-platform 10-tenancy 15-admission 60-storage 40-ingress 50-workloads 20-scheduling; do
+            kubectl apply -k "manifests/root-llms/$d"
+          done
       - name: All 03 checks (incl. RAG on real Qdrant and server-side dry-run)
         run: QDRANT=/tmp/qdrant API=1 ../../02-Kubernetes/lab/tests/ci-run.sh tests/run-local-checks.sh
       - name: Ansible one-click playbook — lint, check mode against the kind platform, preflight guards

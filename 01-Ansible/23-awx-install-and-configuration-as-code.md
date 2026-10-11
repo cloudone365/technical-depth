@@ -64,7 +64,7 @@ flowchart TB
 
 ### 1.3 Memory budget on a UMA machine
 
-Everything on a Spark competes for one unified pool (~119.7 GiB usable), including the GPU. AWX comes out of the root's share: the two vClusters' ResourceQuotas already claim 56 Gi (dev-lab 8, llms 48), and the root keeps the rest for platform services. Give AWX hard limits so it can never starve a model server:
+Everything on a Spark competes for one unified pool (~119.7 GiB usable), including the GPU. AWX comes out of the root's platform share. After the kubelet's 12 GiB reserve, the two vClusters (4 Gi each) and the ~90 GiB LLM memory pool that `llm-serving` and `batch` share, the platform services (Cilium, MetalLB, GPU Operator, Prometheus, Traefik, Kueue, KEDA) have about 9.7 GiB, and AWX lives in that. Give AWX hard limits so it can never starve a model server:
 
 | Container | request | limit |
 |---|---|---|
@@ -102,7 +102,7 @@ done
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
-export KUBECONFIG="$PWD/.cache/kubeconfig-spark-lab.yaml"   # contexts spark-root, dev-lab, llms
+export KUBECONFIG="$PWD/.cache/kubeconfig-spark-lab.yaml"   # contexts spark-root, dev-lab, dev-llms
 mkdir -p .cache/awx && cd .cache/awx
 cat > kustomization.yaml <<'EOF'
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -336,7 +336,7 @@ docker run --rm 192.168.0.100:5000/spark-ee:1.0 ansible-galaxy collection list |
 | Git | Project SCM, update on launch; webhook from GitHub triggers job templates | 25 |
 | Vault (vault01) | "HashiCorp Vault Secret Lookup" / "Signed SSH" credential types, so no static keys live in AWX. Give AWX its own AppRole and policy on vault01; don't reuse Semaphore's `semaphore` AppRole | 18, 24 |
 | Semaphore (sema01) | none: it's the lab's main controller. Keep AWX to read-only templates (validate, drift) so the two never fight over the same hosts | 04 |
-| Kubernetes (`spark-root`) | Container Group runs job pods in `awx`; you can add a second group with a GPU `nodeSelector` for GPU-touching jobs (it comes out of the root's share of 2 time-slices). A job that must manage a vCluster uses a kubeconfig credential with the `dev-lab` / `llms` context | 19, 20 |
+| Kubernetes (`spark-root`) | Container Group runs job pods in `awx`; you can add a second group with a GPU `nodeSelector` for GPU-touching jobs (it comes out of the platform's 2 time-slices). A job that must manage the LLM stack uses the `spark-root` context (namespaces `llm-serving`, `batch`); one that must manage a vCluster uses a kubeconfig credential with the `dev-lab` / `dev-llms` context | 19, 20 |
 | Prometheus | `/api/v2/metrics/` (enable in settings). Scrape it from the Chapter 12 stack | 12 |
 | ARA / logging | AWX external logging → Loki/Splunk; job events stay in Postgres | 27 |
 

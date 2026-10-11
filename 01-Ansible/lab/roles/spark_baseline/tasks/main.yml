@@ -24,7 +24,7 @@
   tags: [baseline, time]
 
 - name: Headless (no desktop)
-  ansible.builtin.include_tasks: headless.yml
+  ansible.builtin.import_tasks: headless.yml
   when:
     - spark_baseline_headless | bool
     - not spark_baseline_container_mode
