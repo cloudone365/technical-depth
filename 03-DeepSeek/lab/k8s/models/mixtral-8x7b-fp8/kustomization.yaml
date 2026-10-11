@@ -32,6 +32,9 @@ patches:
       path: /spec/template/spec/containers/0/resources/limits/memory
       value: 64Gi
     - op: replace
+      path: /spec/template/spec/containers/0/resources/requests/memory
+      value: 64Gi
+    - op: replace
       path: /metadata/labels/model
       value: mixtral-8x7b-fp8
     - op: replace

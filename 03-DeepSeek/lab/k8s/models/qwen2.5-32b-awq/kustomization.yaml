@@ -33,6 +33,9 @@ patches:
       path: /spec/template/spec/containers/0/resources/limits/memory
       value: 48Gi
     - op: replace
+      path: /spec/template/spec/containers/0/resources/requests/memory
+      value: 48Gi
+    - op: replace
       path: /metadata/labels/model
       value: qwen2.5-32b-awq
     - op: replace

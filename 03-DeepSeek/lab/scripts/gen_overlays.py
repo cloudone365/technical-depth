@@ -32,6 +32,8 @@ def overlay(m):
         {"op": "replace", "path": "/spec/template/spec/containers/0/env/0/value", "value": m["hf"]},
         {"op": "replace", "path": "/spec/template/spec/containers/0/env/1/value", "value": m["name"]},
         {"op": "replace", "path": "/spec/template/spec/containers/0/resources/limits/memory", "value": m["mem"]},
+        # request = limit: the 02 base sets both (the scheduler guards the root's shared LLM memory pool)
+        {"op": "replace", "path": "/spec/template/spec/containers/0/resources/requests/memory", "value": m["mem"]},
         {"op": "replace", "path": "/metadata/labels/model", "value": m["name"]},
         {"op": "replace", "path": "/spec/template/metadata/labels/model", "value": m["name"]},
     ]

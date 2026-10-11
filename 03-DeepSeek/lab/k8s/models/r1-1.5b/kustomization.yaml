@@ -32,6 +32,9 @@ patches:
       path: /spec/template/spec/containers/0/resources/limits/memory
       value: 16Gi
     - op: replace
+      path: /spec/template/spec/containers/0/resources/requests/memory
+      value: 16Gi
+    - op: replace
       path: /metadata/labels/model
       value: r1-1.5b
     - op: replace

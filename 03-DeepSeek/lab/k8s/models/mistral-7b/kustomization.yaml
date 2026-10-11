@@ -34,6 +34,9 @@ patches:
       path: /spec/template/spec/containers/0/resources/limits/memory
       value: 32Gi
     - op: replace
+      path: /spec/template/spec/containers/0/resources/requests/memory
+      value: 32Gi
+    - op: replace
       path: /metadata/labels/model
       value: mistral-7b
     - op: replace
