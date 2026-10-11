@@ -100,7 +100,7 @@ One cluster handles the whole request. The root's MetalLB owns the address and k
 | Service | `ingress/traefik-lab`, type LoadBalancer, annotation `metallb.io/loadBalancerIPs: 192.168.0.115`; a root Service, served by MetalLB as is. The `ingress` namespace has no ResourceQuota — the MetalLB pool (192.168.0.110–119) is the only limit |
 | Hostnames | `llm.lab.local` (Ingress), `gw.lab.local` (HTTPRoute) → add both to your laptop's `/etc/hosts` as `192.168.0.115` |
 | Metrics | the chart exposes a plain `traefik-lab-metrics` Service; the root's ServiceMonitor `llm-workloads` (root/95-observability) scrapes it with the same labels as the model servers → `traefik_service_*{vcluster="root", vnamespace="ingress"}` (KEDA uses these in Chapter 20) |
-| Resources | 1 replica, requests 100m CPU / 128 Mi, limit 512 Mi — part of the root's platform share (3 CPU · ~9.7 GiB · 2 slices), not of `serving-budget` |
+| Resources | 1 replica, requests 100m CPU / 128 Mi, limit 512 Mi — part of the root's platform share (3 CPU · ~11.7 GiB · 2 slices), not of `serving-budget` |
 
 ---
 

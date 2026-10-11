@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="1120" viewBox="0 0 960 1120" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" role="img" aria-labelledby="t d">
 <title id="t">DGX Spark nested Kubernetes lab: MacBook terminal, kubeadm root cluster running the LLMs, two small vClusters</title>
-<desc id="d">A MacBook on the home LAN is the terminal. It reaches the root cluster API on 192.168.0.100:6443, the dev-lab vCluster API on 192.168.0.111 and the dev-llms vCluster API on 192.168.0.112. Outside the Spark, sema01 runs every Ansible playbook through Semaphore: it gets a 15-minute SSH certificate from vault01 and logs in to the Spark as svc-ansible. On the DGX Spark, which runs DGX OS headless, the kubeadm root cluster owns the node, Cilium, MetalLB, the GPU Operator with 15 time-slices, storage and Prometheus, and it runs the LLM stack itself in the root namespaces llm-serving, batch and ingress (Traefik on 192.168.0.115). Each vCluster runs its own API server, controller-manager, CoreDNS and SQLite as pods in a root namespace, and a syncer copies its pods, Services and PVCs to the root, where the root scheduler places them on the single node. Budgets: the kubelet reserves 3 CPU and 12 GiB; dev-lab and dev-llms get 2 CPU, 4 Gi and 2 slices each; the root keeps 13 CPU, about 99.7 GiB and 11 slices: 3 CPU, about 9.7 GiB and 2 slices for its platform, and one shared memory pool of about 90 GiB for llm-serving (8 CPU, 6 slices) and batch (2 CPU, 3 slices).</desc>
+<desc id="d">A MacBook on the home LAN is the terminal. It reaches the root cluster API on 192.168.0.100:6443, the dev-lab vCluster API on 192.168.0.111 and the dev-llms vCluster API on 192.168.0.112. Outside the Spark, sema01 runs every Ansible playbook through Semaphore: it gets a 15-minute SSH certificate from vault01 and logs in to the Spark as svc-ansible. On the DGX Spark, which runs DGX OS headless, the kubeadm root cluster owns the node, Cilium, MetalLB, the GPU Operator with 15 time-slices, storage and Prometheus, and it runs the LLM stack itself in the root namespaces llm-serving, batch and ingress (Traefik on 192.168.0.115). Each vCluster runs its own API server, controller-manager, CoreDNS and SQLite as pods in a root namespace, and a syncer copies its pods, Services and PVCs to the root, where the root scheduler places them on the single node. Budgets: the kubelet reserves 3 CPU and 12 GiB; dev-lab and dev-llms get 2 CPU, 4 Gi and 2 slices each; the root keeps 13 CPU, about 101.7 GiB and 11 slices: 3 CPU, about 11.7 GiB and 2 slices for its platform, and one shared memory pool of about 90 GiB for llm-serving (8 CPU, 6 slices) and batch (2 CPU, 3 slices).</desc>
 <defs><marker id="m0969da" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1L9 5L1 9z" fill="#0969da"/></marker><marker id="m0b3d91" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1L9 5L1 9z" fill="#0b3d91"/></marker><marker id="m1f6feb" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1L9 5L1 9z" fill="#1f6feb"/></marker><marker id="m24292f" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1L9 5L1 9z" fill="#24292f"/></marker><marker id="mfb8500" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M1 1L9 5L1 9z" fill="#fb8500"/></marker></defs>
 <rect x="0" y="0" width="960" height="1120" fill="#ffffff"/>
 <rect x="310" y="14" width="340" height="92" rx="5" fill="#24292f" stroke="#000" stroke-width="1"/>
@@ -76,7 +76,7 @@
 <g transform="translate(0,20)">
 <rect x="60" y="438" width="840" height="358" rx="8" fill="#f6f8fa" stroke="#0b3d91" stroke-width="1.8"/>
 <text x="330" y="460" font-size="13.5" fill="#1f2328" text-anchor="start" font-weight="600">Root cluster · spark-root · kubeadm v1.36</text>
-<text x="330" y="477" font-size="10.5" fill="#57606a" text-anchor="start">control plane AND worker · owns the hardware · runs the LLMs · keeps 13 CPU · ~99.7 GiB · 11 slices</text>
+<text x="330" y="477" font-size="10.5" fill="#57606a" text-anchor="start">control plane AND worker · owns the hardware · runs the LLMs · keeps 13 CPU · ~101.7 GiB · 11 slices</text>
 <rect x="80" y="488" width="240" height="48" rx="5" fill="#1f6feb" stroke="#0b3d91" stroke-width="1"/>
 <text x="200.0" y="508.775" font-size="11.5" fill="#ffffff" text-anchor="middle" font-weight="600">kube-apiserver :6443</text>
 <text x="200.0" y="523.275" font-size="10.5" fill="#ffffff" text-anchor="middle">RBAC · APF · audit · Secret encryption</text>
@@ -139,7 +139,7 @@
 <text x="148.0" y="882.7" font-size="12" fill="#1f2328" text-anchor="middle" font-weight="600">20 Arm cores</text>
 <text x="148.0" y="897.7" font-size="11" fill="#1f2328" text-anchor="middle">CPU</text>
 <rect x="236" y="860" width="156" height="52" rx="5" fill="#eaeef2" stroke="#8c959f" stroke-width="1"/>
-<text x="314.0" y="882.7" font-size="12" fill="#1f2328" text-anchor="middle" font-weight="600">~119.7 GiB</text>
+<text x="314.0" y="882.7" font-size="12" fill="#1f2328" text-anchor="middle" font-weight="600">~121.7 GiB</text>
 <text x="314.0" y="897.7" font-size="11" fill="#1f2328" text-anchor="middle">unified memory (CPU + GPU)</text>
 <rect x="402" y="860" width="156" height="52" rx="5" fill="#76b900" stroke="#3d6000" stroke-width="1"/>
 <text x="480.0" y="882.7" font-size="12" fill="#1f2328" text-anchor="middle" font-weight="600">GB10 GPU</text>
@@ -171,7 +171,7 @@
 <text x="435.0" y="1031" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">dev-lab 2</text>
 <rect x="470.0" y="1018" width="420.0" height="18" fill="#0969da"/>
 <text x="680.0" y="1031" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">dev-llms 2 · llm-serving 8 · batch 2</text>
-<text x="40" y="1057" font-size="11" fill="#1f2328" text-anchor="start">Memory · ~119.7 GiB</text>
+<text x="40" y="1057" font-size="11" fill="#1f2328" text-anchor="start">Memory · ~121.7 GiB</text>
 <rect x="190.0" y="1044" width="81.9" height="18" fill="#57606a"/>
 <text x="230.9" y="1057" font-size="10.5" fill="#ffffff" text-anchor="middle" font-weight="600">OS+kubelet 12</text>
 <rect x="271.9" y="1044" width="56.7" height="18" fill="#8c959f"/>

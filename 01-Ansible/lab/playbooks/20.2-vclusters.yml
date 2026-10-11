@@ -3,8 +3,8 @@
 # budgets (02-Kubernetes Chapter 04):
 #   vCluster #1 dev-lab  : 2 CPU · 4 Gi · 2 GPU slices  → https://192.168.0.111
 #   vCluster #2 dev-llms : 2 CPU · 4 Gi · 2 GPU slices  → https://192.168.0.112
-#   root keeps 13 CPU · ~99.7 GiB · 11 slices (after the kubelet's reservations):
-#     platform 3 CPU · ~9.7 GiB · 2 slices
+#   root keeps 13 CPU · ~101.7 GiB · 11 slices (after the kubelet's reservations):
+#     platform 3 CPU · ~11.7 GiB · 2 slices
 #     LLM memory pool ~90 GiB, shared by llm-serving (8 CPU · 6 slices) and batch (2 CPU · ≤12 Gi · 3 slices)
 # The LLMs run on the root; its add-ons (Traefik, Kueue, KEDA) come from
 # "02-Kubernetes/lab/scripts/install-addons.sh".

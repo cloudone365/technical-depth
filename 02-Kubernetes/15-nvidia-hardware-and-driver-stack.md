@@ -23,7 +23,7 @@ Kubernetes treats a GPU as an opaque integer (`nvidia.com/gpu: 1`). Everything t
 |---|---|---|
 | CPU | 20 Arm cores: 10× Cortex-X925 + 10× Cortex-A725 | arm64 images only. CPU limits in whole-core terms (Chapter 14) |
 | GPU | Blackwell, compute capability **12.1** (`sm_121`) | images and kernels must target sm_121 (or carry PTX) |
-| Memory | **128 GB LPDDR5x, unified** (≈119.7 GiB visible to DGX OS), ~273 GB/s | no separate framebuffer. `nvidia-smi` memory reads **N/A**; the node's `memory` capacity is the GPU's memory too |
+| Memory | **128 GB LPDDR5x, unified** (≈121.7 GiB visible to DGX OS), ~273 GB/s | no separate framebuffer. `nvidia-smi` memory reads **N/A**; the node's `memory` capacity is the GPU's memory too |
 | CPU↔GPU link | NVLink-C2C (coherent, on package) | no PCIe copy between host RAM and "GPU RAM" |
 | Tensor-core peak | up to 1 PFLOP FP4 (sparse) | FP4/FP8 quantised models are first-class (modules 03–06) |
 | Network | ConnectX-7, 2× QSFP (200 GbE), 10 GbE RJ-45 | RDMA for 2-Spark NCCL (Chapter 18) |
@@ -186,7 +186,7 @@ kubectl --context spark-root -n platform-tools logs -f job/gemm-solo
 ```
 
 ```json
-{"pod": "gemm-solo-…", "device": "NVIDIA GB10", "cc": "12.1", "n": 8192, "tflops": 87.4, "mem_total_gib": 119.7, "mem_free_gib": 101.2}
+{"pod": "gemm-solo-…", "device": "NVIDIA GB10", "cc": "12.1", "n": 8192, "tflops": 87.4, "mem_total_gib": 121.7, "mem_free_gib": 101.2}
 ```
 
 The TFLOPS figure is illustrative, so **record your own**. It's your "one tenant, no contention" baseline for Chapter 16. `mem_total_gib` from CUDA equals the whole UMA pool, and `mem_free_gib` moves as the OS and other pods — in all three clusters — allocate.

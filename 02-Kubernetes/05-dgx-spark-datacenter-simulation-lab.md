@@ -45,7 +45,7 @@ flowchart TB
     SEMA["sema01 · 192.168.0.210<br/>Semaphore · runs every playbook"]
     VLT["vault01 · 192.168.0.211<br/>SSH CA · 15-min certs · kv/spark-lab"]
   end
-  subgraph SPARK["dgx-spark-1 · DGX OS 7 · GB10 · 128 GB UMA (~119.7 GiB usable)"]
+  subgraph SPARK["dgx-spark-1 · DGX OS 7 · GB10 · 128 GB UMA (~121.7 GiB usable)"]
     direction TB
     subgraph ROOT["Root cluster · kubeadm v1.36 · master + worker"]
       direction TB
@@ -54,7 +54,7 @@ flowchart TB
         API["API server<br/>RBAC · APF · audit · encryption"]
         ETCD[("etcd<br/>snapshots /6 h")]
       end
-      subgraph PLATFORM["Platform tier · 3 CPU · ~9.7 GiB · 2 slices"]
+      subgraph PLATFORM["Platform tier · 3 CPU · ~11.7 GiB · 2 slices"]
         direction LR
         NET["Cilium + kube-proxy<br/>MetalLB .110–.119"]
         OBS["Prometheus · Grafana · Alertmanager<br/>+ host node-exporter :9100"]
@@ -160,15 +160,15 @@ flowchart TB
 | Consumer | CPU | Memory (UMA) | GPU slices |
 |---|---|---|---|
 | kubelet reservations (system 2 + kube 1 CPU; system 6 + kube 2 + eviction 4 Gi) | 3 | 12 Gi | — |
-| root platform (Cilium, MetalLB, kps, metrics-server, GPU Operator, Traefik, Kueue, KEDA, platform-tools) | 3 | ~9.7 GiB | 2 |
+| root platform (Cilium, MetalLB, kps, metrics-server, GPU Operator, Traefik, Kueue, KEDA, platform-tools) | 3 | ~11.7 GiB | 2 |
 | LLM memory pool on the root: `llm-serving` (8 CPU · 6 slices) and `batch` (2 CPU · 3 slices) | 10 | ~90 GiB, shared | 9 |
 | vCluster dev-lab (control plane ~0.3 CPU · 0.5–1 Gi included) | 2 | 4 Gi | 2 |
 | vCluster dev-llms (control plane included) | 2 | 4 Gi | 2 |
-| **total** | **20** | **~119.7 GiB** | **15** |
+| **total** | **20** | **~121.7 GiB** | **15** |
 
-Memory is split without overcommit: of ~107.7 GiB allocatable, the vClusters take 4 + 4 Gi and the root keeps ~99.7 GiB — ~9.7 GiB for its platform and ~90 GiB for the models. The kubelet's system reservation is 6 Gi because DGX OS runs headless (01-Ansible `04.3 Baseline`). CPU may burst into idle cores. The root's 2 platform slices are for `platform-tools` (GPU probes, the Chapter 14 §5.5 UMA experiment, the preemption demo's fillers).
+Memory is split without overcommit: of ~109.7 GiB allocatable, the vClusters take 4 + 4 Gi and the root keeps ~101.7 GiB — ~11.7 GiB for its platform and ~90 GiB for the models. The kubelet's system reservation is 6 Gi because DGX OS runs headless (01-Ansible `04.3 Baseline`). CPU may burst into idle cores. The root's 2 platform slices are for `platform-tools` (GPU probes, the Chapter 14 §5.5 UMA experiment, the preemption demo's fillers).
 
-CPU and slices are split exactly (3 + 8 + 2 = 13 CPU, 2 + 6 + 3 = 11 slices on the root). Only memory is shared: `serving-budget` allows up to 90 Gi and `batch-budget` up to 12 Gi of the same pool, so serving can use all of it while nothing trains. The **scheduler** keeps the two from overcommitting unified memory: every GPU container in the LLM stack sets memory request = limit, so a pod that doesn't fit waits `Pending` and never squeezes a running model; a Kueue-admitted training job waits for serving, never the reverse. ~90 GiB is 0.75 of the GPU, so the `--gpu-memory-utilization` values of the models running at the same time should add up to ≲ 0.72 (Chapter 20 §2). `tests/budget_check.py` keeps these numbers honest and checks request = limit on every GPU container in `manifests/root-llms` (Chapter 04 §3.2).
+CPU and slices are split exactly (3 + 8 + 2 = 13 CPU, 2 + 6 + 3 = 11 slices on the root). Only memory is shared: `serving-budget` allows up to 90 Gi and `batch-budget` up to 12 Gi of the same pool, so serving can use all of it while nothing trains. The **scheduler** keeps the two from overcommitting unified memory: every GPU container in the LLM stack sets memory request = limit, so a pod that doesn't fit waits `Pending` and never squeezes a running model; a Kueue-admitted training job waits for serving, never the reverse. ~90 GiB is 0.74 of the GPU, so the `--gpu-memory-utilization` values of the models running at the same time should add up to ≲ 0.72 (Chapter 20 §2). `tests/budget_check.py` keeps these numbers honest and checks request = limit on every GPU container in `manifests/root-llms` (Chapter 04 §3.2).
 
 ---
 

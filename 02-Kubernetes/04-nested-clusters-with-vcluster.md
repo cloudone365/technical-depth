@@ -67,7 +67,7 @@ flowchart TB
   ADMIN -- "spark-root" --> RAPI
   ADMIN -- "dev-lab · 192.168.0.111" --> DAPI
   ADMIN -- "dev-llms · 192.168.0.112" --> LAPI
-  subgraph SPARK["DGX Spark · DGX OS 7 · GB10 (15 time-slices) · ~119.7 GiB unified memory"]
+  subgraph SPARK["DGX Spark · DGX OS 7 · GB10 (15 time-slices) · ~121.7 GiB unified memory"]
     direction TB
     subgraph ROOT["Root cluster · kubeadm v1.36 · dgx-spark-1 = master + worker"]
       direction TB
@@ -76,7 +76,7 @@ flowchart TB
         RAPI["kube-apiserver<br/>admission · RBAC · APF · audit"] <--> ETCD[("etcd · snapshots /6 h")]
         SCHED["scheduler + controllers"]
       end
-      subgraph PLAT["platform (3 CPU · ~9.7 GiB · 2 slices)"]
+      subgraph PLAT["platform (3 CPU · ~11.7 GiB · 2 slices)"]
         direction LR
         CIL["Cilium CNI<br/>kube-proxy (iptables)"]
         MLB["MetalLB<br/>.110–.119"]
@@ -153,13 +153,13 @@ All three contexts live in one file, `01-Ansible/lab/.cache/kubeconfig-spark-lab
 
 | | CPU (requests) | Memory (requests = limits) | GPU time-slices | Storage |
 |---|---|---|---|---|
-| Spark total | 20 | ~119.7 GiB visible (128 GB) | 15 | ~3.7 TiB |
+| Spark total | 20 | ~121.7 GiB visible (128 GB) | 15 | ~3.7 TiB |
 | kubelet reservations | 3 (system 2 + kube 1) | 12 GiB (system 6 + kube 2 + eviction 4) | – | – |
-| allocatable to pods | 17 | ~107.7 GiB | 15 | |
+| allocatable to pods | 17 | ~109.7 GiB | 15 | |
 | vCluster `dev-lab` | **2** | **4 Gi** | **2** | 200 Gi |
 | vCluster `dev-llms` | **2** | **4 Gi** | **2** | 200 Gi |
-| **root keeps** | **13** | **~99.7 GiB** | **11** | the rest (~3.3 TiB) |
-| ↳ platform (Cilium, MetalLB, GPU Operator, Prometheus, Traefik, Kueue, KEDA, `platform-tools`) | 3 | ~9.7 GiB | 2 | |
+| **root keeps** | **13** | **~101.7 GiB** | **11** | the rest (~3.3 TiB) |
+| ↳ platform (Cilium, MetalLB, GPU Operator, Prometheus, Traefik, Kueue, KEDA, `platform-tools`) | 3 | ~11.7 GiB | 2 | |
 | ↳ LLM memory pool, shared | | ~90 GiB | | |
 | &nbsp;&nbsp;↳ `llm-serving` ResourceQuota `serving-budget` | 8 | up to 90 Gi | 6 | 1 Ti |
 | &nbsp;&nbsp;↳ `batch` ResourceQuota `batch-budget` = Kueue ClusterQueue `spark-cq` | 2 | up to 12 Gi | 3 | 200 Gi |
@@ -172,24 +172,24 @@ python3 tests/budget_check.py            # in 02-Kubernetes/lab, on your MacBook
 
 ```text
                   CPU  mem GiB  slices
-Spark total      20.0    119.7      15
+Spark total      20.0    121.7      15
 kubelet resv.     3.0     12.0       0
-allocatable      17.0    107.7      15
+allocatable      17.0    109.7      15
 vc-dev-lab        2.0      4.0       2
 vc-dev-llms       2.0      4.0       2
-root keeps       13.0     99.7      11
-  platform        3.0      9.7       2
+root keeps       13.0     101.7      11
+  platform        3.0      11.7       2
   llm-serving     8.0     90.0       6
   batch           2.0     12.0       3
   (llm-serving and batch share one memory pool; batch's memory is part of serving's)
-model memory in llm-serving: 90 GiB = 0.75 of the GPU → keep the sum of --gpu-memory-utilization ≲ 0.72 (headroom)
+model memory in llm-serving: 90 GiB = 0.74 of the GPU → keep the sum of --gpu-memory-utilization ≲ 0.72 (headroom)
 LoadBalancer IPs: dev-lab API 192.168.0.111, dev-llms API 192.168.0.112, LLM gateway 192.168.0.115 (pool 192.168.0.110-192.168.0.119)
 budget check OK
 ```
 
 The kubelet reservations come from 01-Ansible Chapter 19 (`systemReserved` 2 CPU · 6 Gi, `kubeReserved` 1 CPU · 2 Gi, eviction below 4 Gi). `systemReserved` memory is 6 Gi because DGX OS runs headless (01-Ansible `04.3 Baseline`, `spark_baseline_headless: true`): no desktop session holds memory. What is left after the reservations is all that pods can ever be given.
 
-**How the split is decided.** Everything must fit inside allocatable memory: 4 + 4 Gi for the vClusters leaves ~99.7 GiB to the root, of which the platform needs ~9.7 GiB and the models get the remaining ~90 GiB. Nothing is overcommitted, because on unified memory a promise of memory the box doesn't have ends with the OOM killer. CPU is compressible, so a budget is a guaranteed share and idle cores can still be used beyond it. The vClusters stay small: a vCluster's control plane and CoreDNS take ≈ 0.5–1 Gi of its 4 Gi; `dev-lab`'s tenants `tenant-alpha` and `tenant-beta` keep their 2 Gi ceilings (ceilings, not reservations), `dev-llms`' `llm-sandbox` gets 3 Gi. The root keeps 2 slices for `platform-tools` (GPU probes, the Chapter 14 §5.5 UMA experiment, the preemption demo's 2 filler replicas).
+**How the split is decided.** Everything must fit inside allocatable memory: 4 + 4 Gi for the vClusters leaves ~101.7 GiB to the root, of which the platform needs ~11.7 GiB and the models get the remaining ~90 GiB. Nothing is overcommitted, because on unified memory a promise of memory the box doesn't have ends with the OOM killer. CPU is compressible, so a budget is a guaranteed share and idle cores can still be used beyond it. The vClusters stay small: a vCluster's control plane and CoreDNS take ≈ 0.5–1 Gi of its 4 Gi; `dev-lab`'s tenants `tenant-alpha` and `tenant-beta` keep their 2 Gi ceilings (ceilings, not reservations), `dev-llms`' `llm-sandbox` gets 3 Gi. The root keeps 2 slices for `platform-tools` (GPU probes, the Chapter 14 §5.5 UMA experiment, the preemption demo's 2 filler replicas).
 
 **One memory pool, shared by serving and batch.** CPU and slices are split exactly between platform, serving and batch (3 + 8 + 2 = 13 CPU; 2 + 6 + 3 = 11 slices). Memory is not: `serving-budget` allows up to 90 Gi, `batch-budget` up to 12 Gi, and both come out of the same ~90 GiB. Serving may use the whole pool while nothing trains; a training job takes up to 12 Gi of it when it runs. The quotas alone would allow 90 + 12 = 102 Gi, more than the pool. What stops the two from overcommitting unified memory is the **scheduler**:
 
@@ -197,7 +197,7 @@ The kubelet reservations come from 01-Ansible Chapter 19 (`systemReserved` 2 CPU
 - With request = limit, the node's allocatable memory is the real cap. A pod that doesn't fit stays `Pending` (`Insufficient memory`); it never squeezes a running model.
 - Kueue may admit a job by its own quota (`spark-cq` = `batch-budget`) and its pods then wait `Pending` while the models fill the pool. Training waits for serving, never the reverse.
 
-**Model memory.** ~90 GiB is 0.75 of the GPU's ~119.7 GiB, so the sum of vLLM `--gpu-memory-utilization` over all models running at the same time must stay at or below **0.72** (with headroom). Sets that fit: three 7–8B models at 0.20 each (16k context); one 32B FP8 model at 0.45 plus one 7B at 0.25; R1-Distill-32B in BF16 at 0.70 alone (Chapter 20 §2).
+**Model memory.** ~90 GiB is 0.74 of the GPU's ~121.7 GiB, so the sum of vLLM `--gpu-memory-utilization` over all models running at the same time must stay at or below **0.72** (with headroom). Sets that fit: three 7–8B models at 0.20 each (16k context); one 32B FP8 model at 0.45 plus one 7B at 0.25; R1-Distill-32B in BF16 at 0.70 alone (Chapter 20 §2).
 
 Three rules shape the quotas themselves:
 
@@ -205,7 +205,7 @@ Three rules shape the quotas themselves:
 - **Memory is capped on requests *and* limits.** On a unified-memory box, memory is GPU memory too, so overcommit here is how model servers die.
 - **GPU slices are time-slices, not GPUs.** All 15 share one GB10 and its memory (Chapter 16). `llm-serving` getting 6 slices means up to 6 GPU pods at once, not 6× the GPU, and they all share the same ~90 GiB of model memory.
 
-The platform's 3 CPUs and ~9.7 GiB cover Cilium, MetalLB, the GPU Operator, Prometheus/Grafana, CoreDNS, local-path, Traefik, Kueue and KEDA; `budget_check.py` insists on at least 2 CPU · 8 GiB · 1 slice. There is little headroom left; giving a vCluster more means taking it from the LLM share (§6.5).
+The platform's 3 CPUs and ~11.7 GiB cover Cilium, MetalLB, the GPU Operator, Prometheus/Grafana, CoreDNS, local-path, Traefik, Kueue and KEDA; `budget_check.py` insists on at least 2 CPU · 8 GiB · 1 slice. There is little headroom left; giving a vCluster more means taking it from the LLM share (§6.5).
 
 ### 3.3 What a vCluster syncs
 
@@ -366,12 +366,12 @@ kubectl --context spark-root -n vc-dev-llms patch resourcequota vcluster-budget 
 kubectl --context spark-root -n vc-dev-llms describe resourcequota vcluster-budget
 ```
 
-Memory works the same way: more memory for a vCluster comes out of the LLM pool (lower `serving-budget` first, then raise `vcluster-budget`), because the platform's ~9.7 GiB has no slack. To make a change permanent, edit `manifests/root/05-vclusters/quotas.yaml` and `manifests/root-llms/10-tenancy/quotas.yaml` (and the LimitRange `max` if single pods need to grow) and run `python3 tests/budget_check.py` — it fails if the budgets together promise more than the Spark has, and also if `dev-lab` and `dev-llms` differ: the lab keeps the two sandboxes identical, so a permanent resize changes both. Shrinking works the same way, but doesn't evict running pods; it only blocks new ones until usage drops below the new limit. Undo the patches above with the values from the files (`kubectl --context spark-root apply -k manifests/root/05-vclusters` and `-k manifests/root-llms/10-tenancy`).
+Memory works the same way: more memory for a vCluster comes out of the LLM pool (lower `serving-budget` first, then raise `vcluster-budget`), because the platform's ~11.7 GiB has no slack. To make a change permanent, edit `manifests/root/05-vclusters/quotas.yaml` and `manifests/root-llms/10-tenancy/quotas.yaml` (and the LimitRange `max` if single pods need to grow) and run `python3 tests/budget_check.py` — it fails if the budgets together promise more than the Spark has, and also if `dev-lab` and `dev-llms` differ: the lab keeps the two sandboxes identical, so a permanent resize changes both. Shrinking works the same way, but doesn't evict running pods; it only blocks new ones until usage drops below the new limit. Undo the patches above with the values from the files (`kubectl --context spark-root apply -k manifests/root/05-vclusters` and `-k manifests/root-llms/10-tenancy`).
 
 ### 6.6 Add a third vCluster (exercise)
 
 1. Copy `vclusters/dev-lab.yaml` to `vclusters/train.yaml`; change the IP to `192.168.0.113` (in `annotations`, `extraSANs`, `exportKubeConfig.server`) and the context to `train`.
-2. Add namespace `vc-train`, a `vcluster-budget` and a `vcluster-defaults` LimitRange to `manifests/root/05-vclusters` (the platform's 3 CPU / ~9.7 GiB / 2 slices have no slack, so lower `serving-budget` in `manifests/root-llms/10-tenancy/quotas.yaml` first and give `vc-train` what you took).
+2. Add namespace `vc-train`, a `vcluster-budget` and a `vcluster-defaults` LimitRange to `manifests/root/05-vclusters` (the platform's 3 CPU / ~11.7 GiB / 2 slices have no slack, so lower `serving-budget` in `manifests/root-llms/10-tenancy/quotas.yaml` first and give `vc-train` what you took).
 3. `kubectl --context spark-root apply -k manifests/root/05-vclusters`
 4. `helm --kube-context spark-root upgrade --install train loft/vcluster --version $VCLUSTER_VERSION -n vc-train -f vclusters/train.yaml --wait`
 5. `scripts/merge-vcluster-kubeconfig.sh train vc-train`

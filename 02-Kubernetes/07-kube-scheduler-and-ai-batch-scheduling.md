@@ -81,7 +81,7 @@ For a GPU pod in the root's `batch` namespace that's three gates, each with its 
 |---|---|---|---|
 | Kueue `spark-cq` | root (`kueue-system`) | 2 CPU · 12 Gi · 3 slices for batch | Job stays `suspend: true`, Workload not admitted, **no pods** |
 | ResourceQuota `batch-budget` | root (admission) | the same 2 CPU · 12 Gi · 3 slices | `FailedCreate … exceeded quota: batch-budget` on the Job. With equal numbers only a Job that bypassed Kueue gets here |
-| Node allocatable | root (scheduler) | 15 slices and ~107.7 GiB for everyone; the ~90 GiB LLM pool is shared with serving | `0/1 nodes are available: 1 Insufficient memory` (or `nvidia.com/gpu`); `spark-batch` pods never preempt, so they wait |
+| Node allocatable | root (scheduler) | 15 slices and ~109.7 GiB for everyone; the ~90 GiB LLM pool is shared with serving | `0/1 nodes are available: 1 Insufficient memory` (or `nvidia.com/gpu`); `spark-batch` pods never preempt, so they wait |
 
 A pod from dev-lab or dev-llms meets a different middle gate: the root's `vcluster-budget` on its host namespace, which refuses it with a sync error inside the vCluster and **no scheduler events** (§5.4, break/fix 02).
 

@@ -1,6 +1,6 @@
 # 01-Ansible · Ansible for AI Infrastructure, Hands-On on NVIDIA DGX Spark
 
-Production-grade automation you can actually run: every chapter is built around a **working Ansible project in [`lab/`](lab/)** targeting one or two **DGX Spark** systems (GB10 Grace Blackwell, 128 GB unified memory of which ~119.7 GiB is usable, ConnectX-7 200GbE). Each chapter has HLD/LLD diagrams, the real roles and playbooks, integrations, a troubleshooting runbook and a validation checklist.
+Production-grade automation you can actually run: every chapter is built around a **working Ansible project in [`lab/`](lab/)** targeting one or two **DGX Spark** systems (GB10 Grace Blackwell, 128 GB unified memory of which ~121.7 GiB is usable, ConnectX-7 200GbE). Each chapter has HLD/LLD diagrams, the real roles and playbooks, integrations, a troubleshooting runbook and a validation checklist.
 
 Where a data-centre concept doesn't exist on a Spark (NVSwitch/Fabric Manager, InfiniBand subnet managers, BMC/Redfish, parallel file systems), the document says so, maps the concept to what the Spark actually has, and gives you a way to practise the data-centre version.
 

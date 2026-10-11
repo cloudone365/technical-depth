@@ -23,14 +23,14 @@ In this lab, training runs on the root cluster in namespace `batch`, next to the
 
 Training memory ≈ weights + gradients + optimizer state + activations. For mixed precision with Adam:
 
-| Method | Bytes per parameter (approx.) | 7B model | 32B model | Fits one Spark (~107.7 GiB allocatable)? | Fits `batch` (spark-cq / batch-budget 12 Gi)? |
+| Method | Bytes per parameter (approx.) | 7B model | 32B model | Fits one Spark (~109.7 GiB allocatable)? | Fits `batch` (spark-cq / batch-budget 12 Gi)? |
 |---|---|---|---|---|---|
 | Full fine-tune, BF16 + FP32 Adam | ~16 | ~112 GB + activations | ~512 GB | 7B: no. 32B: no | no |
 | Full fine-tune, 8-bit Adam | ~10 | ~70 GB | ~320 GB | 7B: yes. 32B: no | no |
 | LoRA on BF16 base | ~2 (+ small adapter) | ~15 GB | ~65 GB | yes / yes | no / no |
 | QLoRA on 4-bit base | ~0.6 (+ adapter) | ~5 GB | ~20 GB | yes / yes | 7B: yes. 32B: no |
 
-The Spark has ~119.7 GiB of unified memory, ~107.7 GiB allocatable after reservations (Chapter 01 §3.3), and that is CPU *and* GPU memory. The root keeps ~90 GiB of it as one LLM memory pool, shared by `llm-serving` (up to 90 Gi) and `batch` (up to 12 Gi). `spark-cq` and the `batch-budget` quota carry the same numbers: 2 CPU · 12 Gi · 3 slices (`root-llms/10-tenancy/quotas.yaml`; the `batch` LimitRange sets defaults only, no max, so one container may use the whole 12 Gi). Running models take their memory from the same pool and the same UMA (Chapter 20 §2), and every GPU container sets memory request = limit, so a training pod that doesn't fit next to the models waits Pending: training waits for serving, never the reverse. A bigger job is a decision for the platform team: raise `batch-budget` and `spark-cq` together and give serving less (CPU and slices on the root are split exactly, Chapter 04 §3.2), or park a model while the job runs. Two Sparks with FSDP/ZeRO-3 shard weights, gradients and optimizer state, which roughly halves the per-node figure (modules 03 and 05 go deep).
+The Spark has ~121.7 GiB of unified memory, ~109.7 GiB allocatable after reservations (Chapter 01 §3.3), and that is CPU *and* GPU memory. The root keeps ~90 GiB of it as one LLM memory pool, shared by `llm-serving` (up to 90 Gi) and `batch` (up to 12 Gi). `spark-cq` and the `batch-budget` quota carry the same numbers: 2 CPU · 12 Gi · 3 slices (`root-llms/10-tenancy/quotas.yaml`; the `batch` LimitRange sets defaults only, no max, so one container may use the whole 12 Gi). Running models take their memory from the same pool and the same UMA (Chapter 20 §2), and every GPU container sets memory request = limit, so a training pod that doesn't fit next to the models waits Pending: training waits for serving, never the reverse. A bigger job is a decision for the platform team: raise `batch-budget` and `spark-cq` together and give serving less (CPU and slices on the root are split exactly, Chapter 04 §3.2), or park a model while the job runs. Two Sparks with FSDP/ZeRO-3 shard weights, gradients and optimizer state, which roughly halves the per-node figure (modules 03 and 05 go deep).
 
 ---
 

@@ -64,7 +64,7 @@ flowchart TB
 
 ### 1.3 Memory budget on a UMA machine
 
-Everything on a Spark competes for one unified pool (~119.7 GiB usable), including the GPU. AWX comes out of the root's platform share. After the kubelet's 12 GiB reserve, the two vClusters (4 Gi each) and the ~90 GiB LLM memory pool that `llm-serving` and `batch` share, the platform services (Cilium, MetalLB, GPU Operator, Prometheus, Traefik, Kueue, KEDA) have about 9.7 GiB, and AWX lives in that. Give AWX hard limits so it can never starve a model server:
+Everything on a Spark competes for one unified pool (~121.7 GiB usable), including the GPU. AWX comes out of the root's platform share. After the kubelet's 12 GiB reserve, the two vClusters (4 Gi each) and the ~90 GiB LLM memory pool that `llm-serving` and `batch` share, the platform services (Cilium, MetalLB, GPU Operator, Prometheus, Traefik, Kueue, KEDA) have about 11.7 GiB, and AWX lives in that. Give AWX hard limits so it can never starve a model server:
 
 | Container | request | limit |
 |---|---|---|

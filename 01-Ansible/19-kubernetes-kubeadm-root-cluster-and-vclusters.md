@@ -194,7 +194,7 @@ mode: iptables
 | `taints: []` | no taint | dgx-spark-1 is the only node. Without this, nothing but DaemonSets could run on it |
 | `controlPlaneEndpoint` | `192.168.0.100:6443` | A stable endpoint, so dgx-spark-2 (or more control planes later) can join. Change it to a VIP *before* `init` if you plan HA; it is baked into every certificate and kubeconfig |
 | Pod / Service CIDR | `10.42.0.0/16` / `10.43.0.0/16` | Kept from the earlier lab, so every address in the course stays valid |
-| `systemReserved` + `kubeReserved` + `evictionHard` | 3 CPU (system 2 + kube 1), 12 GiB (system 6 + kube 2 + eviction 4) | Unified memory: pods, their GPU allocations and DGX OS share ~119.7 GiB. Without a reserve, a big model can starve sshd and the DGX Dashboard. `systemReserved` memory is 6 Gi because DGX OS runs headless: `04.3 Baseline` turns off the GNOME desktop (Chapter 04 §6.3), so the OS needs less. Allocatable ends up 17 CPU / ≈107.7 GiB |
+| `systemReserved` + `kubeReserved` + `evictionHard` | 3 CPU (system 2 + kube 1), 12 GiB (system 6 + kube 2 + eviction 4) | Unified memory: pods, their GPU allocations and DGX OS share ~121.7 GiB. Without a reserve, a big model can starve sshd and the DGX Dashboard. `systemReserved` memory is 6 Gi because DGX OS runs headless: `04.3 Baseline` turns off the GNOME desktop (Chapter 04 §6.3), so the OS needs less. Allocatable ends up 17 CPU / ≈109.7 GiB |
 | `evictionHard` lists all four signals | — | Setting the map **replaces** kubelet's defaults; a signal you omit is no longer enforced |
 | `maxPods: 200` | — | The LLM stack, two vClusters and the platform add-ons on one node pass the default 110 quickly: every tenant pod is a real pod here |
 | `bind-address: 0.0.0.0`, etcd metrics `:2381` | — | kube-prometheus-stack scrapes them from the pod network |
@@ -415,14 +415,14 @@ vclusters_list:
 | 4 | Read Secret `vc-<name>` (written by `exportKubeConfig`), write `.cache/kubeconfig-<name>.yaml`, merge contexts `dev-lab`, `dev-llms` | §2.5 |
 | 5 | `k8s_info` on Namespace `default` **through each new context** | Proves the MetalLB IP, the certificate SAN and the credentials together |
 
-Budgets, sync rules and naming are taught in 02-Kubernetes [Chapter 04](../02-Kubernetes/04-nested-clusters-with-vcluster.md). The numbers to keep in mind here, starting from the 17 CPU, ~107.7 GiB and 15 GPU slices left after the kubelet reservations (§2.4: 3 CPU, 12 GiB including the 4 GiB eviction threshold):
+Budgets, sync rules and naming are taught in 02-Kubernetes [Chapter 04](../02-Kubernetes/04-nested-clusters-with-vcluster.md). The numbers to keep in mind here, starting from the 17 CPU, ~109.7 GiB and 15 GPU slices left after the kubelet reservations (§2.4: 3 CPU, 12 GiB including the 4 GiB eviction threshold):
 
 | | CPU (req) | memory | GPU slices | enforced by |
 |---|---|---|---|---|
 | vCluster `dev-lab` | 2 | 4 Gi | 2 | root ResourceQuota `vcluster-budget` in `vc-dev-lab` |
 | vCluster `dev-llms` | 2 | 4 Gi | 2 | root ResourceQuota `vcluster-budget` in `vc-dev-llms` |
-| **root keeps** | 13 | ~99.7 GiB | 11 | |
-| ↳ platform (Cilium, MetalLB, GPU Operator, Prometheus, Traefik, Kueue, KEDA, platform-tools) | 3 | ~9.7 GiB | 2 | what is left over |
+| **root keeps** | 13 | ~101.7 GiB | 11 | |
+| ↳ platform (Cilium, MetalLB, GPU Operator, Prometheus, Traefik, Kueue, KEDA, platform-tools) | 3 | ~11.7 GiB | 2 | what is left over |
 | ↳ `llm-serving` | 8 | up to 90 Gi | 6 | ResourceQuota `serving-budget` |
 | ↳ `batch` | 2 | up to 12 Gi | 3 | ResourceQuota `batch-budget` (= Kueue ClusterQueue `spark-cq`) |
 

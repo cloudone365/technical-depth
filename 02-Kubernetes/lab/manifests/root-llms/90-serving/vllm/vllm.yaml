@@ -2,7 +2,7 @@
 # (Chapters 20, 04). Apply with --context spark-root.
 #
 # Two memory budgets, both must hold:
-#   1. vLLM's own: --gpu-memory-utilization is a fraction of the ~119.7 GiB the
+#   1. vLLM's own: --gpu-memory-utilization is a fraction of the ~121.7 GiB the
 #      GPU reports — i.e. of the SAME memory the OS, Kubernetes and every other
 #      pod use. 0.20 ≈ 24 GiB (weights + KV cache).
 #   2. The namespace's: serving-budget allows 90 Gi for ALL model servers in

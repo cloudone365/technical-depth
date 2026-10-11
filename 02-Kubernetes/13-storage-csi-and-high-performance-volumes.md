@@ -18,7 +18,7 @@
 Every model server's start time is dominated by one number: **how fast can N gigabytes of weights get from disk into (unified) memory?** And every training job's resilience depends on how fast it can write a checkpoint without stalling etcd (Chapter 02). On the Spark:
 
 - **One NVMe** holds DGX OS, container images (containerd for Kubernetes *and* Docker), the root's etcd data and WAL (`/var/lib/etcd`), both vClusters' SQLite databases, model weights and checkpoints. Isolation is by directory and I/O priority, not by device.
-- **Unified memory** means the page cache and the GPU compete for the same pool — about 119.7 GiB visible of the 128 GB installed. Reading a 60 GB checkpoint through the page cache can briefly need 60 GB of cache *plus* 60 GB of model. NVIDIA's Spark guidance is to drop caches before loading big models, and `scripts/uma-watch.sh` shows why.
+- **Unified memory** means the page cache and the GPU compete for the same pool — about 121.7 GiB visible of the 128 GB installed. Reading a 60 GB checkpoint through the page cache can briefly need 60 GB of cache *plus* 60 GB of model. NVIDIA's Spark guidance is to drop caches before loading big models, and `scripts/uma-watch.sh` shows why.
 - **GPUDirect Storage** matters less here than on a discrete-GPU server. GDS avoids a CPU "bounce buffer" copy across PCIe into HBM, and on GB10 there's no separate HBM to copy into. O_DIRECT loaders and avoiding double-buffering in the page cache give the gains (module 08 goes deeper).
 - **Storage is a root service.** A vCluster has no CSI driver, no provisioner and no PVs of its own. Tenants pick a class the root offers; their PVC is copied to the root, and the root's provisioner makes the directory. That gives one place to manage disks — and one more layer of quota for vCluster claims (§3.4). The LLM stack runs on the root, so its claims are root PVCs from the start.
 
@@ -51,7 +51,7 @@ flowchart LR
     D4[("/data/k8s/vc-dev-lab/<br/>throwaway-x-lab-tools-x-dev-lab")]
     D2[("/data/k8s/platform-tools/fio-scratch")]
     D3[("/var/lib/etcd · /var/lib/containerd<br/>/data/k8s/vc-*/data-*-0 (vCluster SQLite)")]
-    PC["page cache<br/>(part of the ~119.7 GiB UMA pool)"]
+    PC["page cache<br/>(part of the ~121.7 GiB UMA pool)"]
   end
   SC1 & SC2 & SC0 -. "copied in" .-> SCV
   PODV -->|mount| PVCM

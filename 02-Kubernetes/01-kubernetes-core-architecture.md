@@ -130,11 +130,11 @@ The 01-Ansible kubeadm config sets `systemReserved: {cpu: 2, memory: 6Gi}`, `kub
 
 | | CPU | Memory | Why |
 |---|---|---|---|
-| Capacity | 20 | ≈119.7 GiB | What the kernel reports (part of the 128 GB is firmware/carve-outs) |
+| Capacity | 20 | ≈121.7 GiB | What the kernel reports (part of the 128 GB is firmware/carve-outs) |
 | − system-reserved | 2 | 6 Gi | DGX OS (headless — no desktop session), DGX Dashboard, sshd, journald, Docker |
 | − kube-reserved | 1 | 2 Gi | kubelet + containerd |
 | − eviction threshold | — | 4 Gi | kubelet starts evicting below this |
-| **Allocatable** | **17** | **≈107.7 GiB** | What the scheduler hands out, **CPU and GPU combined** |
+| **Allocatable** | **17** | **≈109.7 GiB** | What the scheduler hands out, **CPU and GPU combined** |
 
 System-reserved is 6 Gi because 01-Ansible's `04.3 Baseline` (role `spark_baseline`, `spark_baseline_headless: true`) switches DGX OS to `multi-user.target`: no graphical session holds memory.
 

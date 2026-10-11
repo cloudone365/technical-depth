@@ -3,7 +3,7 @@
 Everything the 28 chapters of the [step-by-step guide](../00-kubernetes-step-by-step-guide.md) teach, as manifests, scripts and drills. The [01-Ansible lab](../../01-Ansible/lab/README.md) builds the base on one DGX Spark (a second Spark is optional):
 
 - a **root cluster** with kubeadm — dgx-spark-1 is control plane *and* worker — with Cilium, MetalLB and the GPU Operator (15 time-slices); it also runs the **LLM stack** (`llm-serving`, `batch`, `ingress` with Traefik, Kueue, KEDA, KServe) in one shared ~90 GiB memory pool, and
-- two small, identical **vClusters** inside it ([Chapter 04](../04-nested-clusters-with-vcluster.md)): `dev-lab` (tenants) and `dev-llms` (an LLM sandbox), 2 CPU · 4 Gi · 2 slices each; of the root's 13 CPU · ~99.7 GiB · 11 slices, the platform keeps 3 CPU · ~9.7 GiB · 2 slices and the LLM stack gets the rest.
+- two small, identical **vClusters** inside it ([Chapter 04](../04-nested-clusters-with-vcluster.md)): `dev-lab` (tenants) and `dev-llms` (an LLM sandbox), 2 CPU · 4 Gi · 2 slices each; of the root's 13 CPU · ~101.7 GiB · 11 slices, the platform keeps 3 CPU · ~11.7 GiB · 2 slices and the LLM stack gets the rest.
 
 This directory holds their definitions and everything that runs on them. Every code block in the chapters is taken from here.
 

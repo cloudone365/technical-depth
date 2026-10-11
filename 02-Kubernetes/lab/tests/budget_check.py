@@ -27,7 +27,7 @@ import yaml
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ANSIBLE = os.path.join(LAB, "..", "..", "01-Ansible", "lab", "roles")
-SPARK = {"cpu": 20.0, "memory_gi": 119.7, "gpu": None}    # gpu filled from the GPU Operator role
+SPARK = {"cpu": 20.0, "memory_gi": 121.7, "gpu": None}    # gpu filled from the GPU Operator role
 # What the root's own platform pods need (Cilium, MetalLB, Traefik, Kueue, KEDA,
 # GPU Operator, Prometheus, CoreDNS, local-path, platform-tools): the vClusters
 # and the LLM quotas must leave at least this.

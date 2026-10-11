@@ -387,7 +387,7 @@ Expected output (trimmed; your exact numbers and kernel will differ):
 ok: [dgx-spark-1] => msg: dgx-spark-1 aarch64 20 cores 119.6 GiB Ubuntu 24.04 kernel 6.x-…-nvidia
 ```
 
-> The reported memory is slightly under 128 GB: firmware and carve-outs take some. The `spark_expected.mem_total_gib_min: 110` guard allows for that.
+> The kernel reports about 121.7 GiB (`MemTotal: 127598768 kB` on dgx-spark-1) of the 128 GiB installed: firmware and carve-outs take the rest. The `spark_expected.mem_total_gib_min: 110` guard allows for that.
 
 Ad-hoc commands are how you poke a box without writing a playbook. Semaphore runs playbooks, not ad-hoc commands, so these run **from your MacBook** as `dgxadmin` (no Semaphore variable group → your own key). Name the host instead of the group `spark` while the optional dgx-spark-2 isn't there:
 
@@ -706,7 +706,7 @@ The `spark_baseline` role installs the tooling you'll need in every later chapte
 
 #### Headless: no desktop on a server
 
-DGX OS ships as a desktop system: it boots to `graphical.target`, so the display manager `gdm` and a GNOME session start even when no monitor is connected. In this lab the Spark is a server. You reach it over SSH (and Semaphore does too), never at its own screen. The desktop then does nothing useful but still costs memory, and on the Spark that memory is the **unified** pool: CPU RAM and GPU memory are the same ~119.7 GiB, so every GiB the desktop holds is a GiB no model can use.
+DGX OS ships as a desktop system: it boots to `graphical.target`, so the display manager `gdm` and a GNOME session start even when no monitor is connected. In this lab the Spark is a server. You reach it over SSH (and Semaphore does too), never at its own screen. The desktop then does nothing useful but still costs memory, and on the Spark that memory is the **unified** pool: CPU RAM and GPU memory are the same ~121.7 GiB, so every GiB the desktop holds is a GiB no model can use.
 
 **Headless** means DGX OS boots to text mode, `multi-user.target`: everything a server needs (networking, sshd, Docker, containerd, the kubelet, the DGX Dashboard on `localhost:11000`) and no graphical login or desktop session. The role does it when `spark_baseline_headless` is `true` (the default in [`defaults/main.yml`](lab/roles/spark_baseline/defaults/main.yml)):
 

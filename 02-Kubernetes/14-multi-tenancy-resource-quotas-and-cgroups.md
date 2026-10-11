@@ -34,14 +34,14 @@ Two facts shape everything below. First, **quotas are admission, cgroups are run
 
 ```mermaid
 flowchart TB
-  subgraph NODE["dgx-spark-1 · 20 cores · ≈119.7 GiB UMA"]
+  subgraph NODE["dgx-spark-1 · 20 cores · ≈121.7 GiB UMA"]
     direction TB
     SR["system-reserved<br/>2 CPU · 6 Gi<br/>DGX OS (headless), Docker"]
     KR["kube-reserved<br/>1 CPU · 2 Gi<br/>kubelet, containerd"]
     EV["eviction-hard<br/>memory.available &lt; 4 Gi"]
-    subgraph KP["kubepods.slice · allocatable 17 CPU · ≈107.7 Gi · 15 GPU slices"]
+    subgraph KP["kubepods.slice · allocatable 17 CPU · ≈109.7 Gi · 15 GPU slices"]
       direction LR
-      subgraph RT["root platform · no quota · 3 CPU · ≈9.7 Gi · 2 slices"]
+      subgraph RT["root platform · no quota · 3 CPU · ≈11.7 Gi · 2 slices"]
         CPL["kube-system: static control plane,<br/>Cilium, CoreDNS"]
         PT["platform-tools: QoS trio,<br/>throttle, UMA experiment"]
         ADD["ingress, kueue-system, keda:<br/>Traefik, Kueue, KEDA"]
@@ -93,11 +93,11 @@ Everything inside `kubepods.slice` is a sibling at runtime: a tenant pod, a mode
 
 | | CPU | Memory | Set in |
 |---|---|---|---|
-| capacity | 20 | ≈119.7 GiB (128 GB installed) | hardware |
+| capacity | 20 | ≈121.7 GiB (128 GB installed) | hardware |
 | `systemReserved` | 2 | 6 Gi | 01-Ansible `kubeadm_cluster_system_reserved` |
 | `kubeReserved` | 1 | 2 Gi | `kubeadm_cluster_kube_reserved` |
 | `evictionHard` `memory.available` | — | 4 Gi | `kubeadm_cluster_eviction_hard` |
-| **allocatable** | **17** | **≈107.7 GiB** | what the scheduler can hand out |
+| **allocatable** | **17** | **≈109.7 GiB** | what the scheduler can hand out |
 
 6 Gi of `systemReserved` is enough because DGX OS runs headless: 01-Ansible `04.3 Baseline` (role `spark_baseline`, `spark_baseline_headless: true`) sets the default target to `multi-user.target`, so no desktop session holds memory. If you keep the desktop, reserve more and keep `tests/budget_check.py` green.
 
@@ -130,20 +130,20 @@ How the Spark is split ([`manifests/root/05-vclusters/quotas.yaml`](lab/manifest
 
 | | CPU (req) | Memory | GPU slices | Storage |
 |---|---|---|---|---|
-| Spark total | 20 | ≈119.7 GiB | 15 | ≈3.7 TiB |
+| Spark total | 20 | ≈121.7 GiB | 15 | ≈3.7 TiB |
 | kubelet reservations | 3 (system 2 + kube 1) | 12 GiB (system 6 + kube 2 + eviction 4) | – | – |
-| allocatable | 17 | ≈107.7 GiB | 15 | |
+| allocatable | 17 | ≈109.7 GiB | 15 | |
 | vCluster dev-lab | 2 | 4 Gi | 2 | 200 Gi |
 | vCluster dev-llms | 2 | 4 Gi | 2 | 200 Gi |
-| **root keeps** | 13 | ≈99.7 GiB | 11 | the rest (≈3.3 TiB) |
-| ↳ platform (Cilium, MetalLB, GPU Operator, Prometheus, Traefik, Kueue, KEDA, platform-tools) | 3 | ≈9.7 GiB | 2 | |
+| **root keeps** | 13 | ≈101.7 GiB | 11 | the rest (≈3.3 TiB) |
+| ↳ platform (Cilium, MetalLB, GPU Operator, Prometheus, Traefik, Kueue, KEDA, platform-tools) | 3 | ≈11.7 GiB | 2 | |
 | ↳ LLM memory pool, shared | | ≈90 GiB | | |
 | &nbsp;&nbsp;↳ `llm-serving` · `serving-budget` | 8 | up to 90 Gi (requests = limits) | 6 | 1 Ti |
 | &nbsp;&nbsp;↳ `batch` · `batch-budget` = Kueue `spark-cq` | 2 | up to 12 Gi | 3 | 200 Gi |
 
-The split follows one rule per resource. Memory must fit allocatable with no overcommit: 4 + 4 + ≈9.7 + ≈90 = ≈107.7 GiB, because on unified memory an overcommitted gigabyte is one a model server can't have. CPU and slices are split exactly — 3 + 8 + 2 = 13 CPU and 2 + 6 + 3 = 11 slices for the root — and CPU may burst into idle cores anyway (it's compressible), so a tight CPU split costs only latency. The two vClusters stay small and identical: dev-lab for tools and tenancy drills, dev-llms to try LLM manifests or a tiny model with its own API server. The root keeps the rest, because the models run there. The root's 2 platform slices are for `platform-tools`: GPU probes, the §5.5 UMA experiment and the preemption-demo filler (2 replicas).
+The split follows one rule per resource. Memory must fit allocatable with no overcommit: 4 + 4 + ≈11.7 + ≈90 = ≈109.7 GiB, because on unified memory an overcommitted gigabyte is one a model server can't have. CPU and slices are split exactly — 3 + 8 + 2 = 13 CPU and 2 + 6 + 3 = 11 slices for the root — and CPU may burst into idle cores anyway (it's compressible), so a tight CPU split costs only latency. The two vClusters stay small and identical: dev-lab for tools and tenancy drills, dev-llms to try LLM manifests or a tiny model with its own API server. The root keeps the rest, because the models run there. The root's 2 platform slices are for `platform-tools`: GPU probes, the §5.5 UMA experiment and the preemption-demo filler (2 replicas).
 
-**The shared LLM memory pool.** Only memory is shared. `serving-budget` (90 Gi) and `batch-budget` (12 Gi) add up to more than the ≈90 GiB pool on purpose: serving may use the whole pool while nothing trains, and a training job takes up to 12 Gi of the same pool. Two quotas that overlap can't stop the two from overcommitting it — the **scheduler** does. Every GPU container in the LLM stack sets memory **request = limit** (vLLM, SGLang and KServe 32 Gi; the prefill and decode pods 20 Gi each; Triton 12 Gi; `resilient-train` 12 Gi; DDP ranks 6 Gi; gang workers 2 Gi), so the scheduler reserves a pod's full size against the node's allocatable memory. A pod that doesn't fit waits `Pending` with `Insufficient memory`; it never squeezes a running model. Kueue can admit a job whose pods then wait `Pending` while models fill the pool — training waits for serving, never the reverse (and PriorityClass `spark-serving` > `spark-batch` settles any race). [`tests/budget_check.py`](lab/tests/budget_check.py) checks request = limit on every GPU container in `root-llms`. In engine terms: ≈90 GiB of model memory means the sum of vLLM `--gpu-memory-utilization` across models running at the same time stays ≲ **0.72** (util × ≈119.7 GiB, with headroom) — three 7–8B models at 0.20, or one 32B FP8 at 0.45 plus one 7B at 0.25 (Chapter 20).
+**The shared LLM memory pool.** Only memory is shared. `serving-budget` (90 Gi) and `batch-budget` (12 Gi) add up to more than the ≈90 GiB pool on purpose: serving may use the whole pool while nothing trains, and a training job takes up to 12 Gi of the same pool. Two quotas that overlap can't stop the two from overcommitting it — the **scheduler** does. Every GPU container in the LLM stack sets memory **request = limit** (vLLM, SGLang and KServe 32 Gi; the prefill and decode pods 20 Gi each; Triton 12 Gi; `resilient-train` 12 Gi; DDP ranks 6 Gi; gang workers 2 Gi), so the scheduler reserves a pod's full size against the node's allocatable memory. A pod that doesn't fit waits `Pending` with `Insufficient memory`; it never squeezes a running model. Kueue can admit a job whose pods then wait `Pending` while models fill the pool — training waits for serving, never the reverse (and PriorityClass `spark-serving` > `spark-batch` settles any race). [`tests/budget_check.py`](lab/tests/budget_check.py) checks request = limit on every GPU container in `root-llms`. In engine terms: ≈90 GiB of model memory means the sum of vLLM `--gpu-memory-utilization` across models running at the same time stays ≲ **0.72** (util × ≈121.7 GiB, with headroom) — three 7–8B models at 0.20, or one 32B FP8 at 0.45 plus one 7B at 0.25 (Chapter 20).
 
 Three design rules:
 
@@ -380,7 +380,7 @@ python3 tests/budget_check.py
 
 | Check | Expected |
 |---|---|
-| node allocatable | 17 CPU, ≈107.7 GiB, `nvidia.com/gpu: 15` |
+| node allocatable | 17 CPU, ≈109.7 GiB, `nvidia.com/gpu: 15` |
 | root budgets | `dev-lab root budget: 2 4Gi 2`, `dev-llms root budget: 2 4Gi 2` |
 | LLM budgets | `llm-serving serving-budget: 8 90Gi 6`, `batch batch-budget: 2 12Gi 3`, `Kueue spark-cq: 2 12Gi 3` |
 | `budget_check.py` | the split table, then `budget check OK` |

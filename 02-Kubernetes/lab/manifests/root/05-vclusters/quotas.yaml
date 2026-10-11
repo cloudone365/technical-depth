@@ -4,14 +4,14 @@
 # sandboxes; the root keeps the rest of the Spark and runs the LLMs:
 #
 #                          CPU (req)   memory       GPU slices   storage
-#   Spark total               20      ~119.7 GiB        15        ~3.7 TiB
+#   Spark total               20      ~121.7 GiB        15        ~3.7 TiB
 #   kubelet reservations       3       12 GiB            -         -   (system 2/6Gi, kube 1/2Gi, eviction 4Gi;
 #                                                                         DGX OS runs headless)
-#   allocatable to pods       17     ~107.7 GiB         15
+#   allocatable to pods       17     ~109.7 GiB         15
 #   dev-lab                    2        4 Gi             2         200 Gi
 #   dev-llms                   2        4 Gi             2         200 Gi
-#   root keeps                13     ~99.7 GiB          11         the rest
-#     platform                 3      ~9.7 GiB           2                    (Cilium, MetalLB, GPU Operator, Prometheus,
+#   root keeps                13     ~101.7 GiB          11         the rest
+#     platform                 3      ~11.7 GiB           2                    (Cilium, MetalLB, GPU Operator, Prometheus,
 #                                                                              Traefik, Kueue, KEDA, platform-tools)
 #     LLM memory pool                  ~90 GiB                                shared by llm-serving (8 CPU · 6 slices · 1 Ti)
 #                                                                             and batch (2 CPU · ≤12 Gi · 3 slices)

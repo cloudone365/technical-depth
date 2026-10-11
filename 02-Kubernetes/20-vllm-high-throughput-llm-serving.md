@@ -15,11 +15,11 @@
 
 ## 1. Why this matters on a Spark
 
-vLLM's throughput comes from **PagedAttention** (the KV cache is paged in fixed blocks, like virtual memory, so it doesn't fragment) and **continuous batching** (new requests join the running batch at every decode step). On a Spark there's one extra rule: `--gpu-memory-utilization` is a fraction of the **whole unified pool** (≈119.7 GiB), the same memory DGX OS, the kubeadm control plane, both vCluster control planes, the page cache and every other pod use. On a discrete GPU, 0.90 is normal. Here, 0.90 would starve the whole machine.
+vLLM's throughput comes from **PagedAttention** (the KV cache is paged in fixed blocks, like virtual memory, so it doesn't fragment) and **continuous batching** (new requests join the running batch at every decode step). On a Spark there's one extra rule: `--gpu-memory-utilization` is a fraction of the **whole unified pool** (≈121.7 GiB), the same memory DGX OS, the kubeadm control plane, both vCluster control planes, the page cache and every other pod use. On a discrete GPU, 0.90 is normal. Here, 0.90 would starve the whole machine.
 
 And there are **two budgets**, both of which must hold:
 
-1. **vLLM's own**: weights + activations + KV cache ≤ fraction × 119.7 GiB. At 0.20 that's ≈ 24 GiB.
+1. **vLLM's own**: weights + activations + KV cache ≤ fraction × 121.7 GiB. At 0.20 that's ≈ 24 GiB.
 2. **The cluster's**: the pod's memory request and limit (both 32 Gi) must fit `serving-budget` in `llm-serving` (up to 90 Gi), *and* the node must still have 32 Gi of allocatable memory that no other pod has requested — the ~90 GiB LLM memory pool is shared with the `batch` namespace, and the scheduler is what keeps the two from overcommitting it. Whether CUDA allocations are charged to the pod's cgroup is something you measure (Chapter 14 §5.5); the manifests are sized as if they are.
 
 | Flag | What it controls | Lab value | Rule of thumb on a Spark |
@@ -78,7 +78,7 @@ flowchart LR
 
 Everything in this chapter is applied to the root (`--context spark-root`) and runs there under its real name: the vLLM pod is `vllm-…` in `llm-serving`, with no syncer in between. The root scheduler hands it a time-slice, the root's kube-proxy routes the Service, the root's Prometheus scrapes it, and KEDA (namespace `keda`, also on the root) queries that Prometheus directly at `http://kps-prometheus.observability.svc:9090`. If you want to try a changed manifest before it touches the running models, apply it to the `dev-llms` sandbox first (namespace `llm-sandbox`, a ~0.5B model at util 0.02, Chapter 04).
 
-**Model memory on the root.** Of the ~107.7 GiB allocatable, the two vClusters take 4 Gi each and the platform (Cilium, MetalLB, GPU Operator, Prometheus, Traefik, Kueue, KEDA, platform-tools) ~9.7 GiB, which leaves an **LLM memory pool of about 90 GiB**, shared by `llm-serving` and `batch`. In `--gpu-memory-utilization` terms that is 90 / 119.7 ≈ 0.75; with some headroom the rule is: **the sum of the util values of all models running at the same time ≲ 0.72**. Each util value is a fraction of the whole pool (util × ~119.7 GiB). Sets that fit:
+**Model memory on the root.** Of the ~109.7 GiB allocatable, the two vClusters take 4 Gi each and the platform (Cilium, MetalLB, GPU Operator, Prometheus, Traefik, Kueue, KEDA, platform-tools) ~11.7 GiB, which leaves an **LLM memory pool of about 90 GiB**, shared by `llm-serving` and `batch`. In `--gpu-memory-utilization` terms that is 90 / 121.7 ≈ 0.75; with some headroom the rule is: **the sum of the util values of all models running at the same time ≲ 0.72**. Each util value is a fraction of the whole pool (util × ~121.7 GiB). Sets that fit:
 
 | Set running together | util values | Sum | ≈ UMA |
 |---|---|---|---|
@@ -334,7 +334,7 @@ Chapters 20–23 all deploy into `llm-serving` on the root, which has one ceilin
 llm-serving  serving-budget  8 CPU · up to 90 Gi · 6 slices · 1 Ti    ← model servers
 batch        batch-budget    2 CPU · up to 12 Gi · 3 slices · 200 Gi  ← training (= Kueue spark-cq)
 pool         ~90 GiB of memory shared by both; CPU and slices are split
-platform     3 CPU · ~9.7 GiB · 2 slices (no quota)                   ← Cilium, MetalLB, GPU Operator, Prometheus, Traefik, Kueue, KEDA, platform-tools
+platform     3 CPU · ~11.7 GiB · 2 slices (no quota)                   ← Cilium, MetalLB, GPU Operator, Prometheus, Traefik, Kueue, KEDA, platform-tools
 ```
 
 CPU and slices are split exactly (3 + 8 + 2 = 13 CPU, 2 + 6 + 3 = 11 slices); only memory is shared. Serving may use the whole pool while nothing trains; a training job takes up to 12 Gi of the same pool. What keeps the two from overcommitting unified memory is the scheduler: every GPU container sets memory request = limit, so a pod that doesn't fit waits Pending and never squeezes a running model. What each lab object charges to `serving-budget` (CPU requests, memory **limits** — equal to the requests for the engines — slices, from the manifests), and the share of the UMA pool it asks vLLM/SGLang for:
@@ -373,7 +373,7 @@ kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscali
   || kubectl --context spark-root -n llm-serving scale deploy vllm --replicas=1
 ```
 
-Two things the table doesn't show. First, **batch** draws on the same ~90 GiB: Kueue admits a training job against `spark-cq` (up to 12 Gi), but its pods still need free memory on the node. With vLLM + P/D running (74.6 Gi) a 12 Gi job fits; with more serving than ~78 Gi its pods wait Pending until an engine is parked — training waits for serving, never the reverse. Read the real state with `kubectl --context spark-root describe node dgx-spark-1 | grep -A9 'Allocated resources'` before starting a batch job next to running engines. Second, quotas and requests count *declared* bytes, the GB10 counts *real* bytes: an engine's `--gpu-memory-utilization` share of 119.7 GiB is taken from the same pool as every other pod, and no quota sees the `platform-tools` benchmarks, a sandbox model in dev-llms or a `docker run` on the host. Keep the util sum ≲ 0.72 yourself.
+Two things the table doesn't show. First, **batch** draws on the same ~90 GiB: Kueue admits a training job against `spark-cq` (up to 12 Gi), but its pods still need free memory on the node. With vLLM + P/D running (74.6 Gi) a 12 Gi job fits; with more serving than ~78 Gi its pods wait Pending until an engine is parked — training waits for serving, never the reverse. Read the real state with `kubectl --context spark-root describe node dgx-spark-1 | grep -A9 'Allocated resources'` before starting a batch job next to running engines. Second, quotas and requests count *declared* bytes, the GB10 counts *real* bytes: an engine's `--gpu-memory-utilization` share of 121.7 GiB is taken from the same pool as every other pod, and no quota sees the `platform-tools` benchmarks, a sandbox model in dev-llms or a `docker run` on the host. Keep the util sum ≲ 0.72 yourself.
 
 ---
 

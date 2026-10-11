@@ -38,7 +38,7 @@ Read it from the outside in:
 5. **The root runs the LLMs.** Model serving and training live in ordinary root namespaces: `llm-serving` (vLLM, Triton, SGLang, KServe), `batch` (Kueue-managed training) and `ingress` (Traefik, the LLM gateway on `192.168.0.115`), with Kueue, KEDA, KServe and cert-manager installed on the root as well. A vLLM pod is `vllm-…` in `llm-serving` — no translation, no second quota.
 6. **Inside it, two small virtual clusters.** `dev-lab` (`192.168.0.111`) and `dev-llms` (`192.168.0.112`) each have their own API server, controller-manager, CoreDNS and datastore — so their users get their own namespaces, RBAC, CRDs and policies — but those run as ordinary pods in the root namespaces `vc-dev-lab` and `vc-dev-llms`. They have no nodes of their own. `dev-lab` holds the tenants (`tenant-alpha`, `tenant-beta`, `lab-tools`); `dev-llms` is a sandbox (`llm-sandbox`) for trying LLM manifests, the mock LLM or a tiny model before they go to the root.
 7. **The syncer is the bridge for the vClusters.** When you create a pod in `dev-lab`, the dev-lab API server stores it and the dev-lab syncer copies it to the root (`echo-…-x-lab-tools-x-dev-lab` in `vc-dev-lab`). From there the **root** scheduler places it, the root kubelet starts it in containerd, Cilium wires its network and the GPU Operator's device plugin hands it a slice.
-8. **Budgets are enforced at the root.** After the kubelet reservations (3 CPU · 12 GiB; DGX OS runs headless), 17 CPU · ~107.7 GiB · 15 slices are allocatable. A ResourceQuota on `vc-dev-lab` and `vc-dev-llms` (2 CPU · 4 Gi · 2 slices each) caps each vCluster as a whole; quotas inside a vCluster only divide its share among its own teams. The root keeps 13 CPU · ~99.7 GiB · 11 slices: 3 CPU · ~9.7 GiB · 2 slices for the platform, and one shared ~90 GiB memory pool for `llm-serving` (8 CPU · 6 slices) and `batch` (2 CPU · 3 slices). Memory is never overcommitted: every model and training container sets memory request = limit, so the scheduler keeps a job from squeezing a running model.
+8. **Budgets are enforced at the root.** After the kubelet reservations (3 CPU · 12 GiB; DGX OS runs headless), 17 CPU · ~109.7 GiB · 15 slices are allocatable. A ResourceQuota on `vc-dev-lab` and `vc-dev-llms` (2 CPU · 4 Gi · 2 slices each) caps each vCluster as a whole; quotas inside a vCluster only divide its share among its own teams. The root keeps 13 CPU · ~101.7 GiB · 11 slices: 3 CPU · ~11.7 GiB · 2 slices for the platform, and one shared ~90 GiB memory pool for `llm-serving` (8 CPU · 6 slices) and `batch` (2 CPU · 3 slices). Memory is never overcommitted: every model and training container sets memory request = limit, so the scheduler keeps a job from squeezing a running model.
 
 **Why this split.** The models are the Spark's main job, so they run on the cluster that owns the hardware: all the memory headroom, no syncer translation and no nested quota between them and the GPU. The two vClusters stay small and identical — one for tenancy and syncer drills, one as an LLM sandbox with its own API server. The trade-off: whoever administers the root also operates the LLM stack, which is isolated by namespaces (quotas, policies, PSA, NetworkPolicy), not by its own API server.
 
@@ -51,14 +51,14 @@ So a tenant's request in a vCluster crosses **two** API servers — the vCluster
 ```mermaid
 flowchart TB
   U(["users · SDKs · Open WebUI"]) --> GW
-  subgraph SPARK["dgx-spark-1 · DGX OS 7 · GB10 (15 time-slices) · ~119.7 GiB unified memory"]
+  subgraph SPARK["dgx-spark-1 · DGX OS 7 · GB10 (15 time-slices) · ~121.7 GiB unified memory"]
     direction TB
     subgraph ROOT["root cluster · kubeadm v1.36 · master + worker"]
       direction TB
       subgraph CP["control plane"]
         API["API server<br/>RBAC · APF · audit"] <--> ETCD[("etcd · snapshots")]
       end
-      subgraph PLAT["platform · 3 CPU · ~9.7 GiB · 2 slices"]
+      subgraph PLAT["platform · 3 CPU · ~11.7 GiB · 2 slices"]
         direction LR
         NET["Cilium · MetalLB"]
         GPU["GPU Operator<br/>15 slices"]
@@ -198,7 +198,7 @@ Every document carries its chapter number. Work through them in order with the [
 |---|---|
 | Nodes | dgx-spark-1 `192.168.0.100` (kubeadm control plane + worker). Optional dgx-spark-2 `192.168.0.101` (worker) |
 | Clusters (contexts) | `spark-root` (kubeadm, runs the LLM stack) · `dev-lab` (vCluster, `https://192.168.0.111`) · `dev-llms` (vCluster, `https://192.168.0.112`) — one kubeconfig: `01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml` |
-| Budgets | after 3 CPU · 12 GiB of kubelet reservations: dev-lab and dev-llms 2 CPU · 4 Gi · 2 slices · 200 Gi each — root keeps 13 CPU · ~99.7 GiB · 11 slices: platform 3 CPU · ~9.7 GiB · 2 slices, `llm-serving` 8 CPU · up to 90 Gi · 6 slices · 1 Ti, `batch` 2 CPU · up to 12 Gi · 3 slices · 200 Gi (one shared ~90 GiB memory pool) ([Chapter 04](04-nested-clusters-with-vcluster.md)) |
+| Budgets | after 3 CPU · 12 GiB of kubelet reservations: dev-lab and dev-llms 2 CPU · 4 Gi · 2 slices · 200 Gi each — root keeps 13 CPU · ~101.7 GiB · 11 slices: platform 3 CPU · ~11.7 GiB · 2 slices, `llm-serving` 8 CPU · up to 90 Gi · 6 slices · 1 Ti, `batch` 2 CPU · up to 12 Gi · 3 slices · 200 Gi (one shared ~90 GiB memory pool) ([Chapter 04](04-nested-clusters-with-vcluster.md)) |
 | CX-7 | `192.168.100.0/24` + `192.168.101.0/24`, MTU 9000 |
 | Pods / Services / DNS | `10.42.0.0/16` / `10.43.0.0/16` / `10.43.0.10` (Cilium VXLAN, kube-proxy iptables) |
 | LoadBalancer IPs | MetalLB `192.168.0.110–119`: dev-lab API `.111`, dev-llms API `.112`, LLM gateway (Traefik on the root) `.115` |

@@ -1,10 +1,10 @@
 # The LLM budgets on the ROOT cluster (Chapters 14, 20, 04).
 #
-#   allocatable to pods          17 CPU · ~107.7 GiB · 15 slices
+#   allocatable to pods          17 CPU · ~109.7 GiB · 15 slices
 #   vCluster dev-lab              2 CPU ·     4 Gi  ·  2 slices   (root/05-vclusters/quotas.yaml)
 #   vCluster dev-llms             2 CPU ·     4 Gi  ·  2 slices   (root/05-vclusters/quotas.yaml)
-#   root keeps                   13 CPU · ~99.7 GiB · 11 slices:
-#     platform (no quota)         3 CPU ·  ~9.7 GiB ·  2 slices   Cilium, MetalLB, GPU Operator, Prometheus,
+#   root keeps                   13 CPU · ~101.7 GiB · 11 slices:
+#     platform (no quota)         3 CPU ·  ~11.7 GiB ·  2 slices   Cilium, MetalLB, GPU Operator, Prometheus,
 #                                                                 Traefik, Kueue, KEDA, platform-tools
 #     LLM memory pool                     ~90 GiB                 shared by:
 #       llm-serving (this file)   8 CPU · up to 90 Gi · 6 slices · 1 Ti    model servers
@@ -19,7 +19,7 @@
 # (tests/budget_check.py checks request = limit on every GPU container here).
 #
 # Model memory: ~90 GiB → keep the sum of vLLM --gpu-memory-utilization across
-# models running at the same time ≲ 0.72 (util × ~119.7 GiB, with headroom).
+# models running at the same time ≲ 0.72 (util × ~121.7 GiB, with headroom).
 # Example sets: three 7-8B models at 0.20 (16k context), one 32B FP8 model at
 # 0.45 + one 7B at 0.25, or R1-Distill-32B BF16 at 0.70 alone (Chapter 20 §2).
 apiVersion: v1
