@@ -122,7 +122,7 @@ Use the **same cage number** on both Sparks. It keeps the config symmetric, and 
 #### What to look for
 
 1. **Semaphore run:** `failed=0`. A first run shows `changed` on *Render netplan for CX-7* and *Apply netplan*; a re-run shows `changed=0`.
-2. **The *Assert link health* task** prints one `OK` line per interface. Healthy values:
+2. **The *Assert link health* task** (with a second Spark in the inventory) prints `All CX-7 ports Up at 200000 Mb/s, PORT_ACTIVE` followed by the report per interface. Healthy values:
 
    | Field | Healthy value |
    |---|---|
@@ -141,7 +141,7 @@ Use the **same cage number** on both Sparks. It keeps the config symmetric, and 
    sudo ls -l /etc/netplan/40-cx7.yaml                         # -rw------- root root
    ```
 
-**With only one Spark:** dgx-spark-1's host_vars already list its two CX-7 interfaces, so this play does *not* skip itself. It writes the netplan file and addresses the ports, finds no peers (no pings), and then fails at *Assert link health*: without a cable the ports report `speed: -1`, `oper: down` and a `rdma_state` other than `PORT_ACTIVE`. *Wait for CX-7 links to come up* first spends about 30 s per interface retrying. To exercise the role anyway, add the extra variable `cx7_fabric_strict: false`: the assert then prints `unhealthy` lines instead of failing, and you can still check item 5 (addresses, MTU 9000, file mode). The GID index may stay empty while the ports have no link. The same applies to the `site` template, which includes this playbook.
+**With only one Spark:** dgx-spark-1's host_vars list its two CX-7 interfaces, so the play still runs: it writes the netplan file and addresses the ports. With no other Spark in the inventory there is no peer to ping, so `cx7_fabric_strict: auto` (the default) turns the link checks into a report: *Assert link health* shows `skipping`, and *Link health, report only* prints `Not Up at full speed: ['enp1s0f1np1', 'enP2p1s0f1np1']` with `speed: -1`, `oper: down` for each uncabled port. The run ends `failed=0`. *Wait for CX-7 links to come up* first spends about 30 s per interface retrying. Check item 5 (addresses, MTU 9000, file mode); the GID index may stay empty while the ports have no link. The checks become strict on their own once dgx-spark-2 is in the inventory; `-e cx7_fabric_strict=true` forces them, `false` turns them off. The `site` template, which includes this playbook, behaves the same.
 
 **If something's off:** `… not found. ibdev2netdev shows: …` → fix the names in host_vars. Speed `100000` → the cable or a switch port negotiated 100G. Plain ping works but the jumbo ping fails → MTU mismatch. More in §5.
 
@@ -288,20 +288,54 @@ Use the **same cage number** on both Sparks. It keeps the config symmetric, and 
   loop_control:
     label: "{{ item.item.name }}"
 
+# Build [peer_ip, my_interface] pairs for peers that share a /24 with one of my ports.
+- name: Compute fabric peers
+  ansible.builtin.set_fact:
+    cx7_fabric_peer_pairs: >-
+      {%- set pairs = [] -%}
+      {%- for peer in groups['spark'] | difference([inventory_hostname]) -%}
+        {%- for p in hostvars[peer].cx7_interfaces | default([]) -%}
+          {%- for mine in cx7_fabric_interfaces -%}
+            {%- if p.address.split('.')[:3] == mine.address.split('.')[:3] -%}
+              {%- set _ = pairs.append({'peer': peer, 'ip': p.address.split('/')[0], 'dev': mine.name, 'mtu': mine.mtu | default(9000)}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ pairs }}
+
+- name: Strict link checks? (auto = only when a fabric peer is in the inventory)
+  ansible.builtin.set_fact:
+    cx7_fabric_strict_effective: >-
+      {{ (cx7_fabric_peer_pairs | length > 0) if (cx7_fabric_strict | string | lower == 'auto')
+         else (cx7_fabric_strict | bool) }}
+    cx7_fabric_unhealthy: >-
+      {%- set bad = [] -%}
+      {%- for i in cx7_fabric_interfaces -%}
+        {%- set r = cx7_fabric_report[i.name] -%}
+        {%- if r.oper != 'up'
+              or (r.speed | int) != (cx7_fabric_expected_speed_mbps | int)
+              or (r.mtu | int) != (i.mtu | default(9000) | int)
+              or r.rdma_state != 'PORT_ACTIVE' -%}
+          {%- set _ = bad.append(i.name) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ bad }}
+
 - name: Assert link health
   ansible.builtin.assert:
-    that:
-      - cx7_fabric_report[item.name].oper == 'up'
-      - cx7_fabric_report[item.name].speed | int == cx7_fabric_expected_speed_mbps
-      - cx7_fabric_report[item.name].mtu | int == item.mtu | default(9000) | int
-      - cx7_fabric_report[item.name].rdma_state == 'PORT_ACTIVE'
-    fail_msg: "{{ item.name }} unhealthy: {{ cx7_fabric_report[item.name] }}"
-    success_msg: "{{ item.name }} OK: {{ cx7_fabric_report[item.name] }}"
-  register: cx7_fabric_assert
-  failed_when: cx7_fabric_strict | bool and cx7_fabric_assert.failed | default(false)
-  loop: "{{ cx7_fabric_interfaces }}"
-  loop_control:
-    label: "{{ item.name }}"
+    that: cx7_fabric_unhealthy | length == 0
+    fail_msg: "Unhealthy CX-7 ports {{ cx7_fabric_unhealthy }}: {{ cx7_fabric_report }}"
+    success_msg: "All CX-7 ports Up at {{ cx7_fabric_expected_speed_mbps }} Mb/s, PORT_ACTIVE: {{ cx7_fabric_report }}"
+  when: cx7_fabric_strict_effective | bool
+
+- name: Link health, report only (no fabric peer in the inventory, so an uncabled port is expected)
+  ansible.builtin.debug:
+    msg:
+      - "Not Up at full speed: {{ cx7_fabric_unhealthy if cx7_fabric_unhealthy else 'none' }}"
+      - "{{ cx7_fabric_report }}"
+      - "Strict checks start once a second Spark with cx7_interfaces is in the inventory (or set cx7_fabric_strict=true)."
+  when: not (cx7_fabric_strict_effective | bool)
 
 - name: Discover RoCEv2 IPv4 GID index (value for NCCL_IB_GID_INDEX)
   ansible.builtin.shell: |
@@ -334,22 +368,6 @@ Use the **same cage number** on both Sparks. It keeps the config symmetric, and 
     cx7_fabric_hca_list: "{{ cx7_fabric_interfaces | map(attribute='rdma_dev') | join(',') }}"
     cx7_fabric_roce_gid_index: "{{ cx7_fabric_gid_index or (cx7_fabric_gid.results[0].stdout | default('', true)) }}"
 
-# Build [peer_ip, my_interface] pairs for peers that share a /24 with one of my ports.
-- name: Compute fabric peers
-  ansible.builtin.set_fact:
-    cx7_fabric_peer_pairs: >-
-      {%- set pairs = [] -%}
-      {%- for peer in groups['spark'] | difference([inventory_hostname]) -%}
-        {%- for p in hostvars[peer].cx7_interfaces | default([]) -%}
-          {%- for mine in cx7_fabric_interfaces -%}
-            {%- if p.address.split('.')[:3] == mine.address.split('.')[:3] -%}
-              {%- set _ = pairs.append({'peer': peer, 'ip': p.address.split('/')[0], 'dev': mine.name, 'mtu': mine.mtu | default(9000)}) -%}
-            {%- endif -%}
-          {%- endfor -%}
-        {%- endfor -%}
-      {%- endfor -%}
-      {{ pairs }}
-
 - name: Jumbo-frame reachability to peers (DF bit set, MTU-28 byte payload)
   ansible.builtin.command: >-
     ping -c 3 -W 1 -M do -s {{ item.mtu | int - 28 }} -I {{ item.dev }} {{ item.ip }}
@@ -379,7 +397,7 @@ Expected tail:
 
 ```
 TASK [cx7_fabric : Assert link health]
-ok: [dgx-spark-1] => (item=enp1s0f1np1) => msg: 'enp1s0f1np1 OK: {''speed'': 200000, ''mtu'': 9000, ''oper'': ''up'', ''rdma_state'': ''PORT_ACTIVE''}'
+ok: [dgx-spark-1] => msg: 'All CX-7 ports Up at 200000 Mb/s, PORT_ACTIVE: {''enp1s0f1np1'': {''speed'': 200000, ''mtu'': 9000, ''oper'': ''up'', ''rdma_state'': ''PORT_ACTIVE''}, …}'
 TASK [cx7_fabric : Jumbo-frame reachability to peers (DF bit set, MTU-28 byte payload)]
 ok: [dgx-spark-1] => (item=enp1s0f1np1 -> dgx-spark-2 (192.168.100.12))
 TASK [Print NCCL environment derived from the fabric]

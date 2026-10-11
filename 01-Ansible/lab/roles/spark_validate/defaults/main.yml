@@ -1,6 +1,11 @@
 ---
 spark_validate_container: true
-spark_validate_fabric: "{{ cx7_interfaces | default([]) | length > 0 }}"
+# CX-7 links at 200G: only when there is a second Spark to cable to. With one
+# Spark the ports have no peer, so 13.1 reports them instead of failing here.
+spark_validate_fabric: "{{ cx7_interfaces | default([]) | length > 0 and groups['spark'] | default([]) | length > 1 }}"
+# Kubernetes and Slurm checks run for hosts in those groups, but only once the
+# service exists (admin.conf on the control plane, sinfo on the Slurm controller).
+# Before Chapters 19 / 22 they are listed as skipped in the report, not failed.
 spark_validate_k8s: "{{ inventory_hostname in (groups['k8s_control_plane'] | default([])) + (groups['k8s_workers'] | default([])) }}"
 spark_validate_slurm: "{{ inventory_hostname in groups['slurm_compute'] | default([]) }}"
 spark_validate_image: nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04

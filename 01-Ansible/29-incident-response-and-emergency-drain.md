@@ -66,6 +66,38 @@ node_drain_bundle_dir: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') 
 # lab/roles/node_drain/tasks/main.yml
 ---
 # Order matters: stop NEW work → collect evidence → stop RUNNING work → remediate → prove → return.
+#
+# Kubernetes and Slurm steps run for hosts in those groups, but only once the service
+# exists (the lab kubeconfig on the control node, scontrol on the Slurm controller), so
+# a drain or a DGX OS upgrade also works before Chapters 19 / 22.
+- name: Is Kubernetes set up yet? (lab kubeconfig on the control node)
+  ansible.builtin.stat:
+    path: "{{ node_drain_kubeconfig }}"
+  delegate_to: localhost
+  become: false
+  register: node_drain_kubeconfig_stat
+  when: node_drain_k8s | bool
+
+- name: Is Slurm set up yet? (scontrol on the controller)
+  ansible.builtin.command: sh -c 'command -v scontrol'
+  delegate_to: "{{ groups['slurm_controller'][0] }}"
+  register: node_drain_scontrol
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  failed_when: false
+  when: node_drain_slurm | bool
+
+- name: Which schedulers to drain
+  ansible.builtin.set_fact:
+    node_drain_k8s_on: "{{ node_drain_k8s | bool and node_drain_kubeconfig_stat.stat.exists | default(false) }}"
+    node_drain_slurm_on: "{{ node_drain_slurm | bool and node_drain_scontrol.rc | default(1) == 0 }}"
+
+- name: Report
+  ansible.builtin.debug:
+    msg: >-
+      Kubernetes: {{ 'drain/uncordon' if node_drain_k8s_on | bool else ('not set up yet, skipped' if node_drain_k8s | bool else 'off') }} ·
+      Slurm: {{ 'drain/resume' if node_drain_slurm_on | bool else ('not set up yet, skipped' if node_drain_slurm | bool else 'off') }}
+
 - name: "1/6 Cordon + drain Kubernetes node"
   kubernetes.core.k8s_drain:
     kubeconfig: "{{ node_drain_kubeconfig }}"
@@ -79,14 +111,14 @@ node_drain_bundle_dir: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') 
       wait_timeout: 300
   delegate_to: localhost
   become: false
-  when: node_drain_k8s | bool
+  when: node_drain_k8s_on | bool
 
 - name: "2/6 Drain in Slurm (running jobs finish, no new ones start)"
   ansible.builtin.command: >-
     scontrol update NodeName={{ inventory_hostname }} State=DRAIN Reason="{{ node_drain_reason }}"
   delegate_to: "{{ groups['slurm_controller'][0] }}"
   changed_when: true
-  when: node_drain_slurm | bool
+  when: node_drain_slurm_on | bool
 
 - name: "3/6 Collect forensic bundle"
   when: node_drain_collect | bool
@@ -151,9 +183,13 @@ node_drain_bundle_dir: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') 
 - name: "6/6 Validate, then return to service"
   when: node_drain_undrain_after | bool
   block:
-    - name: Run validation role
+    # The node is still in Slurm DRAIN here by design, so slurm_usable is checked
+    # after the resume below rather than inside the validation role.
+    - name: Run validation role (hardware, driver, container, fabric, Kubernetes)
       ansible.builtin.include_role:
         name: spark_validate
+      vars:
+        spark_validate_slurm: false
 
     - name: Uncordon Kubernetes node
       kubernetes.core.k8s_drain:
@@ -163,13 +199,23 @@ node_drain_bundle_dir: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') 
         state: uncordon
       delegate_to: localhost
       become: false
-      when: node_drain_k8s | bool
+      when: node_drain_k8s_on | bool
 
     - name: Resume in Slurm
       ansible.builtin.command: scontrol update NodeName={{ inventory_hostname }} State=RESUME
       delegate_to: "{{ groups['slurm_controller'][0] }}"
       changed_when: true
-      when: node_drain_slurm | bool
+      when: node_drain_slurm_on | bool
+
+    - name: Slurm accepts work on the node again
+      ansible.builtin.command: sinfo -h -n {{ inventory_hostname }} -o %T
+      delegate_to: "{{ groups['slurm_controller'][0] }}"
+      register: node_drain_sinfo
+      until: node_drain_sinfo.stdout in ['idle', 'mixed', 'allocated']
+      retries: 12
+      delay: 5
+      changed_when: false
+      when: node_drain_slurm_on | bool
 ```
 
 ```yaml
@@ -239,7 +285,8 @@ kubectl --context spark-root get pdb -A                                         
 - **2 · Evidence:** collects `nvidia-smi -q`, kernel logs (this boot and the previous one), NVRM/Xid/mlx5 lines, service logs, `/proc/meminfo`, RDMA and link state and `docker ps -a` into a `.tgz`, each command time-boxed. It is copied to `incidents/<host>-<time>.tgz` in the state folder (`/opt/spark-lab/cache` on sema01, `.cache/` on the MacBook). With `node_drain_bug_report=true` it adds `nvidia-bug-report.log.gz`, which takes minutes.
 - **3 · Stop GPU containers:** `docker stop` on every running container that uses the NVIDIA runtime.
 - **4 · Reboot** (only with `node_drain_reboot=true`): waits up to 15 minutes for `nvidia-smi -L` to answer.
-- **5 · Prove and return** (only with `node_drain_undrain_after=true`): runs the `spark_validate` role, then uncordons in Kubernetes and resumes in Slurm. If validation fails, the node stays drained.
+- **5 · Prove and return** (only with `node_drain_undrain_after=true`): runs the `spark_validate` role (without its Slurm check, since the node is still drained there), then uncordons in Kubernetes, resumes in Slurm and waits until `sinfo` shows the node `idle`. If validation fails, the node stays drained.
+- **Before Chapters 19 / 22:** the role checks first whether Kubernetes (the lab kubeconfig) and Slurm (`scontrol`) exist, and prints `not set up yet, skipped` for the ones that don't.
 
 #### What to look for
 
@@ -256,8 +303,7 @@ kubectl --context spark-root get pdb -A                                         
 5. **Without `--limit`:** the run fails at once with `Use -l <host> (or -e allow_all=true if you really mean it)`. That is the guard working.
 
 **If something's off:**
-- Verdict fails on `cx7_links_200g` with one Spark → the CX-7 ports have no peer cable. Add `-e spark_validate_fabric=false` and run again with `node_drain_reboot=false node_drain_undrain_after=true`.
-- Verdict fails on `slurm_usable` → validation runs *before* the role resumes the node, so a node still in Slurm `DRAIN` (or a Spark without Slurm) fails this check. Add `-e spark_validate_slurm=false`, then resume by hand: `sudo scontrol update NodeName=dgx-spark-1 State=RESUME` on dgx-spark-1.
+- *Slurm accepts work on the node again* retries and fails → `sinfo -R` on dgx-spark-1 shows why the node is still not `idle` (for example a failing Slurm health check, Chapter 22 §3.4).
 - `Permission denied (publickey)` after the reboot → the 15-minute certificate ran out (§1). More in §5.
 
 #### Run it

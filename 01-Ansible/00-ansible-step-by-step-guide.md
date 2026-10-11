@@ -120,7 +120,7 @@ flowchart LR
   class S13,S14,S15 two
 ```
 
-Orange: the management plane. Blue: needs `dgx-spark-2` and a QSFP cable; with one Spark, read those chapters and move on (the playbooks skip themselves).
+Orange: the management plane. Blue: needs `dgx-spark-2` and a QSFP cable; with one Spark, read those chapters and move on (the playbooks configure dgx-spark-1's side, only report the uncabled links, and skip the two-node tests).
 
 ---
 
@@ -347,7 +347,7 @@ ansible-playbook playbooks/12.1-telemetry.yml -K   # break-glass
 
 # Part III · Fabric & storage
 
-Chapters 13–15 need `dgx-spark-2` and a QSFP cable. Uncomment `dgx-spark-2` in `inventory/hosts.yml` (and in the groups it belongs to), push, and run Chapters 03 (bootstrap), 04 (`04.1-semaphore-target.yml`, `04.2 Ping`, `04.3 Baseline`) and 10–12 for it first. With one Spark these playbooks skip themselves; read the chapters and continue with Chapter 16.
+Chapters 13–15 need `dgx-spark-2` and a QSFP cable. Uncomment `dgx-spark-2` in `inventory/hosts.yml` (and in the groups it belongs to), push, and run Chapters 03 (bootstrap), 04 (`04.1-semaphore-target.yml`, `04.2 Ping`, `04.3 Baseline`) and 10–12 for it first. With one Spark these playbooks configure dgx-spark-1's side, report the uncabled links without failing, and skip the two-node tests; read the chapters and continue with Chapter 16.
 
 ## Chapter 13 · ConnectX-7 fabric & OpenSM → [document](13-connectx7-fabric-and-opensm.md)
 

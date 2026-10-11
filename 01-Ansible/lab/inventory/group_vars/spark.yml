@@ -66,3 +66,8 @@ spark_sysctls:
   net.ipv4.tcp_wmem: "4096 65536 268435456"
   net.core.netdev_max_backlog: 250000
   net.ipv4.tcp_mtu_probing: 1
+
+# Driver security floor (Chapter 28 §3.2). Set it from the NVIDIA GPU Display Driver
+# security bulletin for your branch; 28.1 then fails a Spark whose driver is older.
+# Empty = check skipped.
+spark_driver_min_secure: ""

@@ -11,10 +11,6 @@
   hosts: spark
   become: true
   gather_facts: false
-  vars:
-    # Set from the NVIDIA GPU Display Driver security bulletin that applies to your branch.
-    # Empty = skip the check.
-    spark_driver_min_secure: ""
   tasks:
     - name: Refresh fwupd metadata (LVFS)
       ansible.builtin.command: fwupdmgr refresh --force
@@ -65,12 +61,12 @@
 
     - name: Security floor for the driver
       ansible.builtin.assert:
-        that: fw_record.driver is version(spark_driver_min_secure, '>=')
+        that: fw_record.driver is version(spark_driver_min_secure | default(''), '>=')
         fail_msg: >-
           {{ inventory_hostname }} driver {{ fw_record.driver }} is below the security floor
           {{ spark_driver_min_secure }} — schedule playbooks/10.2-dgxos-upgrade.yml
         success_msg: "driver {{ fw_record.driver }} >= {{ spark_driver_min_secure }}"
-      when: spark_driver_min_secure | length > 0
+      when: spark_driver_min_secure | default('') | length > 0   # set in inventory/group_vars/spark.yml (Chapter 28 §3.2)
 
 - name: Cross-node comparison
   hosts: localhost

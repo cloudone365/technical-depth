@@ -232,7 +232,7 @@ driver_audit:
 3. **After the reboot,** the `container_runtime` smoke test shows the GB10 through both `--gpus` and CDI, as in Chapter 11 §3.1, and `spark_validate` ends with `All N checks passed`.
 4. **Then run the audit (§3.1)** on the upgraded Spark: four equal versions (the new ones), `module_flavor: open`, and `apt-mark showhold` lists the NVIDIA packages again.
 
-**If something's off:** a failure in the drain step on a Spark without the Kubernetes cluster (Chapter 19) or Slurm (Chapter 22) is expected, because dgx-spark-1 is in `k8s_control_plane` and `slurm_compute` in `hosts.yml`; do only the dry run until those chapters are done. A reboot that times out usually means the GPU didn't come back (`nvidia-smi -L` on the console). `Permission denied` after the reboot under Semaphore means the certificate TTL was left at 15 minutes. More in §5.
+**If something's off:** before Chapters 19 and 22, the drain step prints `Kubernetes: not set up yet, skipped · Slurm: not set up yet, skipped`; that's expected, the upgrade carries on without them. A reboot that times out usually means the GPU didn't come back (`nvidia-smi -L` on the console). `Permission denied` after the reboot under Semaphore means the certificate TTL was left at 15 minutes. More in §5.
 
 #### Run it
 
@@ -240,12 +240,15 @@ driver_audit:
 # lab/playbooks/10.2-dgxos-upgrade.yml
 ---
 # Controlled DGX OS update, one Spark at a time:
-#   drain → unhold → apt full-upgrade → reboot → audit + validate → re-hold → return to service
+#   drain → unhold → apt full-upgrade (+ firmware) → reboot → re-hold → validate → return to service
 # This is what the DGX Dashboard "Update" button does, wrapped in the safety
 # steps a shared/multi-node lab needs.
 #
 #   ansible-playbook playbooks/10.2-dgxos-upgrade.yml -l dgx-spark-2 -K
 #   ansible-playbook playbooks/10.2-dgxos-upgrade.yml -K -e upgrade_dry_run=true   # show what would change
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: Rolling DGX OS upgrade
   hosts: spark
   become: true
@@ -272,9 +275,9 @@ driver_audit:
           - "{{ upgrade_pending | length }} packages pending, {{ upgrade_pending_nvidia | length }} driver/CUDA/kernel"
           - "{{ upgrade_pending_nvidia }}"
 
-    - name: Stop here in dry-run mode
+    - name: Stop here in dry-run mode, or when there is nothing to do
       ansible.builtin.meta: end_host
-      when: upgrade_dry_run | bool or upgrade_pending | length == 0
+      when: upgrade_dry_run | bool or (upgrade_pending | length == 0 and not upgrade_firmware | bool)
 
   tasks:
     - name: Drain the node (no forensics, no reboot yet)

@@ -1,6 +1,6 @@
 ---
 # Controlled DGX OS update, one Spark at a time:
-#   drain → unhold → apt full-upgrade → reboot → audit + validate → re-hold → return to service
+#   drain → unhold → apt full-upgrade (+ firmware) → reboot → re-hold → validate → return to service
 # This is what the DGX Dashboard "Update" button does, wrapped in the safety
 # steps a shared/multi-node lab needs.
 #
@@ -35,9 +35,9 @@
           - "{{ upgrade_pending | length }} packages pending, {{ upgrade_pending_nvidia | length }} driver/CUDA/kernel"
           - "{{ upgrade_pending_nvidia }}"
 
-    - name: Stop here in dry-run mode
+    - name: Stop here in dry-run mode, or when there is nothing to do
       ansible.builtin.meta: end_host
-      when: upgrade_dry_run | bool or upgrade_pending | length == 0
+      when: upgrade_dry_run | bool or (upgrade_pending | length == 0 and not upgrade_firmware | bool)
 
   tasks:
     - name: Drain the node (no forensics, no reboot yet)

@@ -1,5 +1,37 @@
 ---
 # Order matters: stop NEW work → collect evidence → stop RUNNING work → remediate → prove → return.
+#
+# Kubernetes and Slurm steps run for hosts in those groups, but only once the service
+# exists (the lab kubeconfig on the control node, scontrol on the Slurm controller), so
+# a drain or a DGX OS upgrade also works before Chapters 19 / 22.
+- name: Is Kubernetes set up yet? (lab kubeconfig on the control node)
+  ansible.builtin.stat:
+    path: "{{ node_drain_kubeconfig }}"
+  delegate_to: localhost
+  become: false
+  register: node_drain_kubeconfig_stat
+  when: node_drain_k8s | bool
+
+- name: Is Slurm set up yet? (scontrol on the controller)
+  ansible.builtin.command: sh -c 'command -v scontrol'
+  delegate_to: "{{ groups['slurm_controller'][0] }}"
+  register: node_drain_scontrol
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  failed_when: false
+  when: node_drain_slurm | bool
+
+- name: Which schedulers to drain
+  ansible.builtin.set_fact:
+    node_drain_k8s_on: "{{ node_drain_k8s | bool and node_drain_kubeconfig_stat.stat.exists | default(false) }}"
+    node_drain_slurm_on: "{{ node_drain_slurm | bool and node_drain_scontrol.rc | default(1) == 0 }}"
+
+- name: Report
+  ansible.builtin.debug:
+    msg: >-
+      Kubernetes: {{ 'drain/uncordon' if node_drain_k8s_on | bool else ('not set up yet, skipped' if node_drain_k8s | bool else 'off') }} ·
+      Slurm: {{ 'drain/resume' if node_drain_slurm_on | bool else ('not set up yet, skipped' if node_drain_slurm | bool else 'off') }}
+
 - name: "1/6 Cordon + drain Kubernetes node"
   kubernetes.core.k8s_drain:
     kubeconfig: "{{ node_drain_kubeconfig }}"
@@ -13,14 +45,14 @@
       wait_timeout: 300
   delegate_to: localhost
   become: false
-  when: node_drain_k8s | bool
+  when: node_drain_k8s_on | bool
 
 - name: "2/6 Drain in Slurm (running jobs finish, no new ones start)"
   ansible.builtin.command: >-
     scontrol update NodeName={{ inventory_hostname }} State=DRAIN Reason="{{ node_drain_reason }}"
   delegate_to: "{{ groups['slurm_controller'][0] }}"
   changed_when: true
-  when: node_drain_slurm | bool
+  when: node_drain_slurm_on | bool
 
 - name: "3/6 Collect forensic bundle"
   when: node_drain_collect | bool
@@ -85,9 +117,13 @@
 - name: "6/6 Validate, then return to service"
   when: node_drain_undrain_after | bool
   block:
-    - name: Run validation role
+    # The node is still in Slurm DRAIN here by design, so slurm_usable is checked
+    # after the resume below rather than inside the validation role.
+    - name: Run validation role (hardware, driver, container, fabric, Kubernetes)
       ansible.builtin.include_role:
         name: spark_validate
+      vars:
+        spark_validate_slurm: false
 
     - name: Uncordon Kubernetes node
       kubernetes.core.k8s_drain:
@@ -97,10 +133,20 @@
         state: uncordon
       delegate_to: localhost
       become: false
-      when: node_drain_k8s | bool
+      when: node_drain_k8s_on | bool
 
     - name: Resume in Slurm
       ansible.builtin.command: scontrol update NodeName={{ inventory_hostname }} State=RESUME
       delegate_to: "{{ groups['slurm_controller'][0] }}"
       changed_when: true
-      when: node_drain_slurm | bool
+      when: node_drain_slurm_on | bool
+
+    - name: Slurm accepts work on the node again
+      ansible.builtin.command: sinfo -h -n {{ inventory_hostname }} -o %T
+      delegate_to: "{{ groups['slurm_controller'][0] }}"
+      register: node_drain_sinfo
+      until: node_drain_sinfo.stdout in ['idle', 'mixed', 'allocated']
+      retries: 12
+      delay: 5
+      changed_when: false
+      when: node_drain_slurm_on | bool

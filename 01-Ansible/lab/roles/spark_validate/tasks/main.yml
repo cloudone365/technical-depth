@@ -40,6 +40,33 @@
          | list | length == cx7_interfaces | default([]) | length }}
   when: spark_validate_fabric | bool
 
+- name: Is Kubernetes set up yet? (Chapter 19)
+  ansible.builtin.stat:
+    path: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['k8s_control_plane'][0] }}"
+  register: spark_validate_k8s_installed
+  when: spark_validate_k8s | bool
+
+- name: Is Slurm set up yet? (Chapter 22)
+  ansible.builtin.command: sh -c 'command -v sinfo'
+  delegate_to: "{{ groups['slurm_controller'][0] }}"
+  register: spark_validate_slurm_installed
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  failed_when: false
+  when: spark_validate_slurm | bool
+
+- name: Which service checks apply
+  ansible.builtin.set_fact:
+    spark_validate_k8s_on: "{{ spark_validate_k8s | bool and spark_validate_k8s_installed.stat.exists | default(false) }}"
+    spark_validate_slurm_on: "{{ spark_validate_slurm | bool and spark_validate_slurm_installed.rc | default(1) == 0 }}"
+
+- name: Checks skipped because the service isn't installed yet
+  ansible.builtin.set_fact:
+    spark_validate_skipped: >-
+      {{ (['k8s_ready_gpu (no /etc/kubernetes/admin.conf yet)'] if spark_validate_k8s | bool and not spark_validate_k8s_on | bool else [])
+         + (['slurm_usable (no sinfo yet)'] if spark_validate_slurm | bool and not spark_validate_slurm_on | bool else []) }}
+
 - name: Kubernetes node Ready + GPU allocatable
   ansible.builtin.shell: |
     set -o pipefail
@@ -52,7 +79,7 @@
   changed_when: false
   check_mode: false        # read-only probe: must also run under --check (drift detection)
   failed_when: false
-  when: spark_validate_k8s | bool
+  when: spark_validate_k8s_on | bool
 
 - name: Slurm node state
   ansible.builtin.command: sinfo -h -n {{ inventory_hostname }} -o %T
@@ -61,7 +88,7 @@
   changed_when: false
   check_mode: false        # read-only probe: must also run under --check (drift detection)
   failed_when: false
-  when: spark_validate_slurm | bool
+  when: spark_validate_slurm_on | bool
 
 - name: Merge service-level results
   ansible.builtin.set_fact:
@@ -71,13 +98,14 @@
          | combine({'cx7_links_200g': spark_validate_fabric_ok | bool} if spark_validate_fabric | bool else {})
          | combine({'k8s_ready_gpu': (spark_validate_k8s_out.stdout | default('')).split('\t')[0] == 'True'
                                      and ((spark_validate_k8s_out.stdout | default('')).split('\t') | last | int) > 0}
-                   if spark_validate_k8s | bool else {})
+                   if spark_validate_k8s_on | bool else {})
          | combine({'slurm_usable': (spark_validate_slurm_out.stdout | default('')) in ['idle', 'mixed', 'allocated']}
-                   if spark_validate_slurm | bool else {}) }}
+                   if spark_validate_slurm_on | bool else {}) }}
 
 - name: Write JSON report on the control node
   ansible.builtin.copy:
-    content: "{{ {'host': inventory_hostname, 'time': now(utc=true).isoformat(), 'results': spark_validate_results} | to_nice_json }}"
+    content: "{{ {'host': inventory_hostname, 'time': now(utc=true).isoformat(), 'results': spark_validate_results,
+            'skipped': spark_validate_skipped} | to_nice_json }}"
     dest: "{{ spark_validate_report_dir }}/{{ inventory_hostname }}.json"
     mode: "0644"
   delegate_to: localhost
@@ -87,4 +115,6 @@
   ansible.builtin.assert:
     that: spark_validate_results | dict2items | rejectattr('value') | list | length == 0
     fail_msg: "FAILED checks: {{ spark_validate_results | dict2items | rejectattr('value') | map(attribute='key') | list }}"
-    success_msg: "All {{ spark_validate_results | length }} checks passed"
+    success_msg: >-
+      All {{ spark_validate_results | length }} checks passed{{
+      ('; skipped: ' ~ (spark_validate_skipped | join(', '))) if spark_validate_skipped else '' }}

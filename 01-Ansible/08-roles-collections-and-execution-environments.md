@@ -101,8 +101,9 @@ argument_specs:
         type: int
         default: 200000
       cx7_fabric_strict:
-        type: bool
-        default: true
+        type: raw
+        default: auto
+        description: "auto (strict only when a fabric peer is in the inventory), true or false"
       cx7_fabric_verify_peers:
         type: bool
         default: true

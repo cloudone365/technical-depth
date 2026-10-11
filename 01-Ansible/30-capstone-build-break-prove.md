@@ -83,6 +83,33 @@ Why three angles? Each can lie in a different way. Ansible can validate a stale 
          | list | length == cx7_interfaces | default([]) | length }}
   when: spark_validate_fabric | bool
 
+- name: Is Kubernetes set up yet? (Chapter 19)
+  ansible.builtin.stat:
+    path: /etc/kubernetes/admin.conf
+  delegate_to: "{{ groups['k8s_control_plane'][0] }}"
+  register: spark_validate_k8s_installed
+  when: spark_validate_k8s | bool
+
+- name: Is Slurm set up yet? (Chapter 22)
+  ansible.builtin.command: sh -c 'command -v sinfo'
+  delegate_to: "{{ groups['slurm_controller'][0] }}"
+  register: spark_validate_slurm_installed
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+  failed_when: false
+  when: spark_validate_slurm | bool
+
+- name: Which service checks apply
+  ansible.builtin.set_fact:
+    spark_validate_k8s_on: "{{ spark_validate_k8s | bool and spark_validate_k8s_installed.stat.exists | default(false) }}"
+    spark_validate_slurm_on: "{{ spark_validate_slurm | bool and spark_validate_slurm_installed.rc | default(1) == 0 }}"
+
+- name: Checks skipped because the service isn't installed yet
+  ansible.builtin.set_fact:
+    spark_validate_skipped: >-
+      {{ (['k8s_ready_gpu (no /etc/kubernetes/admin.conf yet)'] if spark_validate_k8s | bool and not spark_validate_k8s_on | bool else [])
+         + (['slurm_usable (no sinfo yet)'] if spark_validate_slurm | bool and not spark_validate_slurm_on | bool else []) }}
+
 - name: Kubernetes node Ready + GPU allocatable
   ansible.builtin.shell: |
     set -o pipefail
@@ -95,7 +122,7 @@ Why three angles? Each can lie in a different way. Ansible can validate a stale 
   changed_when: false
   check_mode: false        # read-only probe: must also run under --check (drift detection)
   failed_when: false
-  when: spark_validate_k8s | bool
+  when: spark_validate_k8s_on | bool
 
 - name: Slurm node state
   ansible.builtin.command: sinfo -h -n {{ inventory_hostname }} -o %T
@@ -104,7 +131,7 @@ Why three angles? Each can lie in a different way. Ansible can validate a stale 
   changed_when: false
   check_mode: false        # read-only probe: must also run under --check (drift detection)
   failed_when: false
-  when: spark_validate_slurm | bool
+  when: spark_validate_slurm_on | bool
 
 - name: Merge service-level results
   ansible.builtin.set_fact:
@@ -114,13 +141,14 @@ Why three angles? Each can lie in a different way. Ansible can validate a stale 
          | combine({'cx7_links_200g': spark_validate_fabric_ok | bool} if spark_validate_fabric | bool else {})
          | combine({'k8s_ready_gpu': (spark_validate_k8s_out.stdout | default('')).split('\t')[0] == 'True'
                                      and ((spark_validate_k8s_out.stdout | default('')).split('\t') | last | int) > 0}
-                   if spark_validate_k8s | bool else {})
+                   if spark_validate_k8s_on | bool else {})
          | combine({'slurm_usable': (spark_validate_slurm_out.stdout | default('')) in ['idle', 'mixed', 'allocated']}
-                   if spark_validate_slurm | bool else {}) }}
+                   if spark_validate_slurm_on | bool else {}) }}
 
 - name: Write JSON report on the control node
   ansible.builtin.copy:
-    content: "{{ {'host': inventory_hostname, 'time': now(utc=true).isoformat(), 'results': spark_validate_results} | to_nice_json }}"
+    content: "{{ {'host': inventory_hostname, 'time': now(utc=true).isoformat(), 'results': spark_validate_results,
+            'skipped': spark_validate_skipped} | to_nice_json }}"
     dest: "{{ spark_validate_report_dir }}/{{ inventory_hostname }}.json"
     mode: "0644"
   delegate_to: localhost
@@ -130,7 +158,9 @@ Why three angles? Each can lie in a different way. Ansible can validate a stale 
   ansible.builtin.assert:
     that: spark_validate_results | dict2items | rejectattr('value') | list | length == 0
     fail_msg: "FAILED checks: {{ spark_validate_results | dict2items | rejectattr('value') | map(attribute='key') | list }}"
-    success_msg: "All {{ spark_validate_results | length }} checks passed"
+    success_msg: >-
+      All {{ spark_validate_results | length }} checks passed{{
+      ('; skipped: ' ~ (spark_validate_skipped | join(', '))) if spark_validate_skipped else '' }}
 ```
 
 ### 1.2 On-node invariant checker (works when Ansible can't)
@@ -339,7 +369,7 @@ ssh dgxadmin@192.168.0.101 'python3 spark_invariants.py --peer 192.168.100.11'
 
 **If something's off:**
 - Both Chapter 26 lines FAIL with `no drift report` / `never healed` → `drift-cycle.sh` ran on the MacBook, so its reports are in the MacBook's `.cache/drift/`. Copy that folder to `/opt/spark-lab/cache/drift/` on sema01 the same way as `bench.csv`.
-- `validation` FAIL → open the named `validation/<host>.json` and look for the `false` value. With one Spark and no QSFP cable it is `cx7_links_200g`; re-run `30.1 Validate` with `-e spark_validate_fabric=false`.
+- `validation` FAIL → open the named `validation/<host>.json` and look for the `false` value. (With one Spark the CX-7 link check isn't part of the run: there is no peer to cable to.)
 - `firmware-inventory.json` missing → run `28.1 Firmware inventory`.
 
 #### Run it
@@ -623,7 +653,7 @@ The lesson from fault 3 is why the lab ships a **staleness** alert, `SparkGPUMet
 #### What to look for
 
 1. **`site`, first run:** `failed=0`. **Second run:** `changed=0` on every host. Any `changed` task on the second run is an idempotence bug to fix before you go on.
-2. **`30.1 Validate`:** the "Verdict" task prints `All N checks passed`. N is 13 with the CX-7 check on; with one Spark and no QSFP cable, run it with `-e spark_validate_fabric=false` and expect 12.
+2. **`30.1 Validate`:** the "Verdict" task prints `All N checks passed`. N is 13 with two Sparks (the CX-7 link check is included) and 12 with one. Checks for services that aren't installed yet are named after `skipped:`; after the full rebuild there should be none.
 3. **Drift:** `tools/drift-cycle.sh; echo "drift exit=$?"` on the MacBook prints `drift exit=0`.
 4. **After the Kubernetes rebuild:**
    ```bash
