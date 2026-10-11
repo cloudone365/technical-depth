@@ -87,10 +87,11 @@ jobs:
           pip install "ansible-core~=2.18.0" "ansible-lint>=24" "kubernetes>=30.1.0"
           ansible-galaxy collection install "kubernetes.core:>=5.0.0"
           export KUBECONFIG=$HOME/.kube/config
-          ansible-lint ansible/15.1-deploy-deepseek.yml
-          ansible-playbook ansible/15.1-deploy-deepseek.yml --check -e deepseek_model=r1-7b
+          R=../../02-Kubernetes/lab/tests/ci-run.sh     # surfaces the last 40 output lines as an annotation on failure
+          $R ansible-lint ansible/15.1-deploy-deepseek.yml
+          $R ansible-playbook ansible/15.1-deploy-deepseek.yml --check -e deepseek_model=r1-7b
           # r1-32b BF16 (util 0.70) runs alone: without the apps it passes both guards
-          ansible-playbook ansible/15.1-deploy-deepseek.yml --check --tags preflight -e deepseek_model=r1-32b -e deepseek_with_apps=false
+          $R ansible-playbook ansible/15.1-deploy-deepseek.yml --check --tags preflight -e deepseek_model=r1-32b -e deepseek_with_apps=false
           # … next to bge-m3 it breaks the LLM pool rule (0.70 + 0.06 > 0.72)
           if ansible-playbook ansible/15.1-deploy-deepseek.yml --check -e deepseek_model=r1-32b; then
             echo "::error::LLM pool guard (util budget 0.72) did not stop r1-32b next to bge-m3"; exit 1
