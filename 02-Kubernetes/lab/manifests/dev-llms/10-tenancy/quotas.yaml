@@ -1,0 +1,25 @@
+# Sandbox budget INSIDE vCluster #2 · dev-llms (Chapters 14, 04).
+#
+#   root   vc-dev-llms   2 CPU · 8 Gi · 2 GPU slices · 200 Gi   ← the real cap (manifests/root/05-vclusters)
+#   here   llm-sandbox   1500m · 6 Gi · 2 slices · 150 Gi        ← ceiling for experiments
+#   rest   ≈ 0.5 CPU · 2 Gi for the vCluster control plane and CoreDNS
+#
+# Enough for the mock LLM, a tokenizer job or one small model (≈0.5-1.5B at
+# --gpu-memory-utilization 0.04, ~5 GiB). Real models run on the root
+# (manifests/root-llms, serving-budget 68 Gi).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: sandbox-budget
+  namespace: llm-sandbox
+spec:
+  hard:
+    requests.cpu: 1500m
+    requests.memory: 6Gi
+    limits.memory: 6Gi
+    requests.nvidia.com/gpu: "2"
+    requests.storage: 150Gi
+    persistentvolumeclaims: "5"
+    pods: "20"
+    services.loadbalancers: "0"
+    services.nodeports: "0"

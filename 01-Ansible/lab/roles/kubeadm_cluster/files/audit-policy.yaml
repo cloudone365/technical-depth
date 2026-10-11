@@ -25,5 +25,5 @@ rules:
   # Everything that mutates tenant clusters or GPU state: full request
   - level: RequestResponse
     verbs: ["create", "update", "patch", "delete", "deletecollection"]
-    namespaces: ["vc-dev-lab", "vc-llms", "gpu-operator", "platform-tools"]
+    namespaces: ["vc-dev-lab", "vc-dev-llms", "llm-serving", "batch", "gpu-operator", "platform-tools"]
   - level: Metadata

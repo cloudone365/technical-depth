@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Show how Kubernetes requests/limits became cgroup v2 files (Chapter 14).
 #   scripts/cgroup-inspect.sh <namespace> <pod> [context]     (run ON the Spark)
-# context: spark-root (default), dev-lab or llms. A vCluster pod's cgroup
+# context: spark-root (default), dev-lab or dev-llms. A vCluster pod's cgroup
 # belongs to its synced copy on the root, so that is what we look up.
 source "$(dirname "$0")/lib.sh"
 ns=${1:?namespace}; pod=${2:?pod}; ctx=${3:-$ROOT_CTX}

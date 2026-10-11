@@ -8,12 +8,12 @@ manifests/kustomizations, wraps it in a Pod in the right namespace, and creates
 it with a server-side dry run, so PSA / ValidatingAdmissionPolicy / quota
 violations show up in CI instead of as a stuck ReplicaSet.
 
-  python3 tests/pod_template_check.py manifests/llms/90-serving/vllm manifests/llms/50-workloads/qdrant-statefulset.yaml …
+  python3 tests/pod_template_check.py manifests/root-llms/90-serving/vllm manifests/root-llms/50-workloads/qdrant-statefulset.yaml …
 Exit 1 if any template would be rejected.
 
 The lab is three API servers (Chapter 04). The cluster is taken from the path:
-manifests/root/… → spark-root, manifests/dev-lab/… → dev-lab, manifests/llms/… → llms
-(override the context names with ROOT_CTX / DEV_CTX / LLM_CTX). Admission inside
+manifests/root/… and manifests/root-llms/… → spark-root, manifests/dev-lab/… → dev-lab,
+manifests/dev-llms/… → dev-llms (override the context names with ROOT_CTX / DEV_CTX / DEVLLM_CTX). Admission inside
 a vCluster checks that vCluster's PSA/CEL/tenant quotas; the ROOT quota on its
 vc-* namespace is applied only when the syncer creates the real pod, so it
 is not part of a dry run.
@@ -28,7 +28,8 @@ import yaml
 KUBECTL = os.environ.get("KUBECTL", "kubectl")
 CONTEXTS = {"root": os.environ.get("ROOT_CTX", "spark-root"),
             "dev-lab": os.environ.get("DEV_CTX", "dev-lab"),
-            "llms": os.environ.get("LLM_CTX", "llms")}
+            "root-llms": os.environ.get("ROOT_CTX", "spark-root"),
+            "dev-llms": os.environ.get("DEVLLM_CTX", "dev-llms")}
 
 
 def context_for(path):

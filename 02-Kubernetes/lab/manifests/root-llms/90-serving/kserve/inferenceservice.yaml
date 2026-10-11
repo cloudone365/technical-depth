@@ -1,0 +1,41 @@
+# KServe in RawDeployment mode on the ROOT (Chapters 22, 04). Its 32 Gi limit fits next to vLLM's 32 Gi
+# in serving-budget (68 Gi), util 0.20 + 0.20 ≤ 0.55; park anything else first. No Knative, no Istio — KServe
+# creates a plain Deployment + Service + HPA. Requires cert-manager and the
+# KServe controller (scripts/install-addons.sh kserve).
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata: {name: vllm-spark, namespace: llm-serving}
+spec:
+  supportedModelFormats:
+    - {name: huggingface, version: "1", autoSelect: true}
+  containers:
+    - name: kserve-container
+      image: nvcr.io/nvidia/vllm:25.09-py3
+      command: ["vllm", "serve", "/mnt/models"]          # storage-initializer downloads storageUri here
+      args: ["--served-model-name={{.Name}}", "--port=8080",
+             "--gpu-memory-utilization=0.20", "--max-model-len=8192"]
+      ports: [{containerPort: 8080, protocol: TCP}]
+      # Required in llm-serving by the CEL policy spark-serving-needs-readiness
+      # (the predictor Deployment KServe creates is checked like any other).
+      startupProbe: {httpGet: {path: /health, port: 8080}, periodSeconds: 10, failureThreshold: 60}
+      readinessProbe: {httpGet: {path: /health, port: 8080}, periodSeconds: 5}
+      resources:
+        requests: {cpu: 1500m, memory: 12Gi, nvidia.com/gpu: "1"}
+        limits: {memory: 32Gi, nvidia.com/gpu: "1"}
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: qwen-small
+  namespace: llm-serving
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+    serving.kserve.io/autoscalerClass: hpa
+spec:
+  predictor:
+    minReplicas: 1
+    maxReplicas: 1                     # one GB10: scale-out comes with dgx-spark-2
+    model:
+      modelFormat: {name: huggingface}
+      runtime: vllm-spark
+      storageUri: hf://Qwen/Qwen2.5-0.5B-Instruct

@@ -5,6 +5,8 @@
 # express because they can't see root namespaces:
 #   1. Prometheus in the root 'observability' namespace may scrape every pod.
 #   2. The two vClusters can't open connections to each other.
+# The root's own LLM namespaces (root-llms) are protected by ordinary
+# NetworkPolicies there (root-llms/10-tenancy/networkpolicies.yaml).
 #
 # enableDefaultDeny=false is the important part: an ordinary allow policy that
 # selects a pod isolates it (everything not allowed is dropped), which would
@@ -27,13 +29,13 @@ spec:
   ingressDeny:
     - fromEndpoints:
         - matchLabels:
-            k8s:io.kubernetes.pod.namespace: vc-llms
+            k8s:io.kubernetes.pod.namespace: vc-dev-llms
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
   name: vcluster-boundary
-  namespace: vc-llms
+  namespace: vc-dev-llms
 spec:
   endpointSelector: {}
   enableDefaultDeny:

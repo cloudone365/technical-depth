@@ -52,11 +52,11 @@
           storageclass.kubernetes.io/is-default-class: "true"
 
 # ---------------------------------------------------------------- root-side objects
-- name: Root namespaces, PriorityClasses, LimitRanges, ResourceQuotas, Cilium policies for the vClusters
+- name: Root namespaces, PriorityClasses, LimitRanges, ResourceQuotas, Cilium policies (vClusters and LLM stack)
   kubernetes.core.k8s:
     kubeconfig: "{{ vclusters_kubeconfig }}"
     context: "{{ vclusters_root_context }}"
-    definition: "{{ lookup('kubernetes.core.kustomize', dir=vclusters_lab_dir ~ '/manifests/root/' ~ item) }}"
+    definition: "{{ lookup('kubernetes.core.kustomize', dir=vclusters_lab_dir ~ '/manifests/' ~ item) }}"
     state: present
     apply: true
     server_side_apply:
@@ -155,4 +155,4 @@
       export KUBECONFIG={{ vclusters_kubeconfig | realpath }} ;
       kubectl --context spark-root get nodes ;
       kubectl --context dev-lab get ns ;
-      kubectl --context llms get ns
+      kubectl --context dev-llms get ns

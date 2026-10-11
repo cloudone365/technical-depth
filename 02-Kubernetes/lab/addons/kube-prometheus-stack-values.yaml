@@ -4,9 +4,9 @@
 #   helm upgrade --install kps prometheus-community/kube-prometheus-stack \
 #     --version "$KPS_CHART_VERSION" -n observability -f addons/kube-prometheus-stack-values.yaml
 #
-# One Prometheus watches everything: the root control plane, the node, and —
-# through manifests/root/95-observability/vcluster-workloads.yaml — the model
-# servers inside the llms vCluster.
+# One Prometheus watches everything: the root control plane, the node, the
+# root's model servers and gateway, and the pods inside the two vClusters
+# (both through manifests/root/95-observability/vcluster-workloads.yaml).
 fullnameOverride: kps
 crds:
   enabled: true

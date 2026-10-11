@@ -16,11 +16,12 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: vc-llms
+  name: vc-dev-llms
   labels:
     spark.lab/tier: vcluster
-    spark.lab/vcluster: llms
-    # Multi-node NCCL in the llms 'batch' namespace needs hostNetwork/IPC_LOCK
-    # (Chapter 18). Enforce privileged, warn at baseline so it stays visible.
-    pod-security.kubernetes.io/enforce: privileged
-    pod-security.kubernetes.io/warn: baseline
+    spark.lab/vcluster: dev-llms
+    # dev-llms is a sandbox for LLM manifests and small models. Serving images
+    # run as root and need /dev/shm, which baseline allows; anything that needs
+    # more (hostNetwork NCCL, IPC_LOCK) belongs on the root, in batch.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted

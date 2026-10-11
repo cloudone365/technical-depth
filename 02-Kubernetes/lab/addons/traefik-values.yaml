@@ -1,25 +1,25 @@
-# Helm values for Traefik v3 INSIDE vCluster #2 · llms (Chapters 11, 04): the
-# API gateway of the serving tier — Ingress + Gateway API + Traefik CRDs.
+# Helm values for Traefik v3 on the ROOT cluster (Chapters 11, 04): the API
+# gateway of the LLM stack — Ingress + Gateway API + Traefik CRDs.
 # Installed by scripts/install-addons.sh traefik:
-#   helm --kube-context llms upgrade --install traefik-lab traefik/traefik \
+#   helm --kube-context spark-root upgrade --install traefik-lab traefik/traefik \
 #     --version "$TRAEFIK_CHART_VERSION" -n ingress -f addons/traefik-values.yaml
 #
-# Why inside the vCluster and not on the root? Traefik reads Middlewares,
-# IngressRoutes and HTTPRoutes from the API server it talks to. Inside llms it
-# sees the tenant's objects with their real names; on the root it would see
-# vCluster-translated names (llm-x-llm-serving-x-llms) and every middleware
-# reference in an annotation would break.
+# The model servers run in the root's llm-serving namespace, so Traefik runs
+# next to them and reads Middlewares, IngressRoutes and Ingresses with their
+# real names. It watches only the LLM namespaces: the vClusters' host
+# namespaces (vc-*) hold translated objects that are not its business.
 #
-# Its LoadBalancer Service is synced to the root, where MetalLB gives it
-# 192.168.0.115 — counted against the llms vCluster's root quota.
+# MetalLB gives its LoadBalancer Service 192.168.0.115.
 deployment:
   replicas: 1
 providers:
   kubernetesCRD:
     enabled: true
     allowCrossNamespace: false
+    namespaces: [llm-serving, ingress]
   kubernetesIngress:
     enabled: true
+    namespaces: [llm-serving, ingress]
     publishedService:
       enabled: true
   kubernetesGateway:
@@ -54,9 +54,9 @@ service:
     metallb.io/loadBalancerIPs: 192.168.0.115
 metrics:
   prometheus:
-    # No Prometheus Operator inside the vCluster: expose a plain metrics
-    # Service (traefik-lab-metrics); the root's ServiceMonitor
-    # vcluster-workloads scrapes it.
+    # A plain metrics Service (traefik-lab-metrics); the ServiceMonitor
+    # llm-workloads (root/95-observability) scrapes it with the same labels
+    # as the model servers.
     service:
       enabled: true
     serviceMonitor:

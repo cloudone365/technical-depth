@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Walk a pod's network path (Chapter 08): netns → eth0 → lxc* veth peer → Cilium → cilium_vxlan
 #   scripts/pod-netns.sh <namespace> <pod> [context]     (run ON the Spark, needs sudo)
-# context: spark-root (default), dev-lab or llms — a vCluster pod is looked up
+# context: spark-root (default), dev-lab or dev-llms — a vCluster pod is looked up
 # on the root through vCluster's annotations, because that is where it runs.
 source "$(dirname "$0")/lib.sh"
 ns=${1:?namespace}; pod=${2:?pod}; ctx=${3:-$ROOT_CTX}

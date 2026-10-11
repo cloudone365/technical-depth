@@ -17,9 +17,9 @@
     multus_rdma_ifnames: [enp1s0f1np1, enP2p1s0f1np1]
     multus_rdma_dp_image: ghcr.io/mellanox/k8s-rdma-shared-dev-plugin:latest   # pin a release tag
     multus_test_image: ubuntu:24.04          # perftest + verbs utils installed at start (readiness waits for it)
-    # NADs are namespaced: platform-tools for the platform test pods below, vc-llms
-    # because that is where the llms vCluster's batch pods really run on the root.
-    multus_nad_namespaces: [platform-tools, vc-llms]
+    # NADs are namespaced: platform-tools for the platform test pods below, batch
+    # for the training pods of the root's LLM stack (02-Kubernetes manifests/root-llms).
+    multus_nad_namespaces: [platform-tools, batch]
     multus_test_namespace: platform-tools
     multus_nads:
       - { name: cx7-a, master: enp1s0f1np1, subnet: 192.168.100.0/24 }
@@ -73,7 +73,7 @@
               spark.lab/tier: platform
               pod-security.kubernetes.io/enforce: privileged
 
-    - name: Which NAD namespaces exist (vc-llms appears once playbook 20.2 has run)?
+    - name: Which NAD namespaces exist (batch appears once playbook 20.2 has run)?
       kubernetes.core.k8s_info:
         kind: Namespace
       register: multus_ns

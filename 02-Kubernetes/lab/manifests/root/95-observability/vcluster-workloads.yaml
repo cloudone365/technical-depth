@@ -1,15 +1,18 @@
-# The root's Prometheus scrapes model servers that live INSIDE the vClusters
-# (Chapters 17, 04). Tenants can't create ServiceMonitors (no Prometheus Operator
-# in a vCluster, and it couldn't see the root's anyway), so the platform team
-# runs one ServiceMonitor here that watches the vCluster host namespaces.
+# The root's Prometheus scrapes model servers wherever they run (Chapters 17, 04).
+#   vcluster-workloads  the two vClusters' host namespaces (vc-dev-lab, vc-dev-llms)
+#   llm-workloads       the root's own LLM namespaces (llm-serving, ingress), below
+# Tenants can't create ServiceMonitors (no Prometheus Operator in a vCluster,
+# and it couldn't see the root's anyway), so the platform team runs them here.
 #
 # Synced Services carry vCluster's annotations with their original identity:
 #   vcluster.loft.sh/object-name       vllm
 #   vcluster.loft.sh/object-namespace  llm-serving
 # The relabelings keep only the services we want and copy that identity into
 # labels, so queries read like the tenant thinks:
-#   vllm:num_requests_waiting{vcluster="llms", vnamespace="llm-serving"}
-# ('namespace' and 'pod' keep the root names: vc-llms, vllm-…-x-llm-serving-x-llms.)
+#   vllm:num_requests_waiting{vcluster="dev-llms", vnamespace="llm-sandbox"}
+# ('namespace' and 'pod' keep the root names: vc-dev-llms, vllm-…-x-llm-sandbox-x-dev-llms.)
+# llm-workloads sets the same labels for the root's own model servers, with
+# vcluster="root", so one query covers both:  {vcluster="root", vnamespace="llm-serving"}
 # Allowed through tenant NetworkPolicies by root/05-vclusters/cilium-policies.yaml.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -19,7 +22,7 @@ metadata:
   labels: {release: kps}
 spec:
   namespaceSelector:
-    matchNames: [vc-llms, vc-dev-lab]
+    matchNames: [vc-dev-llms, vc-dev-lab]
   selector: {}
   endpoints:
     # OpenAI-compatible engines expose /metrics on their API port
@@ -54,4 +57,50 @@ spec:
         - sourceLabels: [__meta_kubernetes_service_annotation_vcluster_loft_sh_object_name]
           targetLabel: vservice
         - sourceLabels: [__meta_kubernetes_pod_annotation_vcluster_loft_sh_object_name]
+          targetLabel: vpod
+---
+# The root's own LLM stack (manifests/root-llms): ordinary root namespaces, no
+# vCluster annotations. The relabelings set vcluster="root" and copy namespace,
+# service and pod into vnamespace/vservice/vpod, so rules, dashboards and the
+# KEDA queries use the same labels everywhere.
+# Allowed by root-llms/10-tenancy/networkpolicies.yaml (observability may connect).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: llm-workloads
+  namespace: observability
+  labels: {release: kps}
+spec:
+  namespaceSelector:
+    matchNames: [llm-serving, ingress]
+  selector: {}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      relabelings:
+        - action: keep
+          sourceLabels: [__meta_kubernetes_service_name]
+          regex: vllm|vllm-prefill|vllm-decode|sglang|qwen-small-predictor
+        - targetLabel: vcluster
+          replacement: root
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: vnamespace
+        - sourceLabels: [__meta_kubernetes_service_name]
+          targetLabel: vservice
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: vpod
+    - port: metrics
+      interval: 15s
+      relabelings:
+        - action: keep
+          sourceLabels: [__meta_kubernetes_service_name]
+          regex: triton|traefik-lab-metrics
+        - targetLabel: vcluster
+          replacement: root
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: vnamespace
+        - sourceLabels: [__meta_kubernetes_service_name]
+          targetLabel: vservice
+        - sourceLabels: [__meta_kubernetes_pod_name]
           targetLabel: vpod

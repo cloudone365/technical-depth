@@ -3,7 +3,8 @@
 #   scripts/cgroup-inspect.sh platform-tools qos-guaranteed   (… -burstable, -besteffort)
 # Why not in a vCluster? A memory quota (the root quota on every vc-* namespace)
 # rejects any pod without a memory limit, and LimitRange defaults add one — so
-# a BestEffort pod cannot exist inside dev-lab or llms. That is deliberate.
+# a BestEffort pod cannot exist inside dev-lab or dev-llms, nor in the root's
+# llm-serving or batch. That is deliberate.
 apiVersion: v1
 kind: Pod
 metadata: {name: qos-guaranteed, namespace: platform-tools}

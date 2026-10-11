@@ -4,7 +4,7 @@
 #   scripts/make-user.sh ops platform spark-root     → a user of the root cluster
 # The certificate's O= becomes the Kubernetes group that RBAC binds. Tenants
 # live in vCluster dev-lab, so that is the default: the certificate is signed
-# by dev-lab's CA and means nothing to the root or to llms.
+# by dev-lab's CA and means nothing to the root or to dev-llms.
 source "$(dirname "$0")/lib.sh"
 user=${1:?user}; group=${2:?group}; ctx=${3:-$DEV_CTX}; out="$LAB_DIR/.cache"; mkdir -p "$out"
 k() { kc "$ctx" "$@"; }

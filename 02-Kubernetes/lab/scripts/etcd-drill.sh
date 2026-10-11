@@ -7,7 +7,7 @@
 #   scripts/etcd-drill.sh restore <file>    # DESTRUCTIVE: rolls the root cluster state back
 #
 # What a root etcd restore does NOT roll back: the contents of the two vClusters.
-# Each keeps its own SQLite database on its PVC (vc-dev-lab, vc-llms). Back
+# Each keeps its own SQLite database on its PVC (vc-dev-lab, vc-dev-llms). Back
 # those up separately (Chapter 04 §6.7: 'vcluster snapshot' or a copy of the PVC).
 source "$(dirname "$0")/lib.sh"
 SNAPDIR=/var/lib/etcd-snapshots

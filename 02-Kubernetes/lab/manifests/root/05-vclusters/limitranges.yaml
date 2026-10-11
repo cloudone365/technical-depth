@@ -18,10 +18,10 @@ apiVersion: v1
 kind: LimitRange
 metadata:
   name: vcluster-defaults
-  namespace: vc-llms
+  namespace: vc-dev-llms
 spec:
   limits:
     - type: Container
-      default: {memory: 512Mi}
+      default: {memory: 256Mi}
       defaultRequest: {cpu: 50m, memory: 128Mi}
-      max: {memory: 40Gi}
+      max: {memory: 8Gi}

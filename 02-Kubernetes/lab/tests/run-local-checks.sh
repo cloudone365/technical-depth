@@ -2,7 +2,7 @@
 # Everything CI runs that doesn't need a Spark (Chapter 27 §0).
 #   tests/run-local-checks.sh           # static checks
 #   API=1 tests/run-local-checks.sh     # + server-side dry-run against the three contexts in $KUBECONFIG
-#                                         (spark-root, dev-lab, llms — CI builds them on kind)
+#                                         (spark-root, dev-lab, dev-llms — CI builds them on kind)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 KUBECTL=${KUBECTL:-kubectl}
@@ -32,13 +32,13 @@ PY
 echo "== dashboard up to date"
 diff -q <(python3 manifests/root/95-observability/gen_dashboard.py) manifests/root/95-observability/spark-k8s-dashboard.json
 echo "== python";     python3 -m py_compile tests/pod_template_check.py tests/budget_check.py \
-                        manifests/root/45-controller/slice_ledger.py manifests/llms/40-ingress/mock_llm.py manifests/root/70-gpu/gemm_bench.py \
-                        manifests/llms/80-distributed/base/allreduce_bench.py manifests/llms/90-serving/pd-disagg/pd_proxy.py \
-                        manifests/llms/90-serving/triton/model_repository/*/1/model.py manifests/root/95-observability/gen_dashboard.py \
+                        manifests/root/45-controller/slice_ledger.py manifests/root-llms/40-ingress/mock_llm.py manifests/root/70-gpu/gemm_bench.py \
+                        manifests/root-llms/80-distributed/base/allreduce_bench.py manifests/root-llms/90-serving/pd-disagg/pd_proxy.py \
+                        manifests/root-llms/90-serving/triton/model_repository/*/1/model.py manifests/root/95-observability/gen_dashboard.py \
                         scripts/fabric_calc.py scripts/ttft_probe.py scripts/mtbf_calc.py manifests/root/70-gpu/compile_compare.py \
-                        manifests/llms/80-distributed/resilient/train_resilient.py
+                        manifests/root-llms/80-distributed/resilient/train_resilient.py
 echo "== mock-llm functional"
-python3 manifests/llms/40-ingress/mock_llm.py & pid=$!; trap 'kill $pid 2>/dev/null' EXIT; sleep 1
+python3 manifests/root-llms/40-ingress/mock_llm.py & pid=$!; trap 'kill $pid 2>/dev/null' EXIT; sleep 1
 curl -sf localhost:8000/health >/dev/null
 n=$(curl -sN localhost:8000/v1/chat/completions -d '{"stream":true,"max_tokens":5}' | grep -c '^data:')
 [[ $n -eq 6 ]] || { echo "expected 6 SSE events, got $n"; exit 1; }
@@ -52,7 +52,7 @@ if command -v helm >/dev/null && [[ "${HELM_TEMPLATE:-1}" == 1 ]]; then
   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update >/dev/null
   helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/ --force-update >/dev/null
   helm repo update >/dev/null
-  for v in dev-lab llms; do
+  for v in dev-lab dev-llms; do
     helm template "$v" loft/vcluster --version "$VCLUSTER_VERSION" -n "vc-$v" -f "vclusters/$v.yaml" >/dev/null && echo "  vclusters/$v.yaml OK"
   done
   helm template traefik-lab traefik/traefik --version "$TRAEFIK_CHART_VERSION" -n ingress -f addons/traefik-values.yaml >/dev/null && echo "  traefik-values.yaml OK"
@@ -62,16 +62,17 @@ if command -v helm >/dev/null && [[ "${HELM_TEMPLATE:-1}" == 1 ]]; then
     -f addons/metrics-server-values.yaml >/dev/null && echo "  metrics-server-values.yaml OK"
 fi
 if [[ "${API:-0}" == 1 ]]; then
-  echo "== server-side dry-run (API=1): root, dev-lab, llms"
+  echo "== server-side dry-run (API=1): root (with the LLM stack), dev-lab, dev-llms"
   scripts/apply-lab.sh
-  scripts/verify.sh vclusters tenancy admission
+  scripts/verify.sh vclusters llm-budget tenancy admission
   echo "== pod templates vs PSA / CEL policies / quotas (server-side dry-run of the Pods)"
   M=manifests
   python3 tests/pod_template_check.py \
     $M/root/30-networking $M/root/45-controller $M/root/50-workloads $M/root/70-gpu $M/root/*/*.yaml \
     $M/dev-lab/30-networking $M/dev-lab/*/*.yaml \
-    $M/llms/40-ingress $M/llms/50-workloads $M/llms/80-distributed/base $M/llms/80-distributed/two-spark $M/llms/80-distributed/resilient \
-    $M/llms/90-serving/vllm $M/llms/90-serving/triton $M/llms/90-serving/sglang $M/llms/90-serving/pd-disagg $M/llms/90-serving/kserve \
-    $M/llms/*/*.yaml
+    $M/dev-llms/*/*.yaml \
+    $M/root-llms/40-ingress $M/root-llms/50-workloads $M/root-llms/80-distributed/base $M/root-llms/80-distributed/two-spark $M/root-llms/80-distributed/resilient \
+    $M/root-llms/90-serving/vllm $M/root-llms/90-serving/triton $M/root-llms/90-serving/sglang $M/root-llms/90-serving/pd-disagg $M/root-llms/90-serving/kserve \
+    $M/root-llms/*/*.yaml
 fi
 echo "ALL LOCAL CHECKS PASSED"

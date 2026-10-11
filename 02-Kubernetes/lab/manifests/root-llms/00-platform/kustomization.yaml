@@ -1,0 +1,8 @@
+# The LLM stack's namespaces on the ROOT cluster (context spark-root).
+# PriorityClasses are NOT included here: root/00-platform already creates them
+# (with no default class on the root), and the GPU Operator creates the
+# RuntimeClass 'nvidia' on the root.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespaces.yaml

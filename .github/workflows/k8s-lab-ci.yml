@@ -1,7 +1,8 @@
 # CI for "02-Kubernetes/lab" — see 02-Kubernetes/27-hands-on-practice-exercises-workbook.md §0
-# The lab is a root cluster with two vClusters inside (Volume 27). CI builds the
-# same shape on kind: kind = root (fake GB10 with 15 slices), then vCluster
-# dev-lab and llms from the lab's own Helm values, reached by port-forward.
+# The lab is a root cluster that runs the LLM stack, with two small vClusters
+# inside (Chapter 27). CI builds the same shape on kind: kind = root (fake GB10
+# with 15 slices, the LLM stack), then vCluster dev-lab and dev-llms from the
+# lab's own Helm values, reached by port-forward.
 name: k8s-lab
 
 on:
@@ -72,14 +73,14 @@ jobs:
           source versions.env
           kubectl apply --server-side -f "https://raw.githubusercontent.com/cilium/cilium/v${CILIUM_VERSION}/pkg/k8s/apis/cilium.io/client/crds/v2/ciliumnetworkpolicies.yaml"
           kubectl apply --server-side -f "https://github.com/prometheus-operator/prometheus-operator/releases/download/v0.81.0/stripped-down-crds.yaml"
-      - name: VCluster dev-lab and llms from vclusters/*.yaml
+      - name: VCluster dev-lab and dev-llms from vclusters/*.yaml
         run: |
           source versions.env
           kubectl apply -k manifests/root/00-platform
           kubectl apply -k manifests/root/05-vclusters
           helm repo add loft https://charts.loft.sh
           port=8443
-          for v in dev-lab llms; do
+          for v in dev-lab dev-llms; do
             # kind has no MetalLB/local-nvme: ClusterIP + port-forward, kind's 'standard' class
             helm upgrade --install "$v" loft/vcluster --version "$VCLUSTER_VERSION" -n "vc-$v" -f "vclusters/$v.yaml" \
               --set controlPlane.service.spec.type=ClusterIP \
@@ -93,18 +94,17 @@ jobs:
             port=$((port+1))
           done
           kubectl config get-contexts
-      - name: CRDs/controllers inside llms (Kueue for real; Gateway API, Traefik, KEDA as CRDs only)
+      - name: The LLM stack's CRDs/controllers on the root (Kueue for real; Gateway API, Traefik, KEDA as CRDs only)
         run: |
           # surface the failing command, its stderr and the pod state as annotations
           exec 2> >(tee /tmp/step.err >&2)
           diag() {
-            echo "::error title=llms step failed::${BASH_COMMAND} :: $(tail -c 1200 /tmp/step.err | tr '\n' ' ')"
-            echo "::error title=llms pods::$( (kubectl --context llms get pods -A -o wide; kubectl --context llms -n kueue-system describe pods | grep -A12 -E '^(Events|Conditions|    State|    Last State):') 2>&1 | tail -c 3000 | tr '\n' ' ')"
-            echo "::error title=root vc-llms::$( (kubectl --context spark-root -n vc-llms get pods,events --sort-by=.metadata.creationTimestamp; kubectl --context spark-root -n vc-llms describe quota) 2>&1 | tail -c 3000 | tr '\n' ' ')"
+            echo "::error title=LLM stack step failed::${BASH_COMMAND} :: $(tail -c 1200 /tmp/step.err | tr '\n' ' ')"
+            echo "::error title=kueue pods::$( (kubectl --context spark-root -n kueue-system get pods -o wide; kubectl --context spark-root -n kueue-system describe pods | grep -A12 -E '^(Events|Conditions|    State|    Last State):') 2>&1 | tail -c 3000 | tr '\n' ' ')"
           }
           trap diag ERR
           source versions.env
-          K="kubectl --context llms"
+          K="kubectl --context spark-root"
           $K apply --server-side -f "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml"
           $K apply --server-side -f "https://github.com/kedacore/keda/releases/download/${KEDA_VERSION}/keda-${KEDA_VERSION#v}-crds.yaml"
           for c in traefik.io_middlewares traefik.io_ingressroutes; do
@@ -116,16 +116,18 @@ jobs:
         run: HELM_TEMPLATE=0 API=1 tests/ci-run.sh tests/run-local-checks.sh
       - name: Workloads actually run (CPU-only parts)
         run: |
-          kubectl --context llms -n llm-serving rollout status deploy/mock-llm --timeout=5m
+          kubectl --context spark-root -n llm-serving rollout status deploy/mock-llm --timeout=5m
           kubectl --context dev-lab -n lab-tools rollout status deploy/echo --timeout=5m
           # from inside llm-serving (the namespace's NetworkPolicy admits same-namespace pods)
-          kubectl --context llms -n llm-serving exec deploy/mock-llm-canary -- python3 -c \
+          kubectl --context spark-root -n llm-serving exec deploy/mock-llm-canary -- python3 -c \
             "import urllib.request; print(urllib.request.urlopen('http://mock-llm:8000/v1/models').read().decode())"
           kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- dig +short echo-headless.lab-tools.svc.cluster.local | wc -l | grep -q 3
-          # the same pods, seen from the root: renamed and counted against the vCluster budgets
-          kubectl --context spark-root -n vc-llms get pods
-          kubectl --context spark-root -n vc-llms describe resourcequota vcluster-budget
-      - name: Kueue gang admission (inside llms)
+          # dev-lab's pods, seen from the root: renamed and counted against the vCluster budget
+          kubectl --context spark-root -n vc-dev-lab get pods
+          kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget
+          # the LLM stack's budgets on the root
+          kubectl --context spark-root -n llm-serving describe resourcequota serving-budget
+      - name: Kueue gang admission (on the root)
         run: tests/ci-run.sh tests/kueue-gang-test.sh
       - name: Diagnostics on failure
         if: failure()

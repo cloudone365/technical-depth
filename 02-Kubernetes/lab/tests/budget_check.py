@@ -2,12 +2,16 @@
 """Static consistency check of how one DGX Spark is split (Chapter 04 §3).
 
 Reads the files that define the split and fails if they disagree:
-  * root quotas            manifests/root/05-vclusters/quotas.yaml
+  * vCluster budgets       manifests/root/05-vclusters/quotas.yaml
+  * the root's LLM share   manifests/root-llms/10-tenancy/quotas.yaml (serving, batch)
+                           manifests/root-llms/20-scheduling/kueue.yaml (spark-cq = batch)
   * kubelet reservations   01-Ansible roles/kubeadm_cluster/defaults/main.yml
   * GPU time-slice count   01-Ansible roles/gpu_operator/defaults/main.yml
   * MetalLB pool           01-Ansible roles/metallb/defaults/main.yml
   * vCluster API/gateway IPs   vclusters/*.yaml, addons/traefik-values.yaml
-  * tenant quotas / Kueue queue inside the vClusters (must fit their vCluster)
+  * tenant quotas inside the vClusters (must fit their vCluster)
+The root keeps what the vClusters don't take; serving + batch + the platform's
+floor must fit in it exactly (no overlap: nothing else caps their sum on the root).
 Prints the table the docs quote. No cluster needed.
 """
 import ipaddress
@@ -20,9 +24,11 @@ import yaml
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ANSIBLE = os.path.join(LAB, "..", "..", "01-Ansible", "lab", "roles")
 SPARK = {"cpu": 20.0, "memory_gi": 119.7, "gpu": None}    # gpu filled from the GPU Operator role
-# What the root's own platform pods need (Cilium, MetalLB, Traefik, GPU Operator,
-# Prometheus, CoreDNS, local-path): the vClusters must leave at least this.
+# What the root's own platform pods need (Cilium, MetalLB, Traefik, Kueue, KEDA,
+# GPU Operator, Prometheus, CoreDNS, local-path, platform-tools): the vClusters
+# and the LLM quotas must leave at least this.
 ROOT_PLATFORM = {"cpu": 2.0, "memory_gi": 8.0, "gpu": 1}
+VCLUSTERS = ("dev-lab", "dev-llms")
 errors = []
 
 
@@ -70,15 +76,30 @@ for ns, h in quotas.items():
     check(h["requests.memory"] == h["limits.memory"], f"{ns}: requests.memory must equal limits.memory (hard memory budget)")
 
 ALLOC = {k: SPARK[k] - RESERVED[k] for k in SPARK}
-for key in ("cpu", "memory_gi", "gpu"):
-    used = sum(b[key] for b in budget.values())
-    left = ALLOC[key] - used
-    check(left >= ROOT_PLATFORM[key],
-          f"vClusters take {used} {key} of {ALLOC[key]:.1f} allocatable: the root keeps {left:.1f}, its platform needs {ROOT_PLATFORM[key]}")
+ROOT = {k: ALLOC[k] - sum(b[k] for b in budget.values()) for k in ("cpu", "memory_gi", "gpu")}
 
-# ---- IPs: vCluster APIs and the llms gateway inside the MetalLB pool, all distinct
+# ---- the root's LLM share: serving + batch (+ Kueue = batch) + platform floor <= what the root keeps
+llm = {}
+for d in load_all(os.path.join(LAB, "manifests", "root-llms", "10-tenancy", "quotas.yaml")):
+    h = d["spec"]["hard"]
+    llm[d["metadata"]["namespace"]] = {"cpu": cpu(h["requests.cpu"]), "memory_gi": gi(h["limits.memory"]),
+                                       "gpu": int(h["requests.nvidia.com/gpu"]), "storage_gi": gi(h["requests.storage"])}
+check(set(llm) == {"llm-serving", "batch"}, f"root-llms quotas: expected llm-serving and batch, got {sorted(llm)}")
+for d in load_all(os.path.join(LAB, "manifests", "root-llms", "20-scheduling", "kueue.yaml")):
+    if d.get("kind") == "ClusterQueue":
+        res = {r["name"]: r["nominalQuota"] for r in d["spec"]["resourceGroups"][0]["flavors"][0]["resources"]}
+        b = llm.get("batch", {})
+        check(cpu(res["cpu"]) == b.get("cpu") and gi(res["memory"]) == b.get("memory_gi") and int(res["nvidia.com/gpu"]) == b.get("gpu"),
+              f"Kueue spark-cq {res} must equal the batch namespace quota {b}")
+PLATFORM = {k: ROOT[k] - sum(q[k] for q in llm.values()) for k in ("cpu", "memory_gi", "gpu")}
+for key in ("cpu", "memory_gi", "gpu"):
+    check(PLATFORM[key] >= ROOT_PLATFORM[key] - 1e-6,
+          f"root keeps {ROOT[key]:.1f} {key}, llm-serving + batch take {sum(q[key] for q in llm.values())}: "
+          f"the platform is left {PLATFORM[key]:.1f}, it needs {ROOT_PLATFORM[key]}")
+
+# ---- IPs: vCluster APIs and the LLM gateway (Traefik on the root) inside the MetalLB pool, all distinct
 ips = {}
-for name in ("dev-lab", "llms"):
+for name in VCLUSTERS:
     v = yaml.safe_load(open(os.path.join(LAB, "vclusters", f"{name}.yaml")))
     ip = v["controlPlane"]["service"]["annotations"]["metallb.io/loadBalancerIPs"]
     ips[f"{name} API"] = ip
@@ -89,7 +110,7 @@ for name in ("dev-lab", "llms"):
     ns = f"vc-{name}"
     check(gi(res["limits"]["memory"]) < budget[ns]["memory_gi"], f"{name}: control plane memory limit exceeds its budget")
 traefik = yaml.safe_load(open(os.path.join(LAB, "addons", "traefik-values.yaml")))
-ips["llms gateway"] = traefik["service"]["annotations"]["metallb.io/loadBalancerIPs"]
+ips["LLM gateway"] = traefik["service"]["annotations"]["metallb.io/loadBalancerIPs"]
 for what, ip in ips.items():
     a = ipaddress.ip_address(ip)
     check(pool[0] <= a <= pool[1], f"{what} {ip} is outside the MetalLB pool {lo}-{hi}")
@@ -110,28 +131,27 @@ def inner(path, ns_vc):
             check(int(h["requests.nvidia.com/gpu"]) <= b["gpu"], f"{d['metadata']['namespace']} GPU ceiling > {ns_vc} budget")
 
 
-inner(os.path.join(LAB, "manifests", "dev-lab", "10-tenancy", "quotas.yaml"), "vc-dev-lab")
-inner(os.path.join(LAB, "manifests", "llms", "10-tenancy", "quotas.yaml"), "vc-llms")
-for d in load_all(os.path.join(LAB, "manifests", "llms", "20-scheduling", "kueue.yaml")):
-    if d.get("kind") == "ClusterQueue":
-        res = {r["name"]: r["nominalQuota"] for r in d["spec"]["resourceGroups"][0]["flavors"][0]["resources"]}
-        b = budget["vc-llms"]
-        check(cpu(res["cpu"]) <= b["cpu"] and gi(res["memory"]) <= b["memory_gi"] and int(res["nvidia.com/gpu"]) <= b["gpu"],
-              "Kueue spark-cq does not fit the llms budget")
+for name in VCLUSTERS:
+    inner(os.path.join(LAB, "manifests", name, "10-tenancy", "quotas.yaml"), f"vc-{name}")
+check(budget["vc-dev-lab"] == budget["vc-dev-llms"], "dev-lab and dev-llms must have identical budgets")
 
 # ---- report
 rows = [("Spark total", SPARK["cpu"], SPARK["memory_gi"], SPARK["gpu"]),
         ("kubelet resv.", RESERVED["cpu"], RESERVED["memory_gi"], 0),
         ("allocatable", ALLOC["cpu"], ALLOC["memory_gi"], ALLOC["gpu"])]
-for ns in ("vc-dev-lab", "vc-llms"):
-    b = budget[ns]
-    rows.append((ns, b["cpu"], b["memory_gi"], b["gpu"]))
-rows.append(("root keeps", ALLOC["cpu"] - sum(b["cpu"] for b in budget.values()),
-             ALLOC["memory_gi"] - sum(b["memory_gi"] for b in budget.values()),
-             ALLOC["gpu"] - sum(b["gpu"] for b in budget.values())))
+for name in VCLUSTERS:
+    b = budget[f"vc-{name}"]
+    rows.append((f"vc-{name}", b["cpu"], b["memory_gi"], b["gpu"]))
+rows.append(("root keeps", ROOT["cpu"], ROOT["memory_gi"], ROOT["gpu"]))
+rows.append(("  platform", PLATFORM["cpu"], PLATFORM["memory_gi"], PLATFORM["gpu"]))
+for ns in ("llm-serving", "batch"):
+    q = llm.get(ns, {"cpu": 0, "memory_gi": 0, "gpu": 0})
+    rows.append((f"  {ns}", q["cpu"], q["memory_gi"], q["gpu"]))
 print(f"{'':14} {'CPU':>6} {'mem GiB':>8} {'slices':>7}")
 for name, c, m, g in rows:
     print(f"{name:14} {c:6.1f} {m:8.1f} {g:7d}")
+model_gi = llm.get("llm-serving", {}).get("memory_gi", 0)
+print(f"model memory in llm-serving: {model_gi:.0f} GiB = {model_gi / SPARK['memory_gi']:.2f} of the GPU → keep the sum of --gpu-memory-utilization ≲ 0.55 (headroom)")
 print("LoadBalancer IPs:", ", ".join(f"{k} {v}" for k, v in ips.items()), f"(pool {lo}-{hi})")
 if errors:
     print("\n".join("FAIL: " + e for e in errors))

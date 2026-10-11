@@ -1,7 +1,7 @@
 # API Priority & Fairness on the ROOT API server (Chapters 03, 04).
 #
 # Every object a tenant creates in a vCluster reaches the root as a request
-# from that vCluster's syncer (ServiceAccount in vc-dev-lab / vc-llms). A
+# from that vCluster's syncer (ServiceAccount in vc-dev-lab / vc-dev-llms). A
 # tenant loop that creates and deletes pods as fast as it can therefore
 # becomes root API load. This lane gives the syncers a fair, bounded share —
 # by namespace, so one vCluster can't crowd out the other — and the
@@ -37,7 +37,7 @@ spec:
         - kind: ServiceAccount
           serviceAccount: {namespace: vc-dev-lab, name: "*"}
         - kind: ServiceAccount
-          serviceAccount: {namespace: vc-llms, name: "*"}
+          serviceAccount: {namespace: vc-dev-llms, name: "*"}
       resourceRules:
         - verbs: ["*"]
           apiGroups: ["*"]

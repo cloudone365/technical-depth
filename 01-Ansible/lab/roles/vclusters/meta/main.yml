@@ -3,7 +3,8 @@ galaxy_info:
   role_name: vclusters
   author: cloudone365
   description: >-
-    Two vCluster virtual clusters (dev-lab, llms) with root-side quotas, using the
+    Two vCluster virtual clusters (dev-lab, dev-llms) with root-side quotas and the
+    root's LLM budgets, using the
     definitions in the 02-Kubernetes lab; merges their kubeconfigs into the lab kubeconfig
   license: MIT
   min_ansible_version: "2.17"

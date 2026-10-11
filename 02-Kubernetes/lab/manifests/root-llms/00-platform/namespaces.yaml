@@ -1,0 +1,37 @@
+# Namespaces of the LLM stack, on the ROOT cluster (Chapters 20, 04).
+# Apply with --context spark-root. The root is where the models run: these are
+# ordinary root namespaces, so pods keep their names and are scheduled directly
+# (no vCluster syncer in between). Budgets: root-llms/10-tenancy/quotas.yaml.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llm-serving
+  labels:
+    spark.lab/tier: serving
+    spark.lab/stack: llm
+    # NGC serving images run as root and need /dev/shm → baseline, not restricted
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: batch
+  labels:
+    spark.lab/tier: batch                  # Kueue-managed training jobs
+    spark.lab/stack: llm
+    kueue.x-k8s.io/managed: "true"
+    # Multi-node NCCL needs hostNetwork or IPC_LOCK (RDMA pinned memory), which
+    # baseline forbids. Enforce privileged, but WARN at baseline so anything
+    # unusual is visible on every apply (Chapter 18).
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: baseline
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ingress
+  labels:
+    spark.lab/tier: platform               # Traefik for the LLM API (addons/traefik-values.yaml, 192.168.0.115)
+    spark.lab/stack: llm
+    pod-security.kubernetes.io/enforce: baseline

@@ -7,7 +7,7 @@
 #   scripts/argocd-register-vclusters.sh
 source "$(dirname "$0")/lib.sh"
 kr get ns argocd >/dev/null 2>&1 || { bad "Argo CD not installed: scripts/install-addons.sh argocd"; exit 1; }
-for name in "$DEV_CTX" "$LLM_CTX"; do
+for name in "$DEV_CTX" "$DEVLLM_CTX"; do
   kcfg=$(kr -n "vc-$name" get secret "vc-$name" -o jsonpath='{.data.config}' | base64 -d)
   view() { "$KUBECTL" --kubeconfig <(printf '%s' "$kcfg") config view --raw -o jsonpath="$1"; }
   server=$(view '{.clusters[0].cluster.server}')

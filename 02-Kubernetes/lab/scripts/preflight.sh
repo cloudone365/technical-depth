@@ -39,7 +39,7 @@ gpus=$(kr get node "$node" -o jsonpath='{.status.allocatable.nvidia\.com/gpu}' 2
 kr get runtimeclass nvidia >/dev/null 2>&1 && ok "RuntimeClass nvidia present" || warn "RuntimeClass nvidia missing"
 
 echo "── vClusters"
-for ctx in "$DEV_CTX" "$LLM_CTX"; do
+for ctx in "$DEV_CTX" "$DEVLLM_CTX"; do
   if kc "$ctx" get --raw /readyz >/dev/null 2>&1; then ok "vCluster $ctx answers"
   else info "vCluster $ctx not reachable yet (01-Ansible playbooks/20.2-vclusters.yml or scripts/install-addons.sh vclusters)"; fi
 done

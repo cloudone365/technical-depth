@@ -8,7 +8,7 @@ metallb_kubeconfig: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') }}/
 metallb_context: spark-root
 
 # Reserve this range in your router's DHCP settings so nothing else takes it.
-#   .111 dev-lab vCluster API · .112 llms vCluster API · .115 llms gateway (Traefik)
+#   .111 dev-lab vCluster API · .112 dev-llms vCluster API · .115 LLM gateway (Traefik on the root)
 metallb_pool_name: lab-pool
 metallb_pool_addresses: [192.168.0.110-192.168.0.119]
 metallb_l2_interfaces: ["{{ mgmt_interface | default('enP7s7') }}"]

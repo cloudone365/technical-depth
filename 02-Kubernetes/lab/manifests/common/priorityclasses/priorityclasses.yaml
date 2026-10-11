@@ -2,10 +2,10 @@
 # Order: platform > serving > interactive > batch > preemptible.
 #
 # The root and both vClusters create these same classes (this file is included
-# by root/, dev-lab/ and llms/ 00-platform). vCluster copies a tenant's classes
+# by root/, dev-lab/ and dev-llms/ 00-platform). vCluster copies a tenant's classes
 # to the root with translated names, so ONE scheduler — the root's — compares pods from both
-# vClusters and the platform. A pod at spark-serving in llms can preempt a
-# spark-preemptible pod in dev-lab. That is the point of a shared GPU, and the
+# vClusters, the root's model servers and the platform. A vLLM pod at spark-serving
+# in the root's llm-serving can preempt a spark-preemptible pod in dev-lab. That is the point of a shared GPU, and the
 # reason tenants must not be allowed to create PriorityClasses (Chapter 07 §7).
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass

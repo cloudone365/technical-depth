@@ -3,11 +3,11 @@
 # Prints PASS/WARN/FAIL per check; exit 0 only if nothing FAILed.
 #   scripts/verify.sh              # everything
 #   scripts/verify.sh tenancy gpu  # selected sections:
-#     platform vclusters tenancy admission gpu ingress storage serving observability
+#     platform vclusters llm-budget tenancy admission gpu ingress storage serving observability
 source "$(dirname "$0")/lib.sh"
 set +e
 want() { [[ " ${SECTIONS[*]} " == *" $1 "* ]]; }
-SECTIONS=("$@"); [[ ${#SECTIONS[@]} -eq 0 ]] && SECTIONS=(platform vclusters tenancy admission gpu ingress storage serving observability)
+SECTIONS=("$@"); [[ ${#SECTIONS[@]} -eq 0 ]] && SECTIONS=(platform vclusters llm-budget tenancy admission gpu ingress storage serving observability)
 gpu_node() { kr get nodes -l spark.lab/gpu=gb10 -o jsonpath='{.items[0].metadata.name}'; }
 
 if want platform; then
@@ -26,19 +26,31 @@ fi
 
 if want vclusters; then
   echo "── vclusters"
-  declare -A WANT_CPU=([dev-lab]=2 [llms]=12) WANT_MEM=([dev-lab]=8Gi [llms]=88Gi) WANT_GPU=([dev-lab]=2 [llms]=11)
-  for v in "$DEV_CTX" "$LLM_CTX"; do
+  # the two vClusters are identical sandboxes: 2 CPU · 8 Gi · 2 slices each
+  for v in "$DEV_CTX" "$DEVLLM_CTX"; do
     kr -n "vc-$v" get statefulset "$v" -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -q '^1' \
       && ok "$v control plane Running in vc-$v" || bad "$v control plane not ready (kubectl --context $ROOT_CTX -n vc-$v get pods)"
     kc "$v" get --raw /readyz >/dev/null 2>&1 && ok "$v API answers ($(kc "$v" config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null))" \
       || bad "context $v unreachable"
     q=$(kr -n "vc-$v" get resourcequota vcluster-budget -o jsonpath='{.spec.hard.requests\.cpu} {.spec.hard.limits\.memory} {.spec.hard.requests\.nvidia\.com/gpu}' 2>/dev/null)
-    [[ "$q" == "${WANT_CPU[$v]} ${WANT_MEM[$v]} ${WANT_GPU[$v]}" ]] && ok "$v root budget: $q (CPU · memory · GPU slices)" || bad "$v root budget is '$q'"
+    [[ "$q" == "2 8Gi 2" ]] && ok "$v root budget: $q (CPU · memory · GPU slices)" || bad "$v root budget is '$q'"
     n=$(kc "$v" get nodes --no-headers 2>/dev/null | wc -l)
     [[ $n -ge 1 ]] && ok "$v sees $n real node(s) (sync.fromHost.nodes)" || bad "$v sees no nodes"
     kc "$v" get runtimeclass nvidia >/dev/null 2>&1 && ok "$v RuntimeClass nvidia" || bad "$v RuntimeClass nvidia missing (apply $v/00-platform)"
   done
   kr -n vc-dev-lab get ciliumnetworkpolicy vcluster-boundary >/dev/null 2>&1 && ok "Cilium vCluster boundary policies" || warn "root/05-vclusters cilium-policies not applied"
+fi
+
+if want llm-budget; then
+  echo "── llm-budget (the LLM stack on the root, context $ROOT_CTX)"
+  q=$(kr -n llm-serving get resourcequota serving-budget -o jsonpath='{.spec.hard.requests\.cpu} {.spec.hard.limits\.memory} {.spec.hard.requests\.nvidia\.com/gpu}' 2>/dev/null)
+  [[ "$q" == "8 68Gi 6" ]] && ok "llm-serving serving-budget: $q (CPU · memory · GPU slices)" || bad "llm-serving serving-budget is '$q' (apply root-llms/10-tenancy)"
+  q=$(kr -n batch get resourcequota batch-budget -o jsonpath='{.spec.hard.requests\.cpu} {.spec.hard.limits\.memory} {.spec.hard.requests\.nvidia\.com/gpu}' 2>/dev/null)
+  [[ "$q" == "2 12Gi 3" ]] && ok "batch batch-budget: $q" || bad "batch batch-budget is '$q' (apply root-llms/10-tenancy)"
+  if kr get crd clusterqueues.kueue.x-k8s.io >/dev/null 2>&1; then
+    q=$(kr get clusterqueue spark-cq -o jsonpath='{range .spec.resourceGroups[0].flavors[0].resources[*]}{.nominalQuota} {end}' 2>/dev/null)
+    [[ "$q" == "2 12Gi 3 " ]] && ok "Kueue spark-cq: ${q% }" || bad "Kueue spark-cq is '$q' (apply root-llms/20-scheduling)"
+  else info "Kueue not installed on the root yet (scripts/install-addons.sh kueue)"; fi
 fi
 
 if want tenancy; then
@@ -73,7 +85,7 @@ if want gpu; then
   node=$(gpu_node)
   [[ -n "$node" ]] && ok "GB10 node: $node" || bad "no node labelled spark.lab/gpu=gb10"
   alloc=$(kr get node "$node" -o jsonpath='{.status.allocatable.nvidia\.com/gpu}')
-  [[ ${alloc:-0} -eq 15 ]] && ok "allocatable nvidia.com/gpu=$alloc (root 2 · dev-lab 2 · llms 11)" \
+  [[ ${alloc:-0} -eq 15 ]] && ok "allocatable nvidia.com/gpu=$alloc (platform 2 · llm-serving 6 · batch 3 · dev-lab 2 · dev-llms 2)" \
     || { [[ ${alloc:-0} -ge 1 ]] && warn "allocatable nvidia.com/gpu=$alloc (budgets assume 15)" || bad "no GPU allocatable"; }
   kr -n gpu-operator get pods -l app=nvidia-operator-validator --no-headers 2>/dev/null | grep -q Running && ok "operator-validator Running" || warn "operator-validator not Running"
   info "gpu-smoke from INSIDE dev-lab (tenant-beta → syncer → root scheduler → nvidia runtime)"
@@ -86,34 +98,34 @@ if want gpu; then
 fi
 
 if want ingress; then
-  echo "── ingress (Traefik inside $LLM_CTX)"
-  if kl -n ingress get deploy traefik-lab >/dev/null 2>&1; then
-    lb=$(kl -n ingress get svc traefik-lab -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-    [[ "$lb" == 192.168.0.115 ]] && ok "Traefik LoadBalancer IP $lb (MetalLB on the root)" || bad "Traefik LB IP is '$lb' (expected 192.168.0.115 — MetalLB, root quota services.loadbalancers?)"
+  echo "── ingress (Traefik on the root, context $ROOT_CTX)"
+  if kr -n ingress get deploy traefik-lab >/dev/null 2>&1; then
+    lb=$(kr -n ingress get svc traefik-lab -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+    [[ "$lb" == 192.168.0.115 ]] && ok "Traefik LoadBalancer IP $lb (MetalLB on the root)" || bad "Traefik LB IP is '$lb' (expected 192.168.0.115 — is MetalLB running?)"
     code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: llm.lab.local' "http://$lb/v1/models")
     [[ $code == 200 ]] && ok "Ingress llm.lab.local/v1/models → 200" || bad "Ingress returned $code"
     n=$(curl -sN -H 'Host: llm.lab.local' "http://$lb/v1/chat/completions" -d '{"stream":true,"max_tokens":10}' | grep -c '^data:')
     [[ $n -ge 10 ]] && ok "SSE streaming through ingress ($n events)" || bad "streaming broken ($n events)"
     code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: gw.lab.local' "http://$lb/v1/models")
     [[ $code == 200 ]] && ok "Gateway API HTTPRoute gw.lab.local → 200" || warn "HTTPRoute returned $code"
-  else warn "Traefik not installed in $LLM_CTX — skipped (scripts/install-addons.sh traefik)"; fi
+  else warn "Traefik not installed on the root — skipped (scripts/install-addons.sh traefik)"; fi
 fi
 
 if want storage; then
   echo "── storage"
   for sc in local-path local-nvme local-nvme-retain; do kr get sc $sc >/dev/null 2>&1 && ok "StorageClass $sc (root)" || bad "StorageClass $sc missing"; done
-  kl get sc local-nvme-retain >/dev/null 2>&1 && ok "llms sees the root StorageClasses (sync.fromHost.storageClasses)" || warn "llms does not see local-nvme-retain"
-  ph=$(kl -n llm-serving get pvc model-cache -o jsonpath='{.status.phase}' 2>/dev/null)
-  [[ $ph == Bound ]] && ok "model-cache Bound (llms)" || info "model-cache is '${ph:-absent}' (WaitForFirstConsumer binds when a pod uses it)"
+  kdl get sc local-nvme-retain >/dev/null 2>&1 && ok "$DEVLLM_CTX sees the root StorageClasses (sync.fromHost.storageClasses)" || warn "$DEVLLM_CTX does not see local-nvme-retain"
+  ph=$(kr -n llm-serving get pvc model-cache -o jsonpath='{.status.phase}' 2>/dev/null)
+  [[ $ph == Bound ]] && ok "model-cache Bound (root, llm-serving)" || info "model-cache is '${ph:-absent}' (WaitForFirstConsumer binds when a pod uses it)"
 fi
 
 if want serving; then
-  echo "── serving (inside $LLM_CTX)"
-  kl -n llm-serving get deploy mock-llm -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -q '^[1-9]' && ok "mock-llm ready" || bad "mock-llm not ready"
-  if kl -n llm-serving get deploy vllm >/dev/null 2>&1; then
-    r=$(kl -n llm-serving get deploy vllm -o jsonpath='{.status.readyReplicas}')
+  echo "── serving (root, llm-serving)"
+  kr -n llm-serving get deploy mock-llm -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -q '^[1-9]' && ok "mock-llm ready" || bad "mock-llm not ready"
+  if kr -n llm-serving get deploy vllm >/dev/null 2>&1; then
+    r=$(kr -n llm-serving get deploy vllm -o jsonpath='{.status.readyReplicas}')
     if [[ ${r:-0} -ge 1 ]]; then
-      out=$(kl -n llm-serving exec deploy/vllm -- curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+      out=$(kr -n llm-serving exec deploy/vllm -- curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
         -d '{"model":"qwen2.5-0.5b","messages":[{"role":"user","content":"Say OK"}],"max_tokens":5}')
       grep -q '"choices"' <<<"$out" && ok "vLLM answered a chat completion" || bad "vLLM response: $out"
     else warn "vLLM deployed but not ready"; fi
@@ -128,7 +140,7 @@ if want observability; then
     [[ $up -ge 5 ]] && ok "Prometheus: $up targets up" || warn "Prometheus: only $up targets up"
     vc=$(kr -n observability exec sts/prometheus-kps-prometheus -c prometheus -- \
          wget -qO- 'http://localhost:9090/api/v1/query?query=count(up%7Bvcluster%21%3D%22%22%7D)' 2>/dev/null | grep -o '"value":\[[^]]*"[0-9]*"\]' | grep -o '"[0-9]*"\]' | tr -dc 0-9)
-    [[ ${vc:-0} -ge 1 ]] && ok "Prometheus scrapes ${vc} target(s) inside vClusters" || info "no vCluster targets yet (deploy Traefik/vLLM in llms)"
+    [[ ${vc:-0} -ge 1 ]] && ok "Prometheus scrapes ${vc} model-server/gateway target(s) (labelled vcluster=…)" || info "no model-server targets yet (deploy Traefik/vLLM, Chapters 11, 20)"
     kr -n observability get cm spark-k8s-dashboard >/dev/null 2>&1 && ok "Grafana dashboard ConfigMap" || warn "dashboard ConfigMap missing"
   else warn "kube-prometheus-stack not installed — skipped"; fi
 fi

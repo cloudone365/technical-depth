@@ -10,9 +10,10 @@ It does what every controller does, with nothing hidden behind a library:
   5. periodic resync      → reconcile even without events (drift protection)
 
 Runs on the ROOT cluster (namespace platform-tools), so it sees every GPU pod
-on the Spark: the platform's own and the ones the two vClusters synced down.
-A synced pod carries vCluster's annotations with its original name, so the
-ledger shows both: "vc-llms/vllm-…-x-llm-serving-x-llms (llms: llm-serving/vllm-…)".
+on the Spark: the platform's, the root's model servers (llm-serving, batch) and
+the ones the two vClusters synced down. A synced pod carries vCluster's
+annotations with its original name, so the ledger shows both:
+"vc-dev-llms/vllm-…-x-llm-sandbox-x-dev-llms (dev-llms: llm-sandbox/vllm-…)".
 
 Runs in-cluster with its ServiceAccount token, or locally with
 API_SERVER=https://192.168.0.100:6443 TOKEN=… CA_FILE=… .
@@ -89,7 +90,7 @@ def reconcile():
         n["holders"].append(f'{who} [{s["slices"]}, {s["phase"]}]')
         by_ns[s["namespace"]] = by_ns.get(s["namespace"], 0) + s["slices"]
     desired = {k: json.dumps(v, indent=1) for k, v in nodes.items()} or {"<none>": "no GPU pods"}
-    if by_ns:                                    # vc-dev-lab / vc-llms vs their root quotas (2 / 8)
+    if by_ns:                                    # llm-serving / batch / vc-dev-lab / vc-dev-llms vs their quotas (6 / 3 / 2 / 2)
         desired["by-namespace"] = json.dumps(by_ns, indent=1, sort_keys=True)
     if desired == last_written:
         return                                   # idempotent: nothing to do

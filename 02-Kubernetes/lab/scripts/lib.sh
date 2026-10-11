@@ -2,9 +2,10 @@
 # Shared helpers for the 02-Kubernetes lab scripts.
 #
 # The lab is three Kubernetes API servers in one kubeconfig (Chapter 04):
-#   spark-root   the kubeadm root cluster on the Spark — platform, GPU, nodes
+#   spark-root   the kubeadm root cluster on the Spark — platform, GPU, nodes, and
+#                the LLM stack: llm-serving, batch, ingress (Traefik), Kueue, KEDA
 #   dev-lab      vCluster #1 — tenant-alpha, tenant-beta, lab-tools
-#   llms         vCluster #2 — llm-serving, batch, ingress (Traefik), Kueue, KEDA
+#   dev-llms     vCluster #2 — llm-sandbox (LLM manifests and small models, before the root)
 # 01-Ansible (playbooks 19.1, 20.2) or scripts/install-addons.sh vclusters writes
 # all three contexts into one file.
 set -euo pipefail
@@ -21,7 +22,7 @@ KUBECTL="${KUBECTL:-kubectl}"
 HELM="${HELM:-helm}"
 ROOT_CTX="${ROOT_CTX:-spark-root}"
 DEV_CTX="${DEV_CTX:-dev-lab}"
-LLM_CTX="${LLM_CTX:-llms}"
+DEVLLM_CTX="${DEVLLM_CTX:-dev-llms}"
 C_OK=$'\e[32m'; C_BAD=$'\e[31m'; C_WARN=$'\e[33m'; C_DIM=$'\e[2m'; C_OFF=$'\e[0m'
 [[ -t 1 ]] || { C_OK=; C_BAD=; C_WARN=; C_DIM=; C_OFF=; }
 PASS=0; FAIL=0; WARN=0
@@ -35,13 +36,13 @@ kc() { local ctx=$1; shift; "$KUBECTL" --context "$ctx" "$@"; }
 k()  { kc "$ROOT_CTX" "$@"; }
 kr() { kc "$ROOT_CTX" "$@"; }
 kd() { kc "$DEV_CTX" "$@"; }
-kl() { kc "$LLM_CTX" "$@"; }
+kdl() { kc "$DEVLLM_CTX" "$@"; }
 
 # Which cluster owns a namespace in this lab?
 ctx_for_ns() {
   case "$1" in
     tenant-alpha|tenant-beta|lab-tools) echo "$DEV_CTX" ;;
-    llm-serving|batch|ingress|kueue-system|keda|kserve|cert-manager) echo "$LLM_CTX" ;;
+    llm-sandbox) echo "$DEVLLM_CTX" ;;
     *) echo "$ROOT_CTX" ;;
   esac
 }

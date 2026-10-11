@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copy the lab kubeconfig (contexts spark-root, dev-lab, llms) from sema01 to
+# Copy the lab kubeconfig (contexts spark-root, dev-lab, dev-llms) from sema01 to
 # your MacBook, where every 02-Kubernetes command expects it (Chapter 04 §8.4):
 #   01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml
 # Semaphore writes it to its state volume (/opt/spark-lab/cache on sema01)

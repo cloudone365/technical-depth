@@ -46,7 +46,7 @@ kind: MacvlanNetwork
 metadata:
   name: cx7-rdma
 spec:
-  networkNamespace: vc-llms             # root namespace where the llms vCluster's batch pods really run
+  networkNamespace: batch               # root namespace of the training pods (root-llms)
   master: enp1s0f1np1
   mode: bridge
   mtu: 9000

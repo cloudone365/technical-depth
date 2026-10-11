@@ -1,0 +1,43 @@
+# The LLM budgets on the ROOT cluster (Chapters 14, 20, 04).
+#
+#   allocatable to pods          17 CPU · ~105.7 GiB · 15 slices
+#   vCluster dev-lab              2 CPU ·     8 Gi  ·  2 slices   (root/05-vclusters/quotas.yaml)
+#   vCluster dev-llms             2 CPU ·     8 Gi  ·  2 slices   (root/05-vclusters/quotas.yaml)
+#   root keeps                   13 CPU · ~89.7 GiB · 11 slices, split three ways:
+#     platform (no quota)         3 CPU ·  ~9.7 GiB ·  2 slices   Cilium, MetalLB, GPU Operator, Prometheus,
+#                                                                 Traefik, Kueue, KEDA, platform-tools
+#     llm-serving  (this file)    8 CPU ·    68 Gi  ·  6 slices · 1 Ti   model servers
+#     batch        (this file)    2 CPU ·    12 Gi  ·  3 slices · 200 Gi training (Kueue spark-cq, same numbers)
+#
+# The three parts add up exactly: on the root nothing else caps their sum (the
+# vClusters have a root quota around them; root namespaces don't), and on a
+# unified-memory box memory overcommit means losing model servers to the OOM
+# killer. Model memory: ~68 GiB → keep the sum of vLLM --gpu-memory-utilization
+# across models running at the same time ≲ 0.55 (util × ~119.7 GiB). Example
+# sets: two 7-8B models at 0.20 (16k context), three at 0.18 (~8k context), or
+# one 32B FP8 model at 0.45 (Chapter 20 §2). To move memory between serving and
+# batch, change this file and 20-scheduling/kueue.yaml together
+# (tests/budget_check.py checks the sum).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: serving-budget
+  namespace: llm-serving
+spec:
+  hard:
+    requests.cpu: "8"
+    limits.memory: 68Gi
+    requests.nvidia.com/gpu: "6"
+    requests.storage: 1Ti
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: batch-budget
+  namespace: batch
+spec:
+  hard:
+    requests.cpu: "2"
+    limits.memory: 12Gi
+    requests.nvidia.com/gpu: "3"
+    requests.storage: 200Gi

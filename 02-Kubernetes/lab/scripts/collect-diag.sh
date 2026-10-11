@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Support bundle (Chapter 26 §1): everything you need to debug the lab offline,
-# from all three API servers (root, dev-lab, llms).
+# from all three API servers (root, dev-lab, dev-llms).
 #   scripts/collect-diag.sh [root-namespace...]   → ./diag-<timestamp>.tar.gz
 source "$(dirname "$0")/lib.sh"
 set +e
 ts=$(date +%Y%m%d-%H%M%S); out="diag-$ts"; mkdir -p "$out"
-nss=("$@"); [[ ${#nss[@]} -eq 0 ]] && nss=(kube-system gpu-operator metallb-system observability platform-tools vc-dev-lab vc-llms)
+nss=("$@"); [[ ${#nss[@]} -eq 0 ]] && nss=(kube-system gpu-operator metallb-system observability platform-tools llm-serving batch ingress kueue-system vc-dev-lab vc-dev-llms)
 
 dump_ns() {   # dump_ns <context> <namespace> <outdir>
   local ctx=$1 ns=$2 d=$3; mkdir -p "$d"
@@ -32,7 +32,7 @@ kr get --raw /metrics 2>/dev/null | grep -E '^apiserver_flowcontrol_(rejected|cu
 for ns in "${nss[@]}"; do dump_ns "$ROOT_CTX" "$ns" "$r/ns/$ns"; done
 
 # ---- inside each vCluster (if reachable)
-for v in "$DEV_CTX" "$LLM_CTX"; do
+for v in "$DEV_CTX" "$DEVLLM_CTX"; do
   kc "$v" get --raw /readyz >/dev/null 2>&1 || { echo "context $v unreachable" > "$out/$v-UNREACHABLE.txt"; continue; }
   d="$out/$v"; mkdir -p "$d"
   kc "$v" get pods -A -o wide          > "$d/pods.txt" 2>&1

@@ -1,0 +1,15 @@
+# Defaults so a pod without resources still lands inside the sandbox quota;
+# the root quota on vc-dev-llms caps memory, so every container must declare it.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: defaults
+  namespace: llm-sandbox
+spec:
+  limits:
+    - type: Container
+      default: {memory: 512Mi}
+      defaultRequest: {cpu: 50m, memory: 128Mi}
+      max: {memory: 6Gi}
+    - type: PersistentVolumeClaim
+      max: {storage: 100Gi}

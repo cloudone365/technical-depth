@@ -1,5 +1,6 @@
 ---
-# Two virtual clusters inside the root cluster (02-Kubernetes Chapter 04).
+# Two small virtual clusters inside the root cluster, plus the root's LLM
+# budgets (02-Kubernetes Chapter 04).
 # The definitions are NOT duplicated here: this role applies the files in the
 # 02-Kubernetes lab, so Ansible and the lab scripts can never drift apart.
 vclusters_lab_dir: "{{ playbook_dir }}/../../../02-Kubernetes/lab"
@@ -12,15 +13,19 @@ vclusters_root_context: spark-root
 # "02-Kubernetes/lab/scripts/install-addons.sh storage".
 vclusters_local_path_version: v0.0.31
 
-# Root-side objects first: kustomize directories under manifests/root, the same
-# ones scripts/apply-lab.sh applies. 00-platform = platform namespaces and the
-# PriorityClasses (vCluster control planes run at spark-platform; no default
-# class on the root, see 02-Kubernetes Chapter 07 §3.1); 05-vclusters = the
-# vCluster namespaces, LimitRanges, the budgets (ResourceQuotas) and Cilium policies.
+# Root-side objects first: kustomize directories under 02-Kubernetes/lab/manifests,
+# the same ones scripts/apply-lab.sh applies. root/00-platform = platform
+# namespaces and the PriorityClasses (vCluster control planes run at
+# spark-platform; no default class on the root, see 02-Kubernetes Chapter 07 §3.1);
+# root/05-vclusters = the vCluster namespaces, LimitRanges, budgets (ResourceQuotas)
+# and Cilium policies; root-llms/00-platform + 10-tenancy = the LLM namespaces on
+# the root (llm-serving, batch, ingress) and their budgets.
 vclusters_root_manifests:
-  - 00-platform
-  - 05-vclusters
+  - root/00-platform
+  - root/05-vclusters
+  - root-llms/00-platform
+  - root-llms/10-tenancy
 
 vclusters_list:
   - { name: dev-lab, namespace: vc-dev-lab }   # vCluster #1 — 2 CPU · 8 Gi · 2 GPU slices
-  - { name: llms, namespace: vc-llms }         # vCluster #2 — 12 CPU · 88 Gi · 11 GPU slices
+  - { name: dev-llms, namespace: vc-dev-llms } # vCluster #2 — 2 CPU · 8 Gi · 2 GPU slices (LLM sandbox)

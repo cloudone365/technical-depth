@@ -7,10 +7,10 @@
 #     scripts/install-addons.sh storage         # local-path-provisioner at /data/k8s + local-nvme classes
 #     scripts/install-addons.sh metrics-server  # kubectl top / HPAs (k3s bundled it, kubeadm doesn't)
 #     scripts/install-addons.sh kps             # Prometheus/Grafana/Alertmanager
-#     scripts/install-addons.sh vclusters       # vCluster dev-lab + llms, budgets, merged kubeconfig
+#     scripts/install-addons.sh vclusters       # vCluster dev-lab + dev-llms, budgets, merged kubeconfig
 #     scripts/install-addons.sh argocd          # GitOps (Chapter 28)
-#   Inside vCluster #2 (context llms):
-#     scripts/install-addons.sh traefik         # Gateway API CRDs + Traefik (llms API gateway, 192.168.0.115)
+#   The LLM stack, also on the root:
+#     scripts/install-addons.sh traefik         # Gateway API CRDs + Traefik (LLM API gateway, 192.168.0.115)
 #     scripts/install-addons.sh kueue           # batch admission
 #     scripts/install-addons.sh keda            # event-driven autoscaling
 #     scripts/install-addons.sh kserve          # cert-manager + KServe (RawDeployment)
@@ -46,44 +46,44 @@ case "${1:-all}" in
     kr apply -k "$LAB_DIR/manifests/root/00-platform"
     kr apply -k "$LAB_DIR/manifests/root/05-vclusters"             # namespaces, budgets, Cilium boundary
     helm_repo loft https://charts.loft.sh
-    for name in "$DEV_CTX" "$LLM_CTX"; do
+    for name in "$DEV_CTX" "$DEVLLM_CTX"; do
       info "vCluster $name in vc-$name (chart $VCLUSTER_VERSION)"
       "$HELM" --kube-context "$ROOT_CTX" upgrade --install "$name" loft/vcluster --version "$VCLUSTER_VERSION" \
         -n "vc-$name" -f "$LAB_DIR/vclusters/$name.yaml" --wait --timeout 10m
       "$LAB_DIR/scripts/merge-vcluster-kubeconfig.sh" "$name" "vc-$name"
     done
     kr -n vc-dev-lab describe resourcequota vcluster-budget | sed -n '1,20p'
-    kr -n vc-llms describe resourcequota vcluster-budget | sed -n '1,20p'
+    kr -n vc-dev-llms describe resourcequota vcluster-budget | sed -n '1,20p'
     ;;
   argocd)
     kr create namespace argocd --dry-run=client -o yaml | kr apply -f -
     kr -n argocd apply --server-side -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml"
     kr -n argocd rollout status deploy/argocd-server --timeout=10m
     ;;
-  # ------------------------------------------------------------------ inside llms
+  # ------------------------------------------------------------------ LLM stack (root)
   traefik)
-    kl apply -k "$LAB_DIR/manifests/llms/00-platform"              # ingress namespace + PriorityClasses
-    kl apply --server-side -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
+    kr apply -k "$LAB_DIR/manifests/root-llms/00-platform"         # llm-serving, batch, ingress namespaces
+    kr apply --server-side -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
     helm_repo traefik https://traefik.github.io/charts
-    "$HELM" --kube-context "$LLM_CTX" upgrade --install traefik-lab traefik/traefik \
+    "$HELM" --kube-context "$ROOT_CTX" upgrade --install traefik-lab traefik/traefik \
       --version "$TRAEFIK_CHART_VERSION" -n ingress -f "$LAB_DIR/addons/traefik-values.yaml" --wait
-    kl -n ingress get svc traefik-lab -o jsonpath='{.status.loadBalancer.ingress[0].ip}{"\n"}'
+    kr -n ingress get svc traefik-lab -o jsonpath='{.status.loadBalancer.ingress[0].ip}{"\n"}'
     ;;
   kueue)
-    kl apply --server-side -f "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml"
-    kl -n kueue-system rollout status deploy/kueue-controller-manager --timeout=5m
+    kr apply --server-side -f "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml"
+    kr -n kueue-system rollout status deploy/kueue-controller-manager --timeout=5m
     ;;
   keda)
-    kl apply --server-side -f "https://github.com/kedacore/keda/releases/download/${KEDA_VERSION}/keda-${KEDA_VERSION#v}.yaml"
-    kl -n keda rollout status deploy/keda-operator --timeout=5m
+    kr apply --server-side -f "https://github.com/kedacore/keda/releases/download/${KEDA_VERSION}/keda-${KEDA_VERSION#v}.yaml"
+    kr -n keda rollout status deploy/keda-operator --timeout=5m
     ;;
   kserve)
-    kl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
-    kl -n cert-manager rollout status deploy/cert-manager-webhook --timeout=5m
-    kl apply --server-side -f "https://github.com/kserve/kserve/releases/download/${KSERVE_VERSION}/kserve.yaml"
-    kl -n kserve rollout status deploy/kserve-controller-manager --timeout=5m
-    kl apply --server-side -f "https://github.com/kserve/kserve/releases/download/${KSERVE_VERSION}/kserve-cluster-resources.yaml"
-    kl -n kserve patch configmap inferenceservice-config --type merge \
+    kr apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
+    kr -n cert-manager rollout status deploy/cert-manager-webhook --timeout=5m
+    kr apply --server-side -f "https://github.com/kserve/kserve/releases/download/${KSERVE_VERSION}/kserve.yaml"
+    kr -n kserve rollout status deploy/kserve-controller-manager --timeout=5m
+    kr apply --server-side -f "https://github.com/kserve/kserve/releases/download/${KSERVE_VERSION}/kserve-cluster-resources.yaml"
+    kr -n kserve patch configmap inferenceservice-config --type merge \
       -p '{"data":{"deploy":"{\"defaultDeploymentMode\":\"RawDeployment\"}"}}'
     ;;
   all)

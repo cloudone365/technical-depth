@@ -1,7 +1,8 @@
-# The four CEL admission policies run inside BOTH vClusters (each vCluster has
-# its own API server, so each enforces them for its own tenants). Bindings
-# select namespaces by name/label, so they simply match nothing where a
-# namespace doesn't exist.
+# The four CEL admission policies run in all three API servers: inside both
+# vClusters (each enforces them for its own tenants) and on the root, for the
+# LLM stack (root-llms/15-admission). Bindings select namespaces by name/label,
+# so they simply match nothing where a namespace doesn't exist — on the root
+# they don't touch kube-system, the platform or the vc-* namespaces.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources: [policies.yaml]

@@ -1,5 +1,5 @@
 # expect: allow
-# cluster: llms
+# cluster: spark-root
 # serving Deployment with a readinessProbe and pinned image
 apiVersion: apps/v1
 kind: Deployment

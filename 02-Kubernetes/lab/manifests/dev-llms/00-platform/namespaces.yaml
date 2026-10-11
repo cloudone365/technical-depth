@@ -1,0 +1,16 @@
+# Namespaces INSIDE vCluster #2 · dev-llms (Chapters 20, 04). Apply with
+# --context dev-llms. dev-llms is the LLM sandbox: try a manifest or a small
+# model here, with its own API server and its own small budget, before it goes
+# to the root's llm-serving. On the root these pods all land in host namespace
+# vc-dev-llms (PSA baseline there).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llm-sandbox
+  labels:
+    spark.lab/tenant: "true"
+    spark.lab/team: llm-dev
+    spark.lab/tier: serving                # same admission rules as llm-serving (readinessProbe required)
+    # NGC serving images run as root and need /dev/shm → baseline, not restricted
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted

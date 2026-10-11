@@ -15,7 +15,7 @@
   ansible.builtin.import_playbook: 19.1-kubernetes.yml
 - name: GPU Operator
   ansible.builtin.import_playbook: 20.1-gpu-operator.yml
-- name: Virtual clusters (dev-lab, llms)
+- name: Virtual clusters (dev-lab, dev-llms) and the root's LLM budgets
   ansible.builtin.import_playbook: 20.2-vclusters.yml
 - name: Slurm
   ansible.builtin.import_playbook: 22.1-slurm.yml
