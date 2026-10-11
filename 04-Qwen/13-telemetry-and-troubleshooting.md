@@ -242,6 +242,21 @@ Xid events in `journalctl -k`, `spark_gpu_xid_events_24h > 0`, or an engine that
 
 ### 5.1 Deploy the rules and the dashboard
 
+#### What this lab does (03 kustomization `03-DeepSeek/lab/observability`)
+
+- **Applies** to namespace `observability` on `spark-root`: PrometheusRule `spark-reasoning` (alerts such as `ReasoningTruncated`, `VLLMDown`, `PrefixCacheIneffective`, `ReasoningTTFTSlow`, `SparkGPUXid`, `SparkGPUThrottling`) and ConfigMap `deepseek-serving-dashboard` labelled `grafana_dashboard: "1"`, which Grafana's sidecar loads.
+- **Nothing in `llm-serving` changes.** The rules read vLLM's own metrics, so they cover the Qwen engines as they are.
+
+#### What to look for
+
+1. **Apply:** `prometheusrule.monitoring.coreos.com/spark-reasoning` and `configmap/deepseek-serving-dashboard` created or unchanged.
+2. **Lists:** `prometheusrule.monitoring.coreos.com/spark-reasoning` among the rules; `configmap/deepseek-serving-dashboard` among the dashboards.
+3. **Grafana:** the dashboard "Spark · LLM serving (DeepSeek)" shows Qwen series once you select the Qwen model.
+
+**If something's off:** `no matches for kind "PrometheusRule"` → the kube-prometheus-stack isn't installed (02-Kubernetes Chapter 20). Dashboard missing in Grafana → the sidecar didn't pick up the label; wait a minute or restart `deploy/kps-grafana`.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 kubectl --context spark-root apply -k ../../03-DeepSeek/lab/observability
@@ -253,6 +268,28 @@ Open Grafana (`http://192.168.0.100:32000`) → the LLM serving dashboard, and s
 
 ### 5.2 Check that every source is scraped, with a Qwen model serving
 
+#### What this lab does (Prometheus queries + node checks)
+
+- **Serves** `qwen3-8b` as the main model (if it isn't already), then port-forwards `svc/kps-prometheus` to `localhost:9090` for a moment and runs four instant queries: the vLLM scrape target, a vLLM metric, and two host metrics from the 01-Ansible textfile collector.
+- **On dgx-spark-1:** reads `/proc/meminfo` and `nvidia-smi`. Read-only.
+
+#### What to look for
+
+1. **Queries:**
+
+   | Query | Healthy value |
+   |---|---|
+   | `up{job="vllm"}` | a non-empty list (`["-"]`: `up` carries no model label) |
+   | `vllm:num_requests_running` | `["qwen3-8b"]` |
+   | `spark_gpu_up`, `spark_uma_available_bytes` | `["-"]`: present, no model label |
+
+2. **Node:** `MemTotal` ≈ 121.7 GiB (about 127,600,000 kB); `MemAvailable` about 119 GiB on an idle Spark, less with the model loaded.
+3. **`nvidia-smi`:** name `NVIDIA GB10`; `memory.used` is `[N/A]` (unified memory).
+
+**If something's off:** `[]` for the vLLM queries → the ServiceMonitor doesn't match (02 Chapter 20 §5.6). `[]` for `spark_*` → the 01-Ansible telemetry template `12.1 Telemetry` isn't applied. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 scripts/serve-model.sh qwen3-8b
@@ -263,17 +300,28 @@ done
 kill $pf
 ```
 
-Expected: the vLLM series carry `model_name="qwen3-8b"`; the host series are present.
-
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
 grep -E 'MemTotal|MemAvailable|^Cached' /proc/meminfo
 nvidia-smi --query-gpu=name,utilization.gpu,power.draw,temperature.gpu,memory.used --format=csv
 ```
 
-Expected: `MemTotal` ≈ 121.7 GiB; `memory.used` is `[N/A]`.
-
 ### 5.3 Load with and without thinking
+
+#### What this lab does (shell function `load` + `stream_probe.py`)
+
+- **Sends** 32 requests to Qwen3-8B, 8 at a time, first with thinking on, then off, and times each batch. The engine is not reconfigured.
+- **Streams** one request with `stream_probe.py` to time the reasoning and answer phases separately.
+
+#### What to look for
+
+1. **`time load true` vs `time load false`:** the thinking run takes much longer in `real`.
+2. **`stream_probe.py`:** `first reasoning` a number, `first answer` much later, `finish_reason=stop`, no `BUFFERED` or `TRUNCATED` line.
+3. **Dashboard during the runs:** generated tokens and time to first answer differ a lot between the modes; TTFT p95 barely moves. Fill the table below.
+
+**If something's off:** `curl: (7)` → the port-forward died; restart it. `TRUNCATED` → raise `max_tokens` (§3.5.2).
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
@@ -306,6 +354,21 @@ The TTFT row barely moves; the time-to-first-answer and generated-tokens rows do
 
 ### 5.4 Find the memory headroom
 
+#### What this lab does (script `02-Kubernetes/lab/scripts/uma-watch.sh`, on dgx-spark-1)
+
+- **Prints every 2 s:** host `MemAvailable`, page cache (`Cached`), and the vLLM pod cgroup's `memory.current` and `memory.max`. Read-only.
+- **You restart** `deploy/vllm` from another terminal so you see a full load. The main model is down until the new pod is Ready.
+
+#### What to look for
+
+1. **Header:** `time  MemAvailable  Cached  pod.mem.current  pod.mem.max`; `pod.mem.max` equals the catalog `mem` in bytes (32Gi = `34359738368` for `qwen3-8b`).
+2. **During the load:** `MemAvailable` falls, `Cached` grows while the weights are read, `pod.mem.current` rises and settles.
+3. **Record** the peak `pod.mem.current` and the margin to `pod.mem.max`.
+
+**If something's off:** `… not found among the pods synced` or an empty cgroup path → the pod name is stale after a restart; re-run the `pod=$(…)` line. `bc: command not found` → install `bc` on the Spark.
+
+#### Run it
+
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
 cd ~/technical-depth/02-Kubernetes/lab   # your checkout on the Spark
@@ -316,6 +379,22 @@ scripts/uma-watch.sh llm-serving "$pod"
 Restart the engine in another terminal (`kubectl --context spark-root -n llm-serving rollout restart deploy/vllm`) and watch MemAvailable, page cache and the pod cgroup's `memory.current` through the load. Record the peak `memory.current` and compare it with the pod's limit from the catalog; that margin is what §3.5.1 step 3 asks for.
 
 ### 5.5 Provoke and fix three failures
+
+#### What this lab does (three deliberate misconfigurations)
+
+- **(a) Truncated thinking:** one request with `max_tokens: 128` and thinking on. Nothing on the cluster changes.
+- **(b) Missing tool-call parser:** you serve Qwen3-8B without `--enable-auto-tool-choice` and `--tool-call-parser`, run `fc_check.py`, then restore the catalog overlay with `serve-model.sh qwen3-8b`.
+- **(c) Over the pool:** you start a second engine whose util pushes the sum above 0.72 (bypassing the script's budget check), read the evidence, and park it again.
+
+#### What to look for
+
+1. **(a):** `finish: "length"`, `content` empty or `null`, `thinking_chars` above 0.
+2. **(b):** every tool case `FAIL`, with `no tool call (check --enable-auto-tool-choice and --tool-call-parser)` or `request failed: HTTP Error 400` (vLLM refuses `tool_choice: auto` without those flags); `no-tool` and `json-schema` still `PASS`. After `serve-model.sh qwen3-8b`, the suite passes again.
+3. **(c):** one of three signatures, each with its evidence: `Pending` with `exceeded quota: serving-budget` or `Insufficient memory` in `describe pod`, or a CUDA OOM in the vLLM log at load.
+
+**If something's off:** (b) still passes → the flags are still on the running pod; check its args. (c) starts fine → the sum wasn't really above 0.72; recount with `scripts/serve-model.sh list`.
+
+#### Run it
 
 Each one is a deliberate misconfiguration on the served model; `serve-model.sh` restores it.
 
@@ -330,7 +409,7 @@ curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -
 kill $pf
 ```
 
-Expected: `finish: "length"`, empty `content`. Fix with a bigger `max_tokens` or `enable_thinking: false`, and confirm in the finish-reasons panel.
+Fix with a bigger `max_tokens` or `enable_thinking: false`, and confirm in the finish-reasons panel.
 
 **(b) Missing tool-call parser.** Serve the model with the parser flags removed (edit a copy of the overlay, or apply the base vLLM manifest with the model env changed), then:
 
@@ -342,11 +421,26 @@ kill $pf
 scripts/serve-model.sh qwen3-8b
 ```
 
-Expected: every tool case fails with "missing call …" (the call is still in `content` as `<tool_call>` text — check one raw request); `no-tool` and `json-schema` still pass, because they don't depend on the tool parser. After re-serving from the catalog it recovers.
+Without the parser the call can only arrive as `<tool_call>` text in `content` (check one raw request without `tools`); `no-tool` and `json-schema` don't depend on the tool parser.
 
-**(c) Over the pool.** Try to serve a second engine whose util pushes the sum above 0.72 (Chapter 06 shows a second Deployment). Expected: `Pending` on the quota or node memory, or a CUDA OOM at load if the pod fits but vLLM's budget doesn't. Read which one it is from `describe pod` and the log, park it, and note the evidence that told you.
+**(c) Over the pool.** Try to serve a second engine whose util pushes the sum above 0.72 (Chapter 06 shows a second Deployment). A CUDA OOM at load means the pod fit but vLLM's budget didn't. Read which one it is from `describe pod` and the log, park it, and note the evidence that told you.
 
 ### 5.6 Collect a support bundle
+
+#### What this lab does (02 `scripts/collect-diag.sh`, 03 `scripts/llm-triage.sh`)
+
+- **`collect-diag.sh llm-serving batch`:** collects describes, events, current and previous logs and quotas for those namespaces (root, dev-lab and dev-llms API servers) into `./diag-<timestamp>.tar.gz` in `02-Kubernetes/lab`. Read-only.
+- **`llm-triage.sh serving`:** prints a live, read-only summary of the serving stack (what runs, its flags, current engine metrics, usual suspects with pointers). It reads `deploy/vllm` generically, so it works for a Qwen model.
+
+#### What to look for
+
+1. **Bundle:** a `diag-<timestamp>.tar.gz` file.
+2. **Inside it, for §5.5 (c):** the event with the scheduling or OOM reason, the vLLM log line with the memory numbers, and the quota usage.
+3. **Triage:** `[PASS] vLLM Ready` and no `[FAIL]` lines on a healthy stack.
+
+**If something's off:** the triage script's parser checks key on 03's model names (`r1-*`, `qwq-*`, `*tools*`), so they are skipped for Qwen names; check the parser flags with §5.5 (b) or Chapter 10 §5.1 instead.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab

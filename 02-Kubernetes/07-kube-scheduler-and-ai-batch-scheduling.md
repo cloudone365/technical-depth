@@ -155,6 +155,24 @@ export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 
 ### 5.1 Install Kueue and the queues (on the root)
 
+#### What this lab does (script `lab/scripts/install-addons.sh kueue`, manifests `lab/manifests/root-llms/20-scheduling`)
+
+- **Kueue** `v0.13.4` in namespace `kueue-system` on the root (server-side apply of the release manifest); the script waits for `kueue-controller-manager`. Already there if you ran `install-addons.sh all`.
+- **Queues:** ResourceFlavor `gb10` (node label `spark.lab/gpu=gb10`), ClusterQueue `spark-cq` (2 CPU · 12Gi · 3 slices), LocalQueue `batch/train`, and WorkloadPriorityClasses `urgent` (1000) and `routine` (100).
+- **Read-only checks:** `verify.sh llm-budget` and the CRD count in dev-lab.
+- Nothing is installed in the vClusters.
+
+#### What to look for
+
+1. **Command exit:** `deployment "kueue-controller-manager" successfully rolled out`, then `created` / `unchanged` for the queue objects.
+2. **Queues:** `resourceflavor gb10`, `clusterqueue spark-cq` with `PENDING WORKLOADS 0`, and LocalQueue `train` with `CLUSTERQUEUE spark-cq`.
+3. **`verify.sh llm-budget`:** `[PASS] batch batch-budget: 2 12Gi 3` and `[PASS] Kueue spark-cq: 2 12Gi 3`.
+4. **dev-lab:** the CRD count prints `0`.
+
+**If something's off:** `no matches for kind "ClusterQueue"` → the Kueue CRDs aren't installed yet; run the first line again and wait for the rollout. `spark-cq` other than `2 12Gi 3` → someone patched it; re-apply `root-llms/20-scheduling`. More in §7.
+
+#### Run it
+
 ```bash
 scripts/install-addons.sh kueue                                  # on the root (kubectl --context spark-root …)
 kubectl --context spark-root apply -k manifests/root-llms/20-scheduling
@@ -168,6 +186,24 @@ Expected: `spark-cq` with `PENDING WORKLOADS 0`, `train` pointing at it, and `ve
 
 ### 5.2 See how the scheduler thinks
 
+#### What this lab does (read-only `kubectl` on the root and in dev-lab)
+
+- Shows the root's only scheduler pod, the "Allocated resources" block of `dgx-spark-1` as the root and as dev-lab see it, and every root pod that requests a GPU with its priority value and class.
+- **Read-only:** nothing is changed.
+
+#### What to look for
+
+| Check | Healthy value |
+|---|---|
+| scheduler pods (root) | one, `kube-scheduler-dgx-spark-1`, `Running` |
+| root "Allocated resources" `nvidia.com/gpu` | every slice in use on the Spark, model servers included; at most `15` |
+| dev-lab "Allocated resources" | much lower: only dev-lab's own pods are counted |
+| GPU pod list `PRIO` | the value of the class, e.g. `50000` for `spark-serving`, `100000` for `spark-platform` |
+
+**If something's off:** a GPU pod with `PRIO 0` and no class → it was created without a PriorityClass, which the root allows (no root default, §3.1). More in §7.
+
+#### Run it
+
 ```bash
 kubectl --context spark-root -n kube-system get pods -l component=kube-scheduler     # the only scheduler
 kubectl --context spark-root describe node dgx-spark-1 | sed -n '/Allocated resources/,/Events/p'
@@ -179,6 +215,24 @@ kubectl --context spark-root get pods -A -o custom-columns='NS:.metadata.namespa
 The root's node view counts every pod on the Spark, the model servers in `llm-serving` included. dev-lab's view of the *same* node is computed from the pods dev-lab knows about — its own — so it shows much less "allocated" than the node really has. A tenant reading `describe node` inside a vCluster can't tell whether the GPU is free. The root's list shows each pod's priority **value** next to its class name, for synced pods and the root's own alike: that value is what the scheduler sorts on.
 
 ### 5.3 Priority and preemption (on the root)
+
+#### What this lab does (manifest `lab/manifests/root/20-scheduling/preemption-demo.yaml`, one pod in dev-llms)
+
+- **Filler:** Deployment `platform-tools/filler` on the root at `spark-preemptible` (1000, never preempts): `sleep` pods with 1 GPU slice, 10m CPU and 64Mi each. You scale it to every free slice, so the node is full.
+- **Urgent:** pod `platform-tools/urgent` at `spark-serving` (50000) asks for one more slice. The scheduler evicts one filler pod to make room.
+- **Across clusters:** after deleting `urgent`, the same kind of pod is created in **dev-llms** (`llm-sandbox/urgent-from-dev-llms`). The root scheduler evicts another filler for it.
+- **Cleanup** deletes the dev-llms pod and every object in the demo file. `yq` (mikefarah) is installed to `/usr/local/bin` first if missing.
+
+#### What to look for
+
+1. **Node full:** after the scale, every `filler` pod is `Running`.
+2. **`urgent`:** `Pending` for a moment, then `Running`; one `Preempted` event: `Preempted by pod … on node dgx-spark-1`. The filler Deployment recreates the lost pod, which stays `Pending` with `Insufficient nvidia.com/gpu`.
+3. **From dev-llms:** a second `Preempted` event in the root's `platform-tools`, and the host copy `urgent-from-dev-llms-x-llm-sandbox-x-dev-llms` in `vc-dev-llms` with `PRIO 50000`.
+4. **After cleanup:** `kubectl --context spark-root -n platform-tools get deploy filler` prints `NotFound`.
+
+**If something's off:** `urgent` stays `Pending` with `No preemption victims found` → the free slices weren't all filled, or the remaining holders have equal or higher priority. `urgent-from-dev-llms` `Pending` with a sync error → dev-llms' 2 slices are used up (`vcluster-budget`), so the pod never reached the scheduler. More in §7.
+
+#### Run it
 
 Preemption needs a *full node*, and inside a vCluster the root quota refuses pods long before the node fills up. So the demo runs at the root, in `platform-tools`. First fill every free slice with preemptible pods:
 
@@ -239,6 +293,22 @@ kubectl --context spark-root delete -f manifests/root/20-scheduling/preemption-d
 
 ### 5.4 Reproduce the partial-gang deadlock (no Kueue, in dev-lab)
 
+#### What this lab does (manifest `lab/manifests/dev-lab/20-scheduling/no-kueue-deadlock.yaml`)
+
+- **Creates in dev-lab's `lab-tools`:** headless Service `peers` and two Indexed Jobs, `job-x` and `job-y`, each with 2 ranks. Each rank asks for 1 GPU slice (10m CPU, 64Mi, `nicolaka/netshoot:v0.13`) and loops until it can resolve its peer's DNS name, like a torchrun rendezvous.
+- **The trap:** dev-lab's root budget is 2 slices for 4 ranks. When each Job gets one, both rank-0s wait forever and the root refuses both rank-1s.
+- **Read-only checks** of the root quota and of which pods exist at the root. Cleanup deletes the Service and both Jobs.
+
+#### What to look for
+
+1. **Before:** `vcluster-budget` shows `requests.nvidia.com/gpu` used `0`, hard `2`. Anything above 0 → free it first, or the demo can't split 1 + 1.
+2. **The split:** `job-x-0` and `job-y-0` `Running`, `job-x-1` and `job-y-1` `Pending`; the logs repeat `rank 0 waiting for job-x-1.peers` (and `job-y-1`). If one Job got both slices, it simply finishes: delete and re-apply.
+3. **Who holds them back:** the Pending pods' events say `exceeded quota` (the root's `vcluster-budget`), and there's no `Scheduled` / `FailedScheduling` event. At the root, only the two rank-0 host copies exist.
+
+**If something's off:** all four `Pending` → another dev-lab pod holds the slices (`gpu-smoke`, break/fix 02). More in §7.
+
+#### Run it
+
 dev-lab has no Kueue, and its root budget is exactly 2 slices. Make sure nothing else in dev-lab holds a slice (`scripts/breakfix.sh reset 02`, delete `tenant-beta/gpu-smoke`), then submit two 2-rank jobs that each need both:
 
 ```bash
@@ -271,6 +341,25 @@ kubectl --context dev-lab delete -f manifests/dev-lab/20-scheduling/no-kueue-dea
 ```
 
 ### 5.5 Fix it with Kueue gang admission (on the root)
+
+#### What this lab does (manifest `lab/manifests/root-llms/20-scheduling/gang-demo-jobs.yaml`, test `lab/tests/kueue-gang-test.sh`)
+
+- **Two gang jobs** in the root's `batch`, both created `suspend: true` with queue `train`: `gang-a` and `gang-b`, each 3 Indexed pods of `cuda:13.0.1-base` that print their rank, run `nvidia-smi -L` and sleep 120 s. Each pod asks for 500m CPU, 2 Gi (request = limit) and 1 slice, at pod class `spark-batch` and Workload class `routine`.
+- **Kueue** admits one Job whole (3 slices = all of `spark-cq`) and keeps the other suspended with no pods until the first finishes.
+- **Priority inside the queue:** `gang-c` is a copy of `gang-b` with Workload class `urgent` (made with `yq`), which jumps ahead of `gang-b`.
+- Cleanup deletes the three Jobs. `kueue-gang-test.sh` does the first part on its own and cleans up after itself.
+
+#### What to look for
+
+1. **Workloads:** one `ADMITTED True` in `spark-cq`, the other with no reservation.
+2. **Jobs:** the admitted one `SUSPENDED false`, `ACTIVE 3`; the other `SUSPENDED true`, no pods at all.
+3. **Usage:** `flavorsUsage` for `gb10` shows `nvidia.com/gpu` 3, `cpu` 1500m, `memory` 6Gi.
+4. **After ~2 min:** the first Job completes and the held one is admitted whole. With `gang-c` submitted, the `PRIORITY` column shows `1000` for `gang-c` and `100` for `gang-b`, and `gang-c` is admitted first.
+5. **`kueue-gang-test.sh`** ends `PASS: one gang admitted whole, the other held whole (no partial start)`.
+
+**If something's off:** both Jobs `SUSPENDED true` forever → `kubectl --context spark-root -n batch describe workload …` gives the reason (usually `insufficient quota` because another workload already uses `spark-cq`). Pods start without Kueue → the Jobs were created before Kueue was ready. More in §7.
+
+#### Run it
 
 `gang-a` and `gang-b` each need 3 pods × (0.5 CPU · 2 Gi · 1 slice) = 1.5 CPU · 6 Gi · 3 slices; `spark-cq` allows 2 CPU · 12 Gi · 3 slices. Either fits, both don't:
 
@@ -309,6 +398,23 @@ When `gang-a` completes, `gang-c` (priority 1000) is admitted before `gang-b` (1
 Exercise: why didn't Kueue's 3 slices collide with serving? Add up `spark-cq` (3) + `serving-budget` (6) + the platform's 2: exactly the 11 the root keeps, so on slices they can't. Now do the same for memory with `kubectl --context spark-root -n llm-serving describe resourcequota serving-budget`: up to 90 Gi for serving plus up to 12 Gi for batch is more than the ~90 GiB pool — on purpose. If serving already held its full 90 Gi, Kueue would still admit `gang-a` (6 Gi fits its 12 Gi), and the scheduler would find no memory for some or all of its pods: they wait `Pending` with `Insufficient memory`. That's a partial gang at the node, the one layer Kueue can't see. In this lab it is harmless — the pods never squeeze a model (request = limit) and never preempt one (`preemptionPolicy: Never`), so training waits for serving. On a busy cluster you'd turn on Kueue's `waitForPodsReady`, which evicts and requeues a workload whose pods don't all start within a timeout; the lab's Kueue runs with the default configuration, without it.
 
 ### 5.6 Taints and affinity (ready for dgx-spark-2)
+
+#### What this lab does (a root taint, manifest `lab/manifests/dev-lab/20-scheduling/taints-affinity.yaml`)
+
+- **Taints** `dgx-spark-1` with `spark.lab/dedicated=gpu:PreferNoSchedule` on the root. `PreferNoSchedule` only discourages placement, so nothing in any cluster stops.
+- **Creates in dev-lab:** Deployment `tenant-beta/affinity-demo`, 2 `pause:3.10` replicas that tolerate the taint, *require* a node with `spark.lab/gpu=gb10` and *prefer* one replica per node.
+- **Removes the taint** at the end. The Deployment stays until you delete it.
+
+#### What to look for
+
+1. **Taint in dev-lab:** the `jsonpath` prints `[{"effect":"PreferNoSchedule","key":"spark.lab/dedicated","value":"gpu"}]`, synced from the root.
+2. **Placement:** both `affinity-demo` pods `Running` on `dgx-spark-1` (one Spark: the anti-affinity is only preferred).
+3. **Tolerations:** the `jq` output lists the two `spark.lab/dedicated` tolerations (`PreferNoSchedule` and `NoSchedule`) plus the defaults Kubernetes adds.
+4. **After removal:** `kubectl --context spark-root describe node dgx-spark-1 | grep -i taint` prints `Taints: <none>`.
+
+**If something's off:** pods `Pending` with `didn't match Pod's node affinity` → label `spark.lab/gpu=gb10` missing on the node. Never use `NoSchedule` for this test on one Spark: every new pod in all three clusters would stop (break/fix 13). More in §7.
+
+#### Run it
 
 Nodes belong to the root: only the platform admin can taint them, and both vClusters see the taint through node sync.
 

@@ -232,6 +232,34 @@ Key automation moves:
 
 ### 4.1 The operator on the root
 
+#### What this lab does (template `20.1 GPU Operator`)
+
+- **Where:** runs on the controller against the root's API only, always with context `spark-root`. It opens no SSH session and changes nothing on the Spark's host: driver, toolkit and containerd stay as DGX OS and Chapter 19 left them.
+- **Namespace and config:** creates `gpu-operator` (privileged PSA) and the ConfigMap `time-slicing-config`: 15 replicas of `nvidia.com/gpu`, and a request for more than 1 is refused.
+- **Helm release:** chart `nvidia/gpu-operator` v26.7.1 with the driver, toolkit, CDI and MIG manager **off** (DCGM exporter off by default). Device plugin, NFD, GFD and the validator run. `atomic: true` rolls a failed install back; the wait is up to 15 min.
+- **Gates:** waits until the `nvidia-operator-validator` pods are `Running`, then asserts that every node advertises exactly 15 GPUs.
+- **Smoke pod:** `cuda-smoke` in the root's `default` namespace runs `nvidia-smi -L` with 1 slice. It stays behind as a `Completed` pod.
+- **First run:** pulls the operator's images, so expect several minutes.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`. The task "Assert every node advertises time-sliced GPUs" prints `dgx-spark-1 advertises 15 GPU slices`. On a re-run the Helm release and the ConfigMap stay as they are.
+2. **The smoke pod is only informational** (`failed_when: false`), so check it by eye: `kubectl --context spark-root logs cuda-smoke` prints `GPU 0: NVIDIA GB10 (UUID: GPU-…)`. A re-run doesn't start it again; delete the pod first (`kubectl --context spark-root delete pod cuda-smoke`) to repeat the test.
+3. **The node and the release**, with the commands under "Run it":
+
+   | Line/Field | Healthy value |
+   |---|---|
+   | `.status.allocatable["nvidia.com/gpu"]` | `"15"` |
+   | `nvidia.com/gpu.replicas` | `"15"` |
+   | `nvidia.com/gpu.sharing-strategy` | present (time-slicing) |
+   | `nvidia.com/gpu.product` | ends in `-SHARED` |
+   | `helm get values`: `driver`, `toolkit`, `cdi` | `enabled: false` each |
+   | pods in `gpu-operator` | Running/Completed, and no driver or toolkit DaemonSet pods |
+
+**If something's off:** allocatable `1` instead of `15` → the device plugin didn't pick up `time-slicing-config`. Validator stuck in `Init` → `nvidia-smi` on the host first. `Could not find … kubeconfig-spark-lab.yaml` → run `19.1 Kubernetes` from Semaphore first. More in §6.
+
+#### Run it
+
 The role runs on the **controller**: in this lab the Semaphore container on sema01, which has `helm`, `kubectl` and `kubernetes.core` in its image and reads the kubeconfig from its state volume (Chapter 19 §2.5).
 
 **Semaphore UI:** run the template **`20.1 GPU Operator`** (break-glass: `ansible-playbook playbooks/20.1-gpu-operator.yml` from the MacBook, against its own `.cache/` kubeconfig). The play only talks to the Kubernetes API, so it needs no SSH certificate. Then check from the MacBook:
@@ -251,6 +279,23 @@ helm --kube-context spark-root -n gpu-operator get values gpu-operator | grep -A
 Expected: allocatable `"15"`, `nvidia.com/gpu.replicas: "15"` and a `nvidia.com/gpu.sharing-strategy` label from GFD, and `enabled: false` under `driver`, `toolkit` and `cdi`. There is no driver or toolkit DaemonSet in the namespace. Look closely at `nvidia.com/gpu.product`: GFD writes it from what the driver reports, and with time-slicing it adds a `-SHARED` suffix. That is why the lab never selects on it — Chapter 19's kubelet flags set the lab-owned `spark.lab/gpu=gb10` at registration, and every 02 lab selector (node-probe, dev-lab affinity, Kueue's ResourceFlavor, `verify.sh`) uses that.
 
 ### 4.2 Fifteen slices, five budgets
+
+#### What this lab does (manifests `ts-demo.yaml` and `ts-sbx`, below)
+
+- **On the root:** Deployment `ts-demo` in `llm-serving`, 6 replicas. Each pod takes 1 GPU slice and 4Gi of memory (request = limit) and runs a PyTorch matrix-multiply loop. Then you ask for a 7th replica, and delete it all. The image `nvcr.io/nvidia/pytorch:25.09-py3` is large, so the first pull takes a while.
+- **In the vCluster `dev-llms`:** Deployment `ts-sbx` in its `default` namespace, 3 replicas, each holding 1 slice and 256Mi while it sleeps. Deleted at the end.
+- **Nothing is reconfigured.** The quotas `serving-budget` and `vcluster-budget` are only read. If the 02 lab's model servers already run in `llm-serving`, they hold some of the 6 slices: scale them to 0 first.
+
+#### What to look for
+
+1. **`ts-demo`:** 6 pods `Running` on dgx-spark-1, and `nvidia-smi` on the Spark lists 6 python processes (memory columns show `[N/A]` on the GB10's unified memory).
+2. **The 7th replica never exists.** Still 6 pods. The ReplicaSet events show `FailedCreate … exceeded quota: serving-budget, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=6, limited: requests.nvidia.com/gpu=6`, and `describe resourcequota serving-budget` shows `requests.nvidia.com/gpu  6  6`.
+3. **The vCluster sees more than it may use:** `dev-llms` reports allocatable `15` on dgx-spark-1, while the root's `vcluster-budget` in `vc-dev-llms` allows `2`.
+4. **`ts-sbx`:** 2 `Running`, 1 `Pending`. The Pending pod's events quote `exceeded quota: vcluster-budget` and `requests.nvidia.com/gpu`, and there is **no** `FailedScheduling` event. On the root, `vc-dev-llms` holds only 2 copies named `ts-sbx-…-x-default-x-dev-llms`.
+
+**If something's off:** fewer than 6 `ts-demo` pods → other pods in `llm-serving` hold slices or memory (`describe resourcequota serving-budget`). All pods `Pending` with `Insufficient nvidia.com/gpu` → the node's 15 slices are taken elsewhere (`describe node … | grep -A8 'Allocated resources'`). More in §6.
+
+#### Run it
 
 Build the vClusters and the root's LLM budgets if you haven't (**Semaphore UI:** template `20.2 vClusters`, then `tools/fetch-kubeconfig.sh sema01` on the MacBook for the `dev-lab` and `dev-llms` contexts). Start on the root, where the models run. A ResourceQuota on a root namespace is checked by the root's own API server:
 

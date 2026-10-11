@@ -194,6 +194,21 @@ sequenceDiagram
 
 ### 5.1 Check the parsers in the pinned image
 
+#### What this lab does (read-only checks)
+
+- **Prints** `VLLM_IMAGE` from `versions.env`, the tool-call and reasoning parser choices that the running `deploy/vllm` image knows (`vllm serve --help` inside the pod), and the parser flags of every catalog entry.
+- **Nothing changes**; it needs a running main model to exec into.
+
+#### What to look for
+
+1. **Image:** `VLLM_IMAGE=nvcr.io/nvidia/vllm:26.08-py3`.
+2. **Help text:** the `--tool-call-parser` choices include `hermes` and `qwen3_coder`; the `--reasoning-parser` choices include `qwen3` and `deepseek_r1`.
+3. **Catalog:** every parser named in `models.yaml` appears in those lists.
+
+**If something's off:** `error: unable to upgrade connection` or no pod → `deploy/vllm` is parked; serve a model first (§5.3). A missing parser → that model waits for an image bump.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 grep -E '^VLLM_IMAGE' versions.env
@@ -205,6 +220,22 @@ grep -nE '^  - name:|parser' models.yaml
 The parsers your catalog uses must appear in the image's list. If a newer model needs a parser the pinned image lacks, that model waits for an image bump; don't pass a parser name the server doesn't know (it fails at start-up).
 
 ### 5.2 Measure function calling without a GPU
+
+#### What this lab does (tool `lab/tools/fc_check.py` against two mocks)
+
+- **Starts** two deterministic mock endpoints on the MacBook: a correct one on port 18780 and a `flaky` one on 18781 that breaks every second tool call's arguments.
+- **Runs** the fixed six-case suite against each: `single`, `arithmetic`, `typed-args`, `parallel`, `no-tool`, `json-schema`. No cluster, no GPU.
+- **Stops** both mocks with `kill %1 %2`.
+
+#### What to look for
+
+1. **Correct mock:** six `PASS` lines and `fc_check: 6/6 cases passed (100%)  tool calls: valid JSON 5/5, schema-valid 5/5`.
+2. **Flaky mock:** `FAIL  arithmetic` and `FAIL  parallel` with `arguments not JSON: …`, and `fc_check: 4/6 cases passed (67%)  tool calls: valid JSON 3/5, schema-valid 3/5`.
+3. **Exit codes:** 0 for both, because no `--min` is set. With `--min 0.9` the flaky run prints `GATE FAILED` and exits 1.
+
+**If something's off:** a second run against the same flaky mock fails different cases; it alternates per call, so restart it for the numbers above. `Address already in use` → a mock from §5.1 of Chapter 09 still runs.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
@@ -218,6 +249,23 @@ kill %1 %2
 `fc_check.py run` sends a fixed suite — `single` (one call with an `enum` argument), `arithmetic`, `typed-args` (a number with `minimum`/`maximum`), `parallel` (two tools in one turn), `no-tool` (a request no tool fits) and `json-schema` (structured output with `response_format`) — and checks every answer the way an agent runtime would: the right tools were called (or none), `arguments` is valid JSON, it validates against the schema (types, required, enum, bounds, no extra keys), and the values match the prompt. The well-behaved mock passes 6/6; the `flaky` mock breaks every second tool call's arguments and fails `arithmetic` and `parallel` with "arguments not JSON" — exactly what a wrong parser or a truncated generation looks like. `--min 0.9` turns the run into a gate (exit 1 below 90 %).
 
 ### 5.3 Serve a tool-calling Qwen and score it
+
+#### What this lab does (`serve-model.sh qwen3-8b`, `--side qwen3-4b-instruct`, `fc_check.py`, one raw request)
+
+- **Serves** Qwen3-8B as the main model (util 0.20, `qwen3` reasoning parser, `hermes` tool parser) and Qwen3-4B-Instruct-2507 as a side engine `vllm-qwen3-4b-instruct` (util 0.12, `hermes`). Port-forwards: 8000 → `svc/vllm`, 8002 → the side Service.
+- **Scores** both with the same six-case suite; Qwen3-8B thinks on every case because `fc_check.py` sends no thinking switch.
+- **Shows** one raw tool-calling request so you see what the parsers produce.
+
+#### What to look for
+
+1. **Args:** `--reasoning-parser=qwen3`, `--enable-auto-tool-choice`, `--tool-call-parser=hermes`.
+2. **Side model budget:** `[PASS] budget: running 0.20 + qwen3-4b-instruct 0.12 ≤ 0.72` (more if BGE-M3 runs).
+3. **Suites:** `no-tool` passes on both models; valid JSON equals the call count. Fill the table with your pass counts and wall times.
+4. **Raw request:** two entries in `tool_calls` (one per namespace, a parallel call), `content` empty or `null`, reasoning chars above 0; with thinking off, the same calls and fewer completion tokens.
+
+**If something's off:** `no tool call (check --enable-auto-tool-choice and --tool-call-parser)` on every case → the overlay lacks the flags. `finish_reason: length` with no call → thinking used up `max_tokens`. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
@@ -255,9 +303,26 @@ curl -s 127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' -
 }' | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d["choices"][0]["message"]; print("reasoning chars:", len(m.get("reasoning_content") or m.get("reasoning") or "")); print(json.dumps(m.get("tool_calls"), indent=1)); print("content:", m.get("content"), "| completion tokens:", d["usage"]["completion_tokens"])'
 ```
 
-Expected: two entries in `tool_calls` (one per namespace — a parallel call), `content` empty or null, thinking text only in the reasoning field; with thinking off, the same calls for a fraction of the completion tokens.
+With thinking off, the completion tokens drop to a fraction.
 
 ### 5.4 Run the agent loop and its guardrails
+
+#### What this lab does (tool `lab/tools/qwen_agent_demo.py`)
+
+- **Runs** a tool loop on the MacBook against Qwen3-8B (port 8000): the model asks for tools, the script runs them locally and returns the results, for up to 5 steps (2 in the guardrail test). Tools: `calculator` (arithmetic only), `uma_budget` (util → GiB) and `catalog_lookup` (reads this lab's `models.yaml`).
+- **Appends** one JSON line per tool call to `out/agent.jsonl`.
+- **No tool changes anything:** there is no delete or write tool, so the guardrail test can't touch the cluster.
+
+#### What to look for
+
+1. **First question:** `step N → catalog_lookup(…)` twice (possibly in one step), one or two `uma_budget` or `calculator` calls, and `answer (step N): …` near 0.32 × 121.7 ≈ 38.9 GiB. With `--no-think`, fewer seconds.
+2. **Delete request:** nothing deleted; the model declines, or calls an unknown tool and gets `{"error": "unknown tool …"}`; at the latest `no final answer after 2 steps`.
+3. **Unknown model:** `catalog_lookup` returns `{"error": "unknown model qwen9-200b", "known": [...]}` and the answer reports it instead of inventing an entry.
+4. **Audit file:** one line per call with `step`, `tool`, `arguments` and `result`.
+
+**If something's off:** an answer with a number but no tool lines → the model guessed; the tool parser may be missing (§5.1). More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
@@ -268,7 +333,7 @@ python3 tools/qwen_agent_demo.py "How many GiB do qwen3-8b and qwen3-4b-instruct
 cat out/agent.jsonl
 ```
 
-The demo prints each step (`step N → tool(args)` and `← result`) and the final answer. Expected: two `catalog_lookup` calls (possibly in one step — parallel), one or two `uma_budget` or `calculator` calls, and an answer near 0.32 × 121.7 ≈ 38.9 GiB. Compare the number of steps and the wall time with and without thinking.
+Compare the number of steps and the wall time with and without thinking.
 
 Then provoke the guardrails:
 
@@ -280,9 +345,24 @@ python3 tools/qwen_agent_demo.py "Look up the catalog entry for qwen9-200b." \
   --url http://127.0.0.1:8000 --model qwen3-8b --audit out/agent.jsonl
 ```
 
-Expected: nothing is deleted — no such tool exists, so the model either says it can't or tries an unknown tool and gets `{"error": "unknown tool …"}` back; the loop ends by the step cap at the latest. The second request returns `{"error": "unknown model qwen9-200b", "known": [...]}` from `catalog_lookup`, and a good model reports that instead of inventing an entry. The audit file holds a line per call.
+A good model reports a tool error instead of working around it.
 
 ### 5.5 The Qwen-Agent library against the same endpoint
+
+#### What this lab does (`~/qa_test.py` with `qwen-agent==0.0.34`)
+
+- **Creates** a venv `~/.venvs/qwen-agent` on the MacBook with the lab's pinned Qwen-Agent and `json5`.
+- **Registers** one custom tool `uma_gib` and runs Qwen-Agent's `Assistant` against Qwen3-8B on `127.0.0.1:8000` (port-forward still open). Qwen-Agent adds its own function-calling prompt (`nous` style).
+
+#### What to look for
+
+1. **Install:** `Successfully installed … qwen-agent-0.0.34 …`.
+2. **Output:** one or two lines with a `uma_gib` function call, then a final `assistant` answer near 31.6 GiB (0.26 × 121.7).
+3. **Mode:** if no call happens, rerun with `"use_raw_api": True` and record which mode works with your model and image.
+
+**If something's off:** `ModuleNotFoundError` → the venv isn't active. No tool call in either mode → see the double-parsing row in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · any folder
@@ -320,9 +400,24 @@ for r in responses:
     print(r.get("role"), r.get("function_call") or r.get("content"))
 ```
 
-Expected: one or two `uma_gib` calls and a final answer near 31.6 GiB. If the call never happens, try `"use_raw_api": True` in `generate_cfg` (native `tool_calls` through vLLM's parser) and compare; record which mode works with your model and vLLM version. Qwen-Agent also has `WebUI(bot).run()` (needs the `gui` extra) and MCP server support (`mcpServers` in the tool list); both run on the MacBook, not on the Spark.
+If the call never happens, try `"use_raw_api": True` in `generate_cfg` (native `tool_calls` through vLLM's parser) and compare; record which mode works with your model and vLLM version. Qwen-Agent also has `WebUI(bot).run()` (needs the `gui` extra) and MCP server support (`mcpServers` in the tool list); both run on the MacBook, not on the Spark.
 
 ### 5.6 Route agents through LiteLLM
+
+#### What this lab does (03 apps `k8s/apps`, alias `agent`)
+
+- **Edits** the `agent` alias in `03-DeepSeek/lab/k8s/apps/litellm.yaml` (ConfigMap `litellm-config`) to point at `vllm-qwen3-4b-instruct.llm-serving:8000`.
+- **Applies** 03's app stack in `llm-serving` (Open WebUI, LiteLLM and its DB, BGE-M3) and restarts LiteLLM so it reads the new config.
+- **Scores** the alias through the gateway at `api.lab.local` (Traefik, 192.168.0.115) with a LiteLLM key.
+
+#### What to look for
+
+1. **Rollout:** `deployment "litellm" successfully rolled out`.
+2. **`fc_check.py` through the gateway:** the same pass count and valid-JSON ratio as the direct `qwen3-4b-instruct` run in §5.3.
+
+**If something's off:** `401` → wrong key. A different pass rate → the gateway alters `tools` or `tool_choice` (`drop_params`, Chapter 12). `Could not resolve host` → add `api.lab.local` to `/etc/hosts`. More in §7.
+
+#### Run it
 
 Agents should hold a LiteLLM virtual key, not the vLLM port. 03's LiteLLM config already has an `agent` alias; point it at the Qwen tool-calling model. The catalog's choice is the non-thinking `qwen3-4b-instruct`, served as a side model next to `qwen3-8b` (set `everyday`). In `03-DeepSeek/lab/k8s/apps/litellm.yaml` (ConfigMap `litellm-config`):
 

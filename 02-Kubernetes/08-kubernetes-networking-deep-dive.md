@@ -172,6 +172,24 @@ All commands run from `02-Kubernetes/lab` with the lab kubeconfig. Steps that ca
 
 ### 5.1 Deploy the tools
 
+#### What this lab does (manifests `lab/manifests/root/00-platform`, `root/30-networking`, `dev-lab/00-platform`, `dev-lab/30-networking`)
+
+- **Root:** creates the `platform-tools` and `observability` namespaces and the PriorityClasses, then `netshoot-host` in `platform-tools`: one pod with `hostNetwork`, `hostPID` and `NET_ADMIN`/`SYS_ADMIN`, so it sees the node's interfaces, iptables and conntrack.
+- **dev-lab:** creates `tenant-alpha`, `tenant-beta` and `lab-tools`, then in `lab-tools`: `netshoot`, `echo` (3 × agnhost on :8080 behind Service `echo` port 80 and `echo-headless`) and the two `dns-lab` pods for Chapter 10.
+- **Read-only checks:** lists the pods in dev-lab and their root copies in `vc-dev-lab`, and asks the Cilium agent for its status. Nothing in Cilium is reconfigured.
+- The first run pulls `nicolaka/netshoot:v0.13` and `agnhost:2.53`, so pods take a minute to get Ready.
+
+#### What to look for
+
+1. **Command exit:** every `apply` prints `created` on a first run and `unchanged` on a re-run.
+2. **Pods:** in `lab-tools` (dev-lab), `netshoot` 1/1, `echo` 3 × 1/1 and `dns-default` / `dns-ndots1` Running, each with a `10.42.0.x` IP.
+3. **Same pod, two names:** the root listing shows the same IPs under names ending in `-x-lab-tools-x-dev-lab`.
+4. **Cilium:** `cilium-dbg status --brief` prints `OK`.
+
+**If something's off:** pods stuck `Pending` in dev-lab with no events usually means the root refused them (quota on `vc-dev-lab`, Chapter 14); `ContainerCreating` with CNI errors means the Cilium agent isn't ready. More in §7.
+
+#### Run it
+
 ```bash
 cd "02-Kubernetes/lab"
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
@@ -187,6 +205,31 @@ kubectl --context spark-root -n kube-system exec ds/cilium -c cilium-agent -- ci
 Expected: the same pod IPs in both listings — the second one with root names (`echo-…-x-lab-tools-x-dev-lab`). `cilium-dbg status --brief` prints `OK`. (If you installed the `cilium` CLI on your laptop, `cilium status --context spark-root` shows the same thing with more detail.)
 
 ### 5.2 Walk a pod's path
+
+#### What this lab does (script `lab/scripts/pod-netns.sh`)
+
+- **Finds the real pod:** takes the tenant's pod name in dev-lab and looks up its root copy in `vc-dev-lab` through the syncer's annotations.
+- **Walks the path:** enters the pod's network namespace (`sudo crictl inspect` for the PID, then `nsenter`) and prints its address and routes, the host-side `lxc*` veth, `cilium_host`, `cilium_vxlan`, the host route to the pod, and Cilium's endpoint entry.
+- **Read-only:** nothing is changed. It runs **on the Spark** because it needs `sudo crictl` and the host's network namespace.
+
+#### What to look for
+
+1. **Command exit:** the script ends without an error and prints the five `──` sections.
+2. Compare with the expected output below:
+
+   | Line | Healthy value |
+   |---|---|
+   | first line | `dev-lab lab-tools/echo-… runs on the root as vc-dev-lab/echo-…-x-lab-tools-x-dev-lab` |
+   | pod `eth0` | a `/32` address in `10.42.0.0/24` |
+   | pod default route | `via <cilium_host IP> dev eth0 mtu 1450` |
+   | `cilium_vxlan` | `vxlan external … dstport 8472` |
+   | Cilium endpoint | `POLICY (ingress) Disabled`, label `k8s:io.kubernetes.pod.namespace=vc-dev-lab` |
+
+3. **Note the `container-pid`:** §5.3 uses it.
+
+**If something's off:** `crictl` errors mean the script ran on the MacBook instead of the Spark, or without sudo rights. An empty Cilium section means the agent pod isn't Running. More in §7.
+
+#### Run it
 
 `pod-netns.sh <namespace> <pod> [context]` takes the pod's name *as the tenant sees it*. With a vCluster context it finds the root copy through the syncer's annotations, then walks that pod's netns:
 
@@ -229,6 +272,23 @@ Read it top to bottom:
 
 ### 5.3 Watch packets: Hubble and tcpdump
 
+#### What this lab does (Hubble in the Cilium agent, `netshoot-host` on the root)
+
+- **One request:** `netshoot` in dev-lab sends an HTTP request straight to one echo pod's IP on :8080.
+- **Hubble:** reads the last flows Cilium recorded for that pod, with their verdicts.
+- **tcpdump:** `netshoot-host` enters the echo pod's network namespace (`nsenter`, PID from §5.2) and captures 6 packets on its `eth0`.
+- **Read-only:** no policy or config changes. The Hubble UI is on NodePort 31235.
+
+#### What to look for
+
+1. **The curl** prints the echo pod's name (agnhost `serve-hostname`).
+2. **Hubble** shows the flow with root names (`vc-dev-lab/…-x-lab-tools-x-dev-lab`), numeric identities (`ID:…`) and the verdict `FORWARDED`.
+3. **tcpdump** shows SYN, SYN-ACK, ACK and HTTP between two `10.42.0.x` addresses: no NAT and no VXLAN header on a same-node path.
+
+**If something's off:** `hubble: command not found` or no flows means Hubble isn't enabled in the Cilium install (01-Ansible `roles/cilium`). A tcpdump that captures nothing usually means a stale PID: re-run §5.2, pods get a new PID on every restart. More in §7.
+
+#### Run it
+
 Ask Hubble first — it shows every flow Cilium handled, with the verdict:
 
 ```bash
@@ -262,6 +322,21 @@ You see the SYN/SYN-ACK/ACK and HTTP between two `10.42.0.x` addresses: no NAT, 
 
 ### 5.4 Prove the MTU
 
+#### What this lab does (commands in `netshoot`, dev-lab)
+
+- Reads the MTU of `netshoot`'s `eth0` and of its route, then sends two non-fragmentable pings (`-M do`) to the echo pod: one that just fits 1450 bytes, one that is 1 byte too big.
+- **Read-only:** nothing is changed.
+
+#### What to look for
+
+1. **Route MTU:** `mtu 1450` from `ip route` (the `eth0` line itself may show 1500).
+2. **`-s 1422`:** 2 packets transmitted, 2 received, 0 % loss.
+3. **`-s 1423`:** fails with `message too long, mtu=1450`.
+
+**If something's off:** a route MTU other than 1450 means the management NIC isn't at 1500, or the Cilium agents weren't restarted after an MTU change. More in §7 (first row).
+
+#### Run it
+
 ```bash
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- ip link show eth0 | grep -o 'mtu [0-9]*'
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- ip route | grep -o 'mtu [0-9]*'
@@ -272,6 +347,32 @@ kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- ping -c2 -M do -s
 With a 1500-byte management LAN, the route MTU is 1450 even for a neighbour on the same node: Cilium budgets for the VXLAN header on every pod route so a pod doesn't behave differently when dgx-spark-2 joins and the destination moves.
 
 ### 5.5 NetworkPolicies: prove isolation, then break it
+
+#### What this lab does (manifests `dev-lab/10-tenancy`, `dev-llms/00-platform` + `10-tenancy`, `root-llms/00-platform` + `10-tenancy` + `40-ingress`, `root/05-vclusters`; drill `breakfix 06`)
+
+- **Policies:** in dev-lab, `default-deny-ingress` and `allow-same-namespace` in `tenant-alpha` and `tenant-beta` (plus quotas, LimitRanges and RBAC). On the root, `allow-ingress-and-same-namespace` in `llm-serving` and the two `vcluster-boundary` CiliumNetworkPolicies in `vc-dev-lab` and `vc-dev-llms`.
+- **Traffic:** installs Traefik (`scripts/install-addons.sh traefik`) and `mock-llm` in `llm-serving`, so there's something to protect.
+- **Probes:** creates throwaway `probe` pods (socat answering `ok` on :8080) in `tenant-alpha`, `tenant-beta` and dev-llms `llm-sandbox`, then runs `nc -z` tests across tenants, across vClusters and into `llm-serving`.
+- **Drill:** `breakfix.sh inject 06` deletes `allow-ingress-and-same-namespace` and adds `bf06-default-deny`, so Traefik can no longer reach `mock-llm`. `reset 06` restores it.
+
+#### What to look for
+
+1. **Every test line** prints its `✔` message, never `LEAK`. In order: same-namespace allowed, beta → alpha blocked, lab-tools → alpha blocked, DNS allowed, lab-tools → echo allowed, dev-llms → dev-lab blocked, dev-lab and dev-llms → `llm-serving` blocked, and `200` from inside `llm-serving`.
+2. **Enforcement on the root**, with the commands under *Where is it enforced?*:
+
+   | Check | Healthy value |
+   |---|---|
+   | `iptables-save \| grep -c … NWPLCY\|POD-FW` | `0` |
+   | `get networkpolicy -n vc-dev-lab` | `default-deny-ingress-x-tenant-alpha-x-dev-lab` and the other translated copies |
+   | `get ciliumnetworkpolicy -A` | `vcluster-boundary` in `vc-dev-lab` and `vc-dev-llms` |
+   | `cilium-dbg endpoint list` | probe endpoints show `POLICY (ingress) Enabled` |
+   | `hubble observe --verdict DROPPED` | drops with `Policy denied` |
+
+3. **The drill:** after `inject 06`, the curl to `192.168.0.115` with `Host: llm.lab.local` times out. After your fix (or `reset 06`) it answers again and `scripts/verify.sh ingress` passes.
+
+**If something's off:** a `LEAK` inside dev-lab means the tenant policies weren't synced to the root (no `…-x-tenant-alpha-x-dev-lab` copy). A `LEAK` between vClusters means `vcluster-boundary` is missing. Probes stuck `Pending` usually means the tenant quota is full. More in §7.
+
+#### Run it
 
 Apply the tenant policies in dev-lab, the sandbox namespace in dev-llms and the serving tier on the root:
 
@@ -354,6 +455,23 @@ Serving becomes unreachable through Traefik. Diagnose it with the commands above
 Clean up the probes: `kubectl --context dev-lab -n tenant-alpha delete pod probe; kubectl --context dev-lab -n tenant-beta delete pod probe; kubectl --context dev-llms -n llm-sandbox delete pod probe`.
 
 ### 5.6 (2 Sparks) See VXLAN on the wire and compare with RDMA
+
+#### What this lab does (needs dgx-spark-2)
+
+- Scales `echo` in dev-lab to 4 replicas so some land on dgx-spark-2, captures the outer VXLAN packets (UDP 8472) on the management NIC `enP7s7`, and lists Cilium's tunnel map. Scales back to 3 at the end.
+- Optional: compares iperf3 over the overlay with `ib_write_bw` on the CX-7 (01-Ansible `playbooks/13.2-rdma-perftest.yml`).
+- **With only one Spark:** skip this lab. All echo pods stay on dgx-spark-1, there are no VXLAN packets on the wire, and the tunnel list is empty.
+
+#### What to look for
+
+1. **Pod placement:** some echo pods show node `dgx-spark-2` and a `10.42.1.x` IP.
+2. **tcpdump:** `192.168.0.100.<port> > 192.168.0.101.8472: VXLAN, flags [I] (0x08), vni …`.
+3. **`cilium-dbg bpf tunnel list`:** maps `10.42.1.0/24` to `192.168.0.101`.
+4. **Throughput:** overlay iperf3 below ~9.4 Gb/s; `ib_write_bw` about 185–195 Gb/s.
+
+**If something's off:** no packets on 8472 with pods on both nodes means UDP 8472 is blocked between the node IPs or a node registered with the wrong `node-ip`. More in §7.
+
+#### Run it
 
 ```bash
 # pods on both nodes: the root scheduler spreads dev-lab's pods across dgx-spark-1 and dgx-spark-2

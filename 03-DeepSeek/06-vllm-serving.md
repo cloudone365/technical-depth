@@ -159,6 +159,28 @@ scripts/verify.sh platform
 
 ### Task 5.1 · Generate and inspect the overlays
 
+#### What this lab does (script `lab/scripts/gen_overlays.py --check`, then a server-side dry run)
+
+- **Checks the overlays:** `gen_overlays.py --check` regenerates every `k8s/models/<name>/` overlay from `models.yaml` in memory and compares it with the committed files. It writes nothing.
+- **Lists the catalog** (`serve-model.sh list`): name, util, pod memory, weight size and Hugging Face repo per model.
+- **Renders one overlay** (`r1-7b`) locally with `kubectl kustomize` and shows its args and resources.
+- **Dry-runs `r1-32b-fp8`** against the root's API server: admission policies run, nothing is created.
+
+#### What to look for
+
+1. **Overlay check:** `14 overlays checked, 0 drifted`, and no `DRIFT` lines.
+2. **Rendered `r1-7b`:**
+
+   | Field | Healthy value |
+   |---|---|
+   | args | include `--gpu-memory-utilization=0.20` and `--max-model-len=32768`; the list ends with `--reasoning-parser=deepseek_r1` |
+   | `resources.requests.memory` / `limits.memory` | both `28Gi` |
+3. **Dry run:** every object ends with `(server dry run)`; no admission error.
+
+**If something's off:** `DRIFT k8s/models/…` → an overlay was edited by hand or `models.yaml` changed without regenerating; run `python3 scripts/gen_overlays.py`. An admission denial → read the policy message (pinned tag, readinessProbe, no `NVIDIA_VISIBLE_DEVICES`). More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 python3 scripts/gen_overlays.py --check          # "14 overlays checked, 0 drifted"
@@ -180,6 +202,26 @@ If you change the base or write your own overlay, try it in the sandbox first. `
 
 ### Task 5.2 · Hugging Face token from Vault
 
+#### What this lab does (Vault `kv/spark-lab/hf` → Secret `hf-token`)
+
+- **On vault01:** stores your Hugging Face token at `kv/spark-lab/hf`, field `token`.
+- **On the MacBook:** reads it back with the Vault CLI and writes it into the Secret `hf-token` in `llm-serving` on the root (create or update). The token goes through a pipe, not a file.
+- **Who uses it:** the `model-prefetch` Job reads `hf-token` (optional) when it downloads weights. Only gated models (`llama-3.1-8b`) need it.
+
+#### What to look for
+
+1. **vault01:** `vault kv put` prints the new version's metadata (`version` 1 or higher).
+2. **MacBook:** `secret/hf-token configured` (or `created`).
+3. **Content check** without printing the token:
+   ```bash
+   # ▶ MacBook · 03-DeepSeek/lab
+   kubectl --context spark-root -n llm-serving get secret hf-token -o jsonpath='{.data.token}' | base64 -d | cut -c1-3   # hf_
+   ```
+
+**If something's off:** `permission denied` from Vault → your token lacks the lab policy, or `VAULT_ADDR` is wrong. The Secret is back to the placeholder after an `apply -k` of an overlay → expected; re-run the sync (or let the `vault-sync` CronJob do it). More in §7.
+
+#### Run it
+
 Public models (all R1 distills, Qwen) work without a token. Gated ones (`llama-3.1-8b`) need it. Store the token once in Vault:
 
 ```bash
@@ -198,6 +240,30 @@ kubectl --context spark-root -n llm-serving create secret generic hf-token \
 ```
 
 ### Task 5.3 · Switch models with the smoke test
+
+#### What this lab does (script `lab/scripts/serve-model.sh r1-7b`, or template `15.1 Deploy DeepSeek` with `--tags serve`)
+
+- **Prefetch:** Job `model-prefetch` in `llm-serving` downloads the weights into the `model-cache` PVC (~15 GB for `r1-7b` on a first run).
+- **Page cache:** dropped only if the script can use `sudo` locally, so not from the MacBook; do it on the Spark before a large model.
+- **Switch:** applies `k8s/models/r1-7b`, so Deployment `vllm` gets util 0.20, 32K context, the reasoning parser and **28 Gi** (request = limit). The rollout stops the old pod before starting the new one.
+- **Smoke test:** asks the model for 12 × 12 inside the pod.
+- **The Semaphore template** runs the same overlay through `15.1-deploy-deepseek.yml`; with `--tags serve` it skips prefetch, apps and RAG, but first asserts the model fits the util budget and `serving-budget`.
+
+#### What to look for
+
+1. **Script output:** the six lines shown below, ending with `[PASS] answer: 144  (reasoning chars: N)`, then `3 passed, 0 warnings, 0 failed`.
+2. **Cluster charge:**
+
+   | Command | Healthy value |
+   |---|---|
+   | `get pod -l app=vllm -L model` | one pod `Running`, `MODEL` column `r1-7b` |
+   | `serving-budget` | `requests.memory` and `limits.memory` used include the 28Gi |
+   | vLLM log | an `Available KV cache memory` line and a `GPU KV cache size` of roughly 130K tokens (Chapter 05 §3.3 predicts ~138K) |
+3. **Semaphore run:** `failed=0`; the `Show the change` task prints `vLLM: <old> → r1-7b` and the rollback command. Re-running it with the same model shows `changed=0` on the serve task.
+
+**If something's off:** `[FAIL] prefetch failed` → `kubectl --context spark-root -n llm-serving logs job/model-prefetch` (network, or a gated model without a token). `[FAIL] rollout failed` → `logs deploy/vllm`. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -232,6 +298,21 @@ kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -E 'Availabl
 **Semaphore UI:** the same switch from the management plane is the template that runs `03-DeepSeek/lab/ansible/15.1-deploy-deepseek.yml` with `--tags serve` and the extra variable `deepseek_model=r1-7b`. Run it once and compare the result with the manual switch: same overlay, same pod, same smoke test.
 
 ### Task 5.4 · Reasoning and tool calls through the parsers
+
+#### What this lab does (curl through a port-forward to `svc/vllm`)
+
+- **Reasoning parser:** one normal and one streamed request to `r1-7b`. Read-only.
+- **Tool parser:** switches the served model to `qwen2.5-7b-tools` (util 0.20, 28 Gi, `--enable-auto-tool-choice --tool-call-parser=hermes`) and sends one request with a tool definition. The tool isn't executed; you only look at the call the model asks for.
+
+#### What to look for
+
+1. **Non-streamed R1:** `answer` holds only the number (about 24.3); `thinking_chars` is in the hundreds or more.
+2. **Streamed R1:** a line of dots (thinking tokens), then the answer text.
+3. **Tool call:** one `tool_calls` entry, `function.name` `get_pod_resources`, `arguments` a JSON string with `namespace` `llm-serving` and a pod name like `vllm`.
+
+**If something's off:** `thinking_chars` 0 and `<think>` in `answer` → the reasoning parser is missing (drill D01). `tool_calls` is `null` or a 400 → the tool parser flags are missing (drill D07). More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -273,6 +354,23 @@ Expected: one `tool_calls` entry naming `get_pod_resources` with `{"namespace":"
 
 ### Task 5.5 · Add a model to the catalog
 
+#### What this lab does (edit `lab/models.yaml`, run `gen_overlays.py`, serve `r1-14b`)
+
+- **Sizes** R1-Distill-Qwen-14B with `model_math.py` at util 0.35 and 32K.
+- **Adds one catalog entry** `r1-14b` (util 0.35, **46 Gi**, reasoning parser, 16 sequences) to `models.yaml` on the MacBook.
+- **Writes a new overlay** `k8s/models/r1-14b/` with `gen_overlays.py`, then serves it. First run downloads about 30 GB.
+- **Clean-up** is yours: remove the entry and regenerate, or commit both files on purpose.
+
+#### What to look for
+
+1. **Sizing:** ~27.5 GiB of BF16 weights, 192 KiB per token, about 66K tokens of KV (two 32K sequences), `✓ fits`.
+2. **Generation:** `15 overlays written, 0 drifted`; `git diff --stat k8s/models` shows only the new `r1-14b` directory; `--check` then reports `15 overlays checked, 0 drifted`.
+3. **Serving:** `serve-model.sh r1-14b` ends with `[PASS] answer: 144 …` and `0 failed`; the pod has 46Gi request = limit.
+
+**If something's off:** pod refused with `exceeded quota` → add up pod memory in `llm-serving` (Chapter 05 §3.4). `unknown model r1-14b` from `serve-model.sh` → the entry's indentation in `models.yaml` is off. More in §7.
+
+#### Run it
+
 Add an entry for `deepseek-ai/DeepSeek-R1-Distill-Qwen-14B`. Size it first:
 
 ```bash
@@ -303,6 +401,22 @@ scripts/serve-model.sh r1-14b
 Check it against [Chapter 05 §3.4](05-model-catalog-and-memory-math.md): with bge-m3 and the app stack it is 0.41 and 46 + 9 + 9 = 64 Gi, which fits; adding `r1-7b` (0.20, 28Gi) makes 0.61 and 92 Gi, which fits the util rule but not the quota. Remove the entry and regenerate when you are done, or commit it deliberately.
 
 ### Task 5.6 · Benchmark each model the same way
+
+#### What this lab does (`eval_harness.py` sweep, then Job `vllm-bench` from 02-Kubernetes)
+
+- **Quick sweep:** 8 JSON items at 1, 8 and 32 requests in flight against the served `r1-7b` through a port-forward. Nothing is written to disk (no `--out`).
+- **Deeper load test:** Job `vllm-bench` in `llm-serving` runs `vllm bench serve` in the NGC vLLM image against `http://vllm:8000` with 128 random prompts (1,024 tokens in, 256 out) at concurrency 1, 8 and 32. It reads the tokenizer from `model-cache` and uses 1.5 Gi at most. The `sed` points it at `r1-7b`.
+- Repeat for each model you serve and fill one row per model.
+
+#### What to look for
+
+1. **Sweep:** three `tok/s aggregate` lines; aggregate tok/s rises with concurrency.
+2. **Bench Job:** for each `=== max-concurrency` block a `Successful requests: 128` line, output-token throughput, and TTFT, TPOT, ITL and E2EL percentiles.
+3. **Across models:** single-stream tok/s roughly follows 273 GB/s ÷ active weight bytes, so `coder-v2-lite` can beat `r1-7b` per stream.
+
+**If something's off:** `Successful requests` below 128 → requests timed out or the model name is wrong (`--model` must be the served name). The bench pod `Pending` with `exceeded quota` → the quota is full; it needs 1.5 Gi. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -338,6 +452,29 @@ Keep one table per model you serve (**record yours**):
 Decode on a GB10 is bandwidth-bound: single-stream tok/s should be roughly proportional to 273 GB/s divided by active weight bytes ([Chapter 05 §3.1](05-model-catalog-and-memory-math.md)), which is why `coder-v2-lite` (2.4B active) can be faster per stream than `r1-7b` despite holding twice the weights.
 
 ### Task 5.7 · Three serving drills
+
+#### What this lab does (script `lab/scripts/breakfix.sh`, overlays `lab/breakfix/D01…D03`)
+
+- **Each `inject`** applies a broken copy of a catalog overlay to Deployment `vllm`:
+
+  | Drill | What it applies |
+  |---|---|
+  | D01 | `r1-7b` without `--reasoning-parser` |
+  | D02 | `r1-7b` with `--gpu-memory-utilization=0.95` |
+  | D03 | `r1-32b` (87 Gi) with `--max-model-len=131072` |
+- **`hint` and `answer`** only print text. **`reset`** re-applies the clean catalog overlay of the drill's model.
+- **D03 is an exclusive run:** park bge-m3, the app stack and any second model first, or the quota refuses the pod before the real symptom appears.
+
+#### What to look for
+
+1. **D01:** the pod runs; responses carry the `<think>` text in `content` and an empty `reasoning_content`.
+2. **D02:** the new pod fails at startup; `logs deploy/vllm` complains that free memory is below what 0.95 × 121.7 GiB requires.
+3. **D03:** startup fails with a `max_model_len … larger than the maximum number of tokens that can be stored in KV cache` style error.
+4. **After each `reset`:** `kubectl --context spark-root -n llm-serving get deploy vllm` back to `1/1`.
+
+**If something's off:** D03 pod `Pending` with `exceeded quota: serving-budget` → you didn't park the rest; that's the quota, not the drill. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab

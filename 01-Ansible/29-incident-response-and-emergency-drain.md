@@ -232,6 +232,36 @@ kubectl --context spark-root get pdb -A                                         
 
 ### Runbook A — GPU hang (`nvidia-smi` doesn't answer)
 
+#### What this lab does (template `29.1 Emergency drain`)
+
+- **Guard:** refuses to run without `--limit` (or `-e allow_all=true`), and works on one Spark at a time (`serial: 1`).
+- **1 · Stop new work:** cordons and drains the node in `spark-root` (the kubeconfig in the state folder, context pinned to `spark-root`), and sets it to `DRAIN` in Slurm. With one Spark this evicts every model pod and both vCluster control planes (§2.1).
+- **2 · Evidence:** collects `nvidia-smi -q`, kernel logs (this boot and the previous one), NVRM/Xid/mlx5 lines, service logs, `/proc/meminfo`, RDMA and link state and `docker ps -a` into a `.tgz`, each command time-boxed. It is copied to `incidents/<host>-<time>.tgz` in the state folder (`/opt/spark-lab/cache` on sema01, `.cache/` on the MacBook). With `node_drain_bug_report=true` it adds `nvidia-bug-report.log.gz`, which takes minutes.
+- **3 · Stop GPU containers:** `docker stop` on every running container that uses the NVIDIA runtime.
+- **4 · Reboot** (only with `node_drain_reboot=true`): waits up to 15 minutes for `nvidia-smi -L` to answer.
+- **5 · Prove and return** (only with `node_drain_undrain_after=true`): runs the `spark_validate` role, then uncordons in Kubernetes and resumes in Slurm. If validation fails, the node stays drained.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`. Expect `changed` on the drain, on "Pull bundle to the control node" and, if GPU containers were running, on "4/6 Stop GPU containers".
+2. **The bundle exists** and is not empty:
+   ```bash
+   # ▶ sema01 (ssh sema01)
+   sudo ls -lh /opt/spark-lab/cache/incidents/
+   sudo tar tzf "$(sudo ls -t /opt/spark-lab/cache/incidents/*.tgz | head -1)"
+   ```
+   The list contains `nvidia-smi-q.txt`, `kernel.log`, `nvrm-xid.log`, `services.log`, `meminfo.txt`, `docker-ps.txt` and the other files from the capture task.
+3. **While drained** (a run without `node_drain_undrain_after`): `kubectl --context spark-root get node dgx-spark-1` shows `Ready,SchedulingDisabled`, and `sinfo -N` on dgx-spark-1 shows the node `drain` or `drained`.
+4. **With `node_drain_undrain_after=true`:** the "Verdict" task prints `All N checks passed`, then the node shows `Ready` again and the model pods in `llm-serving` go back to `Running`. The JSON result is in `validation/dgx-spark-1.json` in the state folder.
+5. **Without `--limit`:** the run fails at once with `Use -l <host> (or -e allow_all=true if you really mean it)`. That is the guard working.
+
+**If something's off:**
+- Verdict fails on `cx7_links_200g` with one Spark → the CX-7 ports have no peer cable. Add `-e spark_validate_fabric=false` and run again with `node_drain_reboot=false node_drain_undrain_after=true`.
+- Verdict fails on `slurm_usable` → validation runs *before* the role resumes the node, so a node still in Slurm `DRAIN` (or a Spark without Slurm) fails this check. Add `-e spark_validate_slurm=false`, then resume by hand: `sudo scontrol update NodeName=dgx-spark-1 State=RESUME` on dgx-spark-1.
+- `Permission denied (publickey)` after the reboot → the 15-minute certificate ran out (§1). More in §5.
+
+#### Run it
+
 **Signals:** `SparkGPUUnresponsive` alert; Slurm health check drains the node (`healthcheck: nvidia-smi unresponsive`); workloads stuck in CUDA calls.
 
 **Semaphore UI:** template `29.1 Emergency drain`, `--limit dgx-spark-2,localhost`, extra variables `node_drain_bug_report: true`, `node_drain_reboot: true`, `node_drain_undrain_after: true` (see the certificate note in §1). Break-glass:
@@ -245,6 +275,23 @@ ansible-playbook playbooks/29.1-emergency-drain.yml -l dgx-spark-2,localhost -K 
 If it happens again after the reboot, keep the node drained and open a case with the bundle (`incidents/dgx-spark-2-*.tgz` in the state folder, `/opt/spark-lab/cache` on sema01; it includes `nvidia-bug-report.log.gz`), and check for a driver/firmware update (Chapters 10, 28).
 
 ### Runbook B — Xid triage
+
+#### What this lab does (ad hoc command, read-only)
+
+- **One command over SSH:** reads the last 24 hours of the kernel log on the Spark and keeps only the `NVRM: Xid` lines. Nothing is changed.
+- **Then a decision:** you look up each Xid number in the table below to decide between "tell the workload owner" and "drain + bug report" (Runbook A).
+- **One Spark:** the command targets `dgx-spark-2`; with one Spark use `dgx-spark-1` and add `-K`.
+
+#### What to look for
+
+1. **On a healthy Spark:** Ansible reports the host as `FAILED` with `rc=1` and empty output. That is `grep` finding no Xid line, not a problem with the Spark.
+2. **If there are lines:** each has the form `NVRM: Xid (PCI:…): <number>, …`. The number after `Xid (…):` is the code to look up.
+3. **Count and spread:** one Xid 13 or 31 from one application is a workload bug. The same hardware-class code (48, 63, 64, 74, 79, 94, 95, 119, 120) twice, or across different applications, means drain.
+4. **Cross-check:** `spark_gpu_xid_events_24h` in `spark_gpu.prom` (Chapter 12) shows the same count.
+
+**If something's off:** the command fails with a sudo error → add `-K`. More in §5.
+
+#### Run it
 
 **Signals:** `SparkGPUXid` alert; Loki `|= "NVRM: Xid"`.
 
@@ -267,6 +314,32 @@ ansible dgx-spark-2 -b -m shell -a "journalctl -k --since '-24h' --no-pager | gr
 The Slurm health check (Chapter 22) auto-drains on the hardware-class codes; the kata in Chapter 07 (K3) is the same classification in Jinja. Check NVIDIA's Xid documentation for the codes and fields your driver branch reports.
 
 ### Runbook C — Unified-memory pressure
+
+#### What this lab does (template `29.2 UMA relief`)
+
+- **Diagnose (always):** prints a memory picture of the Spark: `MemTotal`, `MemAvailable`, page cache, shared and anonymous memory in GiB, the top processes by RSS, the GPU compute processes, and the containers by memory use. Nothing is changed by this part.
+- **Relieve (opt-in):** with `uma_drop_caches=true` it runs `sync` and drops the page cache. With `uma_stop_label=<key=value>` (for example `spark.lab/idle=true`) it stops the running Docker containers that carry that label.
+- **What is not touched:** Kubernetes pods. Model servers in `llm-serving` are not stopped by this playbook; scale them down with `kubectl` if they are the cause.
+- **Before and after:** it records `MemAvailable` before and after the relief step.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`. A diagnose-only run is `changed=0`; a relief run shows `changed` on the step you turned on.
+2. **"Show diagnosis"**, the `== meminfo (GiB)` part:
+
+   | Line | Healthy value on an idle Spark |
+   |---|---|
+   | `MemTotal` | about `121` GiB |
+   | `MemAvailable` | about `119` GiB idle; lower by the size of every loaded model |
+   | `Cached` | large is fine: page cache is given back on demand |
+
+   The GPU section lists process names only; its memory column is `N/A` on UMA, so use the RSS list to find the big consumer.
+3. **"Result"** prints `MemAvailable <before> GiB → <after> GiB`. After `uma_drop_caches=true` the second number should be equal or higher. If it barely moves, the memory is held by processes, not by cache.
+4. **Prometheus:** `spark_uma_available_bytes` (Chapter 12) shows the same change, and `SparkUnifiedMemoryLow` clears once `MemAvailable` is back above 8 GiB.
+
+**If something's off:** "containers by memory" is empty → no Docker containers run; the memory is in Kubernetes pods or host processes (see the RSS list and the `kubectl` commands below). More in §5.
+
+#### Run it
 
 **Signals:** `SparkUnifiedMemoryLow`; CUDA OOM "while nvidia-smi shows nothing"; kubelet `MemoryPressure` evictions (the kubelet evicts below `memory.available` 4Gi, `roles/kubeadm_cluster/defaults`); the OOM killer in `dmesg`.
 
@@ -355,6 +428,29 @@ ansible-playbook playbooks/29.2-uma-relief.yml -l dgx-spark-1,localhost -K -e um
 Prevent it from recurring: set memory limits on model-server containers, keep the kubelet reserve (Chapter 19), give idle services the `spark.lab/idle=true` label so this runbook can stop them, and don't run Kubernetes and Slurm GPU jobs on the same node at the same time.
 
 ### Runbook D — CX-7 link degraded / down
+
+#### What this lab does (ad hoc check, then templates `13.1 Fabric` and `13.2 RDMA perftest`)
+
+- **Ad hoc check (read-only):** runs `ibdev2netdev` and `ethtool enp1s0f1np1` on every Spark to show each RDMA device's netdev and state, and the port's speed and link.
+- **`13.1 Fabric`:** re-applies the CX-7 netplan file and the runtime settings (live MTU), then verifies the links. See Chapter 13.
+- **`13.2 RDMA perftest`:** measures RDMA bandwidth and latency between the two Sparks after the fix.
+- **This runbook needs two Sparks.** With one Spark and no QSFP cable, the ports are down by design, and `13.2` ends at once ("Needs two Sparks"). Read the steps, and run the ad hoc check to see what a down port looks like.
+
+#### What to look for
+
+1. **Ad hoc check, healthy link:**
+
+   | Line | Healthy value |
+   |---|---|
+   | `ibdev2netdev` | `rocep1s0f1 port 1 ==> enp1s0f1np1 (Up)` (and the same for the second logical port) |
+   | `Speed:` | `200000Mb/s` |
+   | `Link detected:` | `yes` |
+2. **Degraded:** `Speed:` shows `100000Mb/s` or less, or `Unknown!` with `Link detected: no`. That is what `SparkCX7Degraded` fires on.
+3. **After the fix:** `13.1 Fabric` ends `failed=0`, and `13.2 RDMA perftest` reports a bandwidth in line with your Chapter 13 numbers.
+
+**If something's off:** still `Down` after `13.1` → it is physical: reseat the cable, check the cage, then reboot both nodes (the fix order below). More in Chapter 13.
+
+#### Run it
 
 **Signals:** `SparkCX7Degraded` (speed < 200G), NCCL falls back to `NET/Socket`, NFS falls back to TCP.
 

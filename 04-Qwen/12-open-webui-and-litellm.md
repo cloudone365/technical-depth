@@ -133,6 +133,28 @@ Retry back-off in most clients follows truncated exponential back-off with jitte
 
 ### 5.1 Serve the Qwen models and check the budget
 
+#### What this lab does (`serve-model.sh`, set `everyday`)
+
+- **Serves** `qwen3-8b` as the main engine (`svc/vllm`, util 0.20, 32 Gi) and `qwen3-4b-instruct` as a side engine (`svc/vllm-qwen3-4b-instruct`, util 0.12, 20 Gi) next to 03's apps (BGE-M3 at 0.06).
+- **Reads** the util flag of each engine and the `serving-budget` quota. Nothing else changes.
+
+#### What to look for
+
+1. **Both runs:** `[PASS] … ready …`, `[PASS] answer: 144 …`, `0 failed`. The side run's budget line reads `running 0.26 + qwen3-4b-instruct 0.12 ≤ 0.72` with BGE-M3 up.
+2. **Util per engine:**
+
+   | Deployment | Healthy value |
+   |---|---|
+   | `vllm` | `gpu-memory-utilization=0.2` |
+   | `vllm-qwen3-4b-instruct` | `gpu-memory-utilization=0.12` |
+   | `bge-m3` | `gpu-memory-utilization=0.06` |
+
+3. **Quota:** `limits.memory` used about 71Gi of 90Gi (32 + 20 for the engines, ~19 for the apps); `requests.memory` a little lower, because the app pods request less than their limits.
+
+**If something's off:** side engine Pending with `exceeded quota` → another engine (for example `qwen3-vl-8b`) still runs; stop it. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 scripts/serve-model.sh list                              # the sets: everyday = qwen3-8b + qwen3-4b-instruct
@@ -147,6 +169,22 @@ kubectl --context spark-root -n llm-serving describe quota serving-budget | grep
 `serve-model.sh` refuses a model that would push Σ util over 0.72 (`FORCE=1` overrides it — don't). Memory is the tighter limit with the apps: 32 + 20 Gi for the two engines plus ~19 Gi for the 03 apps leaves no room in `serving-budget` (90 Gi) for a third 32 Gi engine such as `qwen3-vl-8b`; stop the side model (`scripts/serve-model.sh --stop-side qwen3-4b-instruct`) before serving the VL model as a side engine.
 
 ### 5.2 Add the Qwen aliases
+
+#### What this lab does (ConfigMap `litellm-config` in `03-DeepSeek/lab/k8s/apps/litellm.yaml`)
+
+- **You edit** the `model_list` in your working copy: six Qwen aliases (`qwen`, `qwen-nothink`, `qwen-fast`, `agent`, `qwen-coder`, `qwen-vl`) and two fallbacks. 03's other entries stay.
+- **Applies** 03's app stack (only the ConfigMap changes if the apps already run) and restarts `deploy/litellm` so it reads the new list.
+- **Reads** the LiteLLM master key from Secret `litellm-master-key` into a shell variable and lists the models at `http://api.lab.local`.
+
+#### What to look for
+
+1. **Apply:** `configmap/litellm-config configured`, the other objects `unchanged`.
+2. **Rollout:** `deployment "litellm" successfully rolled out`.
+3. **`/v1/models`:** `qwen`, `qwen-nothink`, `qwen-fast`, `agent`, `qwen-coder`, `qwen-vl`. Listed is not the same as served: only aliases whose engine runs will answer.
+
+**If something's off:** `Could not resolve host: api.lab.local` → add `192.168.0.115 api.lab.local` to `/etc/hosts`. `401` → `KEY` is empty; check the Secret name. Aliases missing → LiteLLM still runs the old ConfigMap; restart it again.
+
+#### Run it
 
 Edit the `model_list` in `03-DeepSeek/lab/k8s/apps/litellm.yaml` (ConfigMap `litellm-config`). Add, keeping 03's entries (replace 03's `agent` entry):
 
@@ -186,6 +224,23 @@ Keep this edit in your fork of the repo (or in Git behind Argo CD, 03 Chapter 15
 
 ### 5.3 Verify the thinking switch through the gateway
 
+#### What this lab does (three requests through LiteLLM)
+
+- **Asks** the same question through `qwen`, `qwen-nothink` and `qwen-fast` and prints thinking characters, completion tokens and the answer for each. Read-only.
+- **Tests** whether your LiteLLM version forwards `extra_body` (the `enable_thinking: false` switch) to vLLM.
+
+#### What to look for
+
+| Alias | Healthy value |
+|---|---|
+| `qwen` | `thinking_chars` above 0, many completion tokens, answer "No" (221 = 13 × 17) |
+| `qwen-fast` | `thinking_chars` 0, few completion tokens |
+| `qwen-nothink` | 0 if the gateway forwards `extra_body`; above 0 if it drops it. Record which |
+
+**If something's off:** `thinking_chars` 0 on `qwen` too, with many completion tokens → the image returns the trace as `reasoning`, and the `jq` reads only `reasoning_content`; add `// .choices[0].message.reasoning`. A 400 `model not found` → the served name differs from the alias target (§7).
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 for m in qwen qwen-nothink qwen-fast; do
@@ -195,9 +250,26 @@ for m in qwen qwen-nothink qwen-fast; do
 done
 ```
 
-Expected: `qwen` with thinking characters > 0; `qwen-fast` with 0 (the model can't think); `qwen-nothink` with 0 *if* your LiteLLM version forwards `extra_body`. If `qwen-nothink` still thinks, the gateway dropped the field: rely on `qwen-fast`, on a `/no_think` preset in Open WebUI, or on per-request `chat_template_kwargs` from SDK clients, and remove the `qwen-nothink` alias so nobody depends on it. Record which methods work in your setup.
+If `qwen-nothink` still thinks, the gateway dropped the field: rely on `qwen-fast`, on a `/no_think` preset in Open WebUI, or on per-request `chat_template_kwargs` from SDK clients, and remove the `qwen-nothink` alias so nobody depends on it. Record which methods work in your setup.
 
 ### 5.4 A scoped key and the thinking cost
+
+#### What this lab does (LiteLLM `/key/generate`)
+
+- **Creates** a virtual key `qwen-tpm-test` in LiteLLM's database: allowed models `qwen`, `qwen-nothink`, `qwen-fast`; 6,000 tokens and 30 requests per minute; valid for 1 day.
+- **Sends** 10 requests through `qwen-fast`, waits 65 s for the bucket to refill, then 10 through `qwen`, and prints the HTTP codes.
+- **Reads** the key's spend and limits.
+
+#### What to look for
+
+1. **`qwen-fast`:** mostly `200`.
+2. **`qwen`:** `429` after a few `200`s; the thinking tokens empty the bucket.
+3. **Key info:** `key_alias: "qwen-tpm-test"`, `tpm_limit: 6000`, `rpm_limit: 30`, a `spend` value.
+4. **Record** requests per minute per alias; that ratio sizes TPM for thinking aliases.
+
+**If something's off:** `QK` is `null` → the master key in `H` is wrong or the database isn't reachable (`kubectl --context spark-root -n llm-serving logs deploy/litellm`). No `429` at all → the limits aren't enforced in your LiteLLM version; check the key info.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
@@ -214,9 +286,25 @@ done
 curl -s "$API/key/info?key=$QK" "${H[@]}" | jq '.info | {key_alias, spend, tpm_limit, rpm_limit}'
 ```
 
-Expected: `qwen-fast` mostly `200`, `qwen` hitting `429` after a few requests — same question, same limit, the thinking tokens use up the bucket (§3.2). `qwen-fast` is also a smaller model, so for a same-model comparison repeat the loop with `qwen-nothink` against `qwen` if §5.3 showed the switch works. Record how many requests each alias got through per minute; that ratio is your TPM sizing factor for thinking aliases.
+Same question, same limit: the thinking tokens use up the bucket (§3.2). `qwen-fast` is also a smaller model, so for a same-model comparison repeat the loop with `qwen-nothink` against `qwen` if §5.3 showed the switch works. Record how many requests each alias got through per minute; that ratio is your TPM sizing factor for thinking aliases.
 
 ### 5.5 Fallback between Qwen models
+
+#### What this lab does (park the main engine, send two requests)
+
+- **Takes `deploy/vllm` to 0** so `qwen` and `qwen-nothink` lose their engine. In this lab KEDA owns that Deployment, so use the pause annotation shown under the code; a plain `scale` is undone.
+- **Sends** one short request through each alias and prints the status, the time and LiteLLM's `x-litellm-*` response headers.
+- **Restores** the main engine afterwards.
+
+#### What to look for
+
+1. **`qwen`:** `200`, an `x-litellm-attempted-fallbacks` header, and an `x-litellm-model-api-base` pointing at `vllm-qwen3-4b-instruct`. The time is higher than usual (the failed attempts).
+2. **`qwen-nothink`:** a 5xx after the retries; it has no fallback and shares the parked engine.
+3. **Afterwards:** `deployment "vllm" successfully rolled out`.
+
+**If something's off:** both aliases still answer from `vllm` → KEDA scaled it back up; use the pause annotation. `qwen` fails too → the fallback entry is missing from `router_settings` (§5.2).
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
@@ -230,11 +318,34 @@ kubectl --context spark-root -n llm-serving scale deploy vllm --replicas=1
 kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=20m
 ```
 
-Expected: `qwen` returns `200` with an attempted fallback and the side engine's api_base (`vllm-qwen3-4b-instruct`) — the user got an answer from the 4B model; `qwen-nothink` shares the parked engine, has no fallback, and fails after the retries. Note the extra latency the failed attempts added. Aliases on the same engine fail together; only a fallback to a *different* engine helps. The same mechanism reaches across model families: `{"qwen": ["qwen-fast", "reasoning-fast"]}` with an R1 distill from 03 served as an engine. Whether a cross-family fallback is acceptable is a product decision: the answer style changes.
+Note the extra latency the failed attempts added. Aliases on the same engine fail together; only a fallback to a *different* engine helps. The same mechanism reaches across model families: `{"qwen": ["qwen-fast", "reasoning-fast"]}` with an R1 distill from 03 served as an engine. Whether a cross-family fallback is acceptable is a product decision: the answer style changes.
 
 If the vLLM ScaledObject from 02 manages this Deployment, use the pause annotation instead of `scale` (`kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite`, and remove it afterwards), or KEDA will scale it back.
 
 ### 5.6 Open WebUI presets for Qwen
+
+#### What this lab does (Open WebUI presets + `03-DeepSeek/lab/tools/stream_probe.py`)
+
+- **In the UI** at `http://webui.lab.local`: you create presets "Qwen (thinking)", "Qwen (fast)", an agent preset with native function calling, and optionally a vision preset. These live in Open WebUI's database; no manifest changes.
+- **Vision preset:** swaps the side engine from `qwen3-4b-instruct` to `qwen3-vl-8b` (memory, §5.1) and back afterwards.
+- **Timing:** `stream_probe.py` streams one answer through the gateway per alias and times each phase.
+
+#### What to look for
+
+1. **The checkpoint question:** the thinking preset shows a collapsible thinking block, then **14**; the fast preset answers 14 directly.
+2. **Agent preset:** a tool call appears in the chat.
+3. **`stream_probe.py`:**
+
+   | Field | Healthy value |
+   |---|---|
+   | `first reasoning` | a number for `qwen`; `—` for `qwen-fast` |
+   | `first answer` | much later for `qwen` than for `qwen-fast` |
+   | `finish_reason` | `stop` |
+   | `BUFFERED` line | absent |
+
+**If something's off:** `<think>` shown as text in the UI → the engine lacks `--reasoning-parser`. `BUFFERED` → a hop buffers SSE (03 Chapter 08). `TRUNCATED` → raise max tokens. More in §7.
+
+#### Run it
 
 In `http://webui.lab.local` as admin:
 
@@ -243,7 +354,7 @@ In `http://webui.lab.local` as admin:
 3. For the agent preset: base `agent`, **Advanced Params → Function Calling: Native**, attach a tool (Open WebUI **Workspace → Tools**). Ask something that needs the tool and check the call appears in the chat.
 4. For images: `scripts/serve-model.sh --stop-side qwen3-4b-instruct` then `scripts/serve-model.sh qwen3-vl-8b --side` (§5.1 explains why one has to go). Base `qwen-vl`, enable the **Vision** capability, then paste a screenshot of a Grafana panel and ask what it shows. Swap the side engines back afterwards.
 
-Ask both Qwen presets *"A job checkpoints every 7 steps; how many checkpoints after 100 steps?"*. Expected: the thinking preset shows a collapsible thinking block then **14**; the fast preset answers directly. Time both through the gateway hop by hop:
+Ask both Qwen presets *"A job checkpoints every 7 steps; how many checkpoints after 100 steps?"*. Time both through the gateway hop by hop:
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
@@ -254,6 +365,18 @@ python3 ../../03-DeepSeek/lab/tools/stream_probe.py --url http://api.lab.local -
 Compare *time to first answer token*: with thinking it is the length of the thinking phase, which is what users perceive as "slow".
 
 ### 5.7 Tools through the gateway
+
+#### What this lab does (`tools/fc_check.py` through LiteLLM)
+
+- **Runs** the six-case function-calling suite against alias `agent` at `http://api.lab.local` with the master key. Read-only.
+
+#### What to look for
+
+1. **Summary line:** the same `fc_check: N/6 cases passed` and valid-JSON ratio as the direct `qwen3-4b-instruct` run in Chapter 10 §5.3.
+
+**If something's off:** fewer passes than direct, especially `parallel` or `no-tool` → the gateway dropped or rewrote `tools` / `tool_choice` (`drop_params: true` in 03's config). More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab

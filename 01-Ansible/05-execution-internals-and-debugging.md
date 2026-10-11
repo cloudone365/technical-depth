@@ -34,6 +34,23 @@ With **pipelining** on (our `ansible.cfg`), steps 3–4 are a single SSH round-t
 
 ### 1.1 See it for yourself
 
+#### What this lab does (ad-hoc commands from the MacBook)
+
+- **Run 1:** `ping` with `-vvvv`, filtered to the connection lines, so you see the SSH login, the sudo wrapper and the Python call of one task.
+- **Run 2:** `stat` on `/etc/dgx-release` with pipelining off and `ANSIBLE_KEEP_REMOTE_FILES=1`, so the module file stays on the Spark under `/home/dgxadmin/.ansible/tmp/`.
+- **On the Spark:** you unpack that file (`explode`) and run it again by hand (`execute`).
+- **What it changes:** nothing except the kept `ansible-tmp-…` folder in dgxadmin's home. Ansible never removes it; §6.2 Step 5 does.
+
+#### What to look for
+
+1. **Run 1:** `ESTABLISH SSH CONNECTION FOR USER: dgxadmin`, `SSH: EXEC ssh … -o ControlMaster=auto -o ControlPersist=600s …`, one `EXEC` line that ends in `/usr/bin/python3`, and **no** `PUT` line.
+2. **Run 2** prints one path like `/home/dgxadmin/.ansible/tmp/ansible-tmp-<timestamp>-<pid>-<number>`.
+3. **On the Spark:** `explode` creates `debug_dir/`, `ls debug_dir/ansible/modules/` shows `stat.py`, and `execute` prints raw JSON with `"changed": false` and `"exists": true` under `stat`.
+
+**If something's off:** `Missing sudo password` → add `-K`. `PUT` lines in run 1 → pipelining is off: check `echo $ANSIBLE_PIPELINING` in this shell and `ansible --version` (it must use `lab/ansible.cfg`). Run 2 prints no path → the run itself failed; repeat it without the `| grep …` to see the error. More in §7.
+
+#### Run it
+
 These are interactive experiments, so run them from your **MacBook** (the break-glass login: `dgxadmin`, your key). In Semaphore you'd get the same `-vvvv` output by adding `-vvvv` to a template's CLI args, but you can't then `ssh` in as `svc-ansible` to read the payload: only Semaphore holds its certificate, and that's the point.
 
 ```bash
@@ -43,17 +60,17 @@ cd "01-Ansible/lab"
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
-ansible dgx-spark-1 -m ping -vvvv 2>&1 | grep -E 'ESTABLISH|SSH: EXEC|PUT|<dgx-spark-1> (EXEC|SSH)'
+ansible dgx-spark-1 -K -m ping -vvvv 2>&1 | grep -E 'ESTABLISH|SSH: EXEC|PUT|<dgx-spark-1> (EXEC|SSH)'
 ```
 
-Look for `EXEC ... sudo -H -S -n -u root /bin/sh -c 'echo BECOME-SUCCESS-... ; /usr/bin/python3'` and the *absence* of `PUT`. That confirms pipelining is active.
+Look for `EXEC ... sudo -H -S -p "[sudo via ansible, key=...] password:" -u root /bin/sh -c 'echo BECOME-SUCCESS-... ; /usr/bin/python3'` and the *absence* of `PUT`. That confirms pipelining is active. (`group_vars/spark.yml` sets `ansible_become: true`, so even `ping` runs through sudo, and `-K` supplies dgxadmin's password. Under Semaphore, `svc-ansible` has NOPASSWD sudo and the same line reads `sudo -H -S -n -u root …`, as in the diagram.)
 
 Now switch pipelining off and keep the payload on the Spark so you can read it:
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
 ANSIBLE_PIPELINING=0 ANSIBLE_KEEP_REMOTE_FILES=1 \
-  ansible dgx-spark-1 -m ansible.builtin.stat -a path=/etc/dgx-release -vvv 2>&1 | grep -o '/home/dgxadmin/.ansible/tmp/[^ /]*' | head -1
+  ansible dgx-spark-1 -K -m ansible.builtin.stat -a path=/etc/dgx-release -vvv 2>&1 | grep -o '/home/dgxadmin/.ansible/tmp/[^ /]*' | head -1
 # → /home/dgxadmin/.ansible/tmp/ansible-tmp-1727630000.12-4242-1234
 ```
 
@@ -222,7 +239,7 @@ c                           # continue
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
-ansible-console spark --become
+ansible-console spark --become -K
 spark (2)[f:10]# nvidia-smi -L
 spark (2)[f:10]# setup filter=ansible_local
 spark (2)[f:10]# cd dgx-spark-1
@@ -240,7 +257,7 @@ Four short labs that make §1–§4 visible on your own Spark. All four run **fr
 # ▶ MacBook · any folder
 cd ~/technical-depth && git pull                  # gets 05.1-async-download.yml and the latest roles
 lab                                               # = cd 01-Ansible/lab + activate the venv (Chapter 02)
-ansible dgx-spark-1 -m ping                       # expect: pong
+ansible dgx-spark-1 -K -m ping                    # expect: pong (-K: dgxadmin's sudo password)
 ```
 
 | # | Exercise | Shows | Changes on the Spark | Time |
@@ -251,6 +268,27 @@ ansible dgx-spark-1 -m ping                       # expect: pong
 | 4 | Async join | `async` / `poll: 0` / `async_status` (§3) | a 4.7 GB model file in `/srv/models` | ~10 min + download |
 
 ### 6.1 Exercise 1 · Measure the round-trip tax
+
+#### What this lab does (playbook `04.3-baseline.yml`, three runs from the MacBook)
+
+- **Runs the OS baseline three times** on dgx-spark-1, with different connection settings: A without the SSH mux and without pipelining, B with the mux only, C with the lab defaults (mux and pipelining).
+- **Starts each run cold:** `rm -f ~/.ansible/cp/*` closes the SSH connections left from the previous run, and `--flush-cache` makes each run gather facts again.
+- **What it changes:** nothing new. The baseline from Chapter 04 §6.3 is already in place, so every task should report `ok`. Only the time differs.
+
+#### What to look for
+
+1. **Each recap:** `failed=0` and `changed=0` for `dgx-spark-1`. With nothing to change, the run time is almost all connection overhead.
+2. **The `ansible.posix.timer` line** at the end of each run, `Playbook run took 0 days, 0 hours, … minutes, … seconds`. Write down the three times. Healthy pattern: **A > B > C**, with A clearly the slowest. The exact numbers depend on your network and the MacBook.
+3. **`profile_tasks`:** the same task (for example *Gathering Facts*) is slowest in A and fastest in C.
+4. **The run log** keeps all three lines:
+   ```bash
+   # ▶ MacBook · 01-Ansible/lab (venv active)
+   grep "Playbook run took" .cache/ansible.log | tail -3
+   ```
+
+**If something's off:** the three times are about the same → you skipped `rm -f ~/.ansible/cp/*` or `--flush-cache`, or `ANSIBLE_SSH_ARGS`/`ANSIBLE_PIPELINING` is exported in your shell (`env | grep ANSIBLE_`). A recap with `changed` > 0 → something drifted from the baseline; that run is slower for a different reason. More in §7.
+
+#### Run it
 
 **Idea:** run the same playbook three times with different connection settings and compare the total time. The playbook does the same work each time; only the number of SSH round trips changes.
 
@@ -294,6 +332,34 @@ grep "Playbook run took" .cache/ansible.log | tail -3     # the same three lines
 **Why not in Semaphore:** without the mux every task logs in again. Under Semaphore that login uses the 15-minute certificate from play 1, so a slow run A would start failing with `Permission denied` once the certificate expires. With the mux (the default) the one connection made at the start carries the whole run.
 
 ### 6.2 Exercise 2 · Read a real module
+
+#### What this lab does (ad-hoc `apt` module from the MacBook)
+
+- **Step 1:** runs `ansible.builtin.apt` with `name=jq state=present`. `jq` is already installed, so nothing changes, but with pipelining off and `ANSIBLE_KEEP_REMOTE_FILES=1` the module file `AnsiballZ_apt.py` stays in `/home/dgxadmin/.ansible/tmp/`.
+- **Steps 2–4, on the Spark:** you unpack it, read how `apt.py` waits for the dpkg lock, and run it again by hand as root.
+- **Optional lock demo:** a small Python command holds apt's lock while Ansible tries to install `sl` with `lock_timeout=20`. Then `sl` is installed and removed again.
+- **Step 5:** deletes the kept files. Afterwards nothing on the Spark differs from before.
+
+#### What to look for
+
+1. **Step 1** prints one folder name, `/home/dgxadmin/.ansible/tmp/ansible-tmp-…`.
+2. **Step 2:** `ls` shows `AnsiballZ_apt.py`, `ls debug_dir/ansible/modules/` shows `apt.py`, and `cat debug_dir/args` shows `name` `jq` and `state` `present` (plus Ansible's internal `_ansible_…` keys).
+3. **Step 3:** `grep -n -i lock` finds the `lock_timeout` option (default `60`), the `LockFailedException` handling and the message `Failed to lock apt for exclusive operation`.
+4. **Step 4:** `execute` prints JSON with `"changed": false`.
+5. **Lock demo:**
+
+   | Moment | Healthy result |
+   |---|---|
+   | Terminal 1 | `apt is locked - Ctrl-C to release` |
+   | Ansible, lock held | `FAILED!` after about 20 s, `Failed to lock apt for exclusive operation` |
+   | Ansible, after Ctrl-C | `CHANGED`: `sl` installed |
+   | `state=absent` | `CHANGED`: `sl` removed |
+
+6. **Step 5:** `ls ~/.ansible/tmp/` on the Spark is empty.
+
+**If something's off:** the lock demo installs `sl` at once → `sl` was already installed (`dpkg -l sl`), or the lock command in terminal 1 had already ended. `cd ~/.ansible/tmp/ansible-tmp-*/` fails with *too many arguments* → several folders are left from earlier runs; use the exact name from Step 1. More in §7.
+
+#### Run it
 
 **Idea:** a module is a Python program that Ansible wraps into one file (`AnsiballZ_<module>.py`), sends to the Spark, runs and deletes. With pipelining off and `KEEP_REMOTE_FILES=1`, the file stays, so you can unpack it and read the real code. Here you look at how `ansible.builtin.apt` handles the dpkg lock (the "another apt is running" situation you hit after every boot, when unattended-upgrades runs).
 
@@ -386,6 +452,31 @@ exit
 
 ### 6.3 Exercise 3 · Break a handler
 
+#### What this lab does (playbook `04.3-baseline.yml --tags time`, from the MacBook)
+
+- **On the Spark:** you append one comment line to `/etc/chrony/chrony.conf`, so the role's *Configure chrony* task has something to fix and notifies *Restart chrony*.
+- **In your repository copy:** you add `failed_when: true` to the last task of `roles/spark_baseline/tasks/time_logging.yml`, so the play fails before handlers run. You remove it again afterwards.
+- **The runs:** only the tasks in `time_logging.yml` (time zone, chrony, journald), a few seconds each. The role puts `chrony.conf` back to its template each time.
+- **What it changes:** chrony restarts once, in Step 6. journald isn't restarted, because its file doesn't change. Nothing else on the Spark is touched.
+
+#### What to look for
+
+1. **Note the timestamp** from Step 1 (`ActiveEnterTimestamp=…`). It is the evidence for every step below.
+2. **Each run's result:**
+
+   | Step | Tasks | Recap | `RUNNING HANDLER [spark_baseline : Restart chrony]` | chrony timestamp |
+   |---|---|---|---|---|
+   | 4 (failure added) | *Configure chrony* `changed`, *Persistent journald…* `FAILED` | `failed=1` | absent | unchanged |
+   | 5 (failure removed) | *Configure chrony* `ok` | `failed=0` | absent | **still** unchanged: the lost handler |
+   | 6 (`--force-handlers`) | *Configure chrony* `changed`, journald `FAILED` | `failed=1` | **present** | new |
+   | 7 (put back) | every task `ok` | `failed=0` | absent | as after Step 6 |
+
+3. **`git diff roles/`** prints nothing at the end.
+
+**If something's off:** *Configure chrony* is `ok` in Step 4 → the Step 2 line didn't land (`tail -2 /etc/chrony/chrony.conf`). The handler runs in Step 4 → the `failed_when: true` line is not in the last task, or not at the same indentation as `notify:`. Tasks from other files appear → `--tags time` is missing. More in §7.
+
+#### Run it
+
 **Idea:** §2.1 says a handler runs at the end of the play, and only if the play gets there. Here you prove it: chrony's config changes, a later task fails, chrony is **not** restarted, and the next run doesn't restart it either, because by then the file is already right.
 
 The pieces in the role (`roles/spark_baseline/`):
@@ -454,6 +545,30 @@ This time the task still fails, but `RUNNING HANDLER [spark_baseline : Restart c
 
 ### 6.4 Exercise 4 · Async join
 
+#### What this lab does (playbook `05.1-async-download.yml`, or template `05.1 Async download`)
+
+- **Folder:** creates `/srv/models` on dgx-spark-1 (root, 0755).
+- **Background download:** starts `get_url` for `Qwen2.5-7B-Instruct-Q4_K_M.gguf` (about 4.7 GB) from huggingface.co as an async job (`async: 3600`, `poll: 0`) and moves on at once. The Spark needs internet access; no Hugging Face login is needed.
+- **Meanwhile:** runs the whole `spark_baseline` role. It is already in place from Chapter 04, so its tasks report `ok`.
+- **Join:** `async_status` checks the job every 15 s, up to 240 times (1 hour), then reports the file size and deletes the job's status file in `/root/.ansible_async/`.
+- **Cleanup run** (`-e async_cleanup=true`): deletes only the model file and stops.
+
+#### What to look for
+
+1. **Command exit / Semaphore run:** `failed=0`. *Start the download in the background* is `changed` on every run, because a started async job always reports `changed`. The baseline tasks show `ok`.
+2. **"Show the job id"** prints `Download running as async job <id>; result file /root/.ansible_async/<id>`.
+3. **"Join — wait for the download …"** prints `FAILED - RETRYING: … (239 retries left)` and counts down. Those lines are checks that found the job still running, not errors.
+4. **"Report"**, at the end:
+   ```
+   Qwen2.5-7B-Instruct-Q4_K_M.gguf: 4.36 GiB, changed=True (false on a re-run: …)
+   ```
+   On a re-run the file is already there, the join finishes at once, and the line says `changed=False`.
+5. **On the Spark during the run:** `ls -lh /srv/models` grows while the baseline tasks scroll by, and `sudo ls /root/.ansible_async/` shows one file named after the job id. After the run that file is gone.
+
+**If something's off:** *Size on disk* or *Report* fails, or the size is tiny → the download itself failed; the join task's output shows the `get_url` error (no internet from the Spark, or the URL moved). The join gives up after 1 hour → a slow link; the download keeps running on the Spark. Under Semaphore, `Permission denied (publickey)` during a long join → the 15-minute certificate expired after the connection dropped; run the template again. More in §7.
+
+#### Run it
+
 **Idea:** a download of several GB would block the play for minutes. With `async: 3600` and `poll: 0`, Ansible starts it on the Spark as a background job and moves on at once. Later, `async_status` waits for the job ("join"). [`05.1-async-download.yml`](lab/playbooks/05.1-async-download.yml) does exactly that:
 
 1. creates `/srv/models`;
@@ -462,7 +577,7 @@ This time the task still fails, but `RUNNING HANDLER [spark_baseline : Restart c
 4. waits with `async_status` (`until: …finished`, every 15 s, up to 1 hour);
 5. prints the file size and removes the job's status file.
 
-**Run it** (from the MacBook, or create a Semaphore template `05.1 Async download` with the same settings as `04.2 Ping`):
+From the MacBook, or from a Semaphore template `05.1 Async download` with the same settings as `04.2 Ping`:
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
@@ -516,7 +631,7 @@ ansible-playbook playbooks/05.1-async-download.yml -l dgx-spark-1,localhost -K -
 | `sudo: a password is required` in the middle of a run | sudo | Did the task set `become: false` and then `become_user`? | `become_user` needs `become: true` at the same level (ansible-lint `partial-become`) |
 | Handler did not run | Play flow | `--list-tasks`; was the notifying task `changed`? | `meta: flush_handlers`, or `--force-handlers` |
 | Task takes 10+ minutes then fails with `timeout` | async missing | `ps -ef \| grep AnsiballZ` on the Spark | `async:` + `poll:` |
-| Different result on the Spark vs. your laptop | aarch64 | `ansible dgx-spark-1 -m setup -a filter=ansible_architecture` | Pin `platform: linux/arm64` for images; check the module's arch assumptions |
+| Different result on the Spark vs. your laptop | aarch64 | `ansible dgx-spark-1 -K -m setup -a filter=ansible_architecture` | Pin `platform: linux/arm64` for images; check the module's arch assumptions |
 
 ## 8. Validation
 

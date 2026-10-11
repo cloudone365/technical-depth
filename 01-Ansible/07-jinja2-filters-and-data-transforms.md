@@ -37,6 +37,24 @@ Three layers each get a chance to eat your backslashes and quotes:
 
 ## 2. The kata
 
+#### What this lab does (playbook `07.1-jinja-lab.yml`)
+
+- **Where it runs:** on the MacBook only (`hosts: localhost`, `connection: local`). It never connects to a Spark and changes nothing anywhere.
+- **Input:** canned output captured on a Spark (`ibdev2netdev`, `nvidia-smi` CSV, kernel log lines with Xid codes, a `kubectl get nodes -o json` shape) plus `cx7_interfaces` from your `host_vars`.
+- **What it does:** seven katas (K1–K7). Each one turns raw text or JSON into structured data with `set_fact` and then **asserts** the result, so a wrong transform fails the run instead of printing something plausible.
+- **Needs:** `community.general` (for `from_csv` and `json_query`) and the `jmespath` Python library, both from the lab's requirements files (Chapter 02).
+
+#### What to look for
+
+1. **Command exit:** `failed=0` and `changed=0` (only `set_fact`, `assert` and `debug` run, which never report changes). The recap line is `localhost : ok=15 changed=0 unreachable=0 failed=0`.
+2. **The last task** prints `"msg": "7/7 Jinja katas passed"`. It runs only if every assert before it passed.
+3. **Each `K… check` task** shows `ok` with `All assertions passed`. A failing one names the expression that was false, which tells you which kata to look at.
+4. **K6 follows your inventory:** with one Spark it builds one line (`192.168.100.11 dgx-spark-1-fab`); with dgx-spark-2 uncommented, two.
+
+**If something's off:** an error naming `community.general.from_csv` or `community.general.json_query` means the collections aren't installed in `./collections` (`ansible-galaxy collection install -r requirements.yml -p ./collections`); `You need to install "jmespath"` means the venv isn't active. More in §4.
+
+#### Run it
+
 Run it first, then read each block:
 
 ```bash
@@ -268,6 +286,27 @@ class FilterModule:
 ---
 
 ## 3. Point it at your real Spark
+
+#### What this lab does (your own playbook against `spark`)
+
+- **Your exercise:** the play below collects the same three inputs live from the Spark (`ibdev2netdev`, the `nvidia-smi` CSV, the last 200 `NVRM`/`mlx5` kernel log lines) and hands them to your version of K1–K3 (`katas-on-live-data.yml`, which you write).
+- **Read-only:** every command has `changed_when: false`; nothing on the Spark is changed.
+- The kernel log task has `failed_when: false`, because `grep` exits 1 when no line matches.
+
+#### What to look for
+
+1. **Command exit:** `failed=0`, `changed=0`.
+2. **Live values your katas must handle:**
+   | Input | Healthy value on one uncabled Spark |
+   |---|---|
+   | `ib.stdout` | four lines (`rocep1s0f0`, `rocep1s0f1`, `roceP2p1s0f0`, `roceP2p1s0f1`), all `(Down)` until a QSFP cable is in (Chapter 13) |
+   | `smi.stdout` | one GPU row: `NVIDIA GB10`, with `memory.used` = `[N/A]` (UMA) |
+   | `kern.stdout` | `mlx5_core` start-up lines, usually no `NVRM: Xid` lines, so K3 must decide `none` |
+3. Your K1 must cope with "no port Up" (an empty list), which the canned data never shows.
+
+**If something's off:** `ibdev2netdev: command not found` means the MLNX/DOCA tools aren't on that host; a K2 crash on `float` means `[N/A]` wasn't mapped to `none`. More in §4.
+
+#### Run it
 
 Replace the canned vars with live output:
 

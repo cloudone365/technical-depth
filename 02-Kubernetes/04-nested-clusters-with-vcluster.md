@@ -292,6 +292,30 @@ Inner quotas are ceilings, not reservations: `tenant-alpha` + `tenant-beta` + `l
 
 ### 6.1 Build it
 
+#### What this lab does (templates `19.1 Kubernetes` → `20.1 GPU Operator` → `20.2 vClusters`, or script `lab/scripts/install-addons.sh`)
+
+- **Root (19.1, 20.1):** the kubeadm root on dgx-spark-1 with Cilium and MetalLB, then the GPU Operator with 15 time-slices.
+- **Storage first (20.2 or `install-addons.sh storage`):** local-path-provisioner writing to `/data/k8s`, StorageClasses `local-nvme` and `local-nvme-retain`, and `local-path` as the default class. Each vCluster keeps its SQLite database on a 5 Gi `local-nvme` PVC, so this has to exist before the vClusters.
+- **Root-side objects:** namespaces `vc-dev-lab` and `vc-dev-llms` with their `vcluster-budget` quotas (2 CPU · 4 Gi · 2 slices each), LimitRanges and Cilium boundary policies (`root/05-vclusters`), and the PriorityClasses (`root/00-platform`). Template `20.2` also creates the LLM namespaces and their budgets (`root-llms/00-platform`, `10-tenancy`).
+- **The vClusters:** Helm chart `loft/vcluster` 0.37.1 twice, values from `vclusters/dev-lab.yaml` and `dev-llms.yaml`. Each API gets a MetalLB IP: dev-lab `192.168.0.111`, dev-llms `192.168.0.112`.
+- **Kubeconfig:** both contexts are merged into `01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml` next to `spark-root`. Path B also runs `metrics-server` and `kps` (Prometheus/Grafana), which take several minutes on a first install.
+
+#### What to look for
+
+1. **Semaphore runs:** each template ends `failed=0`. On a re-run of `20.2`, the Helm and apply tasks show `ok` instead of `changed`.
+2. **Contexts:** `kubectl config get-contexts -o name` prints `spark-root`, `dev-lab`, `dev-llms`.
+3. **Pods at the root:**
+   ```bash
+   # ▶ MacBook · 02-Kubernetes/lab
+   kubectl --context spark-root -n vc-dev-lab get pods,pvc,svc
+   ```
+   `dev-lab-0` is `Running`, PVC `data-dev-lab-0` is `Bound` (5Gi, `local-nvme`), and the LoadBalancer Service has `EXTERNAL-IP 192.168.0.111`. Same in `vc-dev-llms` with `.112`.
+4. **Gate:** `scripts/verify.sh vclusters` prints the 11 `[PASS]` lines shown in §7 and `0 failed`.
+
+**If something's off:** `dev-lab-0` `Pending` → its PVC is waiting for storage; install storage first. `context dev-lab` times out → MetalLB didn't hand out `.111`. More in §8.
+
+#### Run it
+
 Either path gives the same result. The vCluster definitions live once, in the 02 lab; Ansible applies those files.
 
 **A — 01-Ansible, from Semaphore** (project `spark-lab` on sema01): run the templates `19.1 Kubernetes` → `20.1 GPU Operator` → `20.2 vClusters`, each to `failed=0`. They write the kubeconfig with all three contexts to sema01's state volume. Break-glass CLI from the MacBook: the same playbooks with `-l dgx-spark-1,localhost -K`.
@@ -318,6 +342,25 @@ The LLM stack is installed on the root with `scripts/install-addons.sh traefik`,
 
 ### 6.2 Look around
 
+#### What this lab does (read-only `kubectl` in the root and in dev-lab)
+
+- Lists the root's nodes, the node as dev-lab sees it (with the `spark.lab/gpu` and GPU product labels), the pods in the root namespace `vc-dev-lab`, and the namespaces on both sides.
+- **Read-only:** nothing is created or changed.
+
+#### What to look for
+
+| Command | Healthy value |
+|---|---|
+| root `get nodes` | 1 node `dgx-spark-1`, `Ready`, roles `control-plane` |
+| dev-lab `get nodes -L …` | the same `dgx-spark-1`, label `spark.lab/gpu=gb10` |
+| allocatable `nvidia.com/gpu` inside dev-lab | `15`, although dev-lab's budget is 2 |
+| root `-n vc-dev-lab get pods` | `dev-lab-0` `Running`, plus the host copies of any tenant pods |
+| root namespaces containing `tenant` | `0` |
+
+**If something's off:** dev-lab lists no node → node sync is off; check `sync.fromHost.nodes` in `vclusters/dev-lab.yaml`. More in §8.
+
+#### Run it
+
 ```bash
 kubectl --context spark-root get nodes                    # 1 node: control plane + worker
 kubectl --context dev-lab get nodes -L spark.lab/gpu,nvidia.com/gpu.product
@@ -330,6 +373,23 @@ kubectl --context spark-root get ns | grep -c tenant       # 0 — tenants don't
 The node shows 15 slices inside `dev-lab` even though `dev-lab` may only use 2: nodes are synced as they are, budgets are enforced by quota.
 
 ### 6.3 Follow one pod through both clusters
+
+#### What this lab does (manifests `lab/manifests/dev-lab/30-networking`)
+
+- **Creates in dev-lab's `lab-tools`:** `netshoot`, the `echo` Deployment (3 replicas on :8080) with Services `echo` (port 80) and `echo-headless`, and the two `dns-lab` pods used in Chapter 10.
+- **Compares both views:** pod names and IPs in dev-lab and at the root (`vc-dev-lab`), and the ClusterIP of `echo` on both sides.
+- The first run pulls the netshoot and agnhost images, so pods take a minute to get Ready.
+
+#### What to look for
+
+1. **Command exit:** `apply` prints `created` (first run) or `unchanged`.
+2. **Same pods, two names:** each pod in dev-lab `lab-tools` appears at the root as `<pod>-x-lab-tools-x-dev-lab`, and the `VIRTUAL` column shows the dev-lab name.
+3. **Same IPs:** the pod IPs (`10.42.x.x`) match on both sides.
+4. **Same ClusterIP:** the `echo` Service has one ClusterIP (`10.43.x.x`) in dev-lab and at the root.
+
+**If something's off:** pods `Pending` in dev-lab with no scheduler events → the root refused them (§6.4). Different IPs on the two sides would mean you're looking at two different pods; match them through the `vcluster.loft.sh/object-name` annotation. More in §8.
+
+#### Run it
 
 ```bash
 kubectl --context dev-lab apply -k manifests/dev-lab/30-networking
@@ -344,6 +404,23 @@ Same pod IPs, same ClusterIPs: the network is the root's (Cilium, kube-proxy). O
 
 ### 6.4 Spend a budget
 
+#### What this lab does (script `lab/scripts/breakfix.sh inject 02`, manifest `lab/breakfix/02-gpu-oversubscribed.yaml`)
+
+- **Injects:** Deployment `bf02-gpu` in dev-lab's `lab-tools`: 6 replicas of a `sleep` container, each asking for 1 GPU time-slice, 10m CPU and 64Mi.
+- **What happens:** dev-lab's own API server accepts all 6 pods (`lab-tools` has no inner quota). The syncer then tries to create them at the root, where `vcluster-budget` on `vc-dev-lab` allows 2 slices. The root refuses the other 4.
+- **`reset 02`** deletes the Deployment. Nothing else changes.
+
+#### What to look for
+
+1. **dev-lab:** `get pods -l app=bf02` shows 2 `Running` and 4 `Pending`.
+2. **A Pending pod's events:** a sync error with `exceeded quota: vcluster-budget, requested: requests.nvidia.com/gpu=1, used: 2, limited: 2`. There is no `FailedScheduling` event: the root scheduler never saw the pod.
+3. **Root quota:** `requests.nvidia.com/gpu` reads `2` used of `2` hard in `vcluster-budget`.
+4. **After `reset 02`:** no `bf02` pods are left in dev-lab, and the root quota shows `0` GPUs used (or whatever other dev-lab GPU pods hold).
+
+**If something's off:** fewer than 2 Running → another dev-lab pod already holds a slice (`gpu-smoke`, the §5.4 deadlock jobs in Chapter 07). `breakfix.sh answer 02` explains the scenario. More in §8 (first row).
+
+#### Run it
+
 ```bash
 scripts/breakfix.sh inject 02              # 6 pods × 1 slice in dev-lab (budget: 2)
 kubectl --context dev-lab -n lab-tools get pods -l app=bf02          # 2 Running, 4 Pending
@@ -355,6 +432,22 @@ scripts/breakfix.sh reset 02
 The Pending pods have **no scheduler events** — the root never saw them.
 
 ### 6.5 Resize a vCluster
+
+#### What this lab does (two `kubectl patch` commands, then `tests/budget_check.py`)
+
+- **Moves one GPU slice** from the LLM stack to dev-llms: `serving-budget` in `llm-serving` drops from 6 to 5 slices, `vcluster-budget` in `vc-dev-llms` rises from 2 to 3. No reinstall, no restart, no pod is evicted.
+- **The patch is temporary:** re-applying `root/05-vclusters` and `root-llms/10-tenancy` puts the file values back. A permanent change goes into those files and must pass `python3 tests/budget_check.py`, which runs on the MacBook with no cluster.
+
+#### What to look for
+
+1. **Command exit:** each `patch` prints `resourcequota/… patched`.
+2. **`describe resourcequota vcluster-budget`** in `vc-dev-llms` shows `requests.nvidia.com/gpu` hard `3`.
+3. **`budget_check.py`** on the unchanged files ends `budget check OK` and prints the table from §3.2 (`root keeps 13.0 101.7 11`). If you edit only one vCluster's quota in the files, it fails, because the lab keeps the two sandboxes identical.
+4. **Undo:** after re-applying the two folders, `scripts/verify.sh vclusters llm-budget` shows `dev-llms root budget: 2 4Gi 2` and `serving-budget: 8 90Gi 6` again.
+
+**If something's off:** `budget_check.py` reports an overcommit → the budgets together promise more than allocatable; take from `serving-budget` first. More in §8.
+
+#### Run it
 
 A vCluster's size is its root quota. No reinstall, no restart. The root's slices are all handed out (platform 2, `llm-serving` 6, `batch` 3), so here `dev-llms` takes one of `llm-serving`'s:
 
@@ -370,6 +463,22 @@ Memory works the same way: more memory for a vCluster comes out of the LLM pool 
 
 ### 6.6 Add a third vCluster (exercise)
 
+#### What this lab does (exercise: new `vclusters/train.yaml`, `helm upgrade --install`, `scripts/merge-vcluster-kubeconfig.sh`)
+
+- **You write the files:** a values file for vCluster `train` on `192.168.0.113`, and namespace `vc-train` with a `vcluster-budget` and a `vcluster-defaults` LimitRange in `manifests/root/05-vclusters`, paid for by lowering `serving-budget`.
+- **Helm** installs a third vCluster control plane (pod `train-0`, a 5 Gi `local-nvme` PVC, a LoadBalancer Service) in `vc-train`.
+- **The merge script** reads Secret `vc-train` and adds context `train` to your current `$KUBECONFIG`, then waits until `/readyz` answers.
+
+#### What to look for
+
+1. **Helm:** the install ends `STATUS: deployed`; `kubectl --context spark-root -n vc-train get pods` shows `train-0` `Running`.
+2. **Merge script:** `[PASS] context train → https://192.168.0.113:443`.
+3. **`budget_check.py`** with `train` in `VCLUSTERS`: it fails until the budgets add up again, then prints `budget check OK` with a `vc-train` row.
+
+**If something's off:** x509 errors on `.113` → the IP is missing from `proxy.extraSANs`. No IP on the Service → the `services.loadbalancers` quota in `vc-train` is missing or 0. More in §8.
+
+#### Run it
+
 1. Copy `vclusters/dev-lab.yaml` to `vclusters/train.yaml`; change the IP to `192.168.0.113` (in `annotations`, `extraSANs`, `exportKubeConfig.server`) and the context to `train`.
 2. Add namespace `vc-train`, a `vcluster-budget` and a `vcluster-defaults` LimitRange to `manifests/root/05-vclusters` (the platform's 3 CPU / ~11.7 GiB / 2 slices have no slack, so lower `serving-budget` in `manifests/root-llms/10-tenancy/quotas.yaml` first and give `vc-train` what you took).
 3. `kubectl --context spark-root apply -k manifests/root/05-vclusters`
@@ -378,6 +487,21 @@ Memory works the same way: more memory for a vCluster comes out of the LLM pool 
 6. Add `train` to `VCLUSTERS` in `tests/budget_check.py`, run it — then fix whatever it reports.
 
 ### 6.7 Back up and restore a vCluster
+
+#### What this lab does (StatefulSet scale + `tar` of the PVC folder, on the Spark)
+
+- Scales dev-lab's control plane (`vc-dev-lab/dev-lab`) to 0, archives `/data/k8s/vc-dev-lab/data-dev-lab-0` into `~/dev-lab-<date>.tgz` on the Spark with `sudo tar`, and scales back to 1.
+- For that minute the dev-lab API is gone; tenant pods keep running. Nothing else changes. Chapter 02 §5.8 has the same steps with a wait for the pod to be gone before the copy.
+
+#### What to look for
+
+1. **The PVC:** `data-dev-lab-0`, `Bound`, 5Gi, `local-nvme`.
+2. **Before `tar`:** `kubectl --context spark-root -n vc-dev-lab get pods` no longer lists `dev-lab-0`. If it does, wait: copying a live SQLite file gives a broken backup.
+3. **After:** `tar tzf ~/dev-lab-$(date +%F).tgz | head` lists files under `data-dev-lab-0/`, and `kubectl --context dev-lab get ns` answers again within a minute.
+
+**If something's off:** `dev-lab-0` doesn't come back → `kubectl --context spark-root -n vc-dev-lab describe pod dev-lab-0`. A restored control plane that won't start → the copy was taken while it was running (Chapter 02 §7, last row). More in §8.
+
+#### Run it
 
 A root etcd snapshot does **not** contain a vCluster's objects: they live in SQLite on the vCluster's PVC, which `local-nvme` keeps at `/data/k8s/vc-<name>/<pvc>` on the Spark.
 

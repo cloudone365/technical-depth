@@ -190,6 +190,22 @@ Each task starts with `scripts/serve-model.sh <name>`: it checks the util budget
 
 ### Task 1 · Fill-in-the-middle with a parse-and-test gate
 
+#### What this lab does (script `lab/scripts/serve-model.sh qwen3-coder-30b-fp8` + client `~/qwen-ch02/fim_gate.py`)
+
+- **Serve:** replaces the main `deploy/vllm` on `spark-root` with Qwen3-Coder-30B-A3B in FP8 (util 0.40, 56 Gi request = limit, `--max-model-len=65536`, `qwen3_coder` tool parser). The first run downloads ~32 GB into `model-cache`.
+- **Port-forward:** `svc/vllm` to `localhost:8000` on the MacBook.
+- **Client:** sends a FIM prompt (prefix and suffix of a `fib()` function), assembles the file, rejects it if it doesn't parse, and runs its unit test in a separate Python process on the MacBook. Generated code never runs inside the client process.
+
+#### What to look for
+
+1. **`serve-model.sh`:** `[PASS] budget: running … + qwen3-coder-30b-fp8 0.4 ≤ 0.72`, `[PASS] weights cached`, `[PASS] vllm ready with qwen3-coder-30b-fp8`, `[PASS] answer: 144` and `0 failed`. Reasoning chars are `0`: the Coder model doesn't think.
+2. **`/v1/models`:** `['qwen3-coder-30b-fp8']`.
+3. **`fim_gate.py`:** a short loop as the middle (`a, b = 0, 1` … `for _ in range(…)`), then `ACCEPT tests passed`. Note the token count and seconds in the `--- middle (…) ---` header.
+
+**If something's off:** pod Pending with `exceeded quota: serving-budget` → a side model plus the apps leave less than 56 Gi; stop the side model. `REJECT: does not parse` with fences or a repeated suffix → wrong prompt form, see Troubleshooting in §4.
+
+#### Run it
+
 Serve the Coder model and open a port-forward:
 
 ```bash
@@ -253,9 +269,25 @@ PY
 python3 ~/qwen-ch02/fim_gate.py
 ```
 
-Expected: a two- or three-line loop (`a, b = 0, 1` … `for _ in range(…)`), `ACCEPT tests passed`, and a latency you note down. Run it again with `MODE=raw`: the same FIM string sent to `/v1/completions` without the chat wrapper — compare the middles; for Qwen3-Coder the chat form is the documented one. Then drop the system message and compare again. If the middle repeats the suffix or rewrites the whole function, add a base Coder model to [`models.yaml`](lab/models.yaml) (for example `Qwen/Qwen2.5-Coder-7B`, util 0.20, `mem: 32Gi`, no parser flags), run `python3 scripts/gen_overlays.py`, serve it and compare with `MODE=raw MODEL=<its name>`.
+Run it again with `MODE=raw`: the same FIM string sent to `/v1/completions` without the chat wrapper — compare the middles; for Qwen3-Coder the chat form is the documented one. Then drop the system message and compare again. If the middle repeats the suffix or rewrites the whole function, add a base Coder model to [`models.yaml`](lab/models.yaml) (for example `Qwen/Qwen2.5-Coder-7B`, util 0.20, `mem: 32Gi`, no parser flags), run `python3 scripts/gen_overlays.py`, serve it and compare with `MODE=raw MODEL=<its name>`.
 
 ### Task 2 · Repository context: measure the prefill cost
+
+#### What this lab does (script `~/qwen-ch02/repo_prompt.py`)
+
+- **Builds a repository prompt** from up to 20 `*.py` files of `02-Kubernetes/lab` in the Qwen2.5-Coder repository format, with the last file cut in half as a FIM target.
+- **Sends it twice** to the raw `/v1/completions` endpoint of the Coder model from Task 1 (still served, port-forward still open), asking for only 32 tokens, so the time is almost all prefill.
+- **Nothing is changed** on the cluster; the second call only reuses KV blocks the first one left in vLLM's prefix cache.
+
+#### What to look for
+
+1. **Command exit:** two lines, `call 1:` and `call 2:`, with the same prompt token count.
+2. **Prefill vs cache:** call 2 much faster than call 1. The KV estimate is prompt tokens × 96 KiB.
+3. **Cache miss on purpose:** after you change one character in the first file, call 1 of the next run is slow again.
+
+**If something's off:** both calls equally slow → prefix caching is off; check that the served args contain `--enable-prefix-caching`. A 400 about the context length → fewer files (the model allows 65,536 tokens).
+
+#### Run it
 
 The prompt uses the Qwen2.5-Coder repository format (§2.3) on the raw endpoint; what you measure here — prefill time and prefix-cache reuse — is the same for any model and prompt form.
 
@@ -281,9 +313,31 @@ PY
 python3 ~/qwen-ch02/repo_prompt.py ../../02-Kubernetes/lab
 ```
 
-Expected: the first call's time grows with the prompt (prefill); the second is much faster because `--enable-prefix-caching` (on in the 02 base) reuses the KV blocks. Change one character in the *first* file and run again: the cache misses from that point on. That is the rule for repository prompts — stable content first.
+The first call's time grows with the prompt (prefill); the second is faster because `--enable-prefix-caching` (on in the 02 base) reuses the KV blocks. Change one character in the *first* file and run again: the cache misses from that point on. That is the rule for repository prompts — stable content first.
 
 ### Task 3 · Tool-integrated math with a sandbox, SymPy and voting
+
+#### What this lab does (script `lab/scripts/serve-model.sh qwen2.5-math-7b` + client `~/qwen-ch02/tir.py`)
+
+- **Serve:** replaces the main model with Qwen2.5-Math-7B-Instruct (util 0.15, 24 Gi, 4K context). The first run downloads ~15.2 GB.
+- **TIR loop:** the model writes Python, the client runs it in a separate, resource-limited process on the MacBook (5 s CPU, 10 s wall clock, empty environment) and feeds the output back, for up to 4 rounds.
+- **Checks:** extracts the `\boxed{}` answer, compares it with the brute-force gold answer `55252` using SymPy, then samples 8 plain chain-of-thought answers and takes a majority vote.
+
+#### What to look for
+
+1. **`serve-model.sh`:** four `[PASS]` lines ending with `vllm ready with qwen2.5-math-7b` and `answer: 144`.
+2. **Gold check:** the brute-force one-liner below prints `55252`.
+3. **`tir.py` output:**
+
+   | Line | Healthy value |
+   |---|---|
+   | trace | at least one Python code block, each followed by an `output` block with its result |
+   | `single run:` | `55252 correct` (a `WRONG` is a result to record, not a failure of the lab) |
+   | `CoT samples: … -> vote:` | eight answers (some may be `None`) and the most frequent one with its count |
+
+**If something's off:** `TimeoutError` or `CPU or memory limit reached` in the trace → the model wrote a brute-force loop; that is the sandbox doing its job. A 400 about context length → lower `max_tokens`; this model has a 4K window.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
@@ -374,6 +428,23 @@ The gold answer comes from a brute-force count — check it yourself before trus
 
 ### Task 4 · Thinking on and off: tokens, time and KV
 
+#### What this lab does (script `lab/scripts/serve-model.sh qwen3-8b`, then `--side qwen3-4b-thinking`, client `~/qwen-ch02/think_cost.py`)
+
+- **Serve:** Qwen3-8B as the main model (util 0.20, 32 Gi). Later, Qwen3-4B-Thinking-2507 as a side engine `deploy/svc vllm-qwen3-4b-thinking` (util 0.15, 24 Gi, ~8.1 GB download), forwarded to `localhost:8001`.
+- **Measure:** three questions (lookup, format, puzzle), each with thinking on and off, recording generated tokens, wall time, reasoning length and a KV peak estimate (144 KiB per token).
+- **Clean up:** `--stop-side` deletes the side Deployment and Service at the end.
+
+#### What to look for
+
+1. **Budget line for the side model:** `[PASS] budget: running 0.20 + qwen3-4b-thinking 0.15 ≤ 0.72` (more if BGE-M3 runs).
+2. **Six rows per model.** On Qwen3-8B, `think=True` rows have far more tokens, seconds and `reasoning` characters than `think=False` rows; the `think=False` rows have `reasoning 0 chars`. The puzzle answer is 4 h (14:05 − 09:40 = 4 h 25 min, minus the 25-minute stop).
+3. **On the 4B-Thinking model:** `think=False` rows still show reasoning characters. That is expected: a Thinking-2507 model ignores `enable_thinking`.
+4. **After `--stop-side`:** `[PASS] vllm-qwen3-4b-thinking removed`.
+
+**If something's off:** `reasoning 0 chars` with thinking on and `<think>` inside the answer → the served overlay lacks the reasoning parser (command below). Very long or endless rows → greedy settings; see Troubleshooting in §4.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 scripts/serve-model.sh qwen3-8b
@@ -406,7 +477,7 @@ PY
 python3 ~/qwen-ch02/think_cost.py
 ```
 
-Expected shape (your numbers will differ — record them): thinking multiplies generated tokens and wall time for all three, and only the puzzle benefits. If `reasoning` stays empty with thinking on, the served overlay lacks `--reasoning-parser qwen3` and the `<think>` block sits inside `content` — check with `kubectl --context spark-root -n llm-serving get deploy vllm -o jsonpath='{.spec.template.spec.containers[0].args}'`.
+Your numbers will differ; record them. Thinking multiplies generated tokens and wall time for all three, and only the puzzle benefits. If `reasoning` stays empty with thinking on, the served overlay lacks `--reasoning-parser qwen3` and the `<think>` block sits inside `content` — check with `kubectl --context spark-root -n llm-serving get deploy vllm -o jsonpath='{.spec.template.spec.containers[0].args}'`.
 
 Try the soft switch too: thinking on, and append ` /no_think` to the user message. Then repeat with a thinking budget if your engine supports it (§2.6).
 
@@ -420,9 +491,23 @@ BASE=http://localhost:8001/v1 MODEL=qwen3-4b-thinking python3 ~/qwen-ch02/think_
 scripts/serve-model.sh --stop-side qwen3-4b-thinking
 ```
 
-Expected: the `think=False` rows think anyway — a Thinking-2507 model ignores `enable_thinking` — and the 4B model's traces are long. Note whether its puzzle answer matches the 8B's.
+The `think=False` rows think anyway and the 4B model's traces are long. Note whether its puzzle answer matches the 8B's.
 
 ### Task 5 · Turn the measurement into an engine setting
+
+#### What this lab does (log read + arithmetic)
+
+- **Reads** vLLM's KV capacity from the startup log of the main engine (Qwen3-8B from Task 4). Nothing is changed.
+- **Computes** how many reasoning requests fit at once: KV tokens ÷ (prompt + longest thinking answer).
+
+#### What to look for
+
+1. **The log lines:** `GPU KV cache size: … tokens` (about 45K for Qwen3-8B at util 0.20, Chapter 01 Task 6) and `Maximum concurrency for 32,768 tokens per request`.
+2. **Your result** compared with the overlay's `--max-num-seqs=32`: with thinking answers of several thousand tokens, the number that fits is far below 32. Write down the value you would set.
+
+**If something's off:** no lines from `grep` → the pod restarted and the log rotated; restart it with `scripts/serve-model.sh qwen3-8b` and grep again.
+
+#### Run it
 
 From Task 4 take the longest thinking answer, $g_{\max}$ tokens, and the KV memory from the engine's startup log (Chapter 01 Task 6):
 

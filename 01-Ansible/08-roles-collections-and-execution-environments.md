@@ -138,6 +138,30 @@ fatal: [dgx-spark-1]: FAILED! => argument_errors:
 
 ### 3.1 Package the lab as a collection
 
+#### What this lab does (script `lab/tools/build-collection.sh`)
+
+- **Build:** copies every role in `lab/roles/` (minus `molecule/` folders), the `spark_mdns` inventory plugin and six playbooks (`04.3-baseline`, `11.1-containers`, `13.1-fabric`, `26.1-drift-check`, `29.1-emergency-drain`, `30.1-validate`) into `.cache/build/ansible_collections/cloudone/spark/`. Inside the copied playbooks, `- role: x` becomes `- role: cloudone.spark.x`.
+- **Metadata:** writes `galaxy.yml` (namespace `cloudone`, name `spark`, the version you pass, default `0.1.0`) with its collection dependencies, and `meta/runtime.yml` (`requires_ansible: ">=2.17.0"`).
+- **Output:** `ansible-galaxy collection build` writes `.cache/dist/cloudone-spark-<version>.tar.gz`.
+- **Test install:** the next commands install the tarball into `/tmp/colltest` on the MacBook and list its roles. Your lab folder and `./collections` are not touched. The install may also download the dependency collections named in `galaxy.yml`.
+
+#### What to look for
+
+1. **Script exit:** the last line is `Created collection for cloudone.spark at …/.cache/dist/cloudone-spark-0.1.0.tar.gz`.
+2. **Install:** `ansible-galaxy collection install` ends with `cloudone.spark:0.1.0 was installed successfully`.
+3. **Roles in the collection:**
+   ```bash
+   # ▶ MacBook · 01-Ansible/lab (venv active)
+   tar -tzf .cache/dist/cloudone-spark-0.1.0.tar.gz | grep -c '^roles/[a-z_]*/$'      # one per role in lab/roles/
+   ANSIBLE_COLLECTIONS_PATH=/tmp/colltest ansible-doc -t role cloudone.spark.cx7_fabric | head
+   ```
+   The `ansible-doc` output shows the `cx7_fabric` entry point and its options, because that role has `meta/argument_specs.yml` (§2.1).
+4. **Trap, the last command:** it names `cloudone.spark.30-validate`, but the build packages the playbook as `30.1-validate.yml`, and that playbook imports `00-vault-cert.yml`, which the build does not package. Treat steps 1–3 as the check for this lab; running a packaged playbook needs those two things lined up first.
+
+**If something's off:** `sed: … invalid command code` comes from macOS's BSD `sed`, which reads `sed -i 's/…/'` differently from GNU `sed`; run the script on the Spark (or any Linux machine with a clone of the repository), or with GNU `sed` first in `PATH`. `ansible-galaxy: command not found` means the venv isn't active. More in §5.
+
+#### Run it
+
 ```bash
 # lab/tools/build-collection.sh
 #!/usr/bin/env bash
@@ -201,6 +225,30 @@ collections:
 ```
 
 ### 3.2 Build an arm64 Execution Environment on the Spark
+
+#### What this lab does (definition `lab/ee/execution-environment.yml`)
+
+- **Where:** on dgx-spark-1, from a clone of the repository, so the image is native `linux/arm64` with no emulation.
+- **Tools:** installs `ansible-builder` and `ansible-navigator` with `pip` on the Spark.
+- **Image `spark-ee:1.0`:** based on `quay.io/fedora/python-312:latest`, with `ansible-core~=2.18.0`, `ansible-runner`, every collection from `requirements.yml`, the Python libraries `jmespath`, `netaddr`, `hvac`, `kubernetes`, SSH/rsync/git, and `helm` 3.18.3. It lands in the Spark's local Docker image store; nothing is pushed unless you run the optional buildx step.
+- **First build is slow:** it pulls the base image and downloads every collection and Python package.
+- **Last step:** runs `30.1-validate.yml` through the EE with `ansible-navigator`, the way AWX will run it.
+
+#### What to look for
+
+1. **Build exit:** `ansible-builder build` ends with `Complete! The build context can be found at: …/context`.
+2. **The image checks** in the block below:
+   | Command | Healthy value |
+   |---|---|
+   | `docker image inspect … Architecture` | `arm64` |
+   | `ansible --version` (first line) | `ansible [core 2.18.x]` |
+   | `ansible-galaxy collection list \| grep -cE …` | 5 or more (the `community.*`, `kubernetes.core` and `community.hashi_vault` collections, plus any dependency they pulled in) |
+3. **The navigator run:** the play reaches the `Verdict` task and prints `All N checks passed`, with `failed=0` in the recap. A `FAILED checks: […]` list there is about the Spark's state (Chapter 30), not the EE: the EE did its job if the play got that far.
+4. Optional buildx step: `docker buildx imagetools inspect ghcr.io/cloudone365/spark-ee:1.0` lists both `linux/arm64` and `linux/amd64`.
+
+**If something's off:** `error: externally-managed-environment` from `pip install` means DGX OS's system Python refuses user installs; create a venv first (`python3 -m venv ~/.venvs/ee && . ~/.venvs/ee/bin/activate`). `permission denied` on the Docker socket means your user isn't in the `docker` group (use `sudo` or add the group). For the navigator run, `$SUDO_PW` must be set in that shell; with `--mode stdout --pae false` you can use `-K` instead and type the password. More in §5.
+
+#### Run it
 
 ```yaml
 # lab/ee/execution-environment.yml

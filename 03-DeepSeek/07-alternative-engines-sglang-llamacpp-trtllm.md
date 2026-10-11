@@ -235,6 +235,27 @@ resume_vllm(){ kubectl --context spark-root -n llm-serving annotate scaledobject
 
 ### Task 5.1 · vLLM baseline on the same model
 
+#### What this lab does (`serve-model.sh r1-32b-fp8`, `ttft_probe.py`, `eval_harness.py`)
+
+- **Serves `r1-32b-fp8`** in Deployment `vllm`: util **0.45**, **58 Gi** (request = limit), 32K context. This is the slot every engine in this chapter gets.
+- **TTFT probe** (`02-Kubernetes/lab/scripts/ttft_probe.py`): 10 requests sharing one long prefix and 10 with unique prefixes, through a port-forward.
+- **Eval:** JSON and math suites at 8 requests in flight; writes `results/vllm-32b-fp8.json`, the baseline for Tasks 5.2 and 5.8.
+
+#### What to look for
+
+1. **`serve-model.sh`:** `[PASS] answer: 144 …` and `0 failed`.
+2. **TTFT probe:**
+
+   | Line | Healthy value |
+   |---|---|
+   | `shared prefix  median TTFT` | clearly below the unique-prefix value |
+   | `speed-up from prefix cache` | above 1×; record it |
+3. **Eval:** an `acc=` line per suite and `tok/s aggregate`; record them for the three-engine table.
+
+**If something's off:** speed-up near 1× → prefix caching is off; the overlay sets `--enable-prefix-caching`, so check you are talking to `vllm` on :8000. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh r1-32b-fp8
@@ -246,6 +267,23 @@ kill %1
 ```
 
 ### Task 5.2 · SGLang: prefix reuse and the same tests
+
+#### What this lab does (overlay `lab/k8s/sglang/r1-32b-fp8`)
+
+- **Parks vLLM:** `park_vllm` pauses the ScaledObject at 0 and waits until the vLLM pod is gone.
+- **Starts SGLang** as Deployment `sglang` in `llm-serving` (from the 02-Kubernetes base) with the same FP8 32B weights: `--mem-fraction-static 0.45`, 32K context, `deepseek-r1` reasoning parser, metrics on, port **30000**, **58 Gi** (request = limit). First start pulls the SGLang image.
+- **Same tests as Task 5.1:** TTFT probe and eval (`results/sglang-32b-fp8.json`), then a report of both engines and SGLang's cache-hit and throughput metrics.
+
+#### What to look for
+
+1. **Resources:** the jsonpath shows `requests.memory` and `limits.memory` both `58Gi`.
+2. **Rollout:** `deployment "sglang" successfully rolled out`.
+3. **Report:** maths and JSON accuracy within noise of vLLM (same weights); TTFT and tok/s are where the engines differ.
+4. **Metrics:** `sglang:cache_hit_rate` above 0 after the shared-prefix probe; `sglang:gen_throughput` present.
+
+**If something's off:** SGLang OOM or `Pending` → vLLM is still there (pause not applied) or the page cache is full. `--reasoning-parser` unknown → an older SGLang image. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -265,6 +303,22 @@ curl -s localhost:30000/metrics | grep -E '^sglang:(cache_hit_rate|gen_throughpu
 `ttft_probe.py` sends requests with a shared prefix and with unique prefixes; the difference is what prefix reuse saves. Accuracy should match vLLM within noise (same weights); differences in TTFT and tok/s are the engine.
 
 ### Task 5.3 · Schema-valid JSON from a reasoning model
+
+#### What this lab does (curl to SGLang with `response_format`)
+
+- **One request** to SGLang on :30000 with a JSON schema (ticket, namespace, reason, severity). SGLang constrains the answer to the schema; the thinking stays outside it.
+- **Then without the schema** you repeat it 10 times by hand and count broken outputs.
+- **Clean-up:** stops the port-forward and scales `sglang` to 0. vLLM stays parked for the next tasks.
+
+#### What to look for
+
+1. **With the schema:** the second `jq .` parses the answer and shows exactly four keys: `"ticket": 4821`, `"namespace": "llm-serving"`, a `reason` string mentioning OOMKilled, `"severity": "high"`.
+2. **Without the schema:** some of the 10 answers don't parse, or add prose or extra keys. Record how many.
+3. **After clean-up:** `kubectl --context spark-root -n llm-serving get deploy sglang` shows `0/0`.
+
+**If something's off:** `jq: parse error` with the schema → this SGLang version expects another `response_format` shape; try `{"type":"json_object"}`. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -288,6 +342,22 @@ kubectl --context spark-root -n llm-serving scale deploy sglang --replicas=0
 
 ### Task 5.4 · Build llama.cpp for sm_121 and import it into the node's containerd
 
+#### What this lab does (Dockerfile `lab/k8s/llamacpp/Dockerfile`)
+
+- **On dgx-spark-1, with Docker:** builds llama.cpp at the pinned `LLAMACPP_REF` for CUDA architecture 121 (the GB10) with RPC support, as image `spark-local/llama.cpp:server-sm121`. A from-source CUDA build takes a while.
+- **Imports it** into containerd namespace `k8s.io`, where the kubeadm node looks for images. The pod uses `imagePullPolicy: Never`, so it is never pulled from a registry.
+- **Not changed:** nothing in Kubernetes yet.
+
+#### What to look for
+
+1. **Build:** ends with the image tagged `spark-local/llama.cpp:server-sm121`.
+2. **Import:** `ctr … images import` prints the image reference without errors.
+3. **`crictl images`** lists `spark-local/llama.cpp` with tag `server-sm121`.
+
+**If something's off:** the build fails on the `LLAMACPP_REF` checkout → that tag doesn't exist; pick a current release tag. More in §7.
+
+#### Run it
+
 On the Spark (Docker is part of DGX OS; the kubeadm node runs containerd, namespace `k8s.io`):
 
 ```bash
@@ -301,6 +371,22 @@ sudo crictl images | grep llama.cpp
 Pin `LLAMACPP_REF` to a recent release tag (check the current release); the tag `server-sm121` is fixed, which satisfies the root's no-`:latest` admission rule. With dgx-spark-2 joined, import the image there too.
 
 ### Task 5.5 · Quantisation sweep with `llama-bench`
+
+#### What this lab does (`llama-bench` in a host container)
+
+- **Parks vLLM** so the benchmark has the pool to itself.
+- **Downloads three GGUF files** of R1-Distill-Qwen-7B (Q8_0, Q4_K_M, Q3_K_M; about 8, 4.7 and 3.8 GB) into `~/gguf` on dgx-spark-1.
+- **Runs `llama-bench`** with `docker run --gpus all` directly on the host: all layers on the GPU, 512-token prompt processing (`pp512`) and 128 generated tokens (`tg128`) per file. No pod, so no quota sees it.
+
+#### What to look for
+
+1. **Table:** three rows per test, one per quant, with tokens/s and a ± spread.
+2. **`tg128`:** rises as the file shrinks (Q3_K_M fastest, Q8_0 slowest): generation is bandwidth-bound.
+3. **`pp512`:** changes much less between quants: prompt processing is compute-bound.
+
+**If something's off:** `no kernel image is available` → the image was built without arch 121. `hf: command not found` on the Spark → `python3 -m pip install --user "huggingface_hub[cli]"` and use `~/.local/bin/hf`. More in §7.
+
+#### Run it
 
 `llama-bench` runs as a host container, outside Kubernetes. Park vLLM first so the two don't compete for the pool.
 
@@ -323,6 +409,21 @@ docker run --rm --gpus all -v ~/gguf:/m --entrypoint llama-bench spark-local/lla
 **Record yours:** `pp512` (prompt tokens/s) and `tg128` (generated tokens/s) per quant. On a bandwidth-bound GPU, `tg` rises roughly in proportion to the shrinking file size; `pp` is compute-bound and changes less.
 
 ### Task 5.6 · Serve GGUF in Kubernetes and compare with vLLM
+
+#### What this lab does (Deployment `lab/k8s/llamacpp/llama-server.yaml`)
+
+- **Starts `llama-server`** in `llm-serving` with the image from Task 5.4: Q4_K_M of R1-Distill-Qwen-7B (downloaded on first start into `model-cache` under `/models/gguf`), alias `r1-7b-q4`, all layers on the GPU, 4 slots sharing 16K context, metrics on. **12 Gi** (request = limit), one GPU slice.
+- **Evaluates it** at concurrency 1 and 16 (`results/llamacpp-q4-c*.json`), scales it to 0, resumes vLLM, serves `r1-7b` (BF16, util 0.20, 28 Gi) and runs the same evals (`results/vllm-bf16-c*.json`). Then one report over all four files.
+
+#### What to look for
+
+1. **llama-server log:** `offloaded 29/29 layers to GPU`, a model size of about 4.7 GB, and `listening`.
+2. **Report:** llama.cpp competitive or faster at c=1; vLLM ahead at c=16; Q4 maths accuracy a little below BF16. Fill in the table.
+3. **Back to vLLM:** `serve-model.sh r1-7b` ends with `0 failed`, and `llama-server` shows `0/0`.
+
+**If something's off:** `ErrImageNeverPull` → the image wasn't imported on this node (Task 5.4). `offloaded 0/29 layers` → `-ngl` missing or no GPU in the pod. Truncated R1 answers → 4K per slot is too small for long thinking. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -357,6 +458,23 @@ A common pattern: llama.cpp is competitive or faster at c=1 (fewer bytes to read
 
 ### Task 5.7 · Ollama in two commands (optional)
 
+#### What this lab does (`ollama/ollama` in a host container)
+
+- **Starts Ollama** on dgx-spark-1 with Docker, bound to `127.0.0.1:11434` only, with a Docker volume `ollama` for its models.
+- **Pulls and runs** `deepseek-r1:7b` from Ollama's registry, then asks one question through its OpenAI-compatible API.
+- **Removes the container** at the end. The `ollama` volume with the downloaded model stays until you `docker volume rm ollama`.
+- Outside Kubernetes: park vLLM first; no quota or scheduler sees this.
+
+#### What to look for
+
+1. **`ollama run`** prints a one-sentence answer about MLA after the model download.
+2. **The curl** returns an answer containing 144.
+3. **Afterwards:** `docker ps` on the Spark no longer lists `ollama`.
+
+**If something's off:** `port is already allocated` → an earlier `ollama` container is still running; `docker rm -f ollama`. More in §7.
+
+#### Run it
+
 Ollama wraps llama.cpp with a model registry. It is convenient on a laptop; on the Spark it runs outside Kubernetes, so no quota or scheduler sees it. Park vLLM first and remove the container afterwards.
 
 ```bash
@@ -371,6 +489,25 @@ docker rm -f ollama
 The Ollama tag is an example; check the current release and pin it.
 
 ### Task 5.8 · TensorRT-LLM on the same FP8 32B
+
+#### What this lab does (Deployment `lab/k8s/trtllm/trtllm-serve.yaml`)
+
+- **Checks the image** (`TRTLLM_IMAGE` in `versions.env`) has an arm64 build, from the Spark.
+- **Parks vLLM** and confirms no engine pods are left in `llm-serving`.
+- **Starts `trtllm`** (created with 0 replicas, then scaled to 1): `trtllm-serve` with the PyTorch backend on the same FP8 32B weights, max 32 sequences of 32K, block reuse on, KV = **0.30 of the memory still free after the weights load**. **58 Gi** (request = limit). First start pulls a large image.
+- **Same tests:** TTFT probe and eval (`results/trtllm-32b-fp8.json`) with the model name `RedHatAI/DeepSeek-R1-Distill-Qwen-32B-FP8-dynamic`, then a three-engine report.
+
+#### What to look for
+
+1. **Manifest check:** an `"architecture": "arm64"` entry is printed.
+2. **Rollout and log:** `successfully rolled out`; the log names the KV-cache size, `max_batch_size` 32 and FP8.
+3. **Report:** accuracy within noise of vLLM and SGLang; fill in TTFT, tok/s and memory for all three.
+4. **`free -g` delta:** shows how much "0.30 of free" really took on top of ~32 GiB of weights. Compare with the 58 Gi pod limit.
+5. **Reasoning:** check whether `reasoning_content` is filled or the `<think>` text is in `content`; note it in the table.
+
+**If something's off:** `no matching manifest for linux/arm64` → x86-only tag. OOM during KV allocation → something else held memory; park it or set `kv_cache_config.max_tokens`. 404 on the model → use the repo id, not `r1-32b-fp8`. More in §7.
+
+#### Run it
 
 Confirm the image first (on the Spark, so the manifest check sees arm64):
 
@@ -415,6 +552,22 @@ Fill in the three-engine table (**record yours**):
 | reasoning separated? | yes (parser) | yes (parser) | check; if not, parse `<think>` client-side |
 
 ### Task 5.9 · Back to the default and write the decision
+
+#### What this lab does (scale the other engines to 0, resume vLLM)
+
+- **Scales** `trtllm`, `sglang` and `llama-server` to 0 replicas.
+- **Un-pauses** the vLLM ScaledObject and serves the everyday default `r1-7b` (util 0.20, 28 Gi).
+- **Your output:** one paragraph per engine with your numbers.
+
+#### What to look for
+
+1. **`serve-model.sh r1-7b`** ends with `0 failed`.
+2. **Clean state:** `kubectl --context spark-root -n llm-serving get deploy` shows only `vllm` at `1/1` among the engines; `trtllm`, `sglang` and `llama-server` at `0/0`.
+3. **No pause left:** `kubectl --context spark-root -n llm-serving get scaledobject vllm -o jsonpath='{.metadata.annotations}'` has no `paused-replicas`.
+
+**If something's off:** vLLM stays `0/0` → `resume_vllm` was defined in an earlier shell; run the `annotate … paused-replicas-` line directly. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab

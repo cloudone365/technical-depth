@@ -141,6 +141,31 @@ If DGX OS lacks `conntrack`, either `sudo apt install conntrack` or run the same
 
 ### 5.1 Read a Service out of iptables
 
+#### What this lab does (script `lab/scripts/svc-trace.sh`, manifests `lab/manifests/dev-lab/30-networking`)
+
+- **Applies** the network toolbox in dev-lab `lab-tools` (unchanged if Chapter 08 already did): `netshoot`, `echo` (3 replicas) with Service `echo` (port 80 → 8080) and `echo-headless`.
+- **Reads** the Service's ClusterIP and EndpointSlice in dev-lab, then finds the root's `KUBE-SVC-*` chain for that ClusterIP in `iptables-save -t nat`, prints it, each `KUBE-SEP-*` chain, and up to 5 conntrack entries.
+- **Read-only:** no iptables rule is changed. It runs **on the Spark** because it needs `sudo iptables-save` and `sudo conntrack`.
+
+#### What to look for
+
+1. **Command exit:** no `[FAIL] no KUBE-SVC chain for …` line.
+2. Compare with the expected output below:
+
+   | Line | Healthy value |
+   |---|---|
+   | `Service dev-lab lab-tools/echo ClusterIP=` | an address in `10.43.0.0/16` |
+   | EndpointSlice | three `10.42.0.x` IPs on port 8080 |
+   | `root sees it as:` | `vc-dev-lab/echo-x-lab-tools-x-dev-lab:http cluster IP` |
+   | `KUBE-SVC-…` | one `KUBE-MARK-MASQ` line, then 3 jumps with `--probability 0.333…`, `0.5`, and none on the last |
+   | each `KUBE-SEP-…` | `DNAT --to-destination 10.42.0.x:8080` |
+
+3. **Root copy:** the three `kubectl --context spark-root` commands show the same ClusterIP and pod IPs, and a selector that is not plain `app: echo`.
+
+**If something's off:** no `KUBE-SVC` chain means the Service wasn't synced to `vc-dev-lab` or kube-proxy isn't in iptables mode (check §3.2). Fewer than three endpoints means some echo pods aren't Ready. More in §7.
+
+#### Run it
+
 `svc-trace.sh <namespace> <service> [context]` takes the Service as the tenant sees it, then finds the root's chains by its ClusterIP:
 
 ```bash
@@ -178,6 +203,20 @@ Same ClusterIP, same three pod IPs. The selector on the root copy isn't the tena
 
 ### 5.2 Measure the distribution: new connections vs keep-alive
 
+#### What this lab does (commands in `netshoot`, dev-lab)
+
+- Sends 300 requests to `http://echo` with a new connection each, then 30 requests over one keep-alive connection, and counts which pod answered.
+- **Read-only:** nothing is changed.
+
+#### What to look for
+
+1. **First loop:** three pod names, each about 100 (± 20).
+2. **Second loop:** one pod name, 30 times.
+
+**If something's off:** only one or two names in the first loop means some endpoints aren't ready (`svc-trace.sh` shows fewer `KUBE-SEP` chains). More in §7.
+
+#### Run it
+
 ```bash
 # new connection per request → ~even
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- sh -c 'for i in $(seq 300); do curl -s echo; echo; done' | sort | uniq -c
@@ -188,6 +227,22 @@ kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- sh -c 'curl -s -w
 Expected: ≈100/100/100 for the first loop. For the second, **one** hostname 30 times. That's why an HTTP client pool in front of vLLM needs a real L7 balancer (Traefik, or the gateway in Chapter 20), not just a ClusterIP.
 
 ### 5.3 Readiness controls membership
+
+#### What this lab does (commands, plus `svc-trace.sh`)
+
+- Lists the endpoints of `echo` in dev-lab with their `ready` flag.
+- **Quarantines one pod:** relabels it `app=echo-quarantine`, so it leaves the Service. The ReplicaSet starts a replacement, because it now sees only 2 pods with `app=echo`.
+- Counts the `DNAT` lines in the root's chains, checks the quarantined pod still runs, then deletes it.
+
+#### What to look for
+
+1. **Before:** three endpoints, each `ready=true`.
+2. **After the label change:** `svc-trace.sh … | grep -c DNAT` prints `3` (the new pod replaced the quarantined one), and the quarantined pod is still `Running`.
+3. **Timing:** the root rules follow within a few seconds.
+
+**If something's off:** if the root rules never change, read the syncer log in `vc-dev-lab` (command under the block). More in §7.
+
+#### Run it
 
 ```bash
 POD=$(kubectl --context dev-lab -n lab-tools get pod -l app=echo -o jsonpath='{.items[0].metadata.name}')
@@ -207,6 +262,24 @@ This is the **quarantine pattern**: relabel a misbehaving model server to take i
 
 ### 5.4 Headless Service: DNS instead of NAT
 
+#### What this lab does (commands in `netshoot`, dev-lab, and on the Spark)
+
+- Resolves `echo` and `echo-headless` through dev-lab's CoreDNS, shows the root copy of the headless Service, and counts its iptables rules.
+- **Read-only:** nothing is changed. The `iptables-save` line runs on the Spark.
+
+#### What to look for
+
+| Command | Healthy value |
+|---|---|
+| `dig +short echo…` | one `10.43.x.x` ClusterIP |
+| `dig +short echo-headless…` | three `10.42.0.x` pod IPs |
+| root `get svc echo-headless-x-lab-tools-x-dev-lab` | `CLUSTER-IP None` |
+| `iptables-save -t nat \| grep -c echo-headless` | `0` |
+
+**If something's off:** `dig` returning nothing points at DNS, not kube-proxy: see Chapter 10. More in §7.
+
+#### Run it
+
 ```bash
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- dig +short echo.lab-tools.svc.cluster.local
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- dig +short echo-headless.lab-tools.svc.cluster.local
@@ -217,6 +290,21 @@ sudo iptables-save -t nat | grep -c echo-headless                               
 Expected: one ClusterIP for `echo`, three pod IPs for `echo-headless`. The answers come from dev-lab's own CoreDNS (Chapter 10), built from dev-lab's EndpointSlices; the root contributes nothing but the pod IPs.
 
 ### 5.5 Conntrack
+
+#### What this lab does (commands on the Spark)
+
+- Reads the conntrack table size and fill, lists entries for the `echo` ClusterIP, sends 2000 short requests from `netshoot`, and counts entries again.
+- **Read-only:** no sysctl is changed. Needs `conntrack` on the Spark, or use `netshoot-host` as shown at the start of §5.
+
+#### What to look for
+
+1. **`nf_conntrack_max`:** at least `1310720` (65536 × 20 cores, written by kube-proxy).
+2. **Entries:** the original destination is the ClusterIP, the reply source is a `10.42.0.x` pod IP.
+3. **`conntrack -C`** rises by roughly the 2000 requests, then falls again after about 120 s (`TIME_WAIT`). It stays well below 5 % of the max.
+
+**If something's off:** a max far below 1,310,720 means kube-proxy didn't apply `conntrack.maxPerCore` (check the `kube-proxy` ConfigMap, §3.2). More in §7.
+
+#### Run it
 
 ```bash
 sudo sysctl net.netfilter.nf_conntrack_max net.netfilter.nf_conntrack_count
@@ -229,6 +317,21 @@ sudo conntrack -C
 `nf_conntrack_max` should be ≥ 1,310,720, set by kube-proxy from `conntrack.maxPerCore`. The entries show the original destination (the ClusterIP) and the reply source (the pod IP) — the DNAT kube-proxy chose, remembered for the life of the connection. Each finished curl leaves a `TIME_WAIT` entry for ~120 s.
 
 ### 5.6 Graceful termination (no dropped streams)
+
+#### What this lab does (manifests `lab/manifests/root-llms/40-ingress`)
+
+- **Applies** the mock LLM stack on the root (unchanged if Chapter 08 §5.5 already did): `mock-llm` (2 replicas, 20 tokens/s on :8000) and `mock-llm-canary` in `llm-serving`, plus the Ingress, HTTPRoute and middlewares used in Chapter 11.
+- **Starts a 400-token stream** (about 20 s) from `mock-llm-canary` to Service `mock-llm`, then deletes the `mock-llm` pods 3 s in.
+- The Deployment recreates the pods. Nothing else changes.
+
+#### What to look for
+
+1. **The client prints** `stream CUT after <n> events: …` with `n` well below 400. That is the expected result here: the mock has no `preStop`.
+2. **Recovery:** `kubectl --context spark-root -n llm-serving get pods -l app=mock-llm` shows 2 new pods Ready a few seconds later (5 s simulated start-up).
+
+**If something's off:** `stream completed, events: 400` means the stream wasn't served by a deleted pod (the delete came too late, or the label didn't match). Re-run with a longer `max_tokens`. More in §7.
+
+#### Run it
 
 The mock LLM streams 20 tokens/s. Start a long stream inside `llm-serving` on the root, delete the pod serving it, and see what the client gets:
 
@@ -258,6 +361,23 @@ terminationGracePeriodSeconds: 120      # > longest expected generation
 ```
 
 ### 5.7 The front door: a LoadBalancer IP, from outside and inside
+
+#### What this lab does (Traefik Service `ingress/traefik-lab`, MetalLB, Hubble)
+
+- Shows the root Service `traefik-lab` and the MetalLB speaker log line for `192.168.0.115`, and prints the `KUBE-EXT-*` rules kube-proxy wrote for it (on the Spark).
+- Calls `http://192.168.0.115/v1/models` with `Host: llm.lab.local` from `netshoot` in dev-lab, and asks Hubble who the caller was.
+- **Read-only:** nothing is changed. Needs Traefik installed (Chapter 08 §5.5 or Chapter 11).
+
+#### What to look for
+
+1. **Service:** `EXTERNAL-IP 192.168.0.115`.
+2. **iptables:** a `KUBE-EXT-…` chain for the LB IP that jumps to a `KUBE-SVC-…` chain.
+3. **The curl from dev-lab** prints `200`.
+4. **Hubble:** the source of the flow into Traefik is the node (`host` or the node's router IP), not `vc-dev-lab/…`.
+
+**If something's off:** no `EXTERNAL-IP` means MetalLB isn't running or the pool is used up. A timeout from dev-lab with a `200` from your laptop points at a NetworkPolicy, see Chapter 08 §5.5. More in §7.
+
+#### Run it
 
 ```bash
 kubectl --context spark-root -n ingress get svc traefik-lab                               # EXTERNAL-IP 192.168.0.115 — a root Service, MetalLB serves it as is

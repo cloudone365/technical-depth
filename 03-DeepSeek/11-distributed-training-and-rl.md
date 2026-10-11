@@ -239,6 +239,28 @@ Rough step-time floor = volume ÷ bandwidth, plus compute. With ~5 GB/s NVMe and
 
 ## 5. Lab
 
+#### What this lab does (manifests `02-Kubernetes/lab/manifests/root-llms/training-window`, `03-DeepSeek/lab`)
+
+- **Parks serving:** pauses the vLLM ScaledObject at 0 replicas and scales `sglang`, `trtllm`, `llama-server` and `bge-m3` to 0 in `llm-serving`. The chat API is down until Task 5.10.
+- **Opens the window:** `serving-budget` drops to 2 CPU · 10 Gi, `batch-budget` and the Kueue ClusterQueue `spark-cq` rise to 8 CPU · 80 Gi. GPU slices don't change.
+- **Ships the tools:** `apply -k .` creates the ConfigMaps (`deepseek-train` in `batch` holds `grpo_tiny.py`, `fsdp_finetune.py`, `sft_lora.py`…); `train-common.yaml` creates the 90 Gi PVC `deepseek-ckpt` in `batch`.
+- **Dry run:** `grpo_tiny.py --dry-run` checks the dataset generator and the two reward functions on the MacBook. No GPU, no TRL.
+
+#### What to look for
+
+1. **The wait loop ends:** no `app=vllm` pod is left in `llm-serving` before the window is applied.
+2. **Quotas moved:**
+   ```bash
+   # ▶ MacBook · 03-DeepSeek/lab
+   kubectl --context spark-root -n batch describe resourcequota batch-budget | grep -E 'requests.cpu|requests.memory'   # hard 8 / 80Gi
+   kubectl --context spark-root -n batch get pvc deepseek-ckpt                                                        # Bound
+   ```
+3. **Dry run** ends with `✓ rewards behave: format and correctness are verifiable without a model`, after an example prompt and its ground truth.
+
+**If something's off:** a vLLM pod that never goes away means the ScaledObject annotation didn't apply (`kubectl -n llm-serving get scaledobject vllm -o yaml | grep paused`). New pods refused with `exceeded quota` mean serving was not parked before the window. More in §7.
+
+#### Run it
+
 Every Task runs inside the training window. Open it once at the start, end it once at the end (Task 5.10).
 
 ```bash
@@ -261,6 +283,22 @@ python3 tools/grpo_tiny.py --dry-run
 
 ### Task 5.1 · GRPO layout A — HF generate
 
+#### What this lab does (manifest `lab/k8s/jobs/grpo.yaml`)
+
+- **Job `grpo` in `batch`:** created suspended; Kueue (queue `train`, priority `routine`) unsuspends it when the window has room. 4 CPU · 48 Gi · 1 slice, request = limit.
+- **Inside:** `nvcr.io/nvidia/pytorch:25.09-py3`, then `pip install` of TRL 0.23.0 and friends on every start, then `grpo_tiny.py` on Qwen2.5-0.5B-Instruct for 200 steps. The policy model itself generates the rollouts (HF `generate`).
+- **Writes:** the HF cache under `/ckpt/hf` and the trained model to `/ckpt/grpo-tiny`, both on the PVC `deepseek-ckpt`. The first run pulls the image and downloads the model, so it starts slowly.
+
+#### What to look for
+
+1. **Admission:** `kubectl --context spark-root -n batch get workloads` shows the `grpo` workload admitted, and the pod goes Running.
+2. **The log**, every 5 steps, prints a dict with `'reward'`. Healthy trend (§3.2): `reward` climbs from about 0–0.5 towards 2–3, `rewards/reward_format/mean` rises before `rewards/reward_correct/mean`, `reward_std` stays above 0.
+3. **The end:** `kubectl --context spark-root -n batch get job grpo` shows `1/1` completions. Record s/step and the reward at steps 20, 100 and 200.
+
+**If something's off:** a workload that is never admitted means the window isn't open or another big Job holds it (`kubectl -n batch describe workloads`). A flat reward with `reward_std` ≈ 0 means every completion in a group scores the same. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root apply -f k8s/jobs/grpo.yaml
@@ -270,6 +308,24 @@ kubectl --context spark-root -n batch logs -f job/grpo | grep -E "'reward'|it/s|
 Record seconds per step and the reward at steps 20, 100 and 200.
 
 ### Task 5.2 · GRPO layout B — colocated vLLM
+
+#### What this lab does (manifest `lab/k8s/jobs/grpo-vllm.yaml`)
+
+- **Waits for Task 5.1:** both Jobs ask for 48 Gi, so they run one after the other.
+- **Job `grpo-vllm` in `batch`:** same task, rewards, model and 200 steps as `grpo`, same 4 CPU · 48 Gi · 1 slice. The image is `nvcr.io/nvidia/vllm:25.09-py3` with TRL on top.
+- **The difference:** a vLLM engine inside the trainer process generates the rollouts (`--vllm --vllm-mode colocate`, `vllm_gpu_memory_utilization` 0.20 ≈ 24 GiB). The learner copies new weights into it in-process after each step.
+- **Writes** `/ckpt/grpo-vllm`, the checkpoint Task 5.3 serves.
+
+#### What to look for
+
+1. **vLLM starts inside the Job:** lines with `vLLM` and a `KV cache` size appear before the first step.
+2. **Step time:** s/it several times shorter than layout A. The reward curve looks alike (same algorithm, same data).
+3. **Memory:** the pod stays around the §3.3 estimate (~34 GiB) inside its 48 Gi. Check `free -g` on dgx-spark-1 while it runs.
+4. **The end:** `kubectl --context spark-root -n batch get job grpo-vllm` shows `1/1`. Fill in the table below.
+
+**If something's off:** CUDA OOM at vLLM init means learner + engine exceed the pod (lower `vllm_gpu_memory_utilization`). A pip error about torch means a package replaced the image's torch. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -288,6 +344,23 @@ Expected: B's step is several times shorter than A's, because generation dominat
 
 ### Task 5.3 · Check the learned behaviour
 
+#### What this lab does (script `lab/scripts/publish-adapter.sh`, overlay `lab/k8s/models/r1-1.5b`, tool `lab/tools/format_check.py`)
+
+- **Run after Task 5.10** (window closed): serving needs the everyday quota.
+- **Publish:** two short-lived pods, `ckpt-reader` in `batch` and `cache-writer` in `llm-serving`, stream a tar of `/ckpt/grpo-vllm` into the `model-cache` PVC at `/models/adapters/grpo-vllm`. Both pods are deleted afterwards.
+- **Serve:** applies the `r1-1.5b` vLLM overlay (14 Gi pod, util 0.10), then points `MODEL` at the checkpoint and names it `grpo-0.5b`. This replaces whatever model `deploy/vllm` was serving.
+- **Score:** `format_check.py` sends 50 new arithmetic problems (seed 12345, not the training seed) and scores format and correctness with the same rules as the GRPO rewards.
+
+#### What to look for
+
+1. **Publish** ends with `[PASS] published /ckpt/grpo-vllm → model-cache:/models/adapters/grpo-vllm` and `0 failed`.
+2. **Rollout:** `deployment "vllm" successfully rolled out`.
+3. **The score line:** `model grpo-0.5b: format N/50 (…%)  correct N/50 (…%)`. Format should be far above the untrained Qwen2.5-0.5B (≈ 0 %). Correct is lower than format.
+
+**If something's off:** `has no adapter_config.json or config.json` means the Job didn't finish or wrote elsewhere. A Pending vLLM pod with `exceeded quota` means the window is still open. More in §7.
+
+#### Run it
+
 `/ckpt/grpo-vllm` is a full model. Serving it needs the everyday quota (the `r1-1.5b` overlay asks for 14 Gi; the window leaves `llm-serving` 10 Gi), so run these commands after Task 5.10:
 
 ```bash
@@ -304,6 +377,23 @@ Compare with the untrained Qwen2.5-0.5B (format ≈ 0 %). The overlay keeps `--r
 
 ### Task 5.4 · The R1 recipe in miniature: SFT, then GRPO
 
+#### What this lab does (manifest `lab/k8s/jobs/grpo-vllm.yaml`, rewritten with `yq`)
+
+- **A copy of `grpo-vllm`:** `yq` renames it `grpo-from-sft` and swaps the model for `/ckpt/sft-lora-merged` (Chapter 10's merged R1-Distill-Qwen-1.5B) with `--max-len 512`. The file on disk is not changed.
+- **Same pod size:** 4 CPU · 48 Gi · 1 slice in the window, colocated vLLM at 0.20.
+- **Writes** `/ckpt/grpo-from-sft`.
+
+#### What to look for
+
+1. **Job created:** `job.batch/grpo-from-sft created`, admitted once `grpo-vllm` has finished.
+2. **`reward_format` starts near its maximum (1.0)**: SFT already taught the tags.
+3. **`reward_correct`** is the curve that moves; that is where the RL signal goes.
+4. **The end:** `1/1` completions on `job/grpo-from-sft`.
+
+**If something's off:** a pod that fails at once with a missing path means `/ckpt/sft-lora-merged` doesn't exist (run Chapter 10's merge first). An OOM after raising `--max-len` means the 1.5B policy plus the engine no longer fit 48 Gi. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 # /ckpt/sft-lora-merged comes from Chapter 10 (R1-Distill-Qwen-1.5B taught the format)
@@ -317,6 +407,24 @@ kubectl --context spark-root -n batch logs -f job/grpo-from-sft | grep -E "rewar
 Expected: `reward_format` starts near its maximum (SFT already taught the tags), so the RL signal goes into `reward_correct`. That is why R1 used a cold-start SFT before RL. A 1.5B policy plus a 0.20 engine stays inside the 48 Gi pod; check `STATS`/`free -g` if you raise `--max-len`.
 
 ### Task 5.5 · (2×) GRPO layout C — disaggregated across two Sparks
+
+#### What this lab does (manifest `lab/k8s/rl/grpo-2spark.yaml`)
+
+- **Rollout server:** Deployment `grpo-rollout` in `batch`, pinned to dgx-spark-2, hostNetwork. It runs `trl vllm-serve` for Qwen2.5-0.5B-Instruct on port **8000** (util 0.2), with NCCL group port **51216**. Not queued by Kueue, only counted by `batch-budget`.
+- **Learner:** Job `grpo-learner`, pinned to dgx-spark-1, hostNetwork, created suspended. You unsuspend it once the server is Ready. It asks the server for rollouts over HTTP (`192.168.100.12:8000`) and pushes new weights to it over NCCL on the CX-7 after every step. Writes `/ckpt/grpo-2spark`.
+- **Size:** 4 CPU · 32 Gi · 1 slice per pod, 8 CPU · 64 Gi together.
+- **With only one Spark:** skip this Task. `grpo-rollout` would stay Pending on its `nodeSelector`.
+
+#### What to look for
+
+1. **Placement:** `get pods -o wide` shows `grpo-rollout` on dgx-spark-2 and the learner on dgx-spark-1.
+2. **Server up:** the `curl …/health/` on dgx-spark-2 prints ` rollout server up`.
+3. **NCCL:** the learner log shows the communicator initialising with `NET/IB` (RoCE), not `NET/Socket`.
+4. **Weight sync:** the `ethtool` counters jump by about 1 GB after every optimizer step (§3.4), and `reward` climbs as in Tasks 5.1–5.2.
+
+**If something's off:** a learner stuck at "Initializing communicator" means port 51216 is blocked or NCCL picked the wrong NIC. Rewards that never improve mean the weights aren't reaching the server (`logs deploy/grpo-rollout | grep update_named_param`). More in §7.
+
+#### Run it
 
 Prerequisites: dgx-spark-2 is a root node (`kubectl --context spark-root get nodes`), the CX-7 link passes 02 Chapter 18 §5.5. The rollout Deployment and the learner Job take 8 CPU · 64 Gi of the window together, one 32 Gi pod per Spark.
 
@@ -339,6 +447,22 @@ Expected: NCCL selects `NET/IB` on the RoCE devices, and a ~1 GB burst crosses t
 
 ### Task 5.6 · Full fine-tune baseline: FSDP on one Spark (no actual sharding)
 
+#### What this lab does (tool `lab/tools/lora_calc.py`, manifest `lab/k8s/jobs/fsdp-1spark.yaml`)
+
+- **Prediction (MacBook, no cluster):** `lora_calc.py` adds up the training state of a full fine-tune of R1-Distill-Qwen-7B.
+- **Job `fsdp-1spark` in `batch`:** `torchrun --nproc-per-node 1 fsdp_finetune.py` on R1-Distill-Qwen-1.5B for 50 steps. 4 CPU · 64 Gi · 1 slice, image `nvcr.io/nvidia/pytorch:25.09-py3`.
+- **World size 1:** FSDP2 wraps every decoder block, but with one rank each "shard" is the whole model. It is the baseline for Task 5.8. Nothing is saved; the HF cache goes to `/ckpt/hf`.
+
+#### What to look for
+
+1. **Prediction:** `total ≈ 115.4 GiB of 121.7 GiB unified memory → ✗ needs 2 Sparks (FSDP/ZeRO-3) or a lighter method`, with `train state : 113.5 GiB`.
+2. **The log** prints `rank 0/1 step N loss … peak mem … GiB` at steps 0, 10, 20, 30, 40 and 49, then `done in …s`. Loss falls.
+3. **Peak memory** near the 1.5B full-FT estimate (~28 GiB), well inside the 64 Gi pod. Record yours.
+
+**If something's off:** a workload not admitted means the window is closed or another 48–80 Gi Job holds it. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 python3 tools/lora_calc.py deepseek-r1-distill-qwen-7b --method full          # ✗ needs 2 Sparks (FSDP/ZeRO-3) …
@@ -355,6 +479,24 @@ done in …s
 World size 1 means each "shard" is the whole model: peak ≈ the 1.5B full-FT estimate (~28 GiB) inside the 64 Gi pod. **Record yours.**
 
 ### Task 5.7 · ZeRO-3 + NVMe offload on one Spark
+
+#### What this lab does (manifest `lab/k8s/jobs/zero3-nvme.yaml`)
+
+- **ConfigMap `deepspeed-configs`:** two DeepSpeed configs, `zero3.json` and `zero3-nvme.json` (ZeRO-3, optimizer offloaded to NVMe at `/swap`, libaio 1 MiB blocks, queue depth 16).
+- **PVC `ds-swap`:** 110 Gi on `local-nvme` (reclaim Delete) for ~91 GiB of fp32 master weights and Adam moments. With `deepseek-ckpt` it fills `batch-budget`'s 200 Gi of storage.
+- **Job `zero3-nvme`:** takes the whole window, 8 CPU · 80 Gi · 1 slice. It installs `libaio-dev` and DeepSpeed 0.17.6, prints `ds_report`, then runs a full fine-tune of R1-Distill-Qwen-7B for 30 steps. The first run downloads the 7B weights (~15 GB).
+- **Writes** a normal HF checkpoint to `/ckpt/r1-7b-full-zero3`. Each step reads and writes about 180 GB on the NVMe.
+
+#### What to look for
+
+1. **`ds_report`:** `async_io … [OKAY]` and `cpu_adam` buildable.
+2. **Swap in use:** DeepSpeed logs the swap path `/swap`; on dgx-spark-1, `iostat` shows the NVMe busy with reads and writes during each optimizer step.
+3. **Memory:** `free -g` well under the pod's 80 Gi.
+4. **Step time:** tens of seconds per step. The §3.6 floor is about 35–40 s at ~5 GB/s NVMe; yours depends on the drive. Job `1/1` after 30 steps.
+
+**If something's off:** `ds-swap` refused with `exceeded quota … requests.storage` means another PVC is in `batch`. `async_io … [NO]` means libaio didn't install (read the Job's first lines). More in §7.
+
+#### Run it
 
 The Job takes the whole window (8 CPU · 80 Gi), so nothing else may run in `batch`. Its scratch PVC `ds-swap` (110 Gi: ~91 GiB of optimizer state plus buffers) and `deepseek-ckpt` (90 Gi) together fill `batch-budget`'s 200 Gi of `requests.storage` exactly, so no other PVC fits in `batch` while `ds-swap` exists:
 
@@ -382,6 +524,24 @@ Optional, to see why CPU offload doesn't help: copy `zero3-nvme.json` with `"dev
 `/ckpt/r1-7b-full-zero3` is a normal HF checkpoint. After the window, publish and evaluate it like Chapter 10's merged model (`scripts/publish-adapter.sh r1-7b-full-zero3`, the `r1-7b` overlay, `MODEL=/models/adapters/r1-7b-full-zero3`).
 
 ### Task 5.8 · (2×) FSDP2 across two Sparks
+
+#### What this lab does (manifest `lab/k8s/jobs/fsdp-2spark.yaml`)
+
+- **Raises the budgets for the run:** `batch-budget` to 16 CPU · 160 Gi and `spark-cq` to 16 CPU · 160 Gi. Task 5.10 puts them back.
+- **Headless Service `fsdp`** (port 29500) and an Indexed Job `fsdp` with 2 pods, anti-affinity so there is one per Spark, hostNetwork, NCCL on the CX-7 (`NCCL_IB_GID_INDEX=3`). Rendezvous on `192.168.100.11:29500`.
+- **Training:** FSDP2 full fine-tune of R1-Distill-Qwen-7B for 100 steps, 8 CPU · 80 Gi · 1 slice per rank. Checkpoints go to an `emptyDir`: a measurement run, nothing kept.
+- **With only one Spark:** skip this Task. The second pod stays Pending on anti-affinity.
+
+#### What to look for
+
+1. **Gang admission:** both pods start together, one on each Spark (`-o wide`).
+2. **Two ranks:** `rank 0/2` and `rank 1/2` lines, each with a peak around half the 7B state plus activations (≈ 60–70 GiB). Loss falls.
+3. **NCCL** logs `NET/IB`, and the `ethtool` counters move on every step.
+4. **Speed:** many times faster per step than Task 5.7. Record per-rank peak, s/step and link GB/s.
+
+**If something's off:** a workload that is never admitted means the quota patches didn't apply. Ranks that hang at init mean the rendezvous IP or port 29500 is wrong or blocked. More in §7.
+
+#### Run it
 
 Each rank asks for 8 CPU · 80 Gi · 1 slice, one per Spark: 16 CPU · 160 Gi for the gang, twice the window. dgx-spark-2 adds the memory to the root's nodes; add it to the budgets for the run:
 
@@ -421,6 +581,23 @@ Compare with Task 5.7: same model and data, a fraction of the memory per box wit
 `fsdp` (2×) writes to an `emptyDir` on each rank: it is a measurement run, not a checkpoint you keep.
 
 ### Task 5.10 · End the window
+
+#### What this lab does (manifests `02-Kubernetes/lab/manifests/root-llms/10-tenancy`, `20-scheduling`)
+
+- **Re-applies the everyday quotas:** `serving-budget` back to 8 CPU · 90 Gi, `batch-budget` and `spark-cq` back to 2 CPU · 12 Gi. This also undoes the Task 5.7/5.8 patches.
+- **Brings serving back:** removes the KEDA pause annotation on `vllm` and scales `bge-m3` to 1.
+- **Does not delete** your checkpoints on `deepseek-ckpt`. The `ds-swap` PVC stays until you delete it.
+
+#### What to look for
+
+1. **Jobs:** every Job `Complete`, no `grpo-rollout` Deployment left.
+2. **Quota:** the last command shows `requests.cpu` 2, `limits.memory` 12Gi, `requests.storage` 200Gi as hard limits.
+3. **Serving:** the vLLM pod in `llm-serving` goes Ready again.
+4. **Storage:** after `delete pvc ds-swap`, `kubectl -n batch get pvc` lists only `deepseek-ckpt`.
+
+**If something's off:** vLLM stays at 0 replicas when the annotation is still there (`get scaledobject vllm -o yaml | grep paused`). If you disabled Argo CD self-heal for the window, turn it back on. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab

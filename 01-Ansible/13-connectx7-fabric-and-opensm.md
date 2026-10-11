@@ -77,6 +77,29 @@ To model a ring in this lab, give each host **two** `cx7_interfaces` groups on d
 
 ### 3.1 Cable and discover
 
+#### What this lab does (command `ibdev2netdev`)
+
+- **Read-only:** lists which RDMA device belongs to which CX-7 netdev, and whether its link is up. Nothing is configured.
+- **Why first:** the names it prints are the names `cx7_interfaces` in `inventory/host_vars/dgx-spark-1.yml` must use. If they differ, `13.1 Fabric` stops at its first assert.
+- **One Spark:** this step works without a second Spark or a cable. It is the main CX-7 check you can do alone.
+
+#### What to look for
+
+1. **The device names:** four lines, one per logical port, matching the table in §1: `rocep1s0f0`, `rocep1s0f1`, `roceP2p1s0f0`, `roceP2p1s0f1`, each `==>` its `enp…`/`enP2p…` netdev.
+2. **The link state:** `(Up)` on both logical interfaces of the cabled cage (cage 1 in this lab). Without a cable every line shows `(Down)`, which is expected with one Spark.
+3. **Driver and RDMA links**, with the commands below:
+   ```bash
+   # ▶ dgx-spark-1 (ssh dgx-spark-1)
+   rdma link show                                       # four links; state ACTIVE when cabled, DOWN without a cable
+   ethtool -i enp1s0f1np1 | grep -E '^driver|firmware'  # driver: mlx5_core, plus the CX-7 firmware version
+   ibv_devinfo -d rocep1s0f1 | grep -E 'state|link_layer'   # link_layer: Ethernet (RoCE, not InfiniBand)
+   ```
+   Note the firmware version: Chapter 28 compares it across nodes.
+
+**If something's off:** no `roce…` devices at all → the RDMA stack is not loaded (`lsmod | grep mlx5_ib`). `(Down)` with a cable in → reseat it, use the same cage on both Sparks, reboot both. More in §5.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · any folder
 ssh dgxadmin@192.168.0.100 ibdev2netdev
@@ -87,6 +110,40 @@ ssh dgxadmin@192.168.0.100 ibdev2netdev
 Use the **same cage number** on both Sparks. It keeps the config symmetric, and NVIDIA's NCCL guides recommend it. If nothing shows `Up`, reseat the cable and reboot both.
 
 ### 3.2 Configure and verify the fabric
+
+#### What this lab does (template `13.1 Fabric`)
+
+- **Pre-flight:** runs `ibdev2netdev` and checks that every interface in the host's `cx7_interfaces` exists. On dgx-spark-1 that is `enp1s0f1np1` → `192.168.100.11/24` and `enP2p1s0f1np1` → `192.168.101.11/24`, both MTU 9000 (dgx-spark-2 gets `.12`).
+- **Netplan:** writes `/etc/netplan/40-cx7.yaml` (mode `0600`), validates it with `netplan generate`, and runs `netplan apply` only when the file changed. The management NIC `enP7s7` is not in this file and is never touched.
+- **Runtime drift:** compares the live MTU of each port with the desired one and re-applies netplan if someone changed it by hand.
+- **Verification:** reads link state, speed, MTU and RDMA port state; finds the RoCE v2 IPv4 GID index; sends jumbo pings with the don't-fragment bit to every peer in the same /24.
+- **Output for later chapters:** publishes `cx7_fabric_primary_if`, `cx7_fabric_hca_list` and `cx7_fabric_roce_gid_index`, and prints them as the NCCL environment.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`. A first run shows `changed` on *Render netplan for CX-7* and *Apply netplan*; a re-run shows `changed=0`.
+2. **The *Assert link health* task** prints one `OK` line per interface. Healthy values:
+
+   | Field | Healthy value |
+   |---|---|
+   | `speed` | `200000` |
+   | `mtu` | `9000` |
+   | `oper` | `up` |
+   | `rdma_state` | `PORT_ACTIVE` |
+
+3. **The jumbo ping task** shows `ok` for each peer address, one per subnet: `192.168.100.12` and `192.168.101.12`.
+4. **The NCCL environment** at the end: `NCCL_SOCKET_IFNAME=enp1s0f1np1`, `NCCL_IB_HCA=rocep1s0f1,roceP2p1s0f1` and `NCCL_IB_GID_INDEX=` a number (`3` in the example below). The GID task is allowed to fail without failing the play, so check by eye: an empty value means no RoCE v2 IPv4 GID was found.
+5. **On the Spark:**
+   ```bash
+   # ▶ dgx-spark-1 (ssh dgx-spark-1)
+   ip -br addr show | grep -E 'enp1s0f1np1|enP2p1s0f1np1'   # 192.168.100.11/24 and 192.168.101.11/24; UP when cabled
+   cat /sys/class/net/enp1s0f1np1/mtu                         # 9000
+   sudo ls -l /etc/netplan/40-cx7.yaml                         # -rw------- root root
+   ```
+
+**With only one Spark:** dgx-spark-1's host_vars already list its two CX-7 interfaces, so this play does *not* skip itself. It writes the netplan file and addresses the ports, finds no peers (no pings), and then fails at *Assert link health*: without a cable the ports report `speed: -1`, `oper: down` and a `rdma_state` other than `PORT_ACTIVE`. *Wait for CX-7 links to come up* first spends about 30 s per interface retrying. To exercise the role anyway, add the extra variable `cx7_fabric_strict: false`: the assert then prints `unhealthy` lines instead of failing, and you can still check item 5 (addresses, MTU 9000, file mode). The GID index may stay empty while the ports have no link. The same applies to the `site` template, which includes this playbook.
+
+**If something's off:** `… not found. ibdev2netdev shows: …` → fix the names in host_vars. Speed `100000` → the cable or a switch port negotiated 100G. Plain ping works but the jumbo ping fails → MTU mismatch. More in §5.
 
 ```yaml
 # lab/roles/cx7_fabric/tasks/main.yml
@@ -304,6 +361,10 @@ Use the **same cage number** on both Sparks. It keeps the config symmetric, and 
   when: cx7_fabric_verify_peers | bool
 ```
 
+#### Run it
+
+**Semaphore UI:** run the template **`13.1 Fabric`**. Break-glass from the MacBook:
+
 ```bash
 # ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
@@ -328,6 +389,33 @@ TASK [Print NCCL environment derived from the fabric]
 ```
 
 ### 3.3 Measure RDMA
+
+#### What this lab does (template `13.2 RDMA perftest`)
+
+- **Needs two Sparks:** with fewer than two hosts in the `spark` group the play ends at its first task (*Needs two Sparks*). Nothing runs and nothing changes.
+- **Fabric check first:** includes the `cx7_fabric` role in a relaxed mode (no peer pings, no hard fail), only to find the port's RDMA device and GID index.
+- **Bandwidth:** starts an `ib_write_bw` server on the second Spark in the background, then runs the client on the first: 4 queue pairs, 1 MiB messages, 10 seconds, over one logical port (`perftest_port_idx`, default 0 = `rocep1s0f1`).
+- **Latency:** the same pattern with `ib_write_lat`.
+- **Read-only:** the perftest tasks change nothing on either Spark; the tools (`perftest`) come from the baseline packages.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`, `changed=0` (the fabric was already converged by `13.1 Fabric`).
+2. **The *Report* task** on dgx-spark-1:
+
+   | Field | Healthy value |
+   |---|---|
+   | `device` | `rocep1s0f1 (GID idx …)` for idx 0, `roceP2p1s0f1 (GID idx …)` for idx 1; the index is the one `13.1 Fabric` printed (3 in this chapter's examples) |
+   | `bw_gbps` | a number. One logical port alone typically shows about half the cage's 200 Gb/s (the playbook's own note) |
+   | `lat_typical_usec` | a few microseconds; record it as your baseline |
+
+   `n/a` means the output could not be parsed: re-run with `-v` and read the client's raw output.
+3. **Queue pairs matter:** the run with `-e perftest_qps=1` should show a clearly lower `bw_gbps` than the default `-q 4`.
+4. **The whole cage:** the playbook tests one logical port at a time. To see the full link, run the manual commands below on both logical ports at the same time (two terminals).
+
+**With only one Spark:** the template ends immediately with `failed=0` and no numbers, which is correct. There is nothing to measure without a peer. What you can still check on dgx-spark-1 is the input perftest would use: `show_gids | grep -E 'rocep1s0f1|v2'` lists the RoCE v2 GIDs (an IPv4-mapped GID appears once `13.1 Fabric` has addressed the port), and `ibv_devinfo -d rocep1s0f1` shows the device and its port state.
+
+**If something's off:** `Couldn't connect` → wrong GID index (use the RoCE v2 IPv4 one from `show_gids`). About half the expected rate → one logical port or `-q 1`. Low numbers on a good link → MTU not 9000 on both ends. More in §5.
 
 ```yaml
 # lab/playbooks/13.2-rdma-perftest.yml
@@ -427,6 +515,10 @@ TASK [Print NCCL environment derived from the fabric]
           - "Low numbers? Check MTU (9000 both ends), -q (QPs), link speed (ethtool), and that GID index is RoCE v2."
       when: inventory_hostname == perftest_client
 ```
+
+#### Run it
+
+**Semaphore UI:** run the template **`13.2 RDMA perftest`** (extra variables `perftest_port_idx: 1` or `perftest_qps: 1` for the variants). Break-glass from the MacBook:
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)

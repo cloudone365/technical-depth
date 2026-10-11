@@ -128,8 +128,35 @@ flowchart TB
 
 ### 5.1 Host inventory
 
+#### What this lab does (commands on dgx-spark-1)
+
+- **Read-only inventory:** asks the driver (`nvidia-smi`), the kernel (`lsmod`, `/proc/driver/nvidia/version`) and the OS (`lscpu`, `free`) what hardware and driver the Spark has.
+- **Nothing is changed.** No package, file or Kubernetes object is touched.
+- **Why first:** every later lab assumes these values. A wrong driver or a missing module here explains most GPU pod failures later.
+
+#### What to look for
+
+1. **Command exit:** every command prints output. `nvidia-smi` must print its table; a message like `couldn't communicate with the driver` means stop here.
+2. **Compare the values with this table:**
+
+   | Line/Field | Healthy value |
+   |---|---|
+   | `name`, `compute_cap` | `NVIDIA GB10`, `12.1` |
+   | `driver_version` | `580.xx.xx` |
+   | `pstate` at idle | `P8` (or another low state) |
+   | `Memory-Usage` in the `nvidia-smi` table | `Not Supported`. This is correct on unified memory |
+   | `lscpu` | `CPU(s): 20`, two model names: `Cortex-X925` and `Cortex-A725` |
+   | `free -g`, `Mem:` total | about `121` |
+   | `lsmod` | four lines: `nvidia`, `nvidia_uvm`, `nvidia_modeset`, `nvidia_drm` |
+
+3. **Write down the GPU UUID** from `nvidia-smi -L` (§3.3). §5.3 checks that a pod sees the same one.
+
+**If something's off:** no driver communication or missing modules → a DGX OS update did not finish; check `dmesg` and reboot. A driver other than 580.x → the CUDA rules in §3.1 change. More in §7.
+
+#### Run it
+
 ```bash
-ssh dgxadmin@192.168.0.100
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 nvidia-smi
 nvidia-smi --query-gpu=name,compute_cap,driver_version,pstate,temperature.gpu,power.draw,clocks.sm,clocks.max.sm --format=csv
 lscpu | grep -E 'Model name|^CPU\(s\)|Thread|Socket'
@@ -151,9 +178,37 @@ CPU(s): 20
 
 ### 5.2 What Kubernetes knows
 
+#### What this lab does (kubectl, read-only)
+
+- **Root view:** reads the labels GPU Feature Discovery (GFD) and Node Feature Discovery (NFD) wrote on `dgx-spark-1`, and the node's capacity and allocatable resources, from `spark-root`.
+- **vCluster view:** reads the same node from inside `dev-llms`. vClusters have no real nodes; they show a copy of the root's node.
+- **Nothing is changed.** These are `get` commands only.
+
+#### What to look for
+
+1. **Command exit:** all three commands print output. An empty label list means GFD has not run (Chapter 17).
+2. **Labels** (first command):
+
+   | Label | Healthy value |
+   |---|---|
+   | `nvidia.com/gpu.compute.major` / `.minor` | `12` / `1` |
+   | `nvidia.com/cuda.driver-version.major` | `580` |
+   | `nvidia.com/gpu.count` | `1` |
+   | `nvidia.com/gpu.replicas` | `15` |
+   | `nvidia.com/gpu.sharing-strategy` | `time-slicing` |
+   | `feature.node.kubernetes.io/cpu-model.vendor_id` | `ARM` |
+
+3. **Capacity vs allocatable** (second command): capacity `nvidia.com/gpu` `15`, `cpu` `20`, and `memory` close to the whole unified pool. Allocatable is lower by the kubelet reservation (3 CPU / 12 GiB): `cpu` `17`, `memory` about 109.7 GiB (shown in `Ki`), `nvidia.com/gpu` `15`.
+4. **dev-llms view** (third command): one row, `dgx-spark-1`, with `SPARK.LAB/GPU` `gb10`, a product name ending in `-SHARED`, and `GPU.REPLICAS` `15`. dev-llms may still only use 2 slices: that limit is a quota, not a node property.
+
+**If something's off:** `nvidia.com/gpu: 1` instead of 15 → the time-slicing ConfigMap is not applied (Chapter 16 §7). `No resources found` in dev-llms → node sync is off in the vCluster values (`lab/vclusters/dev-llms.yaml`). More in §7.
+
+#### Run it
+
 Only the root has real nodes; both vClusters show the same node, copied in (`sync.fromHost.nodes`):
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "02-Kubernetes/lab"
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 kubectl --context spark-root get node dgx-spark-1 -o json | jq '.metadata.labels | with_entries(select(.key|test("nvidia.com|cpu-model")))'
@@ -165,9 +220,32 @@ Capacity shows `nvidia.com/gpu: 15` and a `memory` figure that is the whole unif
 
 ### 5.3 The same view from inside a pod
 
+#### What this lab does (manifest `lab/manifests/dev-lab/70-gpu/gpu-smoke.yaml`)
+
+- **Creates one pod:** `gpu-smoke` in namespace `tenant-beta` inside the `dev-lab` vCluster. On the root its copy is `gpu-smoke-x-tenant-beta-x-dev-lab` in `vc-dev-lab`.
+- **Asks for one GPU slice** (`nvidia.com/gpu: 1`, 100m CPU, 128Mi) and `runtimeClassName: nvidia`.
+- **Runs two commands:** `nvidia-smi -L` and an `nvidia-smi` query of name, compute capability, driver and memory, then exits.
+- **Cleans up:** the last command deletes the pod. The first run pulls the small `cuda:13.0.1-base` image.
+
+#### What to look for
+
+1. **Command exit:** `wait` prints `pod/gpu-smoke condition met` within 180 s.
+2. **The log** has two parts:
+   ```
+   GPU 0: NVIDIA GB10 (UUID: GPU-…)
+   name, compute_cap, driver_version, memory.total [MiB]
+   NVIDIA GB10, 12.1, 580.xx.xx, [N/A]
+   ```
+   The UUID must match the one from §5.1. `[N/A]` for memory is correct on unified memory.
+
+**If something's off:** pod `Pending` → a dev-lab GPU quota is used up: `tenant-beta` allows 1 slice and `vc-dev-lab` 2 (`kubectl --context dev-lab -n tenant-beta describe pod gpu-smoke`). `runtimeclass "nvidia" not found` → apply `manifests/dev-lab/00-platform` (Chapter 16 §5.2). `Failed to initialize NVML` → §7.
+
+#### Run it
+
 `gpu-smoke` is a tenant pod in dev-lab, so it exercises the whole chain: dev-lab API → syncer → root scheduler → kubelet → nvidia runtime.
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab apply -f manifests/dev-lab/70-gpu/gpu-smoke.yaml
 kubectl --context dev-lab -n tenant-beta wait --for=jsonpath='{.status.phase}'=Succeeded pod/gpu-smoke --timeout=180s
 kubectl --context dev-lab -n tenant-beta logs gpu-smoke
@@ -176,9 +254,36 @@ kubectl --context dev-lab -n tenant-beta delete pod gpu-smoke
 
 ### 5.4 Throughput baseline (single time-slice, no contention)
 
+#### What this lab does (manifests `lab/manifests/root/70-gpu`)
+
+- **Namespaces:** `manifests/root/00-platform` creates the root's platform namespaces (`observability`, `platform-tools`) if they are missing.
+- **`manifests/root/70-gpu`:** creates the ConfigMap `gemm-bench` (holds `gemm_bench.py` and `compile_compare.py`) and the Deployment `gemm-contention` at **0 replicas**. Nothing runs yet; Chapter 16 scales it.
+- **Job `gemm-solo`** in `platform-tools`: one GPU slice, 1 CPU, 4–8 GiB memory. It multiplies two 8192 × 8192 bf16 matrices 50 times and prints one JSON line with the achieved TFLOPS and the memory CUDA sees.
+- **First run is slow:** it pulls the NGC PyTorch image (many GB) before the job starts.
+
+#### What to look for
+
+1. **Command exit:** both `apply` commands print `created` (or `unchanged`/`configured` on a re-run). `kubectl --context spark-root -n platform-tools get job gemm-solo` ends with `COMPLETIONS 1/1`.
+2. **The JSON line** from `logs -f`:
+
+   | Field | Healthy value |
+   |---|---|
+   | `device`, `cc` | `NVIDIA GB10`, `12.1` |
+   | `n` | `8192` |
+   | `tflops` | a number above 0. Record it: this is baseline **B** for Chapter 16 |
+   | `mem_total_gib` | `121.7` |
+   | `mem_free_gib` | below the total; it moves as other pods in all three clusters allocate |
+
+3. **Sanity check for B:** it is the same bf16 GEMM size that 01-Ansible template `11.2 CUDA smoke` runs (about 46.6 TFLOPS on this lab's Spark). A result far from your 11.2 figure means something else was using the GPU.
+
+**If something's off:** `logs -f` returns `is waiting to start` → the image is still pulling; run it again in a minute. Job `Failed` with `no kernel image is available` → wrong image arch or CUDA (§5.6, §7). TFLOPS far below baseline → another pod or throttling: `kubectl --context spark-root get pods -A -o wide` and §5.5. More in §7.
+
+#### Run it
+
 The benchmark runs on the root in `platform-tools` — a platform job, outside any vCluster budget:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root/00-platform
 kubectl --context spark-root apply -k manifests/root/70-gpu        # ConfigMap with gemm_bench.py (+ contention Deployment at 0 replicas)
 kubectl --context spark-root apply -f manifests/root/70-gpu/gemm-solo.yaml
@@ -193,15 +298,61 @@ The TFLOPS figure is illustrative, so **record your own**. It's your "one tenant
 
 ### 5.5 Watch clocks and power under load
 
+#### What this lab does (job `gemm-solo` again, plus `nvidia-smi dmon`)
+
+- **Re-runs the §5.4 benchmark:** deletes the finished `gemm-solo` job and creates it again.
+- **Watches the GPU once per second** on the Spark with `nvidia-smi dmon`: power and temperature (`p`), utilization (`u`), clocks (`c`) and power/thermal violations (`v`).
+- **Nothing is reconfigured.** `dmon` only reads; stop it with Ctrl-C.
+
+#### What to look for
+
+1. **Command exit:** `job.batch "gemm-solo" deleted`, then `job.batch/gemm-solo created`.
+2. **In `dmon`, while the job runs:**
+
+   | Column | Healthy value |
+   |---|---|
+   | `sm` (utilization) | near 100 during the GEMM, back near 0 after |
+   | `pwr` | rises well above the idle few watts, drops after |
+   | `gtemp` | stays below about 85 °C (§3.3) |
+   | `pclk` | rises from idle to a steady high value and holds there |
+   | `tviol` (thermal violations) | stays at 0 |
+
+**If something's off:** `sm` stays at 0 → the job has not started yet (image pull) or failed (`kubectl --context spark-root -n platform-tools logs job/gemm-solo`). Clocks drop and thermal violations climb → airflow around the Spark; compare TFLOPS with your baseline. More in §7.
+
+#### Run it
+
+Start `dmon` first in its own terminal, then re-run the job from the MacBook:
+
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+nvidia-smi dmon -s pucv -d 1         # power, util, clocks, violations
+```
+
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n platform-tools delete job gemm-solo
 kubectl --context spark-root apply -f manifests/root/70-gpu/gemm-solo.yaml
-nvidia-smi dmon -s pucv -d 1         # on the Spark: power, util, clocks, violations
 ```
 
 ### 5.6 Break it: wrong architecture / wrong CUDA
 
+#### What this lab does (pod `arch-test` in dev-lab)
+
+- **Creates one plain pod** `arch-test` in `lab-tools` inside `dev-lab`, from an amd64-only busybox image. It asks for no GPU.
+- **Shows the failure** you get when an image has no arm64 build: the Spark's Arm CPU cannot run the binary.
+- **Cleans up:** the last command deletes the pod.
+
+#### What to look for
+
+1. **Pod status:** `kubectl --context dev-lab -n lab-tools get pod arch-test` shows `Error`.
+2. **The log:** `exec /bin/uname: exec format error`. This failure happens before any CUDA code loads.
+
+**If something's off:** `ErrImagePull` with `no match for platform in manifest` → containerd refused to pull an image with no arm64 variant; same root cause, caught one step earlier. The log prints `x86_64` → the Spark has amd64 emulation registered (`ls /proc/sys/fs/binfmt_misc/` on the Spark), so the test can't show the failure. More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 # amd64-only image on arm64 → exec format error (a plain pod in dev-lab, no GPU needed)
 kubectl --context dev-lab -n lab-tools run arch-test --image=docker.io/amd64/busybox:1.37 --restart=Never -- uname -m
 sleep 10; kubectl --context dev-lab -n lab-tools logs arch-test; kubectl --context dev-lab -n lab-tools delete pod arch-test

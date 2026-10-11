@@ -119,6 +119,21 @@ The reward functions are the whole supervision signal. In real projects most of 
 
 ### Task 1 · Rewards first
 
+#### What this lab does (script `lab/tools/grpo_tiny.py --dry-run`)
+
+- **Where:** on the MacBook. No GPU, no TRL, no model download.
+- **What it does:** generates four arithmetic prompts (fixed seed) and checks the two reward functions on hand-made completions: a well-formed correct one must score format 1.0 and correctness 2.0, a plain-text one format 0.0.
+
+#### What to look for
+
+1. **Command exit:** 0.
+2. **Output:** the three lines shown below: the GPU-drain prompt, `ground truth   : 205`, and `✓ rewards behave: format and correctness are verifiable without a model`. The seed is fixed, so every run prints the same prompt.
+3. **Your notes:** the answer to the reward-hacking question below the output (a single space inside `<think>` passes).
+
+**If something's off:** an `AssertionError` instead of the ✓ line → the reward regex in `grpo_tiny.py` was edited; compare it with §2.3. More in §6.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 python3 tools/grpo_tiny.py --dry-run
@@ -133,6 +148,21 @@ ground truth   : 205
 The dry run needs neither a GPU nor TRL. Read `reward_format` and `reward_correct`, then try to break them: would `<think> </think><answer>205</answer>` pass the format check? (No: `.+?` needs at least one character, but a single space passes. Tightening this is the kind of change that decides whether a run learns to reason or learns to game the regex.)
 
 ### Task 2 · The group is the baseline
+
+#### What this lab does (a Python one-liner)
+
+- **Where:** on the MacBook, any folder, standard library only.
+- **What it computes:** GRPO's advantages for one group of eight completions: each reward minus the group mean, divided by the group's standard deviation.
+
+#### What to look for
+
+1. **Output:** `mean 1.375 std 1.41` and the eight advantages shown below.
+2. **The signs:** the three correct completions (reward 3) are positive at 1.15; format-only (1) slightly negative at −0.27; failures (0) at −0.98.
+3. **With eight 3s:** `statistics.stdev` is 0 and the division fails. That is the "no gradient from this group" case TRL guards.
+
+**If something's off:** a `ZeroDivisionError` with all-equal rewards is the expected result of step 3, not a bug.
+
+#### Run it
 
 Compute the advantages GRPO would assign to one group of eight completions with total rewards 3 (format + correct), 1 (format only) or 0:
 
@@ -154,6 +184,29 @@ Correct answers are pushed up, format-only answers slightly down, failures firml
 
 ### Task 3 · Open the training window
 
+#### What this lab does (manifests `02-Kubernetes/lab/manifests/root-llms/training-window`)
+
+- **Parks serving:** pauses the vLLM ScaledObject at 0 replicas. You also scale the other model servers in `llm-serving` (bge-m3, SGLang, any second engine) to 0 by hand.
+- **Moves memory from serving to batch** on the root cluster:
+
+  | Object | Everyday | Training window |
+  |---|---|---|
+  | ResourceQuota `serving-budget` (`llm-serving`) | 8 CPU · 90 Gi | 2 CPU · 10 Gi |
+  | ResourceQuota `batch-budget` (`batch`) | 2 CPU · 12 Gi | 8 CPU · 80 Gi |
+  | ClusterQueue `spark-cq` nominal quota | 2 CPU · 12Gi | 8 CPU · 80Gi |
+- **Not changed:** GPU slices (serving 6, batch 3), the platform's 3 CPU · ~11.7 GiB, and nothing is evicted. A smaller quota only blocks new pods.
+
+#### What to look for
+
+1. **Parking:** `get deploy vllm` shows `READY 0/0` before you apply the window.
+2. **`batch-budget`:** `requests.cpu` hard `8`, `requests.memory` and `limits.memory` hard `80Gi`, `requests.nvidia.com/gpu` hard `3`.
+3. **`spark-cq`:** the jsonpath output lists `cpu` `"8"`, `memory` `80Gi`, `nvidia.com/gpu` `"3"`.
+4. **Nothing else left in `llm-serving`** that holds tens of GiB: `kubectl --context spark-root -n llm-serving get pods`.
+
+**If something's off:** the quotas show the everyday numbers again a few minutes later → Argo CD self-heal; disable it for the window. More in §6.
+
+#### Run it
+
 GRPO with G = 8 doesn't fit the everyday `batch` budget (2 CPU · 12 Gi · 3 slices). The training window parks serving and lends `batch` 8 CPU · 80 Gi of the LLM memory pool:
 
 ```bash
@@ -169,6 +222,30 @@ kubectl --context spark-root get clusterqueue spark-cq -o jsonpath='{.spec.resou
 Park other model servers in `llm-serving` too (bge-m3, SGLang, any second engine): a window quota below what is already in use doesn't evict anything, so the memory has to be free on the node.
 
 ### Task 4 · Run GRPO on the Spark
+
+#### What this lab does (Job `lab/k8s/jobs/grpo.yaml`)
+
+- **Ships the training code:** `kubectl apply -k .` creates the ConfigMap `deepseek-train` in `batch` with `grpo_tiny.py` and the other training scripts.
+- **Creates the checkpoint volume:** PVC `deepseek-ckpt` in `batch`, 90 Gi on `local-nvme-retain` (`train-common.yaml`).
+- **Submits Job `grpo`** suspended, in LocalQueue `train`, priority `spark-batch`. Kueue admits it once the window has room. The pod uses the NGC PyTorch image, **4 CPU · 48 Gi** (request = limit) and 1 GPU slice.
+- **The run:** installs TRL and PEFT with pip, downloads Qwen2.5-0.5B-Instruct into `/ckpt/hf`, then runs 200 GRPO steps (G = 8, β = 0) and saves to `/ckpt/grpo-tiny`.
+
+#### What to look for
+
+1. **Admission:** `get workloads` shows the `grpo` workload with `ADMITTED` true, and the pod goes `Running`.
+2. **Training log** every 5 steps (fill in the table below):
+
+   | Field | Healthy trend |
+   |---|---|
+   | `rewards/reward_format/mean` | low at step 5, ≈ 1.0 by step 200 |
+   | `rewards/reward_correct/mean` | above its step-5 value at the end |
+   | `completions/mean_length` | changes as the model learns the format; record it |
+3. **Sample completions** (`log_completions`) gain `<think>` and `<answer>` tags.
+4. **Finish:** `kubectl --context spark-root -n batch get job grpo` shows `COMPLETIONS 1/1`.
+
+**If something's off:** workload stays `Pending` with `insufficient quota` → the window isn't open (Task 3). Pod `Pending` with `Insufficient memory` → a model server still holds the pool. All rewards stay 0 → the reward is too sparse for this model. More in §6.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -195,6 +272,22 @@ Optional: run `k8s/jobs/grpo-vllm.yaml` (same task, rollouts by a colocated vLLM
 
 ### Task 5 · Close the window
 
+#### What this lab does (manifests `root-llms/10-tenancy` and `20-scheduling`)
+
+- **Puts the everyday numbers back:** re-applying the two base directories resets `serving-budget` to 8 CPU · 90 Gi, `batch-budget` and `spark-cq` to 2 CPU · 12 Gi.
+- **Un-pauses** the vLLM ScaledObject, so KEDA brings the chat model back.
+- **Not changed:** the `grpo` Job, its pod history and the `deepseek-ckpt` PVC with the checkpoint stay.
+
+#### What to look for
+
+1. **Before:** `get jobs` shows `grpo` complete (`1/1`). Closing the window under a running job leaves it running but over the new quota.
+2. **After:** `kubectl --context spark-root -n batch describe resourcequota batch-budget` shows `8`→`2` CPU and `80Gi`→`12Gi` hard values.
+3. **Serving:** `kubectl --context spark-root -n llm-serving get deploy vllm` returns to `1/1` within the model's load time.
+
+**If something's off:** vLLM stays `0/0` → the `paused-replicas-` annotate step (with the trailing dash) was skipped. More in §6.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n batch get jobs                             # grpo Complete
@@ -206,6 +299,26 @@ kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscali
 If Argo CD manages these paths ([02-Kubernetes Chapter 28](../02-Kubernetes/28-production-mlops-and-gitops.md)), disable self-heal for the window or it puts the everyday numbers back mid-run.
 
 ### Task 6 · Serve an R1 distill properly
+
+#### What this lab does (script `lab/scripts/serve-model.sh r1-7b`)
+
+- **Serves R1-Distill-Qwen-7B** as Deployment `vllm` in `llm-serving`: util **0.20**, **28 Gi** (request = limit), `--max-model-len=32768`, `--reasoning-parser=deepseek_r1`, from `models.yaml`.
+- **Sends one maths prompt** with DeepSeek's settings (temperature 0.6, top_p 0.95, no system prompt) through a port-forward and shows only the reasoning length, the answer and the token usage.
+
+#### What to look for
+
+1. **`serve-model.sh`:** `[PASS] answer: 144  (reasoning chars: N)` with N above 0, and `0 failed`.
+2. **The curl result:**
+
+   | Field | Healthy value |
+   |---|---|
+   | `reasoning_chars` | hundreds to thousands |
+   | `answer` | contains `\boxed{41}`, no `<think>` text |
+   | `usage.completion_tokens` | far more than the visible answer needs |
+
+**If something's off:** `reasoning_chars` is 0 and `<think>` text shows up in `answer` → the reasoning parser is missing (drill D01). More in §6.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -220,6 +333,22 @@ curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -
 Expected: hundreds to thousands of reasoning characters, an answer containing `\boxed{41}`, and `completion_tokens` far larger than the visible answer. You pay for thinking tokens.
 
 ### Task 7 · Measure the cost of thinking, then break it
+
+#### What this lab does (`eval_harness.py`, then drill D06 with `lab/scripts/breakfix.sh`)
+
+- **Same eval on two 7B models** with the same base: `r1-7b` and `qwen2.5-7b-tools` (both util 0.20, 28 Gi), math and JSON suites. Writes `results/r1-7b.json` and `results/qwen7b.json` and prints a comparison report.
+- **Drill D06:** `breakfix.sh inject D06` changes nothing in the cluster. It prints a harness command at temperature 0 for you to run, then you run the same 5 maths items at 0.6. `breakfix.sh answer D06` prints the explanation.
+- Switching models replaces the model in Deployment `vllm`; the last state is `r1-7b`.
+
+#### What to look for
+
+1. **Report:** `r1-7b` has higher maths accuracy, many more output tokens, and a reasoning share above 0.5 on maths; `qwen2.5-7b-tools` has a reasoning share near 0.
+2. **JSON suite:** similar accuracy for both, with `r1-7b` slower.
+3. **D06:** at temperature 0 some items run all the way to `--max-tokens` 8192 (`finish_reason=length`: the model repeats inside `<think>`), so output tokens and p50 latency jump and maths accuracy drops. At 0.6 they finish normally. The harness prints tokens and latency, not `finish_reason`; check one request with curl if you want to see it.
+
+**If something's off:** `Connection refused` → the port-forward is still bound to the old pod after a model switch; `kill %1` and start it again. More in §6.
+
+#### Run it
 
 R1-Distill-Qwen-7B and Qwen2.5-7B-Instruct share the same base architecture; the difference is R1 distillation.
 

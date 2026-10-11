@@ -227,6 +227,30 @@ Tasks 1–4 run on a laptop with PyTorch for CPU (`python3 -m pip install torch`
 
 ### Task 1 · Size V3/R1 on paper
 
+#### What this lab does (script `lab/tools/model_math.py`)
+
+- **Where:** on the MacBook, standard library only. Read-only arithmetic.
+- **Four sizings:** DeepSeek-V3 in FP8 on two Sparks, V3 at 1.58 bit (IQ1_S) on two Sparks at util 0.92, the R1 70B distill in FP8 with TP = 2, and the same 70B on one Spark at util 0.70.
+- **What it prints per run:** weight size, KV per token, the KV budget left at that util, tokens in cache and concurrent sequences, and a ✓/✗ verdict.
+
+#### What to look for
+
+1. **Command exit:** 0 for all four.
+2. **Verdicts:**
+
+   | Run | Healthy value |
+   |---|---|
+   | V3 FP8, 2 Sparks | `✗ does not fit — weights alone need 624.9 GiB > 158.2 GiB` |
+   | V3 IQ1_S, util 0.92, 2 Sparks | weights 123.4 GiB, `✓ fits` |
+   | 70B FP8, TP = 2, util 0.60 | weights 65.7 GiB, ~243K tokens of KV, `✓ fits` |
+   | 70B FP8, 1 Spark, util 0.70 | ~54K tokens of KV (6 sequences at 8K), `✓ fits` |
+   | `decode ceiling` of the 70B | ≈ 4 tok/s single stream on either layout |
+3. **Your notes:** the number of 8×H200 nodes for 64 users at 128K, worked with §2.1's method.
+
+**If something's off:** `unknown model` → `python3 tools/model_math.py --list` shows the preset names. More in §6.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 python3 tools/model_math.py deepseek-v3 --dtype fp8 --sparks 2
@@ -238,6 +262,27 @@ python3 tools/model_math.py deepseek-r1-distill-llama-70b --dtype fp8 --util 0.7
 The first prints `✗ does not fit — weights alone need 624.9 GiB`. The IQ1_S line fits on paper at util 0.92 across two Sparks; in practice that means every other LLM workload on both nodes is parked (Task 9). Then answer for yourself: how many 8×H200 nodes does V3 FP8 need for 64 users at 128K? (§2.1 has the method.)
 
 ### Task 2 · Ring attention equals full attention
+
+#### What this lab does (script `lab/tools/ring_attention_demo.py`)
+
+- **Where:** on the MacBook, PyTorch on CPU with the `gloo` backend. It starts 2 or 4 local processes ("ranks") that talk over localhost ports.
+- **What it computes:** attention over 1,024 tokens where each rank holds only its share of K and V and the shares are passed around a ring; rank 0 compares the result with ordinary full attention.
+- **The `torchrun` line** runs the same code under the launcher used on real clusters.
+
+#### What to look for
+
+1. **Command exit:** 0 for all three runs (the script asserts the match).
+2. **Output:**
+
+   | Line | Healthy value |
+   |---|---|
+   | `backend=gloo device=cpu` | as shown |
+   | `max \|ring - full\|` | about 1e-16, `→ ✓ identical` |
+   | `K/V held per rank` | 1/W of the full size (0.2 of 1.0 MiB with 4 ranks) |
+
+**If something's off:** `Address already in use` → a previous run still holds the port; pass another `--port`. More in §6.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -256,6 +301,30 @@ K/V held per rank (bf16): 0.2 MiB instead of 1.0 MiB
 Read `ring_attention`: the four lines that update `m`, `l` and `o` are the whole algorithm. Each rank holds 1/W of the K/V, and the result is exact.
 
 ### Task 3 · EPLB on synthetic skew
+
+#### What this lab does (script `lab/tools/eplb_sim.py`, plus DeepSeek's `eplb.py`)
+
+- **Downloads** DeepSeek's EPLB repository to `/tmp/eplb` on the MacBook (a shallow clone).
+- **Simulates** placing 256 experts with Zipf-skewed loads on 32 GPUs with 32 spare slots, three ways: naive contiguous, the lab's `eplb-lite` (replicate the hottest, then pack), and DeepSeek's `eplb.py` in hierarchical (4 nodes) and global (`--nodes 1`) mode.
+- **The redundancy loop** repeats the lab placement with 0 to 128 spare slots.
+
+#### What to look for
+
+1. **Command exit:** 0 for every run.
+2. **Placement results:**
+
+   | Line | Healthy value |
+   |---|---|
+   | `hottest expert` | `52.9× mean` |
+   | `naive contiguous placement` | `6.86` |
+   | `eplb-lite` | `1.01`, 10 replicated experts |
+   | `DeepSeek eplb.py`, `--nodes 1` | about 1.0 |
+   | `DeepSeek eplb.py`, 4 nodes | higher than global |
+3. **Redundancy loop:** 6.71 with 0 spare slots, ~1.01 at 32, ~1.00 at 64; returns vanish after the first slots.
+
+**If something's off:** `AssertionError` → experts + redundant isn't a multiple of the GPU count. Upstream import error → PyTorch is missing. More in §6.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -302,6 +371,20 @@ Then open `/tmp/eplb/eplb.py`, find `replicate_experts` and `balanced_packing`, 
 
 ### Task 4 · EPLB with real router loads from your Spark
 
+#### What this lab does (script `lab/tools/eplb_sim.py --loads`)
+
+- **Where:** on the MacBook. Reads `results/v2lite-loads.json`, the 64 per-expert loads that the Chapter 01 Task 5 router probe measured on your Spark.
+- **What it simulates:** V2-Lite served with expert parallelism over 8 GPUs with 8 spare slots, naive placement vs the lab's and DeepSeek's balancing.
+
+#### What to look for
+
+1. **Command exit:** 0. The first line reads `64 experts on 8 GPUs, 8 redundant slots`.
+2. **Results:** a naive `max/mean GPU load` above 1, and balanced placements closer to 1.0. The gain is smaller than the Zipf example of Task 3 (real loads are less skewed). Record both numbers.
+
+**If something's off:** `No such file` → run Chapter 01 Task 5 first. An empty or `[]` file → the `LOADS_JSON:` line wasn't in the Job log when you saved it. More in §6.
+
+#### Run it
+
 [Chapter 01](01-deepseek-architecture-mla-moe-mtp.md) Task 5 saved the per-expert loads of one V2-Lite layer to `results/v2lite-loads.json`. If you haven't run it, run that task first.
 
 ```bash
@@ -314,6 +397,23 @@ This answers a concrete question: if you served V2-Lite with EP = 8 on eight GPU
 
 ### Task 5 · 128K on one Spark, and whether the model uses it
 
+#### What this lab does (overlay `lab/k8s/long-context/r1-7b-128k`, script `lab/tools/needle_test.py`)
+
+- **Baseline:** `serve-model.sh r1-7b` caches the weights and serves R1-Distill-Qwen-7B (util 0.20, 28 Gi, 32K context).
+- **The overlay** keeps util and pod size the same and changes only the context: `--max-model-len=131072`, chunked prefill, `--max-num-batched-tokens=8192`. One full-length sequence needs about 7 GiB of KV.
+- **The needle test** hides a fact at 10 %, 50 % and 90 % depth in prompts of about 4K, 16K, 64K and 120K tokens and asks for it back, measuring time to first token.
+- **Afterwards** `serve-model.sh r1-7b` puts the 32K overlay back.
+
+#### What to look for
+
+1. **Rollout:** `successfully rolled out`; the log shows `max_model_len=131072` and a `Maximum concurrency for 131,072 tokens per request` of about 1×. At the catalog's util 0.20, `model_math.py` predicts ~7.2 GiB of KV, ~134K tokens: one full-length sequence with little margin.
+2. **Needle table:** one row per length and depth, `✓` or `✗`, and a final `N/12 needles found`.
+3. **Shape:** TTFT grows faster than linearly with length; misses, if any, cluster at the longest prompts and the middle depth.
+
+**If something's off:** vLLM fails with `max_model_len … larger than the maximum number of tokens that can be stored in KV cache` → something else is using the pool; check the util sum. More in §6.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
@@ -321,10 +421,10 @@ scripts/serve-model.sh r1-7b                          # cache the weights, basel
 kubectl --context spark-root apply -k k8s/long-context/r1-7b-128k
 kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=30m
 kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -E 'max_model_len|Maximum concurrency|KV cache size'
-python3 tools/model_math.py deepseek-r1-distill-qwen-7b --util 0.30 --ctx 131072
+python3 tools/model_math.py deepseek-r1-distill-qwen-7b --util 0.20 --ctx 131072
 ```
 
-vLLM logs the maximum concurrency at 131,072 tokens per request; `model_math.py` predicts ~2 sequences. Now check that the model really uses the window:
+vLLM logs the maximum concurrency at 131,072 tokens per request; `model_math.py` predicts one sequence (~134K tokens of KV). Now check that the model really uses the window:
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -344,6 +444,22 @@ kill %1
 Expect TTFT to grow faster than linearly and hit rates to drop at the longest lengths or middle depths ("lost in the middle"). That's the data you need before telling users to paste a whole document instead of using retrieval ([Chapter 13](13-rag-with-qdrant-and-bge.md)). Put the plain overlay back with `scripts/serve-model.sh r1-7b`.
 
 ### Task 6 · Your NVMe in LLM terms
+
+#### What this lab does (Job `02-Kubernetes/lab/manifests/root/60-storage/fio-job.yaml`, then a cold and a warm vLLM start)
+
+- **fio:** creates a 64 Gi `local-nvme` PVC and a Job `fio-ai` in `platform-tools`, which runs four 45-second profiles on a 16 GB file: sequential 1M read and write, random 128k read, random 4k read.
+- **Cold vs warm load:** `serve-model.sh r1-7b` drops the page cache before applying, so its start is cold; the `rollout restart` that follows is warm (weights still in page cache).
+- **Clean-up:** deleting the fio manifest removes the Job and its scratch PVC.
+
+#### What to look for
+
+1. **fio:** four `READ:` / `WRITE:` summary lines with bandwidth; sequential read is the number you use for weight-load predictions. Fill in the table.
+2. **vLLM logs:** `Loading weights took …` is shorter on the warm start than the cold one; the cold time is close to 15 GB ÷ your sequential read speed.
+3. **Engine init:** total init stays much longer than weight loading on both starts (compilation and CUDA graphs).
+
+**If something's off:** warm load not faster → page cache was evicted under memory pressure; check `free -g` on dgx-spark-1. Cold much slower than fio predicts → check the pod's CPU limit. More in §6.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
@@ -380,6 +496,22 @@ The gap between "loading weights" and "engine init" is compilation and CUDA-grap
 
 ### Task 7 · (2 Sparks) Ring attention over the CX-7 link
 
+#### What this lab does (script `lab/tools/ring_attention_demo.py` on two hosts)
+
+- **Needs two Sparks.** With only dgx-spark-1, skip this task; Task 2 already proved the algorithm.
+- **Copies the tool** to `~/ds-tools` on both Sparks and runs one rank per Spark in the NGC PyTorch container (`docker run` directly on the hosts, not in Kubernetes), with the NCCL backend over RoCE on the CX-7 port (`enp1s0f1np1`, 192.168.100.11 and .12).
+- **What it computes:** ring attention over 16,384 tokens with half the K/V on each GB10; rank 0 also computes full attention as the reference.
+
+#### What to look for
+
+1. **Rank 0 output:** `backend=nccl device=cuda`, `max |ring - full|` below 1e-4 with `✓ identical`, and K/V per rank half the full size.
+2. **NCCL log on rank 0:** `NCCL INFO NET/IB : Using … RoCE`, not a socket fallback.
+3. **Both containers** exit 0 and are removed (`--rm`).
+
+**If something's off:** both ranks hang → NCCL can't connect: check IFNAME, HCA, GID index and MTU. Out of memory on rank 0 → lower `--seq`; the full-attention reference is what fills memory. More in §6.
+
+#### Run it
+
 Preconditions: 01-Ansible `13.1-fabric.yml` and `13.2-rdma-perftest.yml` (≥ 180 Gb/s) passed, so dgx-spark-1 is 192.168.100.11 and dgx-spark-2 is 192.168.100.12 on the fabric. Copy the tool to both hosts:
 
 ```bash
@@ -412,6 +544,26 @@ docker run --rm --gpus all --network host --ipc host --ulimit memlock=-1 --devic
 Each GB10 holds half the K/V, and the chunks travel over RDMA (`NCCL INFO NET/IB : Using … RoCE` on rank 0). Agreement is checked in FP32 with a tolerance of 1e-4. Keep `--seq` modest: rank 0 also computes the full-attention reference on one GPU to check the answer, and that reference is what runs out of memory first.
 
 ### Task 8 · (2 Sparks) A 70B with tensor parallelism
+
+#### What this lab does (LeaderWorkerSet `lab/k8s/multinode/lws-vllm-70b.yaml`)
+
+- **Needs two Sparks**, both joined to the root cluster, and the NFS-RDMA share. With only dgx-spark-1, skip it.
+- **Installs LeaderWorkerSet** v0.7.0 and creates namespace `llm-multinode` (privileged Pod Security, for `hostNetwork`).
+- **Downloads** DeepSeek-R1-Distill-Llama-70B in FP8 (~71 GB) once into `/srv/models/hf` on dgx-spark-1, shared to dgx-spark-2 as `/mnt/models`.
+- **Starts a group of two vLLM pods**, one per Spark, each with **8 CPU · 80 Gi** (request = limit) and one GPU slice: TP = 2 over Ray and NCCL on the CX-7 link, util 0.60, 16K context, R1 reasoning parser, API on 192.168.100.11:8000.
+- **Parks serving** first: the vLLM ScaledObject on the root is paused at 0. Everything else that uses the LLM pool on either Spark must be parked by you too.
+
+#### What to look for
+
+1. **Nodes:** `get nodes` lists `dgx-spark-1` and `dgx-spark-2` as `Ready`; `mount | grep /mnt/models` on dgx-spark-2 shows the NFS mount.
+2. **Pods:** `vllm-70b-0` on dgx-spark-1 and `vllm-70b-0-1` on dgx-spark-2, both `Running`.
+3. **Leader log:** NCCL `NET/IB` / `Using network IB`, `tensor_parallel_size=2`, and finally Uvicorn listening.
+4. **API:** `/v1/models` on 192.168.100.11:8000 lists the model. Record tok/s at concurrency 1 and 16.
+5. **Clean-up:** the LWS is deleted before Task 9.
+
+**If something's off:** a pod `Pending` with `Insufficient memory` → something still holds that node's pool. Leader waits forever → the worker can't reach the Ray head on 6379. More in §6.
+
+#### Run it
 
 Preconditions: dgx-spark-2 joined the root as a worker ([02-Kubernetes Chapter 05](../02-Kubernetes/05-dgx-spark-datacenter-simulation-lab.md) §9), the NFS-RDMA share is mounted (01-Ansible `15.1-nfs-rdma.yml`), and every LLM workload on **both** Sparks is parked: each LWS pod holds 80 Gi (request = limit), nearly the whole LLM pool of its node.
 
@@ -457,6 +609,25 @@ curl -s 192.168.100.11:8000/v1/models | jq -r '.data[].id'
 Run the eval harness against `http://192.168.100.11:8000` (port-forward or from a host on the fabric) at concurrency 1 and 16 and record tokens/s. Compare with the same model on one Spark (util 0.70, 8K context, everything else parked): TP buys KV capacity (§2.1: ~244K vs ~54K tokens) and costs per-token communication. Remove it with `kubectl --context spark-root delete -f k8s/multinode/lws-vllm-70b.yaml` before Task 9.
 
 ### Task 9 · (2 Sparks) DeepSeek-R1 671B at 1.58 bit
+
+#### What this lab does (manifests `lab/k8s/llamacpp/rpc-2spark.yaml`)
+
+- **Needs two Sparks.** With only dgx-spark-1 you can't hold the 671B model; skip it.
+- **Builds the llama.cpp image** `spark-local/llama.cpp:server-sm121` on both Sparks from `k8s/llamacpp/Dockerfile` and imports it into each node's containerd (namespace `k8s.io`).
+- **Downloads** the dynamic 1.58-bit GGUF of DeepSeek-R1 (~131 GB, three shards) into `/srv/models/gguf` on dgx-spark-1. Long: plan for the download.
+- **Starts two Deployments** in `llm-multinode`: `llama-rpc-worker` on dgx-spark-2 (`rpc-server` on 192.168.100.12:50052) and `llama-r1-671b` on dgx-spark-1 (`llama-server` on port 8081, alias `r1-671b-iq1`, metrics on). Each pod holds **88 Gi** (request = limit), the whole LLM pool of its Spark.
+- **Clean-up:** deleting the manifest and un-pausing the vLLM ScaledObject brings normal serving back.
+
+#### What to look for
+
+1. **Image import:** `ctr -n k8s.io images import` ends without error on both Sparks.
+2. **Server log:** the RPC device is found, layers are `offloaded` to CUDA0 and the RPC device, and `server is listening` appears. The startup probe allows up to 30 minutes.
+3. **Answer:** the curl returns a coherent answer to 17 × 23 (391).
+4. **Metrics:** prompt and generation tokens per second; single-digit generation speed is expected.
+
+**If something's off:** `ErrImageNeverPull` → the image wasn't imported on that node. `failed to connect to RPC server` → the worker isn't listening on 192.168.100.12:50052. Below 1 tok/s → weights paged from NFS because memory is short. More in §6.
+
+#### Run it
 
 Build the llama.cpp image for sm_121 with RPC support on **both** Sparks and import it into the kubeadm node's containerd:
 

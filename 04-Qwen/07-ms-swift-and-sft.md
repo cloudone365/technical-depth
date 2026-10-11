@@ -219,6 +219,19 @@ With one GB10 per Spark, N = 1 and none of this saves memory; ZeRO-3 with CPU of
 
 ## 5. Lab
 
+#### What this lab does (preflight)
+
+- **Read-only:** prints the pinned PyTorch image and ms-swift pins from `versions.env`, the Kueue LocalQueue `train` in `batch` and the everyday quota of ClusterQueue `spark-cq`.
+
+#### What to look for
+
+1. **Pins:** `nvcr.io/nvidia/pytorch:26.08-py3` and `ms-swift==4.5.3 transformers==5.16.1 trl==0.29.1 peft==0.20.0 datasets==4.8.4 accelerate==1.15.0`.
+2. **Queues:** LocalQueue `train` exists; `spark-cq` resources show 2 CPU, 12Gi memory and 3 GPUs (the everyday numbers, window closed).
+
+**If something's off:** `localqueues.kueue.x-k8s.io "train" not found` → 02's `root-llms/20-scheduling` isn't applied.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
@@ -228,9 +241,28 @@ kubectl --context spark-root -n batch get localqueue train
 kubectl --context spark-root get clusterqueue spark-cq -o jsonpath='{.spec.resourceGroups[0].flavors[0].resources}'; echo
 ```
 
-Expected: the LocalQueue `train`, and the everyday `spark-cq` quota (2 CPU, 12Gi, 3 GPUs).
-
 ### Task 5.1 — Check the arithmetic on the CPU
+
+#### What this lab does (inline Python)
+
+- **Recomputes** §3.4 for Qwen3-4B: LoRA parameters at rank 16 on all linear layers, adapter + AdamW memory, the frozen BF16 base, and checkpointed activations and logits at 2K, 4K and 8K tokens. MacBook CPU only.
+
+#### What to look for
+
+1. **Values:**
+
+   | Line | Healthy value |
+   |---|---|
+   | `LoRA params` | `33.0 M`, adapter + AdamW ≈ `0.49 GiB` |
+   | `base BF16` | `7.5 GiB` |
+   | `S= 2048` | activations `0.35 GiB`, logits `2.32 GiB` (logits + gradient) |
+   | `S= 8192` | logits `9.27 GiB`: the vocabulary, not the model, dominates long rows |
+
+2. **Keep the S = 2048 line** for Task 5.4.
+
+**If something's off:** nothing on the cluster is involved; a different count means an edited shape.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · any folder
@@ -250,6 +282,20 @@ PY
 Keep the S = 2048 line; Task 5.4 compares it with the measured peak.
 
 ### Task 5.2 — Prepare your own data (optional)
+
+#### What this lab does (`out/sft.jsonl` → ConfigMap `qwen-sft-data`)
+
+- **Writes** three `messages` rows (system, user, assistant) to `out/sft.jsonl` on the MacBook and checks that every row ends with an assistant turn.
+- **Creates or updates** ConfigMap `qwen-sft-data` in `batch`; the SFT Job mounts it read-only at `/data/train.jsonl` (optional mount, so the Job also starts without it).
+
+#### What to look for
+
+1. **Check line:** `3 rows ok`.
+2. **Apply:** `configmap/qwen-sft-data created` (or `configured`).
+
+**If something's off:** `ConfigMap … too long` with a bigger file → above ~1 MiB; copy it onto `qwen-train` instead (§3.3).
+
+#### Run it
 
 The Job trains on 2,000 Alpaca-GPT4 rows by default. To train on your own rows instead, write `messages` JSONL, check every line parses and ends with an assistant turn, and load it as the ConfigMap the Job mounts:
 
@@ -277,6 +323,22 @@ Three rows teach nothing; generate a few hundred with `tools/synth_data.py` (Cha
 
 ### Task 5.3 — Open the training window
 
+#### What this lab does (KEDA pause + 02 overlay `root-llms/training-window`)
+
+- **Parks serving:** pauses the `vllm` ScaledObject at 0 replicas, removes the side engine `vllm-qwen3-4b-instruct`, and scales `bge-m3` to 0. Open WebUI, LiteLLM and Qdrant keep running.
+- **Moves the pool:** the training-window overlay sets `serving-budget` to 2 CPU · 10 Gi and `batch-budget` plus ClusterQueue `spark-cq` to 8 CPU · 80 Gi. GPU slices don't move.
+- **Reversible:** Task 5.6 re-applies `10-tenancy` and `20-scheduling` to restore the everyday numbers.
+
+#### What to look for
+
+1. **`get deploy`:** every GPU Deployment in `llm-serving` (`vllm`, `vllm-*`, `bge-m3`, `sglang`, `llama-server`, `trtllm`) at `0/0` or absent.
+2. **`batch-budget`:** hard `requests.cpu 8`, `requests.memory 80Gi`, `limits.memory 80Gi`.
+3. **`spark-cq`:** nominal quotas `8` CPU and `80Gi` memory.
+
+**If something's off:** the numbers snap back to 2 CPU · 12Gi within minutes → Argo CD self-heal on the tenancy apps; disable it first. More in §7.
+
+#### Run it
+
 Park everything in `llm-serving` that holds GPU memory, then lend the pool to `batch`:
 
 ```bash
@@ -290,9 +352,34 @@ kubectl --context spark-root -n batch describe resourcequota batch-budget | grep
 kubectl --context spark-root get clusterqueue spark-cq -o jsonpath='{.spec.resourceGroups[0].flavors[0].resources}'; echo
 ```
 
-Expected: `batch-budget` with 8 CPU and 80Gi hard, `spark-cq` nominal quotas 8 and 80Gi. If Argo CD manages the tenancy apps (02-Kubernetes Chapter 28), disable self-heal on them first, or it restores the everyday numbers within minutes.
+If Argo CD manages the tenancy apps (02-Kubernetes Chapter 28), disable self-heal on them first, or it restores the everyday numbers within minutes.
 
 ### Task 5.4 — Run the SFT Job and watch it
+
+#### What this lab does (manifest `lab/k8s/jobs/swift-sft.yaml`)
+
+- **Creates** PVC `qwen-train` in `batch` (60Gi, `local-nvme-retain`; a no-op if it exists) and Job `swift-sft`, created suspended with `kueue.x-k8s.io/queue-name: train`.
+- **Kueue admits** it into `spark-cq` and un-suspends it. The pod runs on `nvcr.io/nvidia/pytorch:26.08-py3` with 6 CPU · 48 Gi · 1 slice (request = limit), priority `spark-batch`.
+- **Training:** `pip install` of the ms-swift pins, download of Qwen3-4B-Instruct-2507 (~8 GB) into `/work/hf` on `qwen-train`, then one epoch of LoRA SFT (rank 16, all linear layers) on 2,000 Alpaca-GPT4 rows (or your ConfigMap). Output in `/work/output/sft/`.
+- **Long first run:** the image pull (~20 GB) and the model download come first.
+
+#### What to look for
+
+1. **Workload:** `ADMITTED  True` in `kubectl get workloads`; the pod goes `Pending` → `Running`.
+2. **Log landmarks:**
+
+   | Line | Healthy value |
+   |---|---|
+   | `trainable params` | about 33 M, about 0.8 % |
+   | `'loss'` (every 5 steps) | falls from its first value, then flattens |
+   | `eval_loss` (every 50 steps) | recorded; does not climb steadily |
+   | `train_runtime` and last checkpoint | `/work/output/sft/v0-<timestamp>/checkpoint-<step>`; note the path |
+
+3. **Memory:** `peak … GiB of 48 GiB` from the cgroup; compare with Task 5.1's estimate (~12–16 GiB). `kubectl top` shows CPU near 6 cores during data loading.
+
+**If something's off:** Workload `Pending` with `insufficient quota for memory` → the window isn't open (Task 5.3). Pod `Pending: Insufficient memory` → a model server still holds the pool. `OOMKilled` → lower `--max_length` or raise request = limit (≤ 80 Gi). More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
@@ -310,8 +397,6 @@ The Workload shows `ADMITTED  True` once `spark-cq` has room; Kueue then un-susp
 kubectl --context spark-root -n batch logs -f job/swift-sft | grep -E "trainable params|'loss'|eval_loss|train_runtime|checkpoint"
 ```
 
-Expected landmarks: a line with the trainable parameter count (~33 M, 0.8 %), a `loss` every 5 steps falling from its first value and then flattening, an `eval_loss` every 50 steps, and at the end the path of the last checkpoint (`/work/output/sft/v0-<timestamp>/checkpoint-<step>`). Note that path.
-
 While it runs, measure the real memory peak from the pod's cgroup and the training speed:
 
 ```bash
@@ -323,6 +408,22 @@ kubectl --context spark-root top pod -n batch -l job=swift-sft
 Record: peak memory, seconds per step (from the log's progress bar), `train_runtime`, first and last loss, best `eval_loss`. Compare the peak with Task 5.1's estimate. Whether CUDA allocations are charged to the cgroup on GB10 is what 02-Kubernetes [Chapter 14](../02-Kubernetes/14-multi-tenancy-resource-quotas-and-cgroups.md) §5.5 measures; size the next job from the larger of the cgroup peak and the estimate.
 
 ### Task 5.5 — Merge the adapter
+
+#### What this lab does (Job `swift-export`, inline)
+
+- **Creates** a short Kueue-admitted Job in `batch` on the same image and PVC (2 CPU · 24 Gi · 1 slice, request = limit) that runs `swift export --merge_lora true` on your checkpoint.
+- **Writes** a full BF16 copy of the model next to the checkpoint, as `checkpoint-NNN-merged`. The adapter itself is unchanged.
+- **Still in the window:** it needs `spark-cq`'s window quota like the SFT Job.
+
+#### What to look for
+
+1. **`CKPT` set** to the exact path from the Task 5.4 log before you apply.
+2. **Log tail:** the merged path ending in `-merged`; the Job completes.
+3. **The merged directory** holds `config.json` and `*.safetensors` (about the size of the base model, ~8 GB).
+
+**If something's off:** `FileNotFoundError` on the adapter → `CKPT` still holds the placeholder. Workload `Pending` → the SFT Job hasn't finished; one job at a time.
+
+#### Run it
 
 `swift export` merges the LoRA weights into a full BF16 copy of the model. Run it as a short Job on the same PVC, in the same window:
 
@@ -364,6 +465,23 @@ The merged model lands next to the checkpoint as `checkpoint-NNN-merged` (the lo
 
 ### Task 5.6 — Close the window and serve the adapter next to its base
 
+#### What this lab does (02 `10-tenancy` + `20-scheduling`, adapter copy, side engine with LoRA)
+
+- **Closes the window:** re-applies the everyday quotas (`serving-budget` 8 CPU · 90 Gi, `batch-budget` and `spark-cq` 2 CPU · 12 Gi), removes the KEDA pause and scales `bge-m3` back to 1.
+- **On dgx-spark-1:** copies the newest non-merged checkpoint from `qwen-train` to `/data/k8s/retain/llm-serving/model-cache/adapters/qwen3-4b-sft` (seen as `/models/adapters/qwen3-4b-sft` in the vLLM pod).
+- **Serves** the catalog's `qwen3-4b-instruct` as a side engine with `--enable-lora`, `--max-lora-rank=16` and the adapter registered as `qwen3-4b-sft`. One engine answers both names.
+
+#### What to look for
+
+1. **Window closed:** `kubectl get jobs -n batch` shows nothing running; `deployment "vllm" successfully rolled out`.
+2. **Adapter copy:** `adapter_config.json` and `adapter_model.safetensors` in the target folder.
+3. **`/v1/models`:** `qwen3-4b-instruct` and `qwen3-4b-sft`.
+4. **The comparison loop:** two answers. With Alpaca data the difference is style (length, lists); with your own data it is content.
+
+**If something's off:** serving won't start → window quotas still in force or the pause still set; re-apply and remove the annotation. `LoRA rank … is greater than max_lora_rank` → raise `--max-lora-rank`. More in §7.
+
+#### Run it
+
 Close the window first — serving needs its budget back:
 
 ```bash
@@ -398,7 +516,7 @@ kubectl --context spark-root -n llm-serving port-forward svc/vllm-qwen3-4b-instr
 sleep 2; curl -s localhost:8001/v1/models | jq -r '.data[].id'
 ```
 
-Expected: `qwen3-4b-instruct` and `qwen3-4b-sft`. Ask both the same question from your data (or an Alpaca-style instruction) and compare:
+Ask both the same question from your data (or an Alpaca-style instruction) and compare:
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab

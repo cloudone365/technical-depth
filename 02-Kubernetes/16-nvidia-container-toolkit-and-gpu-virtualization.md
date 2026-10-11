@@ -123,14 +123,43 @@ flowchart LR
 All `kubectl` commands run from `02-Kubernetes/lab` with `KUBECONFIG` set to the lab file:
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "02-Kubernetes/lab"
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 ```
 
 ### 5.1 Inspect the toolkit, containerd and CDI on the host
 
+#### What this lab does (commands on dgx-spark-1)
+
+- **Reads the GPU container plumbing:** the NVIDIA Container Toolkit version, the CDI devices in `/etc/cdi/nvidia.yaml`, containerd's runtime settings in `/etc/containerd/config.toml`, the toolkit's `/etc/nvidia-container-runtime/config.toml` and `/etc/crictl.yaml`.
+- **Shows that Docker and Kubernetes share one containerd:** `ctr namespaces ls` lists `k8s.io` (kubelet) and `moby` (Docker).
+- **Runs one throwaway Docker container** through CDI (`--device nvidia.com/gpu=all`) that prints `nvidia-smi -L`, outside Kubernetes.
+- **Nothing is reconfigured.** All commands only read, except the `docker run --rm`, which leaves nothing behind.
+
+#### What to look for
+
+1. **Command exit:** every command prints output; none says `permission denied` (use `sudo` where shown).
+2. **Compare with this table:**
+
+   | Line/Field | Healthy value |
+   |---|---|
+   | `nvidia-ctk cdi list` | three devices: `nvidia.com/gpu=0`, `nvidia.com/gpu=GPU-<uuid>`, `nvidia.com/gpu=all` |
+   | containerd `default_runtime_name` | `"nvidia"` |
+   | `BinaryName` | `/usr/bin/nvidia-container-runtime` |
+   | `SystemdCgroup` | `true` |
+   | `crictl info` default runtime | `nvidia` |
+   | `/etc/crictl.yaml` | `unix:///run/containerd/containerd.sock` |
+   | `ctr namespaces ls` | both `k8s.io` and `moby` |
+
+3. **The Docker CDI run** prints `GPU 0: NVIDIA GB10 (UUID: GPU-…)`, with the same UUID as the CDI list.
+
+**If something's off:** `unresolvable CDI devices` or a UUID that differs from `nvidia-smi -L` → stale CDI spec after a driver upgrade; regenerate it. `disabled_plugins` contains `cri` → a DGX OS update restored containerd's stock config; re-run the 01-Ansible Kubernetes playbook. More in §7.
+
+#### Run it
+
 ```bash
-ssh dgxadmin@192.168.0.100
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 nvidia-ctk --version
 sudo nvidia-ctk cdi list
 grep -nE 'default_runtime_name|runtimes.\W?nvidia|BinaryName|SystemdCgroup' /etc/containerd/config.toml
@@ -145,6 +174,7 @@ Expected: CDI devices `nvidia.com/gpu=0`, `nvidia.com/gpu=GPU-<uuid>`, `nvidia.c
 Run a container through CDI without Kubernetes (Docker 25+ understands CDI):
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 docker run --rm --device nvidia.com/gpu=all nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04 nvidia-smi -L
 ```
 
@@ -152,7 +182,31 @@ That container used one of nobody's 15 slices: Docker talks to the same containe
 
 ### 5.2 See what the device plugin hands a pod — from a vCluster
 
+#### What this lab does (manifest `lab/manifests/dev-lab/70-gpu/gpu-smoke.yaml`, then `crictl` on the Spark)
+
+- **Checks the prerequisites:** the root offers 15 `nvidia.com/gpu` slices, and RuntimeClass `nvidia` exists on the root and inside dev-lab. If dev-lab lacks it, the command applies `manifests/dev-lab/00-platform`, which creates it with the dev-lab namespaces.
+- **Creates `gpu-smoke`** in `tenant-beta` inside dev-lab (one slice, `runtimeClassName: nvidia`). It prints `nvidia-smi -L` and exits.
+- **Looks at the real container** on the Spark with `crictl`: the `NVIDIA_*` environment the device plugin set, the hooks or device nodes the runtime injected, and the sandbox's runtime handler.
+- **Cleans up:** the last command deletes the pod.
+
+#### What to look for
+
+1. **Command exit:** allocatable prints `15`; both `get runtimeclass` commands show `nvidia` with handler `nvidia`; `wait` prints `condition met`.
+2. **gpu-smoke log:** `GPU 0: NVIDIA GB10 (UUID: GPU-…)`.
+3. **On the Spark, from `crictl`:**
+
+   | Line/Field | Healthy value |
+   |---|---|
+   | `NVIDIA_VISIBLE_DEVICES` | `GPU-<uuid>`, the one GB10. Every slice has the same UUID |
+   | `hooks` / `devices` | a prestart hook (legacy injection) **or** `/dev/nvidia*` entries (CDI injection), depending on the toolkit `mode` |
+   | runtime handler | `nvidia` |
+
+**If something's off:** the root pod is not found → it is named `gpu-smoke-x-tenant-beta-x-dev-lab` only while the dev-lab pod exists; don't delete `gpu-smoke` before the `crictl` step. `runtimeclass "nvidia" not found` → apply `manifests/dev-lab/00-platform`. More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'   # 15
 kubectl --context spark-root get runtimeclass nvidia
 kubectl --context dev-lab get runtimeclass nvidia || kubectl --context dev-lab apply -k manifests/dev-lab/00-platform
@@ -163,9 +217,17 @@ kubectl --context dev-lab -n tenant-beta logs gpu-smoke
 
 Now find the container on the node. `gpu-smoke` is a dev-lab pod; its root copy is `gpu-smoke-x-tenant-beta-x-dev-lab` in `vc-dev-lab`, and that's the pod containerd knows:
 
+Print the container ID from the MacBook, then inspect it on the Spark:
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 HPOD=gpu-smoke-x-tenant-beta-x-dev-lab
-POD_CID=$(kubectl --context spark-root -n vc-dev-lab get pod $HPOD -o jsonpath='{.status.containerStatuses[0].containerID}' | sed 's|.*://||')
+kubectl --context spark-root -n vc-dev-lab get pod $HPOD -o jsonpath='{.status.containerStatuses[0].containerID}' | sed 's|.*://||'
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+POD_CID=<the container ID printed on the MacBook>
 sudo crictl inspect "$POD_CID" | jq -r '.info.config.envs[] | select(.key|startswith("NVIDIA")) | "\(.key)=\(.value)"'
 sudo crictl inspect "$POD_CID" | jq '{hooks: (.info.runtimeSpec.hooks | keys? // []), devices: [.info.runtimeSpec.linux.devices[]?.path]}'
 sudo crictl inspectp "$(sudo crictl inspect "$POD_CID" | jq -r .info.sandboxID)" | jq -r .info.runtimeHandler      # nvidia
@@ -174,14 +236,34 @@ sudo crictl inspectp "$(sudo crictl inspect "$POD_CID" | jq -r .info.sandboxID)"
 Expected: `NVIDIA_VISIBLE_DEVICES=GPU-<uuid>` — the device plugin's `Allocate()` answer for one slice, which is the UUID of the one GB10 (every slice is the same GPU) — and either a prestart hook (legacy injection) or `/dev/nvidia*` device entries (CDI injection), depending on the toolkit's `mode`. The sandbox's runtime handler is `nvidia` because `gpu-smoke` sets `runtimeClassName: nvidia` — the RuntimeClass the pod named inside dev-lab.
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab -n tenant-beta delete pod gpu-smoke
 ```
 
 ### 5.3 Measure time-slicing: 1 → 2 → 4 pods
 
+#### What this lab does (manifests `lab/manifests/root/70-gpu`, Deployment `gemm-contention`)
+
+- **Applies** the root platform namespaces and `manifests/root/70-gpu`: the `gemm-bench` ConfigMap and the `gemm-contention` Deployment in `platform-tools`, at 0 replicas.
+- **Scales it to 1, then 2, then 4 pods.** Each pod takes one time-slice, runs the bf16 GEMM benchmark in a loop (`LOOP=1`) and prints one JSON line per run.
+- **Prints a small table** after each step: TFLOPS per pod and the sum.
+- **Scales back to 0** at the end. The loop takes several minutes: each step waits for the rollout and then 60 s. The first rollout pulls the NGC PyTorch image unless Chapter 15 already did.
+
+#### What to look for
+
+1. **Command exit:** each `rollout status` returns; the loop prints three blocks, `== 1 pod(s)`, `== 2 pod(s)`, `== 4 pod(s)`.
+2. **The numbers**, against your baseline **B** from Chapter 15 §5.4: see the table below. The aggregate stays about B at every step; the per-pod figure drops to about B/N.
+3. **The slice ledger** (Chapter 06) shows the extra slices in use while the loop runs: `kubectl --context spark-root -n platform-tools get cm gpu-slice-ledger -o yaml`.
+4. **After the loop:** `kubectl --context spark-root -n platform-tools get deploy gemm-contention` shows `0/0`. Leaving it running holds up to 4 slices and the whole GPU.
+
+**If something's off:** `rollout status` times out → pods `Pending` (`kubectl --context spark-root -n platform-tools get pods -l app=gemm-contention`): other workloads already hold most of the 15 slices, or memory is short. Aggregate far below B → something else is computing on the GPU (`nvidia-smi` on the Spark). More in §7.
+
+#### Run it
+
 The contention Deployment runs on the root in `platform-tools`: GPU benchmarking is a platform job, and the root has no quota that would stop it at a vCluster's 2 slices.
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root/00-platform
 kubectl --context spark-root apply -k manifests/root/70-gpu
 for n in 1 2 4; do
@@ -206,13 +288,46 @@ What to expect, with your baseline B from Chapter 15:
 
 ### 5.4 Reproduce and understand the leak
 
+#### What this lab does (script `lab/scripts/breakfix.sh`, scenario 10)
+
+- **Injects break/fix 10:** applies `lab/breakfix/10-gpu-leak.yaml`, a pod `bf10-leak` in `lab-tools` inside dev-lab. It requests **no** GPU and names no RuntimeClass, and runs `nvidia-smi -L` from a CUDA base image.
+- **Shows the leak:** the pod still sees the GB10, and no quota counts it.
+- **Shows why** on the Spark: the pod's sandbox ran on containerd's default runtime, which is `nvidia`.
+- **Cleans up:** `answer 10` prints the explanation, `reset 10` deletes the pod.
+
+#### What to look for
+
+1. **Command exit:** `inject` ends with `Injected BF-10 [dev-lab]: GPU visible to a pod that didn't ask for one`.
+2. **Compare with this table:**
+
+   | Check | What you should see |
+   |---|---|
+   | `logs bf10-leak` | `GPU 0: NVIDIA GB10 (UUID: GPU-…)`, although the pod asked for no GPU |
+   | `runtimeClassName` / resources | empty runtime class; only `memory: 64Mi` in the limits |
+   | `vcluster-budget` `requests.nvidia.com/gpu` | the used count does **not** go up for `bf10-leak` |
+   | sandbox runtime handler (on the Spark) | empty or `(default)`: the pod used containerd's default, which is `nvidia` |
+
+**If something's off:** the log says `nvidia-smi: not found` or lists no GPU → containerd's default is already `runc` (you hardened it in §5.5), so the leak is closed. Pod still `ContainerCreating` after 15 s → the image is pulling; wait and read the logs again.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh inject 10
 sleep 15; kubectl --context dev-lab -n lab-tools logs bf10-leak     # GPU 0: NVIDIA GB10 … although it requested nothing
 kubectl --context dev-lab -n lab-tools get pod bf10-leak -o jsonpath='{.spec.runtimeClassName} {.spec.containers[0].resources}{"\n"}'
 kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget | grep gpu   # not counted
-POD_CID=$(kubectl --context spark-root -n vc-dev-lab get pod bf10-leak-x-lab-tools-x-dev-lab -o jsonpath='{.status.containerStatuses[0].containerID}' | sed 's|.*://||')
+kubectl --context spark-root -n vc-dev-lab get pod bf10-leak-x-lab-tools-x-dev-lab -o jsonpath='{.status.containerStatuses[0].containerID}' | sed 's|.*://||'
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+POD_CID=<the container ID printed on the MacBook>
 sudo crictl inspectp "$(sudo crictl inspect "$POD_CID" | jq -r .info.sandboxID)" | jq -r '.info.runtimeHandler // "(default)"'
+```
+
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh answer 10; scripts/breakfix.sh reset 10
 ```
 
@@ -220,10 +335,28 @@ The pod names no RuntimeClass and requests no GPU, so its sandbox runs on contai
 
 ### 5.5 (Optional) Harden the runtime
 
+#### What this lab does (edit of `/etc/containerd/config.toml` on dgx-spark-1)
+
+- **Backs up** `/etc/containerd/config.toml` to `config.toml.pre-hardening`.
+- **Changes one line:** containerd's `default_runtime_name` from `"nvidia"` to `"runc"`, then restarts containerd. Running containers keep running; Docker reconnects.
+- **Retests:** injects break/fix 10 again (the leak should be gone) and runs `gpu-smoke` (it should still work, because it names `runtimeClassName: nvidia`).
+- **This is a lasting change** to the node. Many lab manifests rely on the default runtime and must get `runtimeClassName: nvidia` afterwards (see below). Undo by restoring the backup.
+
+#### What to look for
+
+1. **Command exit:** `grep` shows `default_runtime_name = "runc"`; `systemctl restart containerd` returns without error; `crictl info` now prints `runc`.
+2. **`bf10-leak` log:** no GPU listed (`nvidia-smi` not found, or no devices).
+3. **`gpu-smoke` log:** still `GPU 0: NVIDIA GB10 (UUID: GPU-…)`.
+4. **The node stays healthy:** `kubectl --context spark-root get node dgx-spark-1` shows `Ready` after the restart.
+
+**If something's off:** `crictl info` still prints `nvidia` → the `sed` pattern did not match your containerd's TOML layout; edit the line by hand. Node `NotReady` → `sudo journalctl -u containerd -n 50`, and restore `config.toml.pre-hardening`. More in §7.
+
+#### Run it
+
 Switch containerd's default back to `runc`, so only pods that name `runtimeClassName: nvidia` go through the NVIDIA runtime. The 01-Ansible role writes the default when it *registers* the runtime, and doesn't remove it from an existing config — so on a running node make the change by hand, and set the role variable so a rebuild keeps it:
 
 ```bash
-# on the Spark
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo cp /etc/containerd/config.toml /etc/containerd/config.toml.pre-hardening
 sudo sed -i -E 's/(default_runtime_name\s*=\s*)"nvidia"/\1"runc"/' /etc/containerd/config.toml
 grep -n default_runtime_name /etc/containerd/config.toml
@@ -233,6 +366,7 @@ sudo crictl info | jq '.config.containerd.defaultRuntimeName // .config.containe
 ```
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh inject 10; sleep 15; kubectl --context dev-lab -n lab-tools logs bf10-leak   # now: nvidia-smi not found / no devices
 scripts/breakfix.sh reset 10
 kubectl --context dev-lab apply -f manifests/dev-lab/70-gpu/gpu-smoke.yaml && sleep 20 && kubectl --context dev-lab -n tenant-beta logs gpu-smoke   # still works: runtimeClassName: nvidia
@@ -246,6 +380,7 @@ After hardening, **every GPU pod must set `runtimeClassName: nvidia`**, in which
 ## 6. Verify
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/verify.sh gpu
 ```
 

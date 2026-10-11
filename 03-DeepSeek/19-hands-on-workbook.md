@@ -49,6 +49,22 @@ flowchart LR
 
 ### 3.1 What "green" means
 
+#### What this lab does (script `lab/tests/run-local-checks.sh`)
+
+- **Plain run (no GPU, no cluster):** yamllint, overlays and dashboard in sync, kustomize + kubeconform, promtool, Python compile, shellcheck, the CPU architecture demos, and every tool against local mocks (eval gate, agent, stream probe, vault-sync, catalog drift, weights manifest).
+- **`QDRANT=…`:** adds a RAG run against a real Qdrant binary started in a temporary folder.
+- **`API=1`:** talks to the live root (`spark-root`). Besides server-side dry runs it **really applies** 02's `00-platform` and the `llm-multinode` namespace, and switches the quotas to the training window and back to everyday. Run it when no training Job is running.
+
+#### What to look for
+
+1. **One `== <stage>` line per stage**, with `eval gate OK`, `catalog drift OK`, `weights_verify OK` (and `rag OK …` with `QDRANT`) along the way.
+2. **Last line:** `ALL LOCAL CHECKS PASSED`. Any failure stops the script at that stage.
+3. **After `API=1`:** `describe resourcequota batch-budget -n batch` back at 2 CPU · 12Gi.
+
+**If something's off:** kubeconform "could not find schema" → you are offline. `promtool`/`kubeconform` not found → install the versions the CI workflow uses. More in §7.
+
+#### Run it
+
 Everything in this module is checked twice: locally without a GPU, and in GitHub Actions on every pull request (`.github/workflows/deepseek-lab-ci.yml`).
 
 ```bash
@@ -81,6 +97,20 @@ QDRANT=/path/to/qdrant API=1 tests/run-local-checks.sh      # + real Qdrant + se
 
 ### 3.3 The release gate
 
+#### What this lab does (tool `lab/tools/eval_harness.py --gate`)
+
+- **Baseline, once:** the math (40) and JSON (8) suites against the served `r1-7b` through a port-forward, saved to `results/baseline-r1-7b.json`.
+- **Candidate, every change:** the same suites, compared suite by suite with the baseline; exit code 1 if any suite drops more than the tolerance. Read-only for the cluster.
+
+#### What to look for
+
+1. **Per suite:** `<suite>  baseline …  now …  PASS`.
+2. **Last line:** `GATE PASSED` and exit code 0; on a regression `GATE FAILED (N suite(s) regressed)` and exit code 1 (`echo $?`).
+
+**If something's off:** the gate always passes → the baseline came from the same run as the candidate. Flapping results → sampling noise on 40 items; average three runs. More in §7.
+
+#### Run it
+
 Every model change (new revision, quantisation, engine) must not reduce accuracy on your suites by more than a tolerance:
 
 ```bash
@@ -104,6 +134,20 @@ GATE PASSED
 The exit code is non-zero on `GATE FAILED`, so the gate drops into CI, the Ansible playbook or an Argo CD PostSync hook ([Chapter 15](15-automation-secrets-and-day2.md)). With 40 math items one question is 2.5 points: choose the tolerance with that granularity in mind, or average several runs.
 
 ### 3.4 The training window, as used by E5, E17–E20
+
+#### What this lab does (manifests `02-Kubernetes/lab/manifests/root-llms/training-window`, `10-tenancy`, `20-scheduling`)
+
+- **Open:** pauses vLLM at 0 replicas, `serving-budget` to 2 CPU · 10 Gi, `batch-budget` and `spark-cq` to 8 CPU · 80 Gi. Slices don't change. The chat API is down until you close it.
+- **Close:** the everyday quotas back (serving 8 CPU · 90 Gi, batch 2 CPU · 12 Gi) and the pause annotation removed.
+
+#### What to look for
+
+1. **Open:** no `app=vllm` pod left in `llm-serving`; `batch-budget` hard 8 / 80Gi.
+2. **Close:** `batch-budget` back at 2 / 12Gi, vLLM Ready again.
+
+**If something's off:** `exceeded quota` for new serving pods during the window is expected. vLLM missing after the window → the annotation is still there. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
@@ -131,6 +175,22 @@ The exercises reuse every lab file; nothing here is new infrastructure. The plat
 
 ### Part I — Architecture, proved in code (Chapters 01–04)
 
+#### What this lab does (tools in `lab/tools`, Job `lab/k8s/jobs/gpu-probes.yaml`)
+
+- **On the MacBook (CPU, nothing deployed):** E2 `moe_router_demo.py`, E3's `spec_decode_calc.py`, E4 `fp8_blockscale.py` error study, E8 `eplb_sim.py`.
+- **On the GB10:** E1 and E6 run inside the `gpu-probes` Job in `llm-serving` (NGC PyTorch, 4 CPU · 56 Gi · 1 slice; park the served model first). E3 and E7 serve overlays (`k8s/spec-decode/r1-7b-draft`, `k8s/long-context/r1-7b-128k`), which replace the model in `deploy/vllm`. E5 is a training-window Job (§3.4).
+
+#### What to look for
+
+1. **E1:** the three MLA variants agree, and the absorbed decode is faster; `MLA (latent + rope) … × smaller than MHA`.
+2. **E2:** `max/mean expert load` lower in the `WITH … bias balancing` table than in `WITHOUT`.
+3. **E4/E6:** block-scaled error far below per-tensor; grouped, padded, loop times with `max|Δ| vs loop` tiny (grouped may print `unavailable in this PyTorch build`).
+4. **E5:** `reward` at step 200 above step 10 (Chapter 11 Task 5.1 block). **E7:** `N/N needles found`. **E8:** `→ step-time gain vs naive ≈ …×` above 1.
+
+**If something's off:** `gpu-probes` Pending → the served model still holds the memory; park it. More in the chapter each row links to.
+
+#### Run it
+
 | # | Goal | Do | Pass when |
 |---|---|---|---|
 | E1 | Show that absorbed MLA decode is faster | `mla_attention_demo.py --decode-bench 8192 --batch 8 --device cuda` in `k8s/jobs/gpu-probes.yaml` ([Chapter 01](01-deepseek-architecture-mla-moe-mtp.md)) | outputs agree within tolerance and absorbed is faster; ratio recorded |
@@ -144,12 +204,45 @@ The exercises reuse every lab file; nothing here is new infrastructure. The plat
 
 ### Part II — Models on a Spark (Chapter 05)
 
+#### What this lab does (tool `lab/tools/model_math.py`, scripts `serve-model.sh`, `compare-models.sh`)
+
+- **E9:** predictions on the MacBook, then each model served in turn in `deploy/vllm`.
+- **E10:** `r1-32b` (BF16, util 0.70, runs alone) and `r1-32b-fp8` served and evaluated one after the other; results in `results/<model>.json`. Long first run: ~61 GiB plus ~30 GiB of weights.
+
+#### What to look for
+
+1. **E9:** vLLM's startup `KV cache` token count within ~20 % of the `model_math.py` line; `MemAvailable` recorded before and after each load.
+2. **E10:** a two-row table; record the accuracy and `tok/s` deltas (Chapter 18 Task 5.4 explains how to read them).
+
+**If something's off:** `r1-32b did not come up` → bge-m3 or a side model still holds memory; park them. More in Chapter 05 §7.
+
+#### Run it
+
 | # | Goal | Do | Pass when |
 |---|---|---|---|
 | E9 | Predict fit before deploying | `model_math.py` for three catalog models, then serve them ([Chapter 05](05-model-catalog-and-memory-math.md)) | each prediction (fits, sequences, decode ceiling) matches reality within ~20 %; `MemAvailable` on dgx-spark-1 recorded per model |
 | E10 | Measure FP8's cost | `compare-models.sh r1-32b r1-32b-fp8`, with everything else parked for `r1-32b` ([Chapter 05](05-model-catalog-and-memory-math.md), [Chapter 18](18-choosing-models-deepseek-vs-others.md)) | accuracy delta and tok/s delta recorded |
 
 ### Part III — Serving (Chapters 06–09)
+
+#### What this lab does (catalog `lab/models.yaml`, overlays `lab/k8s/…`, `lab/k8s/autoscale/vllm-office-hours.yaml`)
+
+- **E11:** a new `models.yaml` entry, regenerated overlays, a server-side dry run in `dev-llms`, then a real serve on `spark-root`.
+- **E12:** the same FP8 32B on vLLM, SGLang and TensorRT-LLM, one engine at a time in `llm-serving`.
+- **E13:** a deliberate bad edit to an overlay in your working copy, caught by `API=1 tests/run-local-checks.sh` (§3.1), then reverted.
+- **E14/E15:** load timing and `stream_probe.py` per hop, plus drill D04 (LiteLLM timeouts to 30 s, then reset).
+- **E16:** replaces the `vllm` ScaledObject with the office-hours one (cron 08:00–20:00 Mon–Fri, `Europe/London` in the file: set yours; 15 min cooldown) and runs a Job in the training window.
+
+#### What to look for
+
+1. **E11:** CI green; `serve-model.sh` ends `[PASS] answer: 144 …`, `0 failed`.
+2. **E13:** the pod-template check names the policy (for example `spark-no-latest-tag` or `spark-serving-needs-readiness`).
+3. **E15:** the probe through LiteLLM ends after about 30 s while D04 is injected; the direct probe finishes.
+4. **E16:** `get deploy vllm` replicas 1 → 0 → 1 across the schedule; the Job admitted only while the window is open.
+
+**If something's off:** vLLM scaled to 0 outside office hours is E16 working; any request brings it back (activation threshold 0). More in the chapter each row links to.
+
+#### Run it
 
 | # | Goal | Do | Pass when |
 |---|---|---|---|
@@ -162,6 +255,23 @@ The exercises reuse every lab file; nothing here is new infrastructure. The plat
 
 ### Part IV — Fine-tuning and RL (Chapters 10–11), all in the training window
 
+#### What this lab does (Jobs in `lab/k8s/jobs`, script `publish-adapter.sh`, tool `format_check.py`)
+
+- **All four run as Kueue Jobs in `batch`** with the window open (§3.4), each pod ≤ 8 CPU · 80 Gi · 1 slice, request = limit. Checkpoints land on the PVC `deepseek-ckpt`.
+- **E17:** an SFT LoRA, published into `model-cache` and served next to the base for `format_check.py` (after the window closes).
+- **E19/E20:** the Chapter 11 Jobs `grpo`/`grpo-vllm` and `zero3-nvme` (or `fsdp` across two Sparks).
+
+#### What to look for
+
+1. **E17:** `format_check.py` lines `model …: format N/50 (…%)` for base and adapter, adapter ≥ base + 30 points.
+2. **E18:** every Job `1/1`; wall time and peak memory per tool in your table.
+3. **E19/E20:** as in the Chapter 11 Task 5.2 and 5.7 blocks: s/step lower with vLLM; ZeRO-3 30 steps complete with the GB10 peak recorded.
+4. **After each:** the window closed, `batch-budget` 2 CPU · 12Gi.
+
+**If something's off:** a Job never admitted → the window isn't open or another Job holds it. More in Chapter 11 §7.
+
+#### Run it
+
 | # | Goal | Do | Pass when |
 |---|---|---|---|
 | E17 | An adapter that changes behaviour | `k8s/jobs/sft.yaml` + `publish-adapter.sh` + `format_check.py` base vs adapter ([Chapter 10](10-lora-qlora-unsloth-and-llama-factory.md)) | format % with the adapter ≥ base + 30 points |
@@ -171,6 +281,24 @@ The exercises reuse every lab file; nothing here is new infrastructure. The plat
 
 ### Part V — Applications (Chapters 12–14)
 
+#### What this lab does (`lab/k8s/apps`, `lab/k8s/ops/webui-backup.yaml`, `lab/k8s/jobs/rag-ingest.yaml`, `lab/k8s/jobs/agent.yaml`)
+
+- **E21:** an Open WebUI backup Job and the scale-to-0 restore (Chapter 12 Task 5.8).
+- **E22:** a LiteLLM team and a scoped key in PostgreSQL (Chapter 12 Tasks 5.3–5.4).
+- **E23:** a gated ingest, a rollback and a failing gate in Qdrant (Chapter 13 Tasks 5.2, 5.5, 5.6).
+- **E24:** the in-cluster agent Job with its read-only ServiceAccount (Chapter 14 Task 5.4).
+
+#### What to look for
+
+1. **E21:** backup log `… integrity: ok`; the deleted chat is back.
+2. **E22:** `401`, then `429`s after 5 requests in a minute; `spend` above 0 once a cost per token is set.
+3. **E23:** `hit@5` ≥ 0.60 and `gate passed`; rollback moves the alias; `GATE FAILED … alias technical-depth unchanged`.
+4. **E24:** `ANSWER:` in the Job log, audit lines present, `can-i` yes / no / no.
+
+**If something's off:** see the "If something's off" line of the linked chapter Task.
+
+#### Run it
+
 | # | Goal | Do | Pass when |
 |---|---|---|---|
 | E21 | Restore chats | Open WebUI backup + restore drill ([Chapter 12](12-open-webui-and-litellm-gateway.md)) | a deleted chat reappears; restore time recorded |
@@ -179,6 +307,26 @@ The exercises reuse every lab file; nothing here is new infrastructure. The plat
 | E24 | Least-privilege agent | in-cluster agent Job + `kubectl --context spark-root auth can-i` ([Chapter 14](14-tool-calling-and-agents.md)) | correct answer; `delete pods` and `get secrets` → no; audit lines present |
 
 ### Part VI — Operations (Chapters 15–17)
+
+#### What this lab does (template `15.1 Deploy DeepSeek`, CronJob `vault-sync`, `lab/observability`, script `breakfix.sh`)
+
+- **E25:** the playbook from Semaphore in check mode, for real, then `--tags serve` back to the previous model (Chapter 15 Tasks 5.6–5.7).
+- **E26:** a new LiteLLM master key in vault01, synced, consumers rolled (Chapter 15 Task 5.4).
+- **E27:** pin, stage, gate (§3.3), promote, record the weights manifest (Chapter 15 §3.6).
+- **E28:** promtool unit tests on the MacBook and a real `ReasoningTruncated` (Chapter 16 Tasks 5.3, 5.5).
+- **E29:** the seven drills; each changes `deploy/vllm` or LiteLLM until reset (Chapter 17 Task 5.2).
+
+#### What to look for
+
+1. **E25:** Semaphore `failed=0`, `verify.sh` `0 failed`; the rollback run's `Show the change` names the previous model.
+2. **E26:** `old key: 401`, `new key: 200`; `restart` lines for LiteLLM and Open WebUI in the sync log.
+3. **E27:** `GATE PASSED` before promotion; `wv-…` log `== NEW …` for the new snapshot.
+4. **E28:** `SUCCESS`; the alert Firing, then resolved.
+5. **E29:** each drill diagnosed in under 10 minutes; after the loop, `r1-7b` served again and the sync re-run.
+
+**If something's off:** see the "If something's off" line of the linked chapter Task.
+
+#### Run it
 
 | # | Goal | Do | Pass when |
 |---|---|---|---|
@@ -190,11 +338,40 @@ The exercises reuse every lab file; nothing here is new infrastructure. The plat
 
 ### Part VII — Choosing models (Chapter 18)
 
+#### What this lab does (script `compare-models.sh`, tool `eval_harness.py`)
+
+- **E30:** one Chapter 18 comparison end to end: models served one at a time, the same suites and settings, `results/<model>.json`, then a LiteLLM alias change you apply with `apply -k k8s/apps` (run the vault-sync Job afterwards).
+
+#### What to look for
+
+1. **The report table** with `tok/ok` and `p50 s` per model, none skipped.
+2. **The memo:** Σ util of the proposed serving set ≲ 0.72 and pod memory within 90 Gi, both from `models.yaml`.
+
+**If something's off:** see the "If something's off" line of the Chapter 18 Task you chose.
+
+#### Run it
+
 | # | Goal | Do | Pass when |
 |---|---|---|---|
 | E30 | A model recommendation | any one comparison from [Chapter 18](18-choosing-models-deepseek-vs-others.md) end to end | a one-page memo: table, cost per correct answer, latency, Σ util of the proposed serving set, governance, decision, LiteLLM alias change |
 
 ### Capstone (half a day, time-boxed)
+
+#### What this lab does (template `15.1 Deploy DeepSeek`, the gate, a training-window Job, a drill)
+
+- **Rebuilds the whole stack** from Semaphore (r1-7b, apps, RAG ingest), takes a baseline, upgrades `reasoning` to `r1-32b-fp8` through the gate, runs `sft.yaml` in the training window, and fixes an unannounced drill.
+- **Long steps:** the first Semaphore run (downloads) and the r1-32b-fp8 prefetch.
+
+#### What to look for
+
+1. **Rebuild:** Semaphore `failed=0`; `scripts/verify.sh` ends `0 failed`.
+2. **Upgrade:** `GATE PASSED` against `results/baseline-r1-7b.json`; Σ util r1-32b-fp8 0.45 + bge-m3 0.06 = 0.51.
+3. **Train:** the Job `1/1`; afterwards `batch-budget` 2 CPU · 12Gi and vLLM Ready.
+4. **Operate:** the drill diagnosed with `llm-triage.sh` and reset; triage back to the known-good output.
+
+**If something's off:** the template stops at the `serving-budget` assert → the training window is still applied. More in §7.
+
+#### Run it
 
 1. **Rebuild.** **Semaphore UI:** run the template for `03-DeepSeek/lab/ansible/15.1-deploy-deepseek.yml` with `deepseek_model=r1-7b` against the platform from 02. Then `scripts/verify.sh` shows 0 failed.
 2. **Baseline.** Record `results/baseline-r1-7b.json` with `eval_harness.py` (math + json; code via the sandboxed eval Job).

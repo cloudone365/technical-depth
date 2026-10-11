@@ -59,6 +59,32 @@ flowchart LR
 
 ## 3. Hands-on
 
+#### What this lab does (template `16.1 GDS check`)
+
+- **Finds the GDS tools** (`gdscheck`, `gdsio`) under `/usr/local/cuda/gds/tools`. If they're missing it installs a `gds-tools…` package when the apt repository offers one; otherwise it carries on without them.
+- **Platform check:** runs `gdscheck -p` and checks whether the `nvidia_fs` kernel module is loaded. Read-only.
+- **`/etc/cufile.json`:** writes the cuFile config (compat mode allowed, errors logged to `/var/log/cufile`). The previous file is kept as a backup (`cufile.json.*~`).
+- **Benchmark (only if `gdsio` exists):** writes an 8 GiB test file `/srv/models/gdsio.bin` once, then reads it three times for 15 s each (GPU-direct, CPU-only, CPU→GPU bounce), dropping the page cache before each read.
+- **One Spark is enough.** Nothing else is reconfigured; the test file stays in `/srv/models` until you delete it.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`. A first run shows `changed` on `/etc/cufile.json` and the test file (plus the package, if it was installed); a re-run shows `changed=0`.
+2. **The *Report* task** prints `gds_summary`. Expected on GB10 (unified memory):
+
+   | Field | Expected on this Spark |
+   |---|---|
+   | `nvidia_fs_loaded` | `false` |
+   | `compat_mode` | `true` |
+   | `nvme_supported` | `false` is normal here (no P2P path) |
+   | `bench.gpu_direct`, `bench.cpu_only`, `bench.cpu_gpu_bounce` | three throughputs (`… GiB/s`), close to each other and near your NVMe's sequential read speed |
+   | `raw_lines` | the `gdscheck` lines about NVMe, compat mode, IOMMU and the driver |
+
+3. **`n/a` in `bench`:** the read tests are allowed to fail without failing the play, so check by eye. `n/a` for `gpu_direct` alone can happen here: `-x 0` may error when the file system isn't GDS-capable (§5, details in `/var/log/cufile/cufile.log`), and the other two are then your baselines. No `bench` key at all means `gdsio` wasn't found, so there was no benchmark.
+4. **Record the three numbers** next to your Chapter 11 baselines. They are the "before" values for the model-load test in §3.1.
+
+**If something's off:** `gdscheck not found` and no package → this DGX OS image has no GDS tools; the cuFile API isn't needed on this box (table below). Numbers that vary a lot between runs → another container was loading a model at the same time. More in §5.
+
 ```yaml
 # lab/playbooks/16.1-gds-check.yml
 ---
@@ -176,6 +202,10 @@ flowchart LR
         var: gds_summary
 ```
 
+#### Run it
+
+**Semaphore UI:** run the template **`16.1 GDS check`**. Break-glass from the MacBook:
+
 ```bash
 # ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
@@ -196,6 +226,30 @@ Read the result:
 | `gdscheck not found` and no package | This DGX OS image has no GDS tools. Skip; the cuFile API isn't needed on this box |
 
 ### 3.1 The comparison that actually matters: model load time
+
+#### What this lab does (exercise: safetensors load time)
+
+- **Loads one shard to the GPU:** inside the NGC PyTorch container, reads the first `*.safetensors` file under `/srv/models` straight to `cuda` and prints its size, the time and the GB/s. Nothing is installed or changed.
+- **Needs a model in `/srv/models`:** the Qwen2.5-7B download from Chapter 15 §3.1 works on one Spark.
+- **Cold vs warm:** you run it once after dropping the page cache and once again right after.
+
+#### What to look for
+
+1. **The printed line** `/models/…safetensors: X GB in Y s -> Z GB/s`, for a cold and a warm run.
+2. **Cold run:** close to the `gdsio` numbers from the template, i.e. limited by the NVMe.
+3. **Warm run:** much faster, because the weights are in the page cache.
+4. **The cost of the warm run:** `free -g` on the Spark before and after: `buff/cache` grows by about the shard's size. On unified memory that cache uses the same pool the GPU allocates from.
+
+Drop the cache between runs (on the host, not in the container):
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+sync && echo 3 | sudo tee /proc/sys/vm/drop_caches && free -g
+```
+
+**If something's off:** `IndexError` → no `*.safetensors` under `/srv/models` yet (Chapter 15 §3.1). CUDA out of memory → other models are loaded; check `free -g` and §5.
+
+#### Run it
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)

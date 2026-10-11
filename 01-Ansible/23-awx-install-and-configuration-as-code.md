@@ -78,6 +78,20 @@ Everything on a Spark competes for one unified pool (~121.7 GiB usable), includi
 
 ## 2. Pre-flight: architecture check (do this first)
 
+#### What this lab does (a shell loop on the MacBook)
+
+- **Asks the registries** for the manifest of each of the five images AWX needs (operator, AWX, EE, PostgreSQL 15, Redis) and checks whether it lists `arm64`.
+- **Read-only:** nothing is pulled, installed or changed. It needs Docker on the Mac.
+
+#### What to look for
+
+1. **Five lines,** one per image, each ending in `arm64-OK` or `NO-ARM64`.
+2. **All `arm64-OK`:** install AWX on the Spark as in §3. **Any `NO-ARM64`:** use the hybrid pattern (Chapter 24 §2.1).
+
+**If something's off:** every image says `NO-ARM64` → the lookups probably failed (no network, registry rate limit). The loop hides errors, so run one by hand without `2>/dev/null`, e.g. `docker manifest inspect docker.io/redis:7 | grep architecture`.
+
+#### Run it
+
 The Spark is **arm64**. Before installing, confirm that every image you'll pull has a `linux/arm64` manifest:
 
 ```bash
@@ -97,6 +111,30 @@ done
 ---
 
 ## 3. Hands-on: install and configure
+
+#### What this lab does (manifests in `.cache/awx`, §3.1–§3.3)
+
+- **Operator (§3.1):** namespace `awx` on `spark-root` and the AWX operator 2.19.1 (Deployment `awx-operator-controller-manager`), installed with kustomize from the operator's GitHub tag.
+- **Secrets (§3.2):** `awx-admin-password` and `awx-secret-key` with random values, created before AWX so a reinstall finds the same ones. A copy goes to `.cache/awx-secrets.backup.yaml` on the MacBook; it holds both secrets, so keep it private.
+- **AWX itself (§3.3):** the `AWX` resource `awx`. The operator deploys `awx-web`, `awx-task` and the StatefulSet `awx-postgres-15` with a 20Gi volume on the `local-path` StorageClass (a folder under `/data/k8s` on the Spark). The UI and API listen on NodePort **30080**.
+- **Memory:** the limits in §1.3 add up to about 4.5 GiB, plus up to 1 GiB per running job pod, all from the root's platform share.
+- **First run:** the operator runs its own Ansible playbook, pulls the images and migrates the database. Expect several minutes before the API answers.
+
+#### What to look for
+
+1. **Operator:** `rollout status` ends with `successfully rolled out`, and the operator log shows a `PLAY RECAP` with `failed=0`.
+2. **Pods and volume:**
+   ```bash
+   # ▶ MacBook · 01-Ansible/lab (venv active)
+   kubectl --context spark-root -n awx get pods,pvc
+   ```
+   `awx-operator-controller-manager-…`, `awx-web-…`, `awx-task-…` and `awx-postgres-15-0` are `Running`, and the PostgreSQL PVC is `Bound` with StorageClass `local-path`.
+3. **The API:** `curl …/api/v2/ping/ | jq .version` prints a version string, the AWX version the operator ships (the `quay.io/ansible/awx` tag checked in §2).
+4. **The UI:** http://192.168.0.100:30080, user `admin`, password from `awx-admin-password` (§3.4 shows how to read it).
+
+**If something's off:** the PVC stays `Pending` → there is no `local-path` StorageClass yet (run `20.2 vClusters`). Pods in `ImagePullBackOff` with `no matching manifest for linux/arm64` → back to §2. The operator loops → read its log for `failed=1`. More in §6.
+
+#### Run it
 
 ### 3.1 Operator
 
@@ -163,6 +201,24 @@ curl -s http://192.168.0.100:30080/api/v2/ping/ | jq .version
 ```
 
 ### 3.4 Configure AWX *as code*
+
+#### What this lab does (playbook `playbooks/awx-config.yml`, which you write below)
+
+- **Collection:** installs `awx.awx` into `01-Ansible/lab/collections` and points it at AWX with `CONTROLLER_HOST`, `CONTROLLER_USERNAME` and `CONTROLLER_PASSWORD`.
+- **AWX objects, created through the API:** organization `SparkLab`; Machine credential `spark-ssh` (your `dgxadmin` key and sudo password); project `technical-depth` (this repository, branch `main`); inventory `spark-lab`, filled from `01-Ansible/lab/inventory/hosts.yml`; five job templates `spark · baseline`, `fabric`, `validate`, `drift` (check mode) and `drain`; and the schedule `drift-every-30m`.
+- **Two files you create:** `playbooks/awx-config.yml` (the listing below) and `.cache/awx-secrets.yml` with `spark_become_password: …`, the file the run line passes with `-e @…`. Neither ships with the repository.
+- **No playbook runs on the Sparks** until a job is launched: the optional `awx … launch` line starts `spark · validate`, and the schedule starts `spark · drift` every 30 minutes.
+
+#### What to look for
+
+1. **The playbook run:** `failed=0`, with `changed` on every object on the first run. On a re-run most tasks are `ok`; the credential task may still show `changed`, because AWX can't compare stored secrets.
+2. **In the AWX UI:** the project's sync is *Successful*, the inventory `spark-lab` lists `dgx-spark-1`, and Templates shows the five `spark · …` templates.
+3. **`spark · validate`** (from the UI or the `awx` line) ends *Successful*, and the per-host verdict is in its output.
+4. **`spark · drift`** runs every 30 minutes and shows `changed=0` on a clean lab.
+
+**If something's off:** `the role 'spark_facts' was not found` → AWX doesn't read `lab/ansible.cfg` (§6). A job can't reach `192.168.0.x` → check pod-to-LAN traffic through Cilium (§6). Keep AWX to `validate` and `drift`: running `baseline` or `drain` from both AWX and Semaphore makes the two controllers undo each other's work. More in §6.
+
+#### Run it
 
 Clicking through the UI can't be reviewed or rebuilt. Use the `awx.awx` collection instead:
 
@@ -283,6 +339,26 @@ sequenceDiagram
 ```
 
 ### 3.6 An arm64 Execution Environment that contains your collections
+
+#### What this lab does (`ee/execution-environment.yml` with `ansible-builder`)
+
+- **Builds one container image** with Docker, tagged `192.168.0.100:5000/spark-ee:1.0`: base `quay.io/fedora/python-312`, `ansible-core` 2.18, `ansible-runner`, the collections from `lab/requirements.yml`, the Python libraries `jmespath`, `netaddr`, `hvac`, `kubernetes`, and Helm v3.18.3.
+- **Architecture:** the image is built for the machine that runs the build: `arm64` on an Apple-silicon MacBook or on the Spark.
+- **Nothing is pushed.** The tag names a registry on `192.168.0.100:5000` that no lab playbook sets up; push to a registry you run, or to GHCR, before AWX can use the image.
+
+#### What to look for
+
+1. **The build** ends with `Complete! The build context can be found at: …`.
+2. **The collection check** lists `community.hashi_vault` and `kubernetes.core`.
+3. **The architecture:**
+   ```bash
+   # ▶ MacBook · 01-Ansible/lab (venv active)
+   docker image inspect 192.168.0.100:5000/spark-ee:1.0 --format '{{.Architecture}}'   # arm64
+   ```
+
+**If something's off:** `amd64` → the build ran on an Intel machine; build on the Spark or with `docker buildx --platform linux/arm64`. The build fails while installing collections → check network access to Galaxy. More in §6.
+
+#### Run it
 
 `lab/ee/execution-environment.yml` builds on the Spark itself, so the image is native `linux/arm64`:
 

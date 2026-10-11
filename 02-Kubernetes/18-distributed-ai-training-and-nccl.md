@@ -140,7 +140,10 @@ Either way the NAD must be in `batch`: Multus looks for it in the pod's own name
 
 ## 5. Lab
 
+Set up once: Kueue on the root, the LLM-stack namespaces and quotas, and the `spark-cq` queue.
+
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 export KUBECONFIG="$PWD/01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 cd "02-Kubernetes/lab"
 scripts/install-addons.sh kueue                       # on the root, once
@@ -151,7 +154,33 @@ kubectl --context spark-root -n batch describe resourcequota batch-budget   # no
 
 ### 5.1 One Spark: gang-admitted 2-rank job with gloo
 
+#### What this lab does (manifests `lab/manifests/root-llms/80-distributed/base`)
+
+- **Setup (the block above, once):** installs Kueue on the root, applies the `llm-serving`/`batch` namespaces and their quotas, and the Kueue objects: ResourceFlavor `gb10`, ClusterQueue `spark-cq` (2 CPU · 12 Gi · 3 slices), LocalQueue `batch/train`.
+- **Creates in `batch`:** ConfigMap `allreduce-bench` (the benchmark script), headless Service `ddp-workers` (port 29500), and Indexed Job `ddp` with 2 ranks. The Job starts suspended; Kueue admits both ranks together or neither.
+- **Each rank:** 1 CPU, 6 Gi (request = limit), 1 GPU slice, a 2 Gi memory-backed `/dev/shm`. torchrun connects the ranks through `ddp-0.ddp-workers.batch.svc.cluster.local`.
+- **What runs:** an all-reduce sweep from 1 MiB to 1 GiB with the **gloo** backend on CPU tensors (NCCL can't put two ranks on one GPU, §5.2), then a correctness check. The first run pulls the NGC PyTorch image.
+
+#### What to look for
+
+1. **Command exit:** `apply -k` prints `configmap/allreduce-bench`, `service/ddp-workers` and `job.batch/ddp` created. `get workloads` shows one workload with `ADMITTED` `True`.
+2. **Pods:** two, `ddp-0-…` and `ddp-1-…`, both `Running` then `Completed`, both on `dgx-spark-1`.
+3. **Rank 0 log:**
+
+   | Line | Healthy value |
+   |---|---|
+   | first line | `backend=gloo world=2 device=cpu` |
+   | size rows | six rows, `1048576` up to `1073741824`; `algbw` = `busbw` (n = 2). The numbers measure the pod network and 1 CPU, not the GPU |
+   | last line | `correctness OK: sum(1..2) = 3.0` |
+
+4. **Books, while the ranks run:** `spark-cq` shows `cpu=2 memory=12Gi nvidia.com/gpu=2`, and `batch-budget` shows the same used, if nothing else runs in `batch`. Both drop back once the job completes.
+
+**If something's off:** workload not admitted → `spark-cq` full or the LocalQueue missing (`kubectl --context spark-root -n batch describe workload`). Only one pod → §5.3 explains the two gates. Rank 0 waits forever with both pods `Running` → rank 1 can't resolve `ddp-0.ddp-workers`. More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root-llms/80-distributed/base
 kubectl --context spark-root -n batch get workloads
 kubectl --context spark-root -n batch get pods -l job-name=ddp -o wide
@@ -174,6 +203,7 @@ gloo moves CPU tensors over TCP through the pod network. The numbers measure *th
 See what Kueue booked:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root get clusterqueue spark-cq -o jsonpath='{range .status.flavorsUsage[0].resources[*]}{.name}={.total} {end}{"\n"}'
 kubectl --context spark-root -n batch describe resourcequota batch-budget
 ```
@@ -182,7 +212,23 @@ Both show 2 CPU · 12 Gi · 2 slices in use: the queue and the quota agree becau
 
 ### 5.2 See NCCL refuse duplicate GPUs
 
+#### What this lab does (the §5.1 job with `BACKEND=nccl`)
+
+- **Deletes the gloo job** and re-creates it with one change: the backend is `nccl`, so each rank uses the GPU.
+- **Both ranks get the same GB10:** two time-slices are two tickets to one GPU, with the same UUID.
+- **NCCL refuses to start**, the ranks fail, and the job is deleted at the end. Nothing else changes.
+
+#### What to look for
+
+1. **Command exit:** the `apply` prints `job.batch/ddp created`. The pods end in `Error`, not `Completed`.
+2. **The log** contains `ncclInvalidUsage` and `Duplicate GPU detected : rank 1 and rank 0 both on CUDA device …`.
+
+**If something's off:** the `grep` prints nothing → the pods have not started yet (image pull or Kueue admission); wait and run the `logs` line again. A gloo-style table appears → the `sed` did not change the backend; check `kubectl --context spark-root -n batch get job ddp -o yaml | grep -A1 BACKEND`.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n batch delete job ddp
 kubectl kustomize manifests/root-llms/80-distributed/base | sed 's/value: gloo/value: nccl/' | kubectl --context spark-root apply -f -
 kubectl --context spark-root -n batch logs -l job-name=ddp --prefix | grep -iE 'duplicate|error' | head -3
@@ -193,9 +239,28 @@ Expected: `ncclInvalidUsage … Duplicate GPU detected : rank 1 and rank 0 both 
 
 ### 5.3 Rendezvous and the two gates
 
+#### What this lab does (Deployment `slice-filler`, the `ddp` job with and without its Kueue label)
+
+- **Creates `slice-filler`** in `batch`: tiny CUDA pods that hold one GPU slice each and run outside Kueue. It is scaled so exactly **one** slice of `batch-budget` stays free.
+- **Runs `ddp` without the Kueue label** and unsuspended: the Job controller creates rank 0, and the namespace quota refuses rank 1.
+- **Runs `ddp` again with the label:** Kueue admits the gang (its own books still show room), and the quota still refuses rank 1. Kueue can't see what runs outside its queue.
+- **Cleans up:** deletes the job and the filler. Needs `yq` on the MacBook.
+
+#### What to look for
+
+1. **Command exit:** `slice-filler` scales to `HARD - USED - 1` replicas (with an idle `batch`, that is 2).
+2. **Without the label:** `get pods` shows one `ddp` pod `Running` and no second pod. `describe job ddp` ends with a `FailedCreate` event: `exceeded quota: batch-budget, requested: requests.nvidia.com/gpu=1 …`. Read which resources the event names; with the filler's CPU and memory, `requests.cpu` and `limits.memory` can appear too.
+3. **With the label:** `get workloads -o wide` shows `ADMITTED` `True`, and still only one pod `Running`.
+4. **After cleanup:** `kubectl --context spark-root -n batch get pods` shows no `ddp` and no `slice-filler` pods.
+
+**If something's off:** `slice-filler` scale fails with a negative number → `batch-budget` has fewer free slices than expected; something else runs in `batch` (`kubectl --context spark-root -n batch get pods`). Rank 1 is created but `Pending` with `Insufficient memory` → the node gate, not the quota gate: models in `llm-serving` hold the shared pool (§3.2). More in §7.
+
+#### Run it
+
 First the familiar failure: no gang at all. Leave exactly one GPU slice free in `batch-budget` with a filler, then submit the job **without** its Kueue label:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n batch create deployment slice-filler --replicas=0 \
   --image=nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04 -- sleep infinity
 kubectl --context spark-root -n batch set resources deploy slice-filler --limits=nvidia.com/gpu=1,memory=32Mi --requests=cpu=10m,memory=32Mi
@@ -212,6 +277,7 @@ kubectl --context spark-root -n batch logs -l job-name=ddp --prefix --tail=3   #
 Now ask *why* there is no second rank:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n batch describe job ddp | tail -5
 ```
 
@@ -220,6 +286,7 @@ Expected: a `FailedCreate` event from the Job controller — `exceeded quota: ba
 Then put the Kueue label back:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n batch delete job ddp
 kubectl --context spark-root apply -k manifests/root-llms/80-distributed/base
 kubectl --context spark-root -n batch get workloads -o wide                    # ADMITTED: True
@@ -235,15 +302,40 @@ Kueue admitted the gang: `spark-cq` had 3 free slices, 2 CPU and 12 Gi on its bo
 Clean up:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n batch delete job ddp
 kubectl --context spark-root -n batch delete deploy slice-filler
 ```
 
 ### 5.4 Diagnose a hang and a straggler
 
+#### What this lab does (the gloo `ddp` job with a frozen rank 1)
+
+- **Runs the §5.1 job with one change:** 20 s after start, rank 1 freezes its Python processes (SIGSTOP) for 90 s, then resumes. Rank 0 is untouched.
+- **Shows a straggler from the healthy side:** rank 0 just waits, with no error.
+- **Triage tools:** `py-spy dump` on rank 0 (installed with `pip` inside the pod), the process `State` of rank 1, and `scripts/cgroup-inspect.sh` on the Spark for rank 1's cgroup CPU throttling.
+- **Cleans up:** deletes the job. Needs `yq` on the MacBook.
+
+#### What to look for
+
+1. **Command exit:** `job.batch/ddp created`, both ranks `Running`.
+2. **Rank 0's table:** one size row's `time_ms` jumps to thousands of ms (the 90 s pause, averaged over that row's 10 timed iterations) where the others take milliseconds. No error is printed; the job still ends with `correctness OK`.
+3. **During the freeze:**
+
+   | Check | What you should see |
+   |---|---|
+   | `py-spy dump` on rank 0 | the stack sits in `all_reduce`: it waits for a peer |
+   | rank 1 `State` lines | `T (stopped)` |
+   | `cgroup-inspect.sh` on rank 1 | `cpu.max` `100000 100000` (1 CPU); `nr_throttled` small for this job. A real DataLoader at 1 CPU makes it climb |
+
+**If something's off:** no slow row → the `pkill` pattern did not match (check `kubectl --context spark-root -n batch logs <rank-1 pod>`), or the job finished before the 20 s mark. `py-spy` fails with a permission error → the container lacks `SYS_PTRACE`; use the `State` check instead. `cgroup for pod uid … not found` → run the script on the node that hosts the pod. More in §7.
+
+#### Run it
+
 Simulate a straggler: add a sleep to rank 1 only.
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n batch delete job ddp --ignore-not-found
 kubectl kustomize manifests/root-llms/80-distributed/base | yq 'with(select(.kind=="Job");
   .spec.template.spec.containers[0].args[0] += " & if [ \"$JOB_COMPLETION_INDEX\" = 1 ]; then sleep 20; pkill -STOP -f \"allreduce_bench[.]py$\"; sleep 90; pkill -CONT -f \"allreduce_bench[.]py$\"; fi; wait")' \
@@ -256,6 +348,7 @@ After 20 s, rank 1's Python processes freeze (SIGSTOP) for 90 s. The pattern `al
 The hang triage sequence, from inside the pods:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 R0=$(kubectl --context spark-root -n batch get pod -l job-name=ddp,batch.kubernetes.io/job-completion-index=0 -o name)
 R1=$(kubectl --context spark-root -n batch get pod -l job-name=ddp,batch.kubernetes.io/job-completion-index=1 -o name)
 kubectl --context spark-root -n batch exec "$R0" -- sh -c 'pip install -q py-spy && py-spy dump --pid $(pgrep -f "python.*allreduce_bench" | tail -1)'
@@ -265,6 +358,9 @@ kubectl --context spark-root -n batch exec "$R1" -- sh -c 'for p in $(pgrep -f a
 …and from the host, on the Spark, where the rank runs:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+# from 02-Kubernetes/lab in a copy of this repo on the Spark, with the lab kubeconfig exported
+R1=<rank 1's pod name, as printed on the MacBook>
 scripts/cgroup-inspect.sh batch "${R1#pod/}"      # context defaults to spark-root
 ```
 
@@ -279,14 +375,39 @@ Look at `cpu.stat`: a rank capped at `cpu: 1` that runs a DataLoader with severa
 | `NCCL WARN … Timeout` then `ProcessGroupNCCL … watchdog` after `TORCH_NCCL_ASYNC_ERROR_HANDLING` | hang converted to an error. Check that rank's node |
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n batch delete job ddp
 ```
 
 ### 5.5 Two Sparks: NCCL over RoCE
 
+#### What this lab does (overlay `lab/manifests/root-llms/80-distributed/two-spark`)
+
+- **Same `ddp` job, patched for two Sparks:** `hostNetwork: true`, `dnsPolicy: ClusterFirstWithHostNet`, a required anti-affinity that puts one rank on each Spark, and `BACKEND=nccl`.
+- **NCCL settings:** bootstrap over the CX-7 interface `enp1s0f1np1`, both RoCE HCAs `rocep1s0f1,roceP2p1s0f1`, GID index 3, `NCCL_DEBUG=INFO` so the log shows the transport.
+- **Budgets don't change:** the gang still takes 2 CPU · 12 Gi · 2 slices of `batch-budget` and `spark-cq`.
+- **One Spark only:** skip this lab. With one node, the anti-affinity leaves rank 1 `Pending` forever.
+
+#### What to look for
+
+1. **Command exit:** `job.batch/ddp created`; `get pods -o wide` shows one rank on `dgx-spark-1` and one on `dgx-spark-2`.
+2. **The NCCL lines:**
+
+   | Line | Healthy value |
+   |---|---|
+   | `NCCL INFO NET/IB : Using …` | both `rocep1s0f1` and `roceP2p1s0f1`, `/RoCE`, OOB on `enp1s0f1np1` |
+   | `NCCL INFO Using network` | `IB`, never `Socket` |
+   | 1 GiB row, `busbw_GB/s` | in the low twenties; at least 80 % of the 01-Ansible host baseline (`14.2-nccl-test.yml`) |
+   | last line | `correctness OK: sum(1..2) = 3.0` |
+
+**If something's off:** `NET/Socket` or single-digit GB/s → RDMA devices not visible or wrong GID/MTU (§7). Rendezvous fails → check the pod's `dnsPolicy` and `resolv.conf` with the commands below. More in §7.
+
+#### Run it
+
 Prerequisites: dgx-spark-2 joined the root as a worker (Chapter 05 §9; `kubectl --context spark-root get nodes` lists it), 01-Ansible `13.2-rdma-perftest.yml` ≥ 180 Gb/s. The gang still needs 2 CPU · 12 Gi · 2 slices of `batch-budget` and `spark-cq`; dgx-spark-2 adds 15 slices and its memory to the root's nodes, not to those budgets.
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root-llms/80-distributed/two-spark
 kubectl --context spark-root -n batch get pods -l job-name=ddp -o wide          # one on dgx-spark-1, one on dgx-spark-2
 kubectl --context spark-root -n batch logs -l job-name=ddp --prefix | grep -E 'NCCL INFO (NET/|Using network|Channel 00)|busbw|correctness' | head -20
@@ -299,7 +420,7 @@ NCCL INFO NET/IB : Using [0]rocep1s0f1:1/RoCE [1]roceP2p1s0f1:1/RoCE ; OOB enp1s
 NCCL INFO Using network IB
 …
 1073741824     48.9       21.96       21.96
-correctness OK: sum(1..2) = 2+1 = 3.0
+correctness OK: sum(1..2) = 3.0
 ```
 
 A large-message busbw in the low twenties of GB/s means you're close to line rate. If you see `NET/Socket` or single-digit GB/s, go to §7.
@@ -307,6 +428,7 @@ A large-message busbw in the low twenties of GB/s means you're close to line rat
 With `hostNetwork`, the pod IPs are the node IPs, and rank 1 still has to resolve `ddp-0.ddp-workers.batch.svc.cluster.local`. If rendezvous fails, check what DNS the pod really got:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 R1=$(kubectl --context spark-root -n batch get pod -l job-name=ddp,batch.kubernetes.io/job-completion-index=1 -o name)
 kubectl --context spark-root -n batch get "$R1" -o jsonpath='{.spec.dnsPolicy}{"\n"}'
 kubectl --context spark-root -n batch exec "$R1" -- cat /etc/resolv.conf
@@ -315,6 +437,7 @@ kubectl --context spark-root -n batch exec "$R1" -- cat /etc/resolv.conf
 `ClusterFirstWithHostNet` makes a hostNetwork pod use the cluster's CoreDNS (the `kube-dns` Service IP in `resolv.conf`) instead of the node's resolver, which knows nothing about `*.svc.cluster.local`.
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root delete -k manifests/root-llms/80-distributed/two-spark
 ```
 

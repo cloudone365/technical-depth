@@ -117,15 +117,32 @@ KV bytes for a prompt = prompt tokens × KV bytes/token (Chapter 20 §3.1). Tran
 ## 5. Lab
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "02-Kubernetes/lab"
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 ```
 
 ### 5.1 Pre-flight: does the image have NIXL?
 
+#### What this lab does (a `kubectl exec` + parking commands)
+
+- **Checks the image:** runs `import nixl, vllm` inside the running `llm-serving/vllm` pod. P and D use the same image (`nvcr.io/nvidia/vllm:25.09-py3`), so this answers the question without deploying anything.
+- **Parks the other engines** from Chapters 21–22: scales `sglang` and `triton` to 0 and deletes InferenceService `qwen-small` if it exists. Errors for objects that aren't there are hidden.
+- **vLLM stays up.** P + D + vLLM fit `serving-budget` (74.6 of 90 Gi, util sum 0.50).
+
+#### What to look for
+
+1. **The exec prints** `nixl OK, vllm <version>`.
+2. **Only vLLM and the always-on pods remain:** `kubectl --context spark-root -n llm-serving get pods` shows no `sglang-…`, `triton-…` or `qwen-small-predictor-…` pod.
+
+**If something's off:** `ModuleNotFoundError: No module named 'nixl'` → the image has no NIXL; use a newer tag or the thin image described below. `error: unable to upgrade connection` or `no pods` → vLLM is parked; un-pause it (Chapter 20 §9). More in §7.
+
+#### Run it
+
 P/D uses the same image as Chapter 20's vLLM, so ask the running engine. vLLM stays up (74.6 of 90 Gi, util sum 0.50); park the other engines from Chapters 21–22: SGLang or KServe would push the memory past 90 Gi (and the util sum to 0.70); Triton would still fit (88.6 Gi with its perf Job) but shares the GB10 and blurs the comparison:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving exec deploy/vllm -- python3 -c "import nixl, vllm; print('nixl OK, vllm', vllm.__version__)"
 # park the other engines (Chapter 20 §9); vLLM stays
 kubectl --context spark-root -n llm-serving scale deploy sglang triton --replicas=0 2>/dev/null
@@ -138,9 +155,29 @@ Park vLLM too only if memory requires it: for a bigger model in P and D, or if s
 
 ### 5.2 Deploy P, D and the proxy
 
+#### What this lab does (manifests `lab/manifests/root-llms/90-serving/pd-disagg`)
+
+- **Two engines** in the root's `llm-serving`: Deployments `vllm-prefill` and `vllm-decode`, both serving `Qwen/Qwen2.5-0.5B-Instruct` with the `NixlConnector` (role `kv_both`), `--enforce-eager` and `--gpu-memory-utilization=0.15`. Each takes 750m · 20 Gi (request = limit) · 1 GPU slice.
+- **KV side channel:** each engine announces its pod IP on port **5600** (`VLLM_NIXL_SIDE_CHANNEL_HOST` comes from `status.podIP`).
+- **The proxy:** Deployment `pd-proxy` (`python:3.12-slim`, 100m, 256 Mi limit) runs `pd_proxy.py` from a ConfigMap. It sends each request to prefill with `max_tokens=1`, passes the returned `kv_transfer_params` to decode, and streams decode's answer back.
+- **Services:** `vllm-prefill`, `vllm-decode` and `pd-proxy`, all on port 8000.
+- **Budget:** 40.25 Gi of `serving-budget` next to vLLM's 32 Gi. No quota changes. The first start can take a while (the startup probes allow 30 min).
+
+#### What to look for
+
+1. **Before the apply:** `serving-budget` shows at least ~41 Gi of `limits.memory` free and at least 2 slices free.
+2. **Rollouts:** both `successfully rolled out`; `pd-proxy` `1/1`.
+3. **Connector log:** the prefill (and decode) log mentions `NixlConnector` with role `kv_both` and a side-channel port.
+4. **Side channel:** the IP in the `side channel` log line equals the prefill pod's `IP` column, port 5600.
+
+**If something's off:** decode `0/1` with `exceeded quota: serving-budget` → an engine besides vLLM is still in `llm-serving` (back to §5.1). `Pending` with `Insufficient memory` → the node's memory pool is full (batch job or another engine); wait or park, don't lower the requests. More in §7.
+
+#### Run it
+
 Check that the quota and the node have room for 40 Gi more:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving describe resourcequota serving-budget | grep -E 'memory|requests.cpu|gpu'
 kubectl --context spark-root describe node dgx-spark-1 | grep -A9 'Allocated resources'
 kubectl --context spark-root apply -k manifests/root-llms/90-serving/pd-disagg
@@ -154,13 +191,33 @@ Expected: both engines log that the `NixlConnector` initialised (role `kv_both`)
 Prove the side-channel address is the pod IP:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving get pods -l pd-role -o custom-columns=NAME:.metadata.name,IP:.status.podIP,ROLE:.metadata.labels.pd-role
 kubectl --context spark-root -n llm-serving logs deploy/vllm-prefill | grep -iE 'side.?channel' | head -3     # same IP, port 5600
 ```
 
 ### 5.3 Send traffic through the proxy
 
+#### What this lab does (a streaming `curl` through `pd-proxy`)
+
+- **One request** through a port-forward to `pd-proxy:8000`: a streamed chat completion with `max_tokens: 64`.
+- **Behind it:** the proxy sends the prompt to `vllm-prefill` with `max_tokens=1`, takes the `kv_transfer_params` from that answer, and sends the original request with them to `vllm-decode`. Decode pulls the KV blocks over NIXL instead of recomputing the prompt.
+- **Headers** are saved to `/tmp/h` on the MacBook. The proxy adds `X-Prefill-Ms`, the time the prefill step took.
+- **Nothing is changed** in the cluster.
+
+#### What to look for
+
+1. **Answer:** two sentences about prefill and decode, printed token by token.
+2. **Header:** `grep` finds `X-Prefill-Ms: <number>`.
+3. **Decode log:** NIXL or remote-transfer lines for this request in the last minute.
+4. **Trap:** the proxy forwards the request even when prefill returned no `kv_transfer_params`. You still get a correct answer, but decode recomputed the prompt. Only the decode log tells the two cases apart.
+
+**If something's off:** an answer but no NIXL lines in the decode log → the handoff didn't happen (see the `kv_transfer_params` row in §7). `NIXL handshake failed` → port 5600 not reachable between the pods; check with `hubble observe --namespace llm-serving --port 5600 --verdict DROPPED`. More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving port-forward svc/pd-proxy 8000 &
 curl -sN -D /tmp/h localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
   "model":"Qwen/Qwen2.5-0.5B-Instruct","stream":true,"max_tokens":64,
@@ -174,7 +231,24 @@ Evidence of a real handoff: the decode log shows remote-prefill/NIXL read activi
 
 ### 5.4 Compare with a monolithic engine under mixed load
 
+#### What this lab does (script `lab/scripts/ttft_probe.py`, then removes `pd-disagg`)
+
+- **Measures P/D:** runs the TTFT probe (10 shared-prefix and 10 unique-prefix requests) through the `pd-proxy` port-forward from §5.3.
+- **Removes** P, D, the proxy, their Services and the `pd-proxy` ConfigMap (`delete -k`). This frees 40.25 Gi of `serving-budget`.
+- **Measures the monolithic engine:** the same probe against `vllm:8000`.
+
+#### What to look for
+
+1. **Two probe outputs**, each with the four lines from Chapter 22 §5.1. Write down both shared and unique medians.
+2. **Expected on one GB10:** P/D is not faster, and may be a little slower (the proxy hop, both roles on the same GPU). That is the correct result here.
+3. **After the delete:** `kubectl --context spark-root -n llm-serving get pods -l pd-role` returns nothing, and `serving-budget` is back to its value before §5.2.
+
+**If something's off:** the second probe fails with `connection refused` → the first port-forward (`%1`) still holds port 8000, or vLLM is parked; `kill %1` and un-pause it (Chapter 20 §9). More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 python3 scripts/ttft_probe.py --url http://localhost:8000 --model Qwen/Qwen2.5-0.5B-Instruct -n 10      # through P/D
 kill %1
 kubectl --context spark-root delete -k manifests/root-llms/90-serving/pd-disagg
@@ -187,9 +261,29 @@ On one GB10 expect **no latency win**, and possibly a small loss: both roles sha
 
 ### 5.5 (2 Sparks) Prefill on dgx-spark-1, decode on dgx-spark-2
 
+#### What this lab does (manifest `rdma-test-pod.yaml` + your edits to `pd-disagg`)
+
+- **Needs dgx-spark-2** as a worker of the root. With only dgx-spark-1, read this section and skip it; your result from §5.4 is the one-Spark answer.
+- **Checks the plumbing:** a throw-away pod `rdma-test` in `batch` (500m, 4 Gi, one `rdma/rdma_shared_cx7`, `IPC_LOCK`) prints its interfaces and RDMA devices, then you delete it.
+- **Relaxes Pod Security** on `llm-serving` from `baseline` to `privileged` for the experiment. Re-applying `manifests/root-llms/00-platform` puts it back.
+- **Your edits:** pin prefill to dgx-spark-1 and decode to dgx-spark-2, attach `batch/cx7-rdma`, set `UCX_NET_DEVICES` and `UCX_TLS`, add `IPC_LOCK` and an RDMA resource. Then a prefill-heavy benchmark (8,192-token prompts, 64-token outputs) against P/D and against the monolithic engine.
+
+#### What to look for
+
+1. **Nodes:** `get nodes` lists `dgx-spark-1` and `dgx-spark-2`, both `Ready`. `cx7-rdma` exists in `batch`.
+2. **`rdma-test` log:** a `net1` interface with an address, and `rocep…` devices from `ibv_devices`.
+3. **Placement:** `kubectl --context spark-root -n llm-serving get pods -l pd-role -o wide` shows prefill on dgx-spark-1 and decode on dgx-spark-2.
+4. **Result:** under the prefill-heavy mix, decode TPOT stays flat while prefill runs on the other Spark.
+5. **Afterwards:** `kubectl --context spark-root get ns llm-serving --show-labels` shows `pod-security.kubernetes.io/enforce=baseline` again.
+
+**If something's off:** pod rejected with `violates PodSecurity "baseline"` → the namespace relabel didn't happen (or Argo CD reverted it, Chapter 28 §2.3). No `net1` → the NAD was referenced without the `batch/` prefix. `no usable transports` from UCX → RDMA devices or `IPC_LOCK` missing. More in §7.
+
+#### Run it
+
 dgx-spark-2 joins the **root** (01-Ansible `k8s_workers`), where the models run, and `21.1-multus-rdma.yml` has put the `cx7-rdma` NetworkAttachmentDefinition into `batch` (`multus_nad_namespaces: [platform-tools, batch]`). Check the plumbing with the lab's test pod first:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root get nodes                                    # dgx-spark-1, dgx-spark-2
 kubectl --context spark-root -n batch get network-attachment-definitions  # cx7-rdma
 kubectl --context spark-root apply -f manifests/root-llms/85-network-operator/rdma-test-pod.yaml
@@ -200,6 +294,7 @@ kubectl --context spark-root -n batch delete pod rdma-test
 `llm-serving` enforces Pod Security **baseline**, which forbids the `IPC_LOCK` capability RDMA needs (`batch` is privileged for that reason). For the experiment, relax it the same way `batch` is labelled, and put it back afterwards:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root label ns llm-serving pod-security.kubernetes.io/enforce=privileged --overwrite
 # afterwards: kubectl --context spark-root apply -k manifests/root-llms/00-platform
 ```

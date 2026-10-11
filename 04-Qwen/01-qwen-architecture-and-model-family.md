@@ -270,6 +270,32 @@ mkdir -p ~/qwen-arch && cd ~/qwen-arch
 
 ### Task 1 · Count parameters and KV bytes from `config.json`
 
+#### What this lab does (script `~/qwen-arch/qwen_shapes.py`)
+
+- **Download:** fetches only `config.json` (a few KB) of seven Qwen checkpoints from Hugging Face into your local HF cache. No weights.
+- **Compute:** rebuilds total parameters, active parameters (MoE), attention/MLP size per layer and BF16 KV bytes per token from the shapes in §2.2.
+- **Where:** MacBook CPU only. Nothing on the Spark or the cluster is touched.
+
+#### What to look for
+
+1. **Command exit:** one line per repository, no traceback.
+2. **Totals and KV figures** match these (rounded):
+
+   | Repository | Healthy value |
+   |---|---|
+   | `Qwen/Qwen2.5-0.5B-Instruct` | total 0.49B, KV 12 KiB/token |
+   | `Qwen/Qwen2.5-7B-Instruct` | total 7.62B, KV 56 KiB/token |
+   | `Qwen/Qwen2.5-32B-Instruct` | total 32.76B, KV 256 KiB/token |
+   | `Qwen/Qwen3-0.6B` | total 0.60B, KV 112 KiB/token |
+   | `Qwen/Qwen3-8B` | total 8.19B, KV 144 KiB/token |
+   | `Qwen/Qwen3-30B-A3B` | total 30.53B, active 3.35B, KV 96 KiB/token |
+
+3. **Dense vs MoE:** `total` equals `active` on every dense model; only the 30B-A3B line shows a large gap.
+
+**If something's off:** a `KeyError` usually means a nested config (the script already reads `text_config`); an HTTP error means no network or proxy to huggingface.co. Totals off by a few percent are rounding on the model card, explained below.
+
+#### Run it
+
 The script downloads only `config.json` (a few KB) and recomputes the totals from the shapes in §2.2. If your count matches the published size, you have understood every matrix in the block.
 
 ```bash
@@ -309,20 +335,38 @@ python3 ~/qwen-arch/qwen_shapes.py Qwen/Qwen2.5-0.5B-Instruct Qwen/Qwen2.5-7B-In
   Qwen/Qwen2.5-32B-Instruct Qwen/Qwen3-0.6B Qwen/Qwen3-8B Qwen/Qwen3-32B Qwen/Qwen3-30B-A3B
 ```
 
-Expected (rounded; MoE `active` counts embeddings and the output head too):
+The output format (MoE `active` counts embeddings and the output head too):
 
 ```text
 Qwen/Qwen2.5-0.5B-Instruct         total   0.49B  active   0.49B  ...  KV    12 KiB/token (BF16)
-Qwen/Qwen2.5-7B-Instruct           total   7.62B  active   7.62B  ...  KV    56 KiB/token (BF16)
-Qwen/Qwen2.5-32B-Instruct          total  32.76B  ...                  KV   256 KiB/token (BF16)
-Qwen/Qwen3-0.6B                    total   0.60B  ...                  KV   112 KiB/token (BF16)
-Qwen/Qwen3-8B                      total   8.19B  ...                  KV   144 KiB/token (BF16)
 Qwen/Qwen3-30B-A3B                 total  30.53B  active   3.35B  ...  KV    96 KiB/token (BF16)
 ```
 
 The Qwen2.5-0.5B count works out exactly: 136.1M of tied embeddings (151,936 × 896) plus 24 × 14.9M per block. The embedding is over a quarter of the whole model — that is why small Qwen models tie input and output embeddings. Small differences from the model card (for example 32.76B vs "32.5B") come from how the card rounds and whether it counts the padded vocabulary rows.
 
 ### Task 2 · One decoder block in NumPy: RoPE, GQA, SwiGLU, QK-Norm
+
+#### What this lab does (script `~/qwen-arch/qwen_block.py`)
+
+- **Builds a toy Qwen block** in NumPy with random weights: RMSNorm, RoPE (base 10⁶), GQA with 8 query and 2 KV heads, causal softmax, SwiGLU MLP, and QK-Norm switched off and on.
+- **Proves two properties:** RoPE scores depend only on the distance between positions, and GQA shrinks the KV cache per token.
+- **Where:** MacBook CPU, a second or two. No download.
+
+#### What to look for
+
+1. **Command exit:** four groups of output, no traceback.
+2. **Values:**
+
+   | Line | Healthy value |
+   |---|---|
+   | `QK-Norm=False` / `QK-Norm=True` | `out (32, 512) finite=True` on both |
+   | `score(10,5)` vs `score(50,45)` | equal to six decimals; `score(10,0)` differs |
+   | `attention … MLP …` | `77% in the MLP` |
+   | `KV cache per token` | `256 values vs 1024 with MHA (25%)` |
+
+**If something's off:** `finite=False` means an edit broke the mask or the softmax (`-inf` must sit above the diagonal only). Different RoPE scores at equal distance mean `rope()` got positions in the wrong order.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · any folder
@@ -385,9 +429,32 @@ PY
 python3 ~/qwen-arch/qwen_block.py
 ```
 
-Expected: both outputs finite with shape `(32, 512)`; `score(10,5)` equals `score(50,45)` to six decimals and differs from `score(10,0)`; 77 % of the toy block's parameters in the MLP; KV per token 25 % of MHA (2 of 8 heads). Change `hkv` to 8 and to 1 to see MHA and MQA.
+KV per token is 25 % of MHA because 2 of 8 heads carry keys and values. Change `hkv` to 8 and to 1 to see MHA and MQA.
 
 ### Task 3 · Tokenizer and chat template
+
+#### What this lab does (script `~/qwen-arch/qwen_tok.py`)
+
+- **Download:** the Qwen3-8B tokenizer files (a few MB) into your local HF cache. No weights.
+- **Prints:** the vocabulary size, the ids of the control tokens (`<|im_start|>`, `<think>`, `<tool_call>` …), bytes per token for English, code, German and Chinese, and the rendered chat template for one user message with thinking off.
+- **Where:** MacBook CPU only.
+
+#### What to look for
+
+1. **Command exit:** no traceback; transformers prints no "unknown token" warnings.
+2. **Values:**
+
+   | Line | Healthy value |
+   |---|---|
+   | `regular BPE =` | `151643` (§2.4); `len(tokenizer)` a few dozen higher |
+   | `<|endoftext|>`, `<|im_end|>` | ids `151643`, `151645` |
+   | `<think>`, `</think>`, `<tool_call>` | ids above 151,643 (control tokens), never a multi-token split |
+   | bytes/token | one figure per sample, each above 1; record them for the comparison below |
+   | rendered template | ends with `<|im_start|>assistant` followed by an empty `<think>\n\n</think>` block |
+
+**If something's off:** an old `transformers` (< 4.51) may not know the Qwen3 template; re-run the `pip install` above. A gated-repo error does not apply here (Qwen3-8B is Apache-2.0, not gated); check the network instead.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · any folder
@@ -414,6 +481,21 @@ python3 ~/qwen-arch/qwen_tok.py
 Record your bytes-per-token figures; compare with another tokenizer you use (for example `meta-llama/Llama-3.1-8B-Instruct` if you have access). With `enable_thinking=False` the Qwen3 template appends an empty `<think>\n\n</think>` block to the generation prompt — that is how non-thinking mode is implemented (Chapter 02).
 
 ### Task 4 · Dual Chunk Attention keeps distances inside the trained window
+
+#### What this lab does (script `~/qwen-arch/dca_map.py`)
+
+- **Maps positions:** for a 16,384-token sequence and a trained window of 4,096, it computes the relative distance DCA assigns to every query/key pair (chunk 3,072, local 1,024), in blocks of 512 rows to keep memory small.
+- **Asserts** that every remapped distance stays inside `[0, 4096)`.
+- **Where:** MacBook CPU, a few seconds. No download.
+
+#### What to look for
+
+1. **Command exit:** 0, with no `AssertionError`.
+2. **The summary line:** `max true distance 16,383   max DCA distance 4,095   min 0   (trained window 4,096)`, then `every DCA distance lies in [0, c)…`.
+
+**If something's off:** an `AssertionError` after you change the numbers means `chunk + local > c`; the neighbouring-chunk rule needs `chunk + local ≤ c`.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · any folder
@@ -442,9 +524,24 @@ PY
 python3 ~/qwen-arch/dca_map.py
 ```
 
-Expected: a true maximum of 16,383 against a DCA maximum of 4,095 and no negative distance. The mapping follows the DCA paper (the neighbouring chunk needs `chunk + local ≤ c`); the production kernels add the softmax merging of the three parts. The point to keep: positions are remapped, memory is not reduced.
+The mapping follows the DCA paper (the neighbouring chunk needs `chunk + local ≤ c`); the production kernels add the softmax merging of the three parts. The point to keep: positions are remapped, memory is not reduced.
 
 ### Task 5 · YaRN in the config
+
+#### What this lab does (inline Python)
+
+- **Download:** `config.json` of Qwen2.5-7B-Instruct, Qwen3-8B and Qwen3-30B-A3B-Instruct-2507 (a few KB each).
+- **Prints** `rope_theta`, `max_position_embeddings` and any `rope_scaling` / `rope_parameters` entry, so you see what the checkpoint ships versus what you add at serve time.
+- **Where:** MacBook CPU only.
+
+#### What to look for
+
+1. **Command exit:** three lines, no traceback.
+2. **Values:** `rope_scaling=None` on all three (YaRN is opt-in); `max_pos` 32,768 / 40,960 for the two older models and 262,144 for the 2507 release; a `rope_theta` on every line.
+
+**If something's off:** a newer `transformers`-style config may carry `rope_parameters` instead of `rope_theta`; the script prints both, so read whichever is filled.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · any folder
@@ -458,9 +555,41 @@ for r in ("Qwen/Qwen2.5-7B-Instruct", "Qwen/Qwen3-8B", "Qwen/Qwen3-30B-A3B-Instr
 PY
 ```
 
-Expected: `rope_scaling` is `None` in the shipped configs (YaRN is opt-in at serve time), `max_position_embeddings` 32,768 / 40,960 for the older models and 262,144 for the 2507 release. Compare the 2507 model's `rope_theta` with Qwen3-8B's: a longer native window usually comes with a larger base.
+Compare the 2507 model's `rope_theta` with Qwen3-8B's: a longer native window usually comes with a larger base.
 
 ### Task 6 · Check the arithmetic against a running engine
+
+#### What this lab does (script `lab/scripts/serve-model.sh qwen3-8b`)
+
+- **Budget check:** adds Qwen3-8B's util 0.20 to the `--gpu-memory-utilization` of every running Deployment in `llm-serving` and refuses if the sum exceeds 0.72.
+- **Prefetch:** runs the 02 Job `model-prefetch`, which downloads `Qwen/Qwen3-8B` (~16.4 GB) into the `model-cache` PVC. Long on the first run, seconds once cached.
+- **Serve:** applies the generated overlay `k8s/models/qwen3-8b` on `spark-root`: it replaces the main `deploy/vllm` (behind `svc/vllm`) with image `nvcr.io/nvidia/vllm:26.08-py3`, util 0.20, `--max-model-len=32768`, 32 Gi memory (request = limit). The first start also pulls the image and compiles CUDA graphs.
+- **Smoke test:** asks the model "What is 12*12?" from inside the pod.
+- **Not changed:** the 02 base manifests, the quotas and the other engines.
+
+#### What to look for
+
+1. **Script output:** four `[PASS]` lines and a summary with `0 failed`:
+   ```
+   [PASS] budget: running 0.00 + qwen3-8b 0.2 ≤ 0.72      # higher than 0.00 if BGE-M3 or a side model runs
+   [PASS] weights cached
+   [PASS] vllm ready with qwen3-8b
+   [PASS] answer: 144  (reasoning chars: …)
+   ```
+   Reasoning chars above 0: Qwen3-8B thinks by default and the `qwen3` reasoning parser moved the trace out of `content`.
+2. **The vLLM startup log** (the `grep` below):
+
+   | Line | Healthy value |
+   |---|---|
+   | `Available KV cache memory` | about 6 GiB (24.3 GiB util share − ~15.3 GiB weights − activations and CUDA graphs) |
+   | `GPU KV cache size` | about 45K tokens; within a few percent of your own util × 121.7 GiB − weights − overhead, ÷ 144 KiB |
+   | `Maximum concurrency for 32,768 tokens per request` | a bit above 1× |
+
+3. **Write both numbers down** (yours and vLLM's). Chapter 04 Task 1 compares them again.
+
+**If something's off:** `[FAIL] budget` → another engine holds the pool; park it (`scripts/serve-model.sh --stop-side <name>`). Stuck at prefetch → `kubectl --context spark-root -n llm-serving logs job/model-prefetch`. Rollout failure → `kubectl --context spark-root -n llm-serving logs deploy/vllm`. More in [Chapter 04 §7](04-serving-qwen-with-vllm-and-sglang.md).
+
+#### Run it
 
 Serve one catalog model on the root and compare vLLM's own KV figure with yours (`serve-model.sh` prefetches into `model-cache`, applies the generated overlay of the 02 vLLM base and waits for readiness; Chapter 04 explains it):
 

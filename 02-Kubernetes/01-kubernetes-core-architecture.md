@@ -198,6 +198,41 @@ Each numbered step leaves evidence you can read. §5 does exactly that.
 
 ## 5. Lab — trace a pod end to end
 
+#### What this lab does (script `lab/scripts/preflight.sh`, manifests `lab/manifests/dev-lab/00-platform`, `10-tenancy`, `70-gpu/gpu-smoke.yaml`)
+
+- **Preflight (Task 1):** read-only checks, run on the Spark: the host (aarch64, 20 cores, memory, cgroup v2, swap off, the GB10), the root cluster (containerd with `nvidia` as default runtime, kubelet, kubeadm version, `/readyz`, no control-plane taint, Cilium, MetalLB pool, 15 GPU slices, RuntimeClass `nvidia`), both vClusters, and tools and disk (helm, ≥ 300 GiB free on `/`, `/data/k8s`, mikefarah `yq`).
+- **Control-plane inspection (Tasks 2, 3, 5, 6, 7):** reads the static-pod manifests in `/etc/kubernetes/manifests`, the kubelet config, listening ports, leases, CRI and OCI state. Nothing is reconfigured. The one write is the optional `kubectl delete` of a mirror pod in Task 2, which the kubelet puts straight back.
+- **dev-lab objects (Task 4):** creates `tenant-alpha`, `tenant-beta` and `lab-tools` with the five PriorityClasses and RuntimeClass `nvidia` (`00-platform`), then quotas, LimitRanges, RBAC and NetworkPolicies (`10-tenancy`).
+- **One test pod:** `tenant-beta/gpu-smoke` asks for 1 GPU time-slice, 100m CPU and 128Mi, runs `nvidia-smi` once and exits (`restartPolicy: Never`). On the root it runs as `vc-dev-lab/gpu-smoke-x-tenant-beta-x-dev-lab`. The first run pulls `nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04`.
+
+#### What to look for
+
+1. **Preflight exit:** the last line reads `… passed, … warnings, 0 failed`. `[WARN]` and `[....]` lines (no `vcluster` CLI, for example) don't stop the lab; any `[FAIL]` names the 01-Ansible playbook to re-run. `MemTotal` shows about 121 GiB.
+2. **Static control plane (Task 2):** four manifests (`etcd`, `kube-apiserver`, `kube-controller-manager`, `kube-scheduler`) and one owner per port:
+
+   | Port | Healthy owner |
+   |---|---|
+   | `6443` | `kube-apiserver` |
+   | `2379`, `2381` | `etcd` |
+   | `10257` | `kube-controller` |
+   | `10259` | `kube-scheduler` |
+   | `10250` | `kubelet` |
+
+3. **API health (Task 3):** `readyz check passed` on the root, Leases `kube-scheduler` and `kube-controller-manager` held by `dgx-spark-1_<uuid>`, and `ok` from dev-lab.
+4. **The test pod (Task 4):** it ends `Completed`, the root events run `Scheduled → Pulling → Pulled → Created → Started`, and the log shows `NVIDIA GB10, 12.1, 580.xx, [N/A]`. `[N/A]` for memory is correct on a UMA GPU.
+   ```bash
+   # ▶ MacBook · 02-Kubernetes/lab
+   kubectl --context dev-lab -n tenant-beta get pod gpu-smoke        # STATUS Completed
+   kubectl --context dev-lab -n tenant-beta logs gpu-smoke | tail -1
+   ```
+5. **One layer down (Tasks 5–7):** one sandbox plus one `smi` container under the root name, `NVIDIA_VISIBLE_DEVICES=GPU-<uuid>` in the container env, and on the root copy only the syncer and `kubelet` as managers, never your `kubectl`.
+
+**If something's off:** a `gpu-smoke` left over from an earlier run makes `apply` print `unchanged` and you see no new events; delete it first (`kubectl --context dev-lab -n tenant-beta delete pod gpu-smoke`). `gpu-smoke` `Pending` with no scheduler events means dev-lab's 2 root slices are in use (Chapter 04 §6.4, break/fix 02). More in §7.
+
+#### Run it
+
+Tasks 1–7 below, in order. Task 1 and every `sudo` / `crictl` line run on the Spark (`ssh dgx-spark-1`).
+
 ### Task 1 · Preflight
 
 ```bash
@@ -210,7 +245,7 @@ Expected (abridged):
 ```text
 [PASS] arch aarch64
 [PASS] 20 CPU cores (10 X925 + 10 A725)
-[PASS] MemTotal 119 GiB (unified CPU+GPU pool)
+[PASS] MemTotal 121 GiB (unified CPU+GPU pool)
 [PASS] cgroup v2
 [PASS] swap off
 [PASS] GPU NVIDIA GB10, compute capability 12.1

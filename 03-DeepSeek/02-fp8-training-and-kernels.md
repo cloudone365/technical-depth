@@ -167,6 +167,22 @@ Tasks 1–3 run on a laptop with PyTorch for CPU (`python3 -m pip install torch`
 
 ### Task 1 · Why blocks: the FP8 error sweep
 
+#### What this lab does (script `lab/tools/fp8_blockscale.py`)
+
+- **Where:** on the MacBook, PyTorch on CPU. Nothing touches the Spark.
+- **What it simulates:** quantises a 1024 × 1024 weight matrix with 16 planted outliers to FP8 (E4M3) twice: with one scale for the whole tensor, and with one scale per 128 × 128 block. The outliers grow from 1× to 5,000× their starting size, row by row.
+- **What it prints:** per row, the error on the normal weights and the share of them flushed to zero, for both schemes.
+
+#### What to look for
+
+1. **Command exit:** 0, five rows like the output below.
+2. **Small outliers (first rows):** both schemes have about the same error, near 0.0265, and almost nothing flushed to zero.
+3. **Large outliers (last two rows):** per-tensor flushes 8 % or more of the weights to zero (about 41 % in the last row); 128 × 128 blocks stay well below that.
+
+**If something's off:** `CUDA not available: skipping GEMM timing` is expected on a laptop; the GEMM part runs on the GPU in Task 4. More in §6.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 python3 tools/fp8_blockscale.py
@@ -186,6 +202,22 @@ With modest outliers both schemes work. Then per-tensor scaling collapses while 
 
 ### Task 2 · Why MoE needs grouped GEMMs
 
+#### What this lab does (script `lab/tools/grouped_gemm_bench.py`)
+
+- **Where:** on the MacBook, PyTorch on CPU.
+- **What it measures:** one MoE layer (16 experts, top-6) computed three ways: a Python loop over experts, all experts padded to the busiest one, and one grouped GEMM (`torch._grouped_mm`, CUDA only).
+- **The three runs** use the default skew, uniform expert popularity (`--skew 0.0`) and extreme skew (`--skew 2.0`).
+
+#### What to look for
+
+1. **Command exit:** 0 for all three runs. `grouped : unavailable in this PyTorch build` is expected on CPU.
+2. **Correctness:** `max|Δ| vs loop` is `0.0e+00` (or close to it) on every path.
+3. **Padding waste** in the first line: about 8 % at `--skew 0.0`, several hundred percent at the default skew, about 900 % at `--skew 2.0`. The padded path gets slower as the waste grows.
+
+**If something's off:** times differ from the example: expected, they depend on your CPU; record yours. More in §6.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 python3 tools/grouped_gemm_bench.py
@@ -204,6 +236,21 @@ device=cpu experts=16 routed tokens=12288 (top-6) busiest expert=4409 quietest=1
 
 ### Task 3 · Naive vs absorbed MLA decode
 
+#### What this lab does (script `lab/tools/mla_attention_demo.py --decode-bench`)
+
+- **Where:** on the MacBook, PyTorch on CPU.
+- **What it measures:** the time for one decode step of a scaled-down MLA layer, batch 2, with 1,024 and then 4,096 cached tokens. "Naive" rebuilds K and V for every cached token; "absorbed" attends directly on the latent cache.
+
+#### What to look for
+
+1. **Command exit:** 0 for both runs.
+2. **Each run** prints a `naive` and an `absorbed` line; the absorbed line ends with `→ N× faster`, N one to two orders of magnitude.
+3. **Scaling:** N is larger at 4,096 cached tokens than at 1,024. Record both.
+
+**If something's off:** a very small N → another process is loading the CPU; re-run on an idle laptop. More in §6.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 python3 tools/mla_attention_demo.py --decode-bench 1024 --batch 2
@@ -219,6 +266,32 @@ decode step, batch 2, 1024 cached tokens, latent cache 4 MiB/layer
 Expect the absorbed form to be one to two orders of magnitude faster, and the ratio to grow from 1,024 to 4,096 cached tokens. This is the design decision FlashMLA is built around.
 
 ### Task 4 · FP8, grouped GEMM and MLA decode on the GB10
+
+#### What this lab does (Job `lab/k8s/jobs/gpu-probes.yaml`)
+
+- **Parks the chat model:** pauses the vLLM ScaledObject at 0 replicas.
+- **Ships the tools:** `kubectl apply -k .` refreshes the `deepseek-*` ConfigMaps; any earlier `gpu-probes` Job is deleted first.
+- **Runs one GPU Job** in `llm-serving` (NGC PyTorch image, 4 CPU, **56 Gi** request = limit, one GPU slice): the MLA decode bench at V3 sizes, BF16 vs FP8 GEMM at 8192³, the grouped-GEMM bench at V2-Lite sizes, then the router probe of Chapter 01 (which loads V2-Lite, ~31 GB).
+- **Cleans up** at the end: deletes the Job and un-pauses the ScaledObject.
+
+#### What to look for
+
+1. **Job status:** `kubectl --context spark-root -n llm-serving get job gpu-probes` reaches `COMPLETIONS 1/1`.
+2. **The log lines you fill into the table:**
+
+   | Line | Healthy value |
+   |---|---|
+   | `NVIDIA GB10  cc=(12, 1)` | GB10, capability 12.1 |
+   | `BF16 GEMM` | near the ~46.6 TFLOPS baseline of 01-Ansible Chapter 11 |
+   | `FP8  GEMM` | higher than BF16, with `(N× BF16)` above 1 |
+   | `absorbed … → N× faster` | N well above 1 at 8,192 cached tokens |
+   | `loop` / `padded` / `grouped` | `max\|Δ\| vs loop` near 0; `grouped` faster than `loop`, or `unavailable` |
+3. **`FP8 _scaled_mm unavailable`** instead of an FP8 line means the image lacks FP8 kernels for sm_121; note it and use a newer NGC PyTorch image.
+4. **After cleanup:** `kubectl --context spark-root -n llm-serving get deploy vllm` shows the model coming back (KEDA restores the replica).
+
+**If something's off:** pod `Pending` → the pool is still held by another engine. CUDA OOM in the MLA bench → lower `--decode-bench` or `--batch` in the Job. More in §6.
+
+#### Run it
 
 The `gpu-probes` Job runs the same tools on the GPU: the MLA decode bench at V3 sizes (8,192 cached tokens, batch 8, BF16), `fp8_blockscale.py --gemm --n 8192` (BF16 vs FP8 GEMM via `torch._scaled_mm`) and `grouped_gemm_bench.py` at V2-Lite sizes (64 experts, d = 2048, expert FFN 1408). It ends with the router probe of [Chapter 01](01-deepseek-architecture-mla-moe-mtp.md), so park the served model first:
 
@@ -269,6 +342,24 @@ kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscali
 
 ### Task 5 · Which MLA and MoE kernels does vLLM use?
 
+#### What this lab does (script `lab/scripts/serve-model.sh v2-lite`, then `kubectl set env`)
+
+- **Serves `v2-lite`:** Deployment `vllm` in `llm-serving`, util 0.45, 58 Gi (request = limit), `--trust-remote-code`.
+- **Reads the log** for the attention backend vLLM picked and for the fused-MoE kernel config it found (or didn't).
+- **Forces `VLLM_ATTENTION_BACKEND=FLASHMLA`** on the Deployment, watches the rollout, then removes the variable and rolls back to automatic. Both are rollouts of the same Deployment; nothing else changes.
+
+#### What to look for
+
+1. **`serve-model.sh`** ends with `[PASS] vLLM ready with v2-lite` and `0 failed`.
+2. **Attention backend:** a Triton-based MLA backend; FlashMLA or CUTLASS MLA skipped for capability 12.1.
+3. **MoE config:** `Using default MoE config. Performance might be sub-optimal!` is normal on GB10.
+4. **Forced FlashMLA:** the new pod fails at startup with a message about compute capability (the `rollout status` times out or errors, and the `logs` tail shows why). It must not start and then crash on requests.
+5. **After the reset:** the last `rollout status` reports `successfully rolled out`.
+
+**If something's off:** the forced rollout seems to hang → it waits up to 20 min; the old pod keeps serving meanwhile. The reset step must still run. More in §6.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh v2-lite
@@ -293,6 +384,21 @@ An unsupported backend should fail at startup with a message about compute capab
 
 ### Task 6 · Decode throughput vs batch size
 
+#### What this lab does (script `lab/tools/eval_harness.py`, concurrency sweep)
+
+- **Sends the JSON and math suites** to the served `v2-lite` through a port-forward, four times: with 1, 4, 16 and 32 requests in flight.
+- **Writes** `results/v2lite-c1.json` … `results/v2lite-c32.json`. Read-only for the cluster.
+
+#### What to look for
+
+1. **Each run** prints `run: … = N tok/s aggregate`.
+2. **The shape:** aggregate tok/s rises almost linearly from 1 to 16, then flattens by 32. Fill in the table below.
+3. **Accuracy** (`acc=` lines) stays about the same at every concurrency.
+
+**If something's off:** tok/s doesn't rise with concurrency → check `kubectl --context spark-root -n llm-serving get deploy vllm -o yaml | grep max-num-seqs` (32 for `v2-lite`). More in §6.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
@@ -310,6 +416,32 @@ kill %1
 | 32 | KV reads, attention and more experts per step start to dominate; gains flatten | |
 
 ### Task 7 · The same 32B in BF16 and FP8
+
+#### What this lab does (`serve-model.sh r1-32b`, then `r1-32b-fp8`)
+
+- **Parks everything else first** (you do this by hand): bge-m3, Open WebUI, LiteLLM, SGLang and TensorRT-LLM scaled to 0, and no Job running in `batch`.
+- **Serves `r1-32b`** (BF16, ~66 GB of weights): util **0.70**, **87 Gi** pod memory (request = limit), max-num-seqs 16. It is the one catalog entry marked `alone`.
+- **Runs the full eval** (math, code, JSON). The code suite runs the model's Python on your MacBook in an isolated interpreter with a 10 s timeout.
+- **Serves `r1-32b-fp8`** (~34 GB of weights): util **0.45**, **58 Gi**, max-num-seqs 32, same eval. Then prints one report over both.
+- **Long first run:** two downloads, 66 GB and 34 GB, into `model-cache`.
+
+#### What to look for
+
+1. **Quota before `r1-32b`:** `describe resourcequota serving-budget` shows at least 87 Gi of `requests.memory` free (out of 90 Gi).
+2. **Both `serve-model.sh` runs** end with `[PASS] answer: 144 …` and `0 failed`.
+3. **Compare** with the table below:
+
+   | Value | Healthy result |
+   |---|---|
+   | accuracy (math / code / json) | within a few points between BF16 and FP8 |
+   | `Loading weights took … GiB` | FP8 about half of BF16 |
+   | aggregate tok/s | FP8 higher |
+   | `free -g` used on the Spark | clearly lower with FP8 |
+4. **Afterwards:** with `r1-32b-fp8` serving, the parked apps can be scaled back.
+
+**If something's off:** `r1-32b` pod `Pending` with `exceeded quota: serving-budget` → an app or engine still holds memory in `llm-serving`. Same memory for FP8 as BF16 → the weights were dequantised at load. More in §6.
+
+#### Run it
 
 `r1-32b` runs at util 0.70 (~85 GiB of the ~90 GiB LLM pool) with its pod memory raised to fit, so it runs **alone**: scale every other model server and app in `llm-serving` to 0 (bge-m3, Open WebUI, LiteLLM, SGLang, TensorRT-LLM) and make sure no training job is running in `batch`. Check what is left with `kubectl --context spark-root -n llm-serving describe resourcequota serving-budget`.
 
@@ -346,6 +478,22 @@ free -g
 The usual outcome: accuracy within noise, half the weight memory, faster single-stream decode. Once `r1-32b-fp8` is serving, the parked apps can come back.
 
 ### Task 8 · FP8 KV cache
+
+#### What this lab does (`kubectl patch` on Deployment `vllm`)
+
+- **Adds `--kv-cache-dtype=fp8`** to the running `r1-32b-fp8` Deployment (util 0.45, 58 Gi unchanged). Pod memory stays the same; each cached token takes half the bytes.
+- **Restores** the catalog overlay afterwards with `serve-model.sh r1-32b-fp8`, which removes the patch.
+
+#### What to look for
+
+1. **Rollout:** `successfully rolled out`.
+2. **KV cache size:** the logged token count is about twice the Task 7 figure for `r1-32b-fp8`.
+3. **Accuracy:** a Task 7 eval re-run stays within a few points of the BF16-KV result.
+4. **Restore:** `serve-model.sh` ends with `0 failed`, and `kubectl --context spark-root -n llm-serving get deploy vllm -o yaml | grep kv-cache-dtype` prints nothing.
+
+**If something's off:** startup error about the KV dtype → the attention backend in this image doesn't support FP8 KV on sm_121; restore the overlay. More in §6.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab

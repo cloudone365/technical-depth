@@ -160,6 +160,23 @@ user:   Sources:
 
 ### Task 5.1 · Prerequisites
 
+#### What this lab does (manifests `02-Kubernetes/lab/manifests/root-llms/50-workloads`, `lab/k8s/apps`, script `lab/scripts/serve-model.sh`)
+
+- **Qdrant:** StatefulSet `qdrant` (`qdrant/qdrant:v1.13.4-unprivileged`, REST :6333) in `llm-serving` with a `local-nvme-retain` PVC. A no-op if 02 already deployed it.
+- **Tools and data:** `apply -k .` refreshes the ConfigMaps `deepseek-tools` (with `rag_demo.py`) and `deepseek-evaldata` (with `rag_gold.jsonl`, 16 questions).
+- **bge-m3:** the embedding server from Chapter 12 (util 0.06).
+- **Chat model:** `serve-model.sh r1-7b` prefetches, switches `deploy/vllm` to r1-7b and runs a smoke test.
+
+#### What to look for
+
+1. **Rollouts:** `sts/qdrant` and `deploy/bge-m3` report `successfully rolled out`.
+2. **`serve-model.sh`** ends with `[PASS] vLLM ready with r1-7b`, `[PASS] answer: 144 …` and `0 failed`.
+3. **Memory budget:** r1-7b 0.20 + bge-m3 0.06 = 0.26, well under 0.72.
+
+**If something's off:** bge-m3 Pending means `serving-budget` memory is full (`describe quota serving-budget`). A failed prefetch prints the `logs job/model-prefetch` command to run. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 export KUBECONFIG=~/technical-depth/01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml
@@ -176,6 +193,29 @@ scripts/serve-model.sh r1-7b
 ```
 
 ### Task 5.2 · Index with the gate
+
+#### What this lab does (manifest `lab/k8s/jobs/rag-ingest.yaml`)
+
+- **Job `rag-ingest` in `llm-serving`:** runs as UID 65534 with all capabilities dropped; deleted 24 h after it finishes.
+- **Init container** clones `github.com/cloudone365/technical-depth` (depth 1): the Job indexes `main`, not your working copy.
+- **Ingest:** chunks every `.md` under `01-Ansible`, `02-Kubernetes` and `03-DeepSeek`, embeds each chunk with bge-m3 and writes a new collection `technical-depth-<timestamp>` in Qdrant.
+- **Gate:** evaluates the new collection on the 16 gold questions. Only if hit@5 ≥ 0.6 does the alias `technical-depth` move to it; older collections beyond the live one and the previous one are pruned.
+
+#### What to look for
+
+1. **Job status:** `kubectl --context spark-root -n llm-serving get job rag-ingest` shows `1/1`.
+2. **The log**, as in the block below:
+
+   | Line | Healthy value |
+   |---|---|
+   | `… files → … chunks` | about 1,400 chunks |
+   | `collection technical-depth-…` | the same point count, `dim 1024` |
+   | `16 questions hit@1 … hit@5 … MRR …` | hit@5 well above 0.60 |
+   | last lines | `gate passed`, then `alias technical-depth: … → technical-depth-…` |
+
+**If something's off:** the init container failing with `could not resolve host` means the pod has no egress to GitHub. A `GATE FAILED` line means the new index is worse and was deleted; the alias didn't move. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -196,6 +236,21 @@ Record your numbers. With bge-m3, hit@5 should sit well above the gate.
 
 ### Task 5.3 · Measure retrieval at several k
 
+#### What this lab does (tool `lab/tools/rag_demo.py eval`)
+
+- **Two port-forwards** from the MacBook: Qdrant on `localhost:6333`, bge-m3 on `localhost:8001`.
+- **Read-only:** embeds the 16 gold questions and searches the `technical-depth` alias at k = 1, 3, 5, 10. Nothing is written.
+
+#### What to look for
+
+1. **One summary line per k:** `16 questions  hit@1 …  hit@k …  MRR …`. hit@k grows with k; hit@1 and MRR stay the same across the runs.
+2. **hit@5** is the same value Task 5.2's gate saw.
+3. **`MISS` lines** (shown without `| tail -1`) name the question, the expected file and what ranked first.
+
+**If something's off:** `Connection refused` means a port-forward died; start it again. hit@5 low everywhere means the query uses another embedder than the corpus. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root -n llm-serving port-forward svc/qdrant 6333 >/dev/null &
@@ -215,6 +270,21 @@ Each `MISS` line names the question, the expected file and what ranked first. Re
 
 ### Task 5.4 · Ask with citations, and a refusal
 
+#### What this lab does (tool `lab/tools/rag_demo.py ask`)
+
+- **A third port-forward:** vLLM on `localhost:8000`.
+- **Retrieve, then ask:** embeds the question, takes the top 5 chunks from Qdrant, numbers them as sources and asks r1-7b at temperature 0.3 to answer only from them, with citations. Read-only.
+
+#### What to look for
+
+1. **First question:** `--show-context` prints the five sources, then an answer with `[n]` citations, then a `sources:` list whose entries come from `02-Kubernetes/20-vllm-high-throughput-llm-serving.md`.
+2. **Second question:** an answer saying the sources don't contain it. No guessed capital.
+3. **No `<think>` text** in either answer.
+
+**If something's off:** a 404 means `--chat-model` doesn't match the served name. A right context with a wrong answer means the model ignored the sources or ran out of tokens; read `--show-context`. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null &
@@ -227,6 +297,22 @@ python3 tools/rag_demo.py ask "What is the capital of Australia?" $E \
 Expected: the first answer cites sources from [02-Kubernetes Chapter 20](../02-Kubernetes/20-vllm-high-throughput-llm-serving.md); the second says the sources don't contain the answer, which is the refusal the system prompt asks for. `--chat-model` is the served model name; through LiteLLM you'd pass `--chat-url http://api.lab.local --chat-model reasoning-fast` and a key.
 
 ### Task 5.5 · Rollback drill
+
+#### What this lab does (tool `lab/tools/rag_demo.py ingest` and `rollback`)
+
+- **A second index** from your working copy (`--repo ../..`, only `02-Kubernetes` and `03-DeepSeek`), without a gate: the alias moves to it at once.
+- **Rollback:** points the alias back at the previous collection in one atomic alias update. Both collections stay.
+
+#### What to look for
+
+1. **After the ingest:** `alias technical-depth: technical-depth-<old> → technical-depth-<new>`, and `/aliases` shows the new name.
+2. **After the rollback:** `alias technical-depth: technical-depth-<new> → technical-depth-<old>`, and `/aliases` shows the old name again.
+3. **The `eval` loop** in a second terminal keeps printing summary lines through both switches, no errors.
+
+**If something's off:** `no collection older than … to roll back to` means only one `technical-depth-<timestamp>` collection exists; run Task 5.2 first. More in §7.
+
+#### Run it
+
 
 Build a second, newer index from your working copy, then roll back:
 
@@ -242,6 +328,20 @@ Expected: the alias points at the older collection again. Run `eval` in a loop i
 
 ### Task 5.6 · Gate drill
 
+#### What this lab does (tool `lab/tools/rag_demo.py ingest --gate 0.99`)
+
+- **Builds a new collection** from your working copy, then evaluates it with a gate it can't pass (0.99).
+- **On failure:** the new collection is deleted and the alias is left alone. Users never see it.
+
+#### What to look for
+
+1. **The log ends** with `GATE FAILED: hit@5 below 0.99 — technical-depth-… deleted, alias technical-depth unchanged`, then `exit 1`.
+2. **`/collections`** no longer lists the failed collection; `/aliases` is unchanged.
+
+**If something's off:** `gate passed` means all 16 gold questions hit at 5 (hit@5 = 1.00), and the alias moved. Roll back as in Task 5.5 and repeat with `--gate 1.01`, which can never pass. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 python3 tools/rag_demo.py ingest --repo ../.. --dirs "02-Kubernetes" "03-DeepSeek" $E --gate 0.99; echo "exit $?"
@@ -250,6 +350,20 @@ python3 tools/rag_demo.py ingest --repo ../.. --dirs "02-Kubernetes" "03-DeepSee
 Expected: `GATE FAILED … alias technical-depth unchanged` and exit 1. Nothing users see has changed, and the failed collection is gone (`curl -s localhost:6333/collections | jq`).
 
 ### Task 5.7 · Latency budget
+
+#### What this lab does (tool `lab/tools/rag_demo.py ask` and `eval`, timed)
+
+- **Times one full RAG request** (embed, search, R1 answer up to 2,048 tokens) and, separately, the 16 embed-plus-search calls of an `eval`. Read-only.
+
+#### What to look for
+
+1. **`real` of the `ask`:** seconds, dominated by R1's generation.
+2. **`real` of the `eval` ÷ 16:** the retrieval share per question, a small fraction of the `ask` time.
+3. **Fill in the table:** retrieval should be the small row, generation the big one.
+
+**If something's off:** a slow `eval` too means bge-m3 is sharing its time-slice with busy chat traffic. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -266,6 +380,18 @@ time python3 tools/rag_demo.py ask "How does GRPO compute advantages?" $E \
 For the retrieval share, time the eval alone: `time python3 tools/rag_demo.py eval $E -k 5` embeds and searches all 16 gold questions, so divide by 16. Retrieval is almost never the bottleneck; reasoning length is. If RAG answers are slow, look at `max_tokens` and the model, not at Qdrant.
 
 ### Task 5.8 · Embeddings through the gateway
+
+#### What this lab does (LiteLLM alias `embeddings`, bge-m3 directly)
+
+- **Two embedding calls** for the same text: one through `api.lab.local` with the LiteLLM master key, one to bge-m3 through the `localhost:8001` port-forward. Read-only.
+
+#### What to look for
+
+1. **Both commands print `1024`.**
+
+**If something's off:** `null` from the gateway call means the `embeddings` alias is missing or the key is wrong (read the full JSON without `jq`). More in §7.
+
+#### Run it
 
 Production clients use the gateway with a scoped key. Check that the `embeddings` alias returns the same 1024-dim vectors as bge-m3 directly:
 

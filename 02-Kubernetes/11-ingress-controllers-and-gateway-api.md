@@ -120,6 +120,32 @@ Run from `02-Kubernetes/lab` with the lab kubeconfig (`export KUBECONFIG="$PWD/.
 
 ### 5.1 Install and check Traefik and the Gateway
 
+#### What this lab does (script `lab/scripts/install-addons.sh traefik`, values `lab/addons/traefik-values.yaml`)
+
+- **Namespaces:** applies `root-llms/00-platform` on the root (`llm-serving`, `batch`, `ingress`).
+- **Gateway API:** installs the v1.2.1 standard CRDs on the root (server-side apply, downloaded from GitHub).
+- **Traefik:** `helm upgrade --install traefik-lab` in `ingress`: 1 replica, Service `traefik-lab` of type LoadBalancer on `192.168.0.115` (MetalLB), GatewayClass `traefik` and Gateway `lab-gateway`. Streaming-friendly timeouts: `readTimeout: 0s`, `writeTimeout: 0s`, `idleTimeout: 600s`.
+- **Checks:** lists the pods, Services, Gateway objects and CRDs on the root and in dev-lab. The vClusters are not changed.
+- Re-running the script is safe: it is a `helm upgrade`.
+
+#### What to look for
+
+1. **Script exit:** the last line is `192.168.0.115`.
+2. Compare the listings:
+
+   | Object | Healthy value |
+   |---|---|
+   | `svc/traefik-lab` | `LoadBalancer`, `EXTERNAL-IP 192.168.0.115` |
+   | `pod/traefik-lab-…` | `1/1 Running` |
+   | GatewayClass `traefik` | `ACCEPTED True` |
+   | Gateway `ingress/lab-gateway` | `PROGRAMMED True` |
+   | Gateway API CRD count | above 0 on `spark-root`, `0` on `dev-lab` |
+   | `get resourcequota -n ingress` | `No resources found` |
+
+**If something's off:** `EXTERNAL-IP <pending>` means MetalLB isn't running or the pool is used up. A `helm` timeout usually means the Traefik pod can't pull its image. More in §7.
+
+#### Run it
+
 ```bash
 cd "02-Kubernetes/lab"
 scripts/install-addons.sh traefik                        # prints the LB IP at the end
@@ -133,6 +159,24 @@ kubectl --context spark-root -n ingress get resourcequota                      #
 Expected: `svc/traefik-lab` `LoadBalancer` with `EXTERNAL-IP 192.168.0.115`. GatewayClass `traefik` `ACCEPTED True`. Gateway `lab-gateway` `PROGRAMMED True`. A few Gateway API CRDs on the root, none in dev-lab.
 
 ### 5.2 Deploy the mock API behind Ingress and HTTPRoute
+
+#### What this lab does (manifests `lab/manifests/root-llms/10-tenancy`, `root-llms/40-ingress`)
+
+- **Tenancy** in `llm-serving` and `batch`: `serving-budget` and `batch-budget` quotas, LimitRanges, RBAC, and the NetworkPolicy `allow-ingress-and-same-namespace` that lets Traefik in.
+- **Mock API:** `mock-llm` (2 replicas) and `mock-llm-canary` (1 replica), an OpenAI-compatible stub that streams 20 tokens/s on :8000.
+- **Routes:** Ingress `llm` for `llm.lab.local` with the `llm-body-limit` (32 MiB) and `llm-ratelimit` (20/s, burst 40) middlewares, and HTTPRoute `llm-gw` for `gw.lab.local` with a 90/10 split between `mock-llm` and `mock-llm-canary`.
+- **On your laptop:** adds `llm.lab.local` and `gw.lab.local` → `192.168.0.115` to `/etc/hosts`.
+
+#### What to look for
+
+1. **Command exit:** `created` on a first run, `unchanged` on a re-run.
+2. **Pods:** `mock-llm-…` × 2 and `mock-llm-canary-…` × 1, all `1/1 Running`, with their real names (no `-x-…-x-…` suffix).
+3. **HTTPRoute status:** `Accepted=True ResolvedRefs=True`.
+4. **curl:** `{"object":"list","data":[{"id":"mock-llm",…}]}`.
+
+**If something's off:** a curl that hangs while the pods are Ready is the NetworkPolicy (`get netpol -n llm-serving` must list `allow-ingress-and-same-namespace`). `404` means the `Host` didn't match: check `/etc/hosts`. More in §7.
+
+#### Run it
 
 ```bash
 kubectl --context spark-root apply -k manifests/root-llms/10-tenancy       # serving NetworkPolicy, quotas
@@ -148,6 +192,23 @@ Expected: `Accepted=True ResolvedRefs=True`, and `{"object":"list","data":[{"id"
 The pods are `mock-llm-…` in `llm-serving`, not `…-x-llm-serving-x-…` in a `vc-*` namespace: the LLM stack runs on the root, so there is no syncer and no second copy of any object. `kubectl --context spark-root get ingress,httproute -A` lists them under the names in the YAML.
 
 ### 5.3 Prove streaming isn't buffered
+
+#### What this lab does (curl through `llm.lab.local`, drill `breakfix 09`)
+
+- Times a 100-token stream through the Ingress (time to first byte vs total) and timestamps an 8-token stream.
+- **Drill:** `breakfix.sh inject 09` adds a second Ingress `bf09` for `bf09.lab.local` with a `buffering` middleware (`maxResponseBodyBytes: 10485760`). You time the same stream through it, then `reset 09` deletes both objects.
+- Adds `bf09.lab.local` to your laptop's `/etc/hosts`. Nothing else changes.
+
+#### What to look for
+
+1. **Through `llm.lab.local`:** `TTFB` about `0.05s`, `total` about `5s` (100 tokens at 20 tok/s).
+2. **`ts` output:** one `data:` line about every 50 ms.
+3. **Through `bf09.lab.local`:** `TTFB` about equal to `total`, both about `5s`.
+4. **After `reset 09`:** `kubectl --context spark-root -n llm-serving get ingress` lists only `llm`.
+
+**If something's off:** a high TTFB through `llm.lab.local` too means buffering somewhere else: another middleware on the route, or a proxy on your laptop (`curl --noproxy '*'`). More in §7.
+
+#### Run it
 
 ```bash
 curl -sN -o /dev/null -w 'TTFB %{time_starttransfer}s  total %{time_total}s\n' \
@@ -169,6 +230,21 @@ Expected with the buffering middleware: **TTFB ≈ total ≈ 5 s**. TTFB equal t
 
 ### 5.4 Long generations don't time out
 
+#### What this lab does (curl, optional `helm upgrade`)
+
+- Streams 2000 tokens (about 100 s) through the Ingress.
+- **Optional experiment:** set `readTimeout: 60s` in `addons/traefik-values.yaml`, re-run `scripts/install-addons.sh traefik`, watch the stream fail at 60 s, then set it back to `0s` and re-run.
+
+#### What to look for
+
+1. **The stream** ends with `data: [DONE]` and `time` shows about 100 s.
+2. **With `readTimeout: 60s`:** the stream stops at about 60 s without `[DONE]`.
+3. **After you put it back:** `scripts/verify.sh ingress` passes again.
+
+**If something's off:** a cut at 60 s with the lab values means the values file wasn't applied: check `helm --kube-context spark-root -n ingress get values traefik-lab` and re-run the install script. More in §7.
+
+#### Run it
+
 ```bash
 time curl -sN http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":2000}' | tail -1
 ```
@@ -176,6 +252,22 @@ time curl -sN http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_t
 2000 tokens at 20 tok/s = 100 s, past the old 60 s default. Expected: ends with `data: [DONE]`. Set `readTimeout: 60s` under `ports.web.transport.respondingTimeouts` in [`addons/traefik-values.yaml`](lab/addons/traefik-values.yaml), re-run `scripts/install-addons.sh traefik` (a `helm upgrade` on the root), and watch it fail at 60 s. That's the #1 support ticket for self-hosted LLM APIs. Put it back to `0s` afterwards.
 
 ### 5.5 Body limit and rate limit
+
+#### What this lab does (middlewares `llm-body-limit`, `llm-ratelimit`)
+
+- Sends one 40 MB request (above the 32 MiB `maxRequestBodyBytes`), then 200 requests with 50 in parallel against the `average: 20`, `burst: 40` rate limit.
+- **Optional:** turn on Traefik access logs in `addons/traefik-values.yaml`, re-run the install script, and read which client IP Traefik saw.
+- Nothing is changed unless you do the optional step.
+
+#### What to look for
+
+1. **Big request:** `413`.
+2. **Burst:** a mix of `200` and `429`, roughly 40 plus 20 per second of the run as `200`.
+3. **Access log (optional):** a single `ClientHost`, the node's address, not your laptop's.
+
+**If something's off:** all `200` means the `router.middlewares` annotation on Ingress `llm` doesn't list `llm-serving-llm-ratelimit@kubernetescrd`. More in §7.
+
+#### Run it
 
 ```bash
 head -c 40000000 /dev/zero | tr '\0' 'a' | jq -Rs '{messages:[{role:"user",content:.}]}' > /tmp/big.json
@@ -196,6 +288,21 @@ The lab values don't enable access logs: add `logs: {access: {enabled: true}}` t
 
 ### 5.6 API-key auth (basicAuth as a simple key)
 
+#### What this lab does (middleware `llm-apikey`)
+
+- Creates a random key in `/tmp/alpha.key` and an htpasswd entry for `team-alpha`, stores it as Secret `llm-api-users` in `llm-serving` on the root.
+- **Changes** Ingress `llm`: its middleware annotation now also lists `llm-serving-llm-apikey@kubernetescrd`, so every request needs the key.
+
+#### What to look for
+
+1. **Without the key:** `401`.
+2. **With the key:** `mock-llm`.
+3. **Side effect:** `scripts/verify.sh ingress` now reports `Ingress returned 401` for `llm.lab.local`, because it sends no key. Remove the auth middleware again (re-apply `root-llms/40-ingress`) when you're done with this step.
+
+**If something's off:** `401` with the key usually means the Secret has no `users` key (it must be created `--from-file=users=…`). More in §7.
+
+#### Run it
+
 ```bash
 htpasswd -nbB team-alpha "$(openssl rand -hex 16 | tee /tmp/alpha.key)" > /tmp/users
 kubectl --context spark-root -n llm-serving create secret generic llm-api-users --from-file=users=/tmp/users
@@ -211,6 +318,20 @@ For OpenAI SDKs that only send `Authorization: Bearer`, use LiteLLM (module 03) 
 
 ### 5.7 Canary with Gateway API weights
 
+#### What this lab does (HTTPRoute `llm-gw`)
+
+- Sends 200 requests through `gw.lab.local` and counts which model name answers.
+- **Optional:** edit the weights in `gateway-routes.yaml` and re-apply `root-llms/40-ingress`.
+
+#### What to look for
+
+1. **With 90/10:** about `180 mock-llm` and `20 mock-llm-canary`.
+2. **After a weight change:** the counts follow the new weights.
+
+**If something's off:** only `mock-llm` means the canary has no ready endpoint (`kubectl --context spark-root -n llm-serving get pods -l app=mock-llm-canary`). More in §7.
+
+#### Run it
+
 ```bash
 for i in $(seq 200); do curl -s http://gw.lab.local/v1/models | jq -r '.data[0].id'; done | sort | uniq -c
 ```
@@ -218,6 +339,20 @@ for i in $(seq 200); do curl -s http://gw.lab.local/v1/models | jq -r '.data[0].
 Expected: ≈ `180 mock-llm` / `20 mock-llm-canary`. Promote by editing the weights in [`gateway-routes.yaml`](lab/manifests/root-llms/40-ingress/gateway-routes.yaml) (90/10 → 50/50 → 0/100) and re-applying with `kubectl --context spark-root apply -k manifests/root-llms/40-ingress`. Every step is a Git diff — and in Chapter 28, an Argo CD sync of a `spark-root-llms-*` Application (destination in-cluster).
 
 ### 5.8 TLS
+
+#### What this lab does (self-signed certificate on Ingress `llm`)
+
+- Creates a self-signed ECDSA certificate for `llm.lab.local` in `/tmp`, stores it as Secret `llm-tls` in `llm-serving`.
+- **Changes** Ingress `llm`: adds a `tls` section and the `web,websecure` entrypoints, so it answers on 443 too.
+
+#### What to look for
+
+1. **Command exit:** `secret/llm-tls created`, `ingress.networking.k8s.io/llm patched`, `… annotated`.
+2. **curl over HTTPS** with `--cacert /tmp/tls.crt` prints `mock-llm`. If you kept the API key from §5.6, add `-u "team-alpha:$(cat /tmp/alpha.key)"`.
+
+**If something's off:** a certificate error means curl isn't using `/tmp/tls.crt` or the name isn't `llm.lab.local`. Traefik's default certificate in the answer means the Secret isn't in `llm-serving`. More in §7.
+
+#### Run it
 
 ```bash
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 365 \
@@ -231,6 +366,20 @@ curl -s --cacert /tmp/tls.crt https://llm.lab.local/v1/models | jq -r '.data[0].
 In production, cert-manager issues and renews these (`scripts/install-addons.sh kserve` installs cert-manager on the root).
 
 ### 5.9 gRPC to Triton (after Chapter 21)
+
+#### What this lab does (GRPCRoute `triton`)
+
+- Creates a GRPCRoute in `llm-serving` that sends `triton.lab.local` to the Triton Service on port 8001 through `lab-gateway`.
+- Needs Triton deployed from Chapter 21. Without it the route is created but has no backend.
+
+#### What to look for
+
+1. **Route status:** `kubectl --context spark-root -n llm-serving get grpcroute triton -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {end}{"\n"}'` prints `Accepted=True ResolvedRefs=True`.
+2. **`ResolvedRefs=False`** means the `triton` Service doesn't exist yet.
+
+**If something's off:** see §7 and Chapter 21.
+
+#### Run it
 
 The Triton Service declares `appProtocol: kubernetes.io/h2c` on port 8001, so Traefik speaks cleartext HTTP/2 to it. Apply with `kubectl --context spark-root apply -f -`:
 

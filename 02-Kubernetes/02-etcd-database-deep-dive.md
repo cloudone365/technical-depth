@@ -171,6 +171,33 @@ kubectl config get-contexts -o name          # spark-root, dev-lab, dev-llms
 
 ### 5.1 Meet the stacked etcd
 
+#### What this lab does (script `lab/scripts/etcd-drill.sh status`)
+
+- **Reads the static pod:** greps the data dir, client/peer/metrics URLs and cert flags out of `/etc/kubernetes/manifests/etcd.yaml`, lists the etcd CA folder `/etc/kubernetes/pki/etcd/` and shows the mirror pod `etcd-dgx-spark-1`.
+- **`etcd-drill.sh status`:** runs `sudo etcdctl` against `https://127.0.0.1:2379` with the `healthcheck-client` certificate and prints the member list, the endpoint status and the alarm list, then the newest files in `/var/lib/etcd-snapshots` and the `etcd-snapshot.timer` schedule.
+- **Read-only:** nothing is written to etcd and nothing is restarted.
+
+#### What to look for
+
+1. **Command exit:** `etcd-drill.sh status` prints its tables without `context deadline exceeded`.
+2. Compare with the expected output below:
+
+   | Field | Healthy value |
+   |---|---|
+   | member list | one member, `started`, name `dgx-spark-1`, peer `https://192.168.0.100:2380` |
+   | `IS LEADER` | `true` |
+   | `RAFT TERM` | a small number that doesn't grow between runs |
+   | `DB SIZE` vs `DB SIZE IN USE` | tens of MB; far below the 2 GiB quota |
+   | alarm list | empty |
+   | snapshots | at least one `etcd-dgx-spark-1-<YYYYmmdd-HHMMSS>.db` |
+   | timer | `etcd-snapshot.timer` with a `NEXT` time at most 6 h away |
+
+3. **Tool versions:** `etcdctl version` and `etcdutl version` match the etcd image tag in `etcd.yaml`.
+
+**If something's off:** `etcdctl missing` → re-run 01-Ansible `19.1 Kubernetes`, which downloads the matching tools. No snapshot yet → `systemctl status etcd-snapshot.service` shows the last run. More in §7.
+
+#### Run it
+
 There's nothing to migrate: kubeadm created etcd at `kubeadm init`. Look at how:
 
 ```bash
@@ -207,6 +234,23 @@ Things to notice:
 
 ### 5.2 Measure the disk the way etcd uses it
 
+#### What this lab does (host `fio`, then manifest `lab/manifests/root/60-storage/fio-job.yaml`)
+
+- **Host fio:** writes 22 MiB in 2300-byte blocks to a temporary `/var/lib/fio-etcd`, with an `fdatasync` after every write (the way etcd writes its WAL), then deletes the folder.
+- **Competing I/O:** creates PVC `fio-scratch` (64 Gi, `local-nvme`), ConfigMap `fio-profiles` and Job `fio-ai` in the root's `platform-tools`. The Job runs four 45-second profiles (1 MiB sequential read and write, 128 KiB and 4 KiB random read) on the same NVMe while you repeat the host fio. It asks for 4 CPUs.
+- **Nothing in etcd or Kubernetes is reconfigured.** You delete the Job afterwards.
+
+#### What to look for
+
+1. **Same device:** `df -h /var/lib/etcd /data/k8s` shows the same filesystem for both.
+2. **First fio run:** in the `fsync/fdatasync/sync_file_range` block, the `99.00th` percentile is well under 10 ms; a healthy NVMe gives tens to hundreds of µs.
+3. **Second run, during `fio-ai`:** the same percentile is clearly higher. Note both numbers: that gap is what the API server and both vClusters' SQLite files feel during a checkpoint write.
+4. **The Job:** `kubectl --context spark-root -n platform-tools get pods` shows the `fio-ai-…` pod `Running`, then `Completed`.
+
+**If something's off:** `fio: command not found` on the Spark → `sudo apt-get install -y fio` (01-Ansible's base package list doesn't include it). The `fio-ai` pod `Pending` → its PVC is waiting for the `local-nvme` StorageClass (`scripts/install-addons.sh storage`). More in §7 (second row).
+
+#### Run it
+
 etcd writes small records and fdatasyncs each one. Test exactly that on the filesystem that holds `/var/lib/etcd` (on a Spark that's the one NVMe that also holds `/data/k8s`, where every PVC lives):
 
 ```bash
@@ -226,6 +270,28 @@ kubectl --context spark-root -n platform-tools get pods -w                      
 The tail latency jumps. That's what happens to the API server — and to both vClusters, whose SQLite files sit on the same disk — during a checkpoint write. Delete the job afterwards (`kubectl --context spark-root delete -f manifests/root/60-storage/fio-job.yaml`).
 
 ### 5.3 Look inside the keyspace
+
+#### What this lab does (raw `etcdctl` reads, a few test objects)
+
+- **Counts keys:** lists every key under `/registry` (keys only) and counts them by resource, then lists the host copies of dev-lab's pods under `/registry/pods/vc-dev-lab`.
+- **Creates test objects:** Secret `platform-tools/demo` on the root; in dev-lab, Secret `lab-tools/demo` and a `pause` pod `secret-user` that mounts it, so the syncer copies the Secret to the root as `vc-dev-lab/demo-x-lab-tools-x-dev-lab`.
+- **Reads raw values:** the root Secret and its host copy straight from etcd, and greps dev-lab's SQLite files under `/data/k8s/vc-dev-lab/data-dev-lab-0/` for the password.
+- **MVCC:** annotates `platform-tools/demo` three times and reads it at the current and the previous revision.
+- Nothing is reconfigured. You delete the dev-lab objects at the end and keep `platform-tools/demo` for §5.6.
+
+#### What to look for
+
+| Check | Healthy value |
+|---|---|
+| top of the key count | `events`, `pods`, `leases` and similar near the top |
+| raw `platform-tools/demo` | starts with `k8s:enc:aescbc:v1:key1:`; `hunter2` appears nowhere |
+| raw `vc-dev-lab/demo-x-lab-tools-x-dev-lab` | also starts with `k8s:enc:aescbc:v1:key1:` |
+| `grep -rac hunter2` on dev-lab's PVC | one or more files with a count above 0: dev-lab stores Secrets in plaintext |
+| MVCC JSON | `version: 4`; the read one revision back returns `3` |
+
+**If something's off:** plaintext in a **root** Secret means the encryption flag is missing (Chapter 03 §3.5). No `demo-x-lab-tools-x-dev-lab` at the root means `secret-user` isn't running yet: vCluster syncs a Secret only once a synced pod uses it. More in §7.
+
+#### Run it
 
 ```bash
 E="sudo ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt \
@@ -279,6 +345,24 @@ Clean up: `kubectl --context dev-lab -n lab-tools delete pod secret-user && kube
 
 ### 5.4 Break Raft on purpose (sandbox, not your cluster)
 
+#### What this lab does (script `lab/scripts/etcd-sandbox.sh`, compose file `lab/etcd-sandbox/compose.yaml`)
+
+- **`up`:** starts four Docker containers from `quay.io/coreos/etcd:v3.5.21`: members `e1`, `e2`, `e3` (host ports 12379, 22379, 32379) and a `cli` container that holds `etcdctl`, so stopping a member never stops your client. Heartbeat 100 ms, election timeout 1000 ms, quota 32 MiB.
+- **`kill-leader`:** stops the current leader, times the election, writes `/after-failover` with 2 of 3 members, then starts the old leader again.
+- **`kill-two`:** stops `e2` and `e3`, tries a write on `e1` (it must fail), does a serializable read on `e1` (it must succeed), then starts both again.
+- **The root's etcd is never touched:** Docker uses its own containerd namespace, so `sudo crictl ps` doesn't list these containers.
+
+#### What to look for
+
+1. **`up`:** the status table lists three endpoints, exactly one with `IS LEADER true`, and an empty alarm list.
+2. **`kill-leader`:** `[PASS] new leader eN after … ms`, a value a little above the 1000 ms election timeout, then `OK` and `[PASS] writes still work with 2/3 members`.
+3. **`kill-two`:** `Error: context deadline exceeded`, then `[PASS] write failed: no quorum (expected)` and `[PASS] serializable (possibly stale) read still served locally`.
+4. A `[FAIL] write succeeded without quorum?!` line would mean the members didn't stop. Check `docker compose ps` in `lab/etcd-sandbox`.
+
+**If something's off:** `docker: permission denied` → `dgxadmin` isn't in the `docker` group yet (01-Ansible `04.3 Baseline` adds it); log out and in again, or run 04.3. A first `up` that hangs is the image pull. When you're done with §5.5, `scripts/etcd-sandbox.sh down` removes the containers.
+
+#### Run it
+
 The sandbox is three etcd containers under Docker. Docker on DGX OS shares `containerd.io` with Kubernetes but uses its own containerd namespace (`moby`), so `sudo crictl ps` won't show them and they never touch the root etcd.
 
 ```bash
@@ -303,6 +387,22 @@ This is why a Kubernetes control plane with 1 of 3 etcd members left serves `kub
 
 ### 5.5 Hit the space quota and recover
 
+#### What this lab does (script `lab/scripts/etcd-sandbox.sh fill` / `recover-space`)
+
+- **`fill`:** writes 64 KiB random values to 50 keys under `/fill/` in a loop until etcd refuses, then prints the alarm list and the status table. The sandbox quota is 32 MiB and auto-compaction is off, so every overwrite keeps its old revision and the database fills in a few minutes.
+- **`recover-space`:** compacts to the current revision, defragments all three members (`defrag --cluster`), disarms the alarm and prints the status again.
+- **Sandbox only.** The block for the root afterwards is a reference for when `EtcdDbNearQuota` fires; don't run it just to practise.
+
+#### What to look for
+
+1. **End of `fill`:** `[WARN] stopped after … puts`, then `alarm:NOSPACE` for a member, and a `DB SIZE` around 32 MB.
+2. **A write during the alarm** fails with `etcdserver: mvcc: database space exceeded`.
+3. **After `recover-space`:** `DB SIZE` is much smaller than before and `alarm list` prints nothing.
+
+**If something's off:** a write still fails after recovery → the alarm wasn't disarmed; run `scripts/etcd-sandbox.sh status` and disarm again. `defrag` errors on one member → that member is stopped; `docker compose start` it in `lab/etcd-sandbox`. More in §7 (first row).
+
+#### Run it
+
 ```bash
 scripts/etcd-sandbox.sh fill          # 32 MiB quota → NOSPACE
 scripts/etcd-sandbox.sh recover-space # compact → defrag --cluster → alarm disarm
@@ -323,6 +423,32 @@ $E alarm list && $E alarm disarm
 With one member, `defrag` blocks **the only** member: the root API server stalls for its duration (seconds on a small DB), and both vClusters' syncers queue behind it. Do it off-peak. In a 3-member cluster you defrag one member at a time, never `--cluster` in production.
 
 ### 5.6 Snapshot and restore the root cluster
+
+#### What this lab does (script `lab/scripts/etcd-drill.sh snapshot` / `restore`)
+
+- **`snapshot`:** runs `/usr/local/sbin/etcd-snapshot drill`, which saves `/var/lib/etcd-snapshots/etcd-dgx-spark-1-<YYYYmmdd-HHMMSS>-drill.db`, checks it with `etcdutl snapshot status` and keeps the newest 20 snapshots.
+- **Markers:** after the snapshot you create namespace `doomed-by-restore` and ConfigMap `platform-tools/doomed` on the root, and namespace `survives-restore` in dev-lab.
+- **`restore <file>` (destructive):** asks you to type `restore`, then moves the four static-pod manifests to `/etc/kubernetes/manifests.stopped`, keeps the current data as `/var/lib/etcd.before-restore-<ts>`, runs `etcdutl snapshot restore` into `/var/lib/etcd` with the member name and IP from `etcd.yaml`, moves the manifests back and waits for `/readyz`.
+- **What rolls back:** every root object, the LLM stack in `llm-serving` and `batch` included. Running pods keep running while the control plane is down (a minute or two). The vClusters' own objects don't roll back: they live in SQLite.
+
+#### What to look for
+
+1. **Script exit:** `[PASS] restored from etcd-dgx-spark-1-…-drill.db` followed by the `[WARN]` that the vClusters' data was not rolled back. That warning is expected.
+2. **The markers**, with the commands under "Then check" below:
+
+   | Object | Healthy value after the restore |
+   |---|---|
+   | root namespace `doomed-by-restore` | `NotFound` |
+   | root ConfigMap `platform-tools/doomed` | `NotFound` |
+   | root Secret `platform-tools/demo` (from §5.3) | still there |
+   | dev-lab namespace `survives-restore` | still there |
+
+3. **The syncer:** `kubectl --context spark-root -n vc-dev-lab get pods -w` shows host copies created or removed for a minute or two, then it settles.
+4. **Gate:** `scripts/verify.sh platform vclusters` ends `0 failed`. Its etcd-snapshot line reads `[....] no etcd snapshot on this machine yet` when you run it as `dgxadmin`, because `/var/lib/etcd-snapshots` is mode 0700 root; `etcd-drill.sh status` (with sudo) is the real check.
+
+**If something's off:** `kubectl` hangs after the restore → etcd didn't start; `sudo crictl ps -a --name etcd` and its logs. To undo, move `/var/lib/etcd.before-restore-<ts>` back to `/var/lib/etcd`. More in §7 (fourth row).
+
+#### Run it
 
 Make a marker on each side of the snapshot, so you can see exactly what rolls back:
 
@@ -365,6 +491,25 @@ Workbook Ex 20 asks you to doom a namespace, a ConfigMap and a Kueue LocalQueue.
 
 ### 5.7 Copy snapshots off the box
 
+#### What this lab does (one `ssh … sudo tar` pipeline from the MacBook)
+
+- **Pulls one tarball** to `~/spark-backups/spark-root-<date>.tgz` on the MacBook with: all snapshots in `/var/lib/etcd-snapshots`, the whole PKI folder `/etc/kubernetes/pki` (CA keys included), the encryption key file `/etc/kubernetes/encryption/config.yaml`, and `/etc/kubernetes/kubeadm-config.yaml`.
+- **Read-only on the Spark:** nothing there changes. It logs in as `dgxadmin` with your own key, and `sudo tar` must run without a password prompt inside the pipeline.
+
+#### What to look for
+
+1. **Command exit:** the `ssh` line returns without an error and the file is bigger than your newest snapshot.
+2. **`tar tzf … | head`** lists paths starting with `var/lib/etcd-snapshots/`, `etc/kubernetes/pki/` and `etc/kubernetes/encryption/config.yaml`. Check for `pki/ca.key` and `pki/etcd/ca.key` too:
+   ```bash
+   # ▶ MacBook · any folder
+   tar tzf ~/spark-backups/spark-root-$(date +%F).tgz | grep -E 'ca\.key|config\.yaml|\.db$' | head
+   ```
+3. **Protect it:** this file can decrypt every Secret and mint cluster-admin certificates. Encrypt it, or keep the keys in vault01 and only the snapshots on the NAS.
+
+**If something's off:** `sudo: a terminal is required` → `sudo` asked for a password. Do it in two steps: `ssh -t` to the Spark, `sudo tar czf /tmp/spark-root.tgz …` with the same paths, then `scp` it to the MacBook and delete `/tmp/spark-root.tgz`. An empty or tiny tarball means `sudo tar` failed on the Spark; run the `ssh` part alone to see its error.
+
+#### Run it
+
 A snapshot on the Spark's own NVMe protects you from a bad `kubectl delete`, not from a dead disk or `19.2-reset-kubernetes.yml -e reset_wipe_data=true`. From your MacBook (as the admin user `dgxadmin` with your own key, the same login as the bootstrap playbooks), pull everything a rebuild on *new* hardware needs in one tarball:
 
 ```bash
@@ -384,6 +529,23 @@ tar tzf ~/spark-backups/spark-root-$(date +%F).tgz | head
 Treat that tarball like a password: it holds the key that decrypts every Secret **and** the CA keys that can mint cluster-admin certificates. Encrypt it at rest (`age`/`gpg`), or store the keys in vault01's KV (01-Ansible Chapter 18) and only the snapshots on the NAS. Automate it daily (Chapter 05's operations table) — a `cron`/`launchd` job on the MacBook (or a timer on the NAS) running this `ssh … | …` line is enough.
 
 ### 5.8 Back up a vCluster's own state
+
+#### What this lab does (StatefulSet scale + `tar` of the PVC folder)
+
+- **Stops dev-lab's control plane:** scales StatefulSet `vc-dev-lab/dev-lab` to 0 and waits for pod `dev-lab-0` to go away, so nothing writes the SQLite database during the copy.
+- **Copies the database:** `sudo tar` of `/data/k8s/vc-dev-lab/data-dev-lab-0` (the 5 Gi `local-nvme` PVC) into `~/dev-lab-<date>.tgz` on the Spark.
+- **Starts it again:** scales back to 1 and waits for the rollout.
+- **Impact:** for a minute `kubectl --context dev-lab` fails and nothing new syncs; tenant pods keep running because they are root pods. dev-llms, the LLM stack and the root aren't touched. Repeat with `vc-dev-llms` / `data-dev-llms-0` for the second vCluster.
+
+#### What to look for
+
+1. **Commands exit:** `wait --for=delete` returns before its 120 s timeout, and `rollout status` ends with `partitioned roll out complete` or `successfully rolled out`.
+2. **The tarball:** `tar tzf ~/dev-lab-$(date +%F).tgz | head` lists files under `data-dev-lab-0/`.
+3. **dev-lab is back:** `scripts/verify.sh vclusters` shows `[PASS] dev-lab control plane Running in vc-dev-lab` and `[PASS] dev-lab API answers`, and the `survives-restore` namespace from §5.6 is still listed by `kubectl --context dev-lab get ns`.
+
+**If something's off:** `dev-lab-0` doesn't come back → `kubectl --context spark-root -n vc-dev-lab describe pod dev-lab-0` and its logs. A control plane that won't start after a *restore* of this folder means the copy was taken while it was running. More in §7 (last row).
+
+#### Run it
 
 None of §5.6–5.7 covers dev-lab's or dev-llms' objects. Each keeps them in SQLite on a `local-nvme` PVC, which local-path-provisioner placed at `/data/k8s/<namespace>/<pvc>` ([`addons/local-path-nvme.yaml`](lab/addons/local-path-nvme.yaml)). The lab supports two ways to back it up:
 
@@ -410,7 +572,7 @@ Either way, a *consistent* lab backup is a pair: a root etcd snapshot and both v
 | Check | Expected |
 |---|---|
 | `scripts/etcd-drill.sh status` | 1 member `dgx-spark-1`, `IS LEADER true`, empty alarm list, ≥ 1 snapshot, `etcd-snapshot.timer` scheduled |
-| `scripts/verify.sh platform` | includes `[PASS] etcd snapshots present (N)` |
+| `scripts/verify.sh platform` | `0 failed`. The snapshot line is `[PASS] etcd snapshots present (N)` only for a user who can read `/var/lib/etcd-snapshots` (mode 0700 root); as `dgxadmin` it prints `[....] no etcd snapshot …`, so rely on `etcd-drill.sh status` |
 | raw root Secret starts with `k8s:enc:aescbc:v1:key1:` | yes |
 | Prometheus `histogram_quantile(0.99, rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m]))` | < 0.01 when idle |
 | Restore drill | root objects created after the snapshot are gone; dev-lab's `survives-restore` namespace is still there; `scripts/verify.sh platform vclusters` passes |

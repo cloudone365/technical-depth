@@ -155,6 +155,26 @@ The lab's GRPO settings and what they mean:
 
 ### Task 3.1 — The losses on toy numbers (CPU)
 
+#### What this lab does (inline Python)
+
+- **Computes** the DPO loss for one toy pair, the SimPO loss for the same log-probs, and GRPO's group-normalised advantages for three groups of four rewards. MacBook CPU only.
+
+#### What to look for
+
+1. **Values:**
+
+   | Line | Healthy value |
+   |---|---|
+   | `DPO` | `step 0 loss 0.6931`, then `margin +0.50 loss 0.4741` |
+   | `SimPO` | `z -1.167  loss 1.4378` |
+   | `GRPO rewards [1, 0, 0, 1]` | `[1.0, -1.0, -1.0, 1.0]` |
+   | `GRPO rewards [1, 1, 1, 1]` | `[0.0, 0.0, 0.0, 0.0]`: no signal when every completion scores the same |
+   | `GRPO rewards [0.0, 0.5, 1.0, 2.0]` | `[-1.18, -0.51, 0.17, 1.52]` |
+
+**If something's off:** nothing on the cluster is involved; different numbers mean an edited constant.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · any folder
 python3 - <<'PY'
@@ -176,13 +196,27 @@ for rewards in ([1, 0, 0, 1], [1, 1, 1, 1], [0.0, 0.5, 1.0, 2.0]):
 PY
 ```
 
-Expected: the DPO loss starts at 0.6931 and drops when the chosen answer's log-ratio exceeds the rejected one's; the all-ones GRPO group gives all-zero advantages.
+The DPO loss starts at ln 2 and drops when the chosen answer's log-ratio exceeds the rejected one's.
 
 ---
 
 ## 4. What it means on a Spark — the lab
 
 ### 4.1 Setup and the training window
+
+#### What this lab does (KEDA pause + 02 overlay `root-llms/training-window`)
+
+- **Checks** that PVC `qwen-train` from Chapter 07 exists in `batch`.
+- **Parks serving and lends the pool**, exactly as Chapter 07 Task 5.3: `vllm` paused at 0, the side engine removed, `bge-m3` at 0; `batch-budget` and `spark-cq` go to 8 CPU · 80 Gi, `serving-budget` to 2 CPU · 10 Gi.
+
+#### What to look for
+
+1. **PVC:** `qwen-train` `Bound`, 60Gi.
+2. **`batch-budget`:** hard `requests.cpu 8`, `requests.memory 80Gi`, `limits.memory 80Gi`, and nothing used yet.
+
+**If something's off:** PVC missing → applying any `swift-*.yaml` creates it (each file carries the same PVC). Quotas back at 2 CPU · 12Gi → Argo CD self-heal (Chapter 07 Task 5.3).
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
@@ -206,6 +240,30 @@ One Job at a time: each asks for 6 CPU, and the window has 8.
 
 ### Task 4.2 — DPO
 
+#### What this lab does (manifest `lab/k8s/jobs/swift-dpo.yaml`)
+
+- **Job `swift-dpo` in `batch`**, admitted by Kueue (`train` → `spark-cq`): `swift rlhf --rlhf_type dpo`, LoRA rank 16 on Qwen3-4B-Instruct-2507, 2,000 pairs of `Intel/orca_dpo_pairs`, learning rate 5e-5, `--rpo_alpha 0.1`. 6 CPU · 48 Gi · 1 slice, request = limit.
+- **Reuses** the PVC `qwen-train`: the base model is already in `/work/hf` from Chapter 07. Output in `/work/output/dpo`.
+- **Variants:** the same file with `MODEL` pointed at your merged SFT model, or `DATASET` at your own pairs.
+
+#### What to look for
+
+1. **Workload:** `ADMITTED  True`; one pod `Running`.
+2. **Log metrics:**
+
+   | Metric | Healthy value |
+   |---|---|
+   | `loss` | starts near `0.693`, then falls |
+   | `rewards/accuracies` | climbs above `0.5` |
+   | `rewards/margins` | grows |
+   | `rewards/chosen` | does not fall steadily |
+
+3. **Memory:** the cgroup `peak … GiB` stays well below 48; record it with the time per step.
+
+**If something's off:** `loss` flat at 0.693 → the pairs don't separate; check a few by eye. `rewards/chosen` falling steadily → DPO drift; keep `--rpo_alpha`. More in §5.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 kubectl --context spark-root apply -f k8s/jobs/swift-dpo.yaml
@@ -213,7 +271,7 @@ kubectl --context spark-root -n batch get workloads
 kubectl --context spark-root -n batch logs -f job/swift-dpo | grep -oE "'(loss|rewards/(chosen|rejected|margins|accuracies))': [-0-9.e]+" 
 ```
 
-The Job trains a LoRA on 2,000 pairs of `Intel/orca_dpo_pairs` (`question` / `chosen` / `rejected`, mapped by ms-swift onto its `messages` + `rejected_response` format) at learning rate 5e-5, β 0.1 (the default) and `--rpo_alpha 0.1`, in 6 CPU · 48 Gi request = limit. Watch for: `loss` starting at ~0.693, `rewards/accuracies` climbing above 0.5, `rewards/margins` growing, `rewards/chosen` not collapsing. Record time per step and the cgroup peak as in Chapter 07 Task 5.4:
+The Job trains a LoRA on 2,000 pairs of `Intel/orca_dpo_pairs` (`question` / `chosen` / `rejected`, mapped by ms-swift onto its `messages` + `rejected_response` format) at learning rate 5e-5, β 0.1 (the default) and `--rpo_alpha 0.1`, in 6 CPU · 48 Gi request = limit. Record time per step and the cgroup peak as in Chapter 07 Task 5.4:
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
@@ -233,6 +291,20 @@ sed 's|value: Qwen/Qwen3-4B-Instruct-2507}|value: /work/output/sft/v0-XXXXXXXX-X
 
 ### Task 4.3 — SimPO with the same Job
 
+#### What this lab does (`swift-dpo.yaml` with `RLHF_TYPE=simpo`)
+
+- **Deletes** the DPO Job and re-applies the same manifest through `sed`: `RLHF_TYPE` becomes `simpo` and `--rpo_alpha 0.1` becomes `--cpo_alpha 0` (pure SimPO). Same name `swift-dpo`, same resources.
+- **No reference model** forward pass. Output in `/work/output/simpo`; the DPO output stays.
+
+#### What to look for
+
+1. **Log:** `loss`, `rewards/*` and at the end `train_runtime`.
+2. **Compared with DPO:** shorter time per step, a peak memory no higher, `rewards/accuracies` above 0.5. Compare accuracies, not raw margins: SimPO's rewards use β = 2 and length normalisation.
+
+**If something's off:** `unrecognized arguments` → a typo in the `sed`; render it without `| kubectl apply` and read the args. More in §5.
+
+#### Run it
+
 `RLHF_TYPE` selects the method; everything else stays. Pure SimPO also wants `--cpo_alpha 0` (otherwise ms-swift mixes in the CPO NLL term):
 
 ```bash
@@ -248,6 +320,29 @@ The output goes to `/work/output/simpo`. Compare with the DPO run: time per step
 
 ### Task 4.4 — GRPO with rule-based rewards
 
+#### What this lab does (manifest `lab/k8s/jobs/swift-grpo.yaml`)
+
+- **Job `swift-grpo` in `batch`:** LoRA GRPO of Qwen2.5-1.5B-Instruct (a new ~3 GB download into `/work/hf`) on 1,000 NuminaMath-TIR problems for 200 steps, 4 completions per prompt, rewards `accuracy` (via `math-verify`) and `format` (`<think>…</think><answer>…</answer>`). 6 CPU · 64 Gi · 1 slice, request = limit.
+- **Rollouts** use Hugging Face `generate()`: slow, but it needs only the PyTorch image. Output in `/work/output/grpo`.
+- **Variant:** the same Job on `VLLM_IMAGE` with a colocated vLLM engine at util 0.25 (≈ 30 GiB inside the pod's 64 Gi) that sleeps during the backward pass.
+
+#### What to look for
+
+1. **Log metrics** (names vary a little between releases):
+
+   | Metric | Healthy value |
+   |---|---|
+   | format reward | rises first, within tens of steps |
+   | accuracy reward | rises more slowly and noisily |
+   | completion length | changes, often grows |
+   | `kl` | starts at 0 and grows slowly |
+
+2. **Time per step:** note it and how much is the rollout phase. The vLLM variant should cut it.
+
+**If something's off:** accuracy reward always 0 → read a few completions; the answer format doesn't match the checker. `OOMKilled` in the vLLM variant → lower `--vllm_gpu_memory_utilization`. `pip` trying to replace `torch` or `vllm` on the vLLM image → stop the Job. More in §5.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 kubectl --context spark-root -n batch delete job swift-dpo --ignore-not-found
@@ -257,7 +352,7 @@ kubectl --context spark-root -n batch logs -f job/swift-grpo | grep -oE "'(rewar
 
 This Job uses a smaller model on purpose — Qwen2.5-1.5B-Instruct on 1,000 NuminaMath-TIR problems for 200 steps — because generation dominates and a 1.5B model generates fast enough to see the curves move in one session. It runs in 6 CPU · 64 Gi request = limit and installs `math-verify` for the accuracy reward. Metric names differ slightly between releases; look for the mean reward, each reward function's mean, the completion length and the KL.
 
-What a working run looks like: the **format** reward rises first (the model learns the tags within tens of steps), the **accuracy** reward rises more slowly and noisily, completion length changes (often grows as the model reasons more), KL grows slowly from 0. Note the time per step and how much of it is generation (the log shows the rollout phase).
+The format reward rises first because the tags are easy to learn; accuracy needs the model to reason better, so it moves slowly.
 
 **Faster rollouts with colocated vLLM.** The Job's header gives the variant: run on the lab's vLLM image and let ms-swift start a vLLM engine *inside the training pod*, sleeping it during the backward pass (`--sleep_level 1`). Its util is a share of the whole ~121.7 GiB pool, so 0.25 ≈ 30 GiB comes out of the pod's 64 Gi:
 
@@ -272,6 +367,22 @@ sed -e "s|image: nvcr.io/nvidia/pytorch:26.08-py3|image: ${VLLM_IMAGE}|" \
 Compare seconds per step with the first run. If `pip install` on the vLLM image tries to replace its `torch` or `vllm`, stop — the pins in `PIP_SWIFT` must match the image's packages, and the PyTorch-image run remains the reference.
 
 ### Task 4.5 — Look at the result
+
+#### What this lab does (close the window, DPO adapter as a LoRA module, GRPO log summary)
+
+- **Closes the window** as in Chapter 07 Task 5.6 (everyday quotas back, pause removed, `bge-m3` back).
+- **Serves** the DPO adapter next to its base: copy it into `model-cache/adapters/qwen3-4b-dpo` on dgx-spark-1 and register it on the `vllm-qwen3-4b-instruct` side engine with `--lora-modules=qwen3-4b-dpo=…`.
+- **Summarises** the GRPO accuracy reward from the Job log on the MacBook. Read-only.
+
+#### What to look for
+
+1. **`/v1/models`** on the side engine lists `qwen3-4b-dpo` next to `qwen3-4b-instruct`.
+2. **Answers:** the DPO model differs mostly in length and tone.
+3. **GRPO summary:** `first 20: …   last 20: …` with the last value higher than the first.
+
+**If something's off:** the `awk` line prints nothing → the accuracy metric has another name in your ms-swift release; adjust the `grep` pattern. The GRPO Job's log is gone after 24 h (`ttlSecondsAfterFinished: 86400`).
+
+#### Run it
 
 Close the window first (Chapter 07 Task 5.6: re-apply `10-tenancy` and `20-scheduling`, remove the pause, scale `bge-m3` back). Then serve the DPO adapter next to its base exactly as in Chapter 07 Task 5.6 — copy `/data/k8s/retain/batch/qwen-train/output/dpo/v*/checkpoint-*` to `model-cache/adapters/qwen3-4b-dpo` on the Spark and add `--lora-modules=qwen3-4b-dpo=/models/adapters/qwen3-4b-dpo` to the side engine. Ask both models the same open questions and compare length and tone; preference training on Orca pairs mostly changes style.
 

@@ -93,6 +93,31 @@ Rule of thumb: **hardware facts in `group_vars/spark.yml`, per-box addressing in
 
 ### 3.1 Build the MacBook toolchain
 
+#### What this lab does (script `lab/tests/run-local-checks.sh`)
+
+- **Python venv:** creates `~/.venvs/spark-ansible` and installs `lab/requirements.txt` into it: ansible-core 2.18, ansible-lint, yamllint, Molecule and the Python libraries later chapters use (jmespath, netaddr, hvac, kubernetes, ARA).
+- **Collections:** installs the collections from `lab/requirements.yml` (ansible.posix, community.general, community.docker, community.crypto, community.hashi_vault, kubernetes.core, ansible.utils, netbox.netbox) into `lab/collections`, not into your home folder.
+- **`lab` alias:** one line in `~/.zshrc` that takes a new terminal to `01-Ansible/lab` with the venv active.
+- **Local checks:** `tests/run-local-checks.sh` runs, in order, yamllint, a syntax check of every playbook, an `ansible_managed` check, ansible-lint, the Jinja katas, the mDNS inventory plugin and drift report against test fixtures, a Python compile check and a shell syntax check.
+- **What it doesn't touch:** the Spark, sema01 and vault01. Everything stays on the MacBook.
+
+#### What to look for
+
+1. **`ansible --version`**, from `01-Ansible/lab` with the venv active:
+
+   | Line | Healthy value |
+   |---|---|
+   | `ansible [core 2.18.x]` | 2.18, not 2.17 or 2.19 |
+   | `config file` | `…/01-Ansible/lab/ansible.cfg` |
+   | `python version` | 3.11 or newer, from `~/.venvs/spark-ansible` |
+
+2. **`tests/run-local-checks.sh`** prints one `== …` header per check and ends with `ALL LOCAL CHECKS PASSED`. The script stops at the first failure, so the last `==` header on screen names the check that failed.
+3. **A new terminal:** typing `lab` gives the prompt `(spark-ansible) … lab %`.
+
+**If something's off:** `yamllint not found` → the venv isn't active in this shell (`source ~/.venvs/spark-ansible/bin/activate`, or type `lab`). `config file = None` → you're not in `01-Ansible/lab`, or `ANSIBLE_CONFIG` points elsewhere. pip can't find ansible-core 2.18 → the venv was built with Python older than 3.11. More in §5.
+
+#### Run it
+
 First, once, type this line by hand (not pasted as part of a block): it makes macOS zsh treat `#` lines, including the `# ▶` location line at the top of every block, as comments.
 
 `setopt interactivecomments; echo 'setopt interactivecomments' >> ~/.zshrc`
@@ -206,6 +231,29 @@ The key and certificate in `/tmp/lab_ssh` come from **play 1**, `playbooks/00-va
 So keep long or rebooting Semaphore tasks to one host per task (`--limit`), and if a reconnect after a reboot fails with `Permission denied (publickey)`, simply run the template again: play 1 issues a new certificate. On the MacBook path none of this applies, because your key doesn't expire.
 
 ### 3.3 Describe your hardware (inventory)
+
+#### What this lab does (inventory `lab/inventory/`)
+
+- **`hosts.yml`:** `dgx-spark-1` on 192.168.0.100 in the hardware group `spark` and in the functional groups `k8s_control_plane`, `slurm_controller`, `monitoring` and `nfs_server` (`slurm_compute` takes the whole `spark` group). `localhost` sits in `control`. `dgx-spark-2` is commented out.
+- **`group_vars/spark.yml`:** the login switch from §3.2, the golden hardware values (`spark_expected`), the base packages, the NVIDIA hold pattern and the sysctls.
+- **`host_vars/dgx-spark-1.yml`:** the two CX-7 netdevs of the cabled cage with their fabric addresses and MTU 9000.
+- **The checks:** `ansible-inventory` and an ad-hoc `debug` only read the files. Nothing connects to the Spark.
+
+#### What to look for
+
+1. **`ansible-inventory --graph`:** `dgx-spark-1` under `@spark`, `@k8s_control_plane`, `@slurm_controller`, `@slurm_compute`, `@monitoring` and `@nfs_server`; `localhost` under `@control`. You also see fact-based groups from `zz-constructed.yml`, such as `@arch_…` and `@driver_…`. They end in `_unknown` while the fact cache is empty or older than 2 hours (Chapter 06).
+2. **`ansible-inventory --host dgx-spark-1 --yaml`:** `ansible_host: 192.168.0.100`, `ansible_become: true`, `cx7_interfaces`, `spark_expected`. `ansible_user` shows the raw `{{ … }}` expression: ansible-inventory prints variables without rendering them. The `debug` command in §5 shows the rendered value, `dgxadmin`.
+3. **`ansible -m debug -a "var=cx7_interfaces" spark`:** one result for `dgx-spark-1` with two entries:
+
+   | Field | Healthy value |
+   |---|---|
+   | `name` | `enp1s0f1np1` and `enP2p1s0f1np1` |
+   | `address` | `192.168.100.11/24` and `192.168.101.11/24` |
+   | `mtu` | `9000` |
+
+**If something's off:** no `dgx-spark-1` in the graph → you're not in `01-Ansible/lab`, or `hosts.yml` has an indentation error. A value you didn't expect → a later source wins (§2.2); `ansible-inventory --host` shows the merged result. More in §5.
+
+#### Run it
 
 The inventory below is what the lab ships with: `dgx-spark-1` on 192.168.0.100 and the CX-7 interface names a DGX Spark reports. You don't need the Spark to write it. Nothing uses the fabric before [Chapter 13](13-connectx7-fabric-and-opensm.md), which has you confirm the names on each box with `ibdev2netdev`; its output looks like this:
 

@@ -240,6 +240,29 @@ vault login                                                                   # 
 
 ### 3.1 Inspect vault01
 
+#### What this lab does (commands: `vault status`, `vault … list`)
+
+- **Read-only tour of vault01:** seal state, Raft peers, secrets engines, auth methods, audit devices, policies and the SSH signing role. Nothing on vault01 changes.
+- **Runs from the MacBook** with the shell from the start of §3 (`VAULT_ADDR`, `VAULT_CACERT`, `vault login`), or on vault01.
+
+#### What to look for
+
+1. **Every command answers** (no TLS or permission error). The expected value is the comment next to each command.
+2. **The key values:**
+
+   | Command | Healthy value |
+   |---|---|
+   | `vault status` | `Initialized true`, `Sealed false`, `Total Shares 3`, `Threshold 2`, `Storage Type raft` |
+   | `vault operator raft list-peers` | one peer, `vault01`, `leader`, `Voter true` |
+   | `vault audit list` | `file/` with `file_path=/var/log/vault_audit.log` |
+   | `vault read ssh-client-signer/roles/ansible` | `allowed_users svc-ansible`, `ttl 15m`, `max_ttl 1h` |
+
+3. **`kv/` and `spark-lab-read`** appear only after `17.1-vault.yml` (§3.2). Missing before that is correct.
+
+**If something's off:** `x509: certificate signed by unknown authority` → `VAULT_CACERT` doesn't point at `.cache/vault-ca.crt`. `Sealed true` → unseal (§3.3). More in §6.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
 # same shell as above: VAULT_ADDR, VAULT_CACERT and the vault login are set
@@ -253,6 +276,25 @@ vault read ssh-client-signer/roles/ansible | grep -E 'allowed_users|ttl'   # svc
 ```
 
 ### 3.2 Add the Spark lab's KV engine and policy (vault01 + MacBook)
+
+#### What this lab does (playbook `17.1-vault.yml`, MacBook only)
+
+- **Checks Chapter 01's objects, without changing them:** an admin token is present, the signing role `ssh-client-signer/roles/ansible` exists and allows `svc-ansible`, and the AppRole `semaphore` exists.
+- **Adds the lab's objects on vault01, through its HTTPS API:** mounts a KV v2 engine at `kv/` (if missing), writes the policy `spark-lab-read` (if missing or different), and appends it to AppRole `semaphore`'s policies (keeping `semaphore-ssh`).
+- **Seeds a placeholder:** `kv/spark-lab/ngc` with `api_key=REPLACE_ME`, only if the secret doesn't exist yet. Your real key is never overwritten.
+- **Then by hand on vault01:** you store the real NGC key with `vault kv put`.
+- **No template:** it needs an admin token, so it runs from the MacBook and never from Semaphore. It only talks to `localhost` and vault01; nothing on the Spark changes.
+
+#### What to look for
+
+1. **First run:** `failed=0`. Expect `changed` on *Mount KV v2*, *Write the lab policy*, *Attach the lab policy* and *Seed placeholder secrets* the very first time (fewer if Chapter 04 §7 already ran it).
+2. **Second run:** `changed=0`. That is the idempotency proof.
+3. **The *Verify* commands below:** `token_policies` is `[semaphore-ssh spark-lab-read]`, and `current_version` of `kv/spark-lab/ngc` is `2` (1 = placeholder, 2 = your key).
+4. **`VAULT_TOKEN` is unset** in the MacBook shell afterwards (`echo ${VAULT_TOKEN:+set}` prints nothing).
+
+**If something's off:** the play stops at *An admin token is required* → export `VAULT_TOKEN` in that shell. The signing-role or AppRole assert fails → vault01 differs from Chapter 01 §4; fix it there, the playbook won't. More in §6.
+
+#### Run it
 
 This is [Chapter 04 §7](04-dgx-spark-as-semaphore-target.md) (Tasks 7.1–7.3); skip the first run if you already did it there. The `vault` program runs on vault01; the playbook runs on the MacBook and only needs the token.
 
@@ -290,6 +332,23 @@ vault kv metadata get kv/spark-lab/ngc | grep current_version   # 2 (version 1 =
 
 ### 3.3 Prove the seal behaviour (vault01 + Semaphore)
 
+#### What this lab does (exercise: restart, seal, unseal)
+
+- **Restarts the Vault service on vault01.** It comes back sealed, as after any restart.
+- **Shows the effect on the lab:** with vault01 sealed, the `04.2 Ping` template fails in play 1 and never reaches the Spark.
+- **Unseals with two of the three key shares,** then runs `04.2 Ping` again. Have two shares ready before you start.
+
+#### What to look for
+
+1. **After the restart:** `vault status` shows `Sealed true`, and `sys/health` returns `503`.
+2. **`04.2 Ping` while sealed:** fails at *Log in to Vault with AppRole* (details hidden by `no_log`); no host play runs.
+3. **After two unseal shares:** `Sealed false`, `HA Mode active`.
+4. **`04.2 Ping` again:** `failed=0`.
+
+**If something's off:** still sealed after two shares → both were the same share, or one was mistyped; `vault status` shows `Unseal Progress`. More in §6.
+
+#### Run it
+
 ```bash
 # ▶ vault01 (ssh vault01)
 sudo systemctl restart vault         # on vault01
@@ -310,6 +369,20 @@ vault status | grep -E 'Sealed|HA Mode'   # Sealed false, HA Mode active
 
 ### 3.4 Read the audit log (on vault01)
 
+#### What this lab does (exercise: query the audit log)
+
+- **Read-only:** uses `jq` on `/var/log/vault_audit.log` to list the latest requests from Semaphore runs, then proves which SSH principal was requested by hashing `svc-ansible` with the audit device's salt.
+- **Needs at least one recent Semaphore task** (for example `04.2 Ping`) so there is something to read.
+
+#### What to look for
+
+1. **The last requests:** `auth/approle/login`, `ssh-client-signer/sign/ansible` and, if lab secrets are enabled, `kv/data/spark-lab/ngc`, with role `semaphore`.
+2. **The hash check:** the `valid_principals` value from the log (`hmac-sha256:…`) is exactly the value `vault write -field=hash sys/audit-hash/file input=svc-ansible` prints.
+
+**If something's off:** no lines → no Semaphore task ran since the log was rotated; run `04.2 Ping`. `jq: Permission denied` → use `sudo` (the log is root-only). More in §6.
+
+#### Run it
+
 The `file` audit device writes one JSON line per request and one per response. Values are **HMAC'd** (salted SHA-256), so the log proves *that* something was read without revealing *what*.
 
 ```bash
@@ -328,6 +401,22 @@ vault write -field=hash sys/audit-hash/file input=svc-ansible   # the same hmac-
 `sys/audit-hash/<device>` hashes an input with that device's salt. It's how an investigator checks "was this value used?" without the log ever storing it.
 
 ### 3.5 Backups: Raft snapshots (on vault01)
+
+#### What this lab does (exercise: snapshot and restore drill)
+
+- **Saves a Raft snapshot** to `~/vault-backups/` on vault01: a full copy of secrets, policies, the SSH CA key and AppRoles.
+- **Restore drill:** writes a throwaway secret `kv/spark-lab/drill`, snapshots, deletes the secret, restores the snapshot and reads the secret back, then cleans up.
+- **Careful:** a restore rolls back *everything* on vault01 to the snapshot. Change nothing else between the drill's snapshot and its restore.
+
+#### What to look for
+
+1. **The snapshot file:** `ls -l ~/vault-backups` shows a `raft-….snap` of a few hundred KB.
+2. **The drill:** `vault kv get -field=canary kv/spark-lab/drill` prints `before` after the restore.
+3. **Afterwards:** `04.2 Ping` still passes (the AppRole and SSH CA survived the restore).
+
+**If something's off:** `permission denied` on the snapshot → not logged in as an admin. After a restore, a task fails at the AppRole login → a secret_id created after the snapshot no longer exists (Chapter 18 §3.5). More in §6.
+
+#### Run it
 
 A snapshot is a consistent copy of the whole Raft store: secrets, policies, the SSH CA key, AppRoles, secret_id accessors.
 
@@ -365,6 +454,20 @@ A snapshot is useless without the unseal keys that were valid **when it was take
 
 ### 3.6 Metrics (optional, on vault01)
 
+#### What this lab does (exercise: Prometheus metrics)
+
+- **Changes `/etc/vault.d/vault.hcl`:** appends a `telemetry` block so Vault serves Prometheus-format metrics at `/v1/sys/metrics`.
+- **Restarts Vault,** which seals it: you unseal with two shares. Semaphore tasks can't start until you do.
+
+#### What to look for
+
+1. **After the restart and unseal:** `vault status` shows `Sealed false`.
+2. **The `curl`** prints metric lines: `vault_core_unsealed 1` and some `vault_raft_…` lines.
+
+**If something's off:** `prometheus is not enabled` → the `telemetry` block didn't land in `vault.hcl` or Vault wasn't restarted. Vault doesn't start → a typo in `vault.hcl`; `journalctl -u vault -n 50`. More in §6.
+
+#### Run it
+
 Chapter 01's `vault.hcl` has no `telemetry` block, so Prometheus-format metrics are off. Add it, and practise the restart → unseal cycle while you're at it:
 
 ```bash
@@ -383,6 +486,20 @@ curl -s --cacert $VAULT_CACERT -H "X-Vault-Token: $(vault print token)" \
 Chapter 12's Prometheus can scrape this with a token whose policy allows `read` on `sys/metrics`. Alert on `vault_core_unsealed == 0`: that alert means "no Semaphore task can start".
 
 ### 3.7 Retire the root token for `17.1-vault.yml` (on vault01)
+
+#### What this lab does (exercise: least-privilege admin token)
+
+- **Writes a policy `spark-lab-admin`** on vault01 that allows exactly what `17.1-vault.yml` reads and writes, and nothing else.
+- **Creates a 30-minute token** with that policy, which you use instead of the root token for the playbook.
+
+#### What to look for
+
+1. **`17.1-vault.yml` with the new token:** `failed=0`, all tasks `ok`, `changed=0`.
+2. **The boundary:** `vault policy write semaphore-ssh …` with the same token fails with `permission denied`.
+
+**If something's off:** the playbook gets `permission denied` → compare the failing path in the audit log's `error` field with the policy above. More in §6.
+
+#### Run it
 
 `17.1-vault.yml` doesn't need root. Give it exactly what `vault_config` touches, as a short-lived token:
 

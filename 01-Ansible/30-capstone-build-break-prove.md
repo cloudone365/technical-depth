@@ -135,6 +135,34 @@ Why three angles? Each can lie in a different way. Ansible can validate a stale 
 
 ### 1.2 On-node invariant checker (works when Ansible can't)
 
+#### What this lab does (script `lab/tools/spark_invariants.py`)
+
+- **Copy and run on the Spark:** plain Python with no Ansible and no extra packages. It only reads: `/proc/meminfo`, `/etc/os-release`, `nvidia-smi`, `docker info`, the kernel log, `ibdev2netdev`, `/sys/class/net`. Nothing is changed.
+- **Checks:** platform (aarch64, 20 cores, Ubuntu 24.04, DGX OS release file), GPU (GB10, driver ≥ 580, compute capability 12.1, CUDA 13.x, Xid count in 24 h), memory (MemTotal, MemAvailable), runtime (Docker default runtime `nvidia`, CDI spec), and fabric (each CX-7 port that is Up: 200G, MTU 9000, `PORT_ACTIVE`; with `--peer`, a jumbo ping).
+- **Exit code = number of FAIL lines.** WARN lines do not count.
+- **One Spark:** the commands below use dgx-spark-2 and ping dgx-spark-1 over the fabric. With only dgx-spark-1, copy it to `dgxadmin@192.168.0.100` and run it without `--peer`.
+
+#### What to look for
+
+1. **Last line:** `N checks, 0 failed`, and exit code `0` (`echo $?`).
+2. **The lines that carry numbers:**
+
+   | Check | Healthy value |
+   |---|---|
+   | `20 CPU cores` | `PASS … 20` |
+   | `driver >= 580` | `PASS … 580.xx.xx` |
+   | `compute capability 12.1` | `PASS … 12.1` |
+   | `no Xid in 24h` | `PASS … 0 events` |
+   | `MemTotal >= 110 GiB` | `PASS`, about `121` GiB |
+   | `UMA MemAvailable >= 16 GiB` | `PASS`, about `119` GiB available on an idle Spark |
+   | `docker default runtime nvidia` | `PASS … nvidia` |
+3. **Fabric with one Spark:** `[WARN] CX-7 link up … no port Up (single Spark?)`. That is expected and does not count as a failure. With two cabled Sparks, expect a `PASS` line for 200G, MTU 9000 and `PORT_ACTIVE` per Up port, plus `jumbo ping 192.168.100.11` with `--peer`.
+4. **Every non-PASS line** prints a `fix:` hint underneath. Read it before you reach for Ansible.
+
+**If something's off:** `docker reachable` FAIL → the user running the script is not in the `docker` group; run it as `dgxadmin` or with `sudo`. `jumbo ping` FAIL → MTU mismatch on the path or wrong subnet. More in Chapter 29.
+
+#### Run it
+
 ```python
 # lab/tools/spark_invariants.py
 #!/usr/bin/env python3
@@ -296,6 +324,25 @@ ssh dgxadmin@192.168.0.101 'python3 spark_invariants.py --peer 192.168.100.11'
 ```
 
 ### 1.3 Evidence-based scorecard
+
+#### What this lab does (script `lab/tools/capstone_scorecard.py`)
+
+- **Reads, never runs anything:** it looks only at files in one state folder (`$SPARK_LAB_CACHE`, or `lab/.cache`) and grades 10 challenges from what earlier runs left behind.
+- **The 10 checks:** at least 10 runs in `ansible.log`; GPU facts for every Spark in `facts/`; at least 7 rows in `bench.csv`; every `validation/*.json` all true; `firmware-inventory.json` with `mismatch == {}`; latest drift report clean; a `drift/recheck-*.md` exists; at least one `incidents/*.tgz`; a `kubeconfig-*.yaml` that points at a real API server address; `vault-ca.crt` present and no file named like a Vault token or AppRole secret.
+- **Where to run it:** on sema01 against `/opt/spark-lab/cache`, after copying in the files that only exist on the MacBook (below).
+
+#### What to look for
+
+1. **Last line:** `Score: 10/10`, and exit code `0`. Any lower score exits `1`.
+2. **Each line** reads `[PASS] Chapter NN  <challenge>` with an `evidence:` line under it. The evidence line tells you exactly what was found, for example `2/2 hosts with GPU facts` or `1 reports, failing: none`.
+3. **The `17/18` line:** `ca=True leaks=none`. Anything listed under `leaks` is a file you must delete from the state folder.
+
+**If something's off:**
+- Both Chapter 26 lines FAIL with `no drift report` / `never healed` → `drift-cycle.sh` ran on the MacBook, so its reports are in the MacBook's `.cache/drift/`. Copy that folder to `/opt/spark-lab/cache/drift/` on sema01 the same way as `bench.csv`.
+- `validation` FAIL → open the named `validation/<host>.json` and look for the `false` value. With one Spark and no QSFP cable it is `cx7_links_200g`; re-run `30.1 Validate` with `-e spark_validate_fabric=false`.
+- `firmware-inventory.json` missing → run `28.1 Firmware inventory`.
+
+#### Run it
 
 The scorecard reads one state folder: `$SPARK_LAB_CACHE` if set, else `lab/.cache`. In this lab the evidence is split between two places:
 
@@ -508,6 +555,24 @@ Complete them in order. "Evidence" is what the scorecard or a reviewer checks.
 
 ## 3. Chaos drill
 
+#### What this lab does (template `30.2 Chaos`)
+
+- **Guard:** runs only with a `--limit` that names exactly one Spark.
+- **One fault:** picks one of 7 reversible faults at random (or the one in `chaos_fault`) and injects it on that Spark. The catalogue is at the end of this section, hidden on purpose.
+- **Sealed answer:** writes the fault number, base64-encoded, to `chaos-<host>.sealed` in the state folder (`/opt/spark-lab/cache` on sema01, `.cache/` on the MacBook).
+- **Reversible:** every fault is fixed by one of the lab's normal templates. Nothing is deleted.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`, and the last task prints `A fault has been injected on dgx-spark-1. Find it. …`. **Do not scroll through the task log**: the one "Fault N" task that is not `skipping` gives the answer away.
+2. **Find it with your tools only:** `30.1 Validate` (a `FAILED checks:` list), `tools/drift-cycle.sh` (exit `2` and the drifted task), Grafana alerts, Loki, `spark_invariants.py` (a FAIL or WARN line), `10.1 Driver audit`.
+3. **Fixed means all three angles agree:** `30.1 Validate` passes, `drift-cycle.sh` exits `0`, and `spark_invariants.py` reports `0 failed`.
+4. **Only then reveal:** the sealed file decodes to the fault number. Compare it with the catalogue.
+
+**If something's off:** none of the tools finds anything → with one Spark and no Slurm, fault 5 (Slurm drain) has nothing to act on; the task does not fail. Check `sinfo -R`, and if Slurm is not installed, reveal and run the drill again. More in Chapter 29.
+
+#### Run it
+
 **Semaphore UI:** run the template `30.2 Chaos` with `--limit dgx-spark-2,localhost` (or `dgx-spark-1,localhost` with one Spark) and extra variable `chaos_fault: random`. Break-glass equivalent:
 
 ```bash
@@ -547,6 +612,32 @@ The lesson from fault 3 is why the lab ships a **staleness** alert, `SparkGPUMet
 ---
 
 ## 4. Full rebuild and final proof
+
+#### What this lab does (templates `site`, `30.1 Validate`, `19.2 Reset Kubernetes` → `19.1` → `20.1` → `20.2`, `28.1`, then the scorecard)
+
+- **`site`:** applies every build playbook in order. The second run proves idempotence.
+- **`30.1 Validate`:** runs `spark_facts` and the `spark_validate` role. It checks the platform (aarch64, 20 cores, Ubuntu 24, memory ≥ 110 GiB, GB10, driver ≥ 580, CUDA 13, compute capability 12.1), container GPU access, the CX-7 links at 200G, the Kubernetes node Ready with `nvidia.com/gpu` > 0, and the Slurm node usable. It writes `validation/<host>.json` to the state folder and fails if any check is false.
+- **Kubernetes from zero:** `19.2 Reset Kubernetes` tears down `spark-root` (and with it the LLM stack and both vClusters); `19.1`, `20.1`, `20.2` rebuild them. Every model and tenant workload is gone in between.
+- **`28.1 Firmware inventory`** and **the scorecard** (§1.3) close it out.
+
+#### What to look for
+
+1. **`site`, first run:** `failed=0`. **Second run:** `changed=0` on every host. Any `changed` task on the second run is an idempotence bug to fix before you go on.
+2. **`30.1 Validate`:** the "Verdict" task prints `All N checks passed`. N is 13 with the CX-7 check on; with one Spark and no QSFP cable, run it with `-e spark_validate_fabric=false` and expect 12.
+3. **Drift:** `tools/drift-cycle.sh; echo "drift exit=$?"` on the MacBook prints `drift exit=0`.
+4. **After the Kubernetes rebuild:**
+   ```bash
+   # ▶ MacBook · 01-Ansible/lab (venv active)
+   tools/fetch-kubeconfig.sh sema01
+   export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
+   kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}'; echo   # 15
+   kubectl --context dev-lab get ns && kubectl --context dev-llms get ns                                        # both answer
+   ```
+5. **Scorecard on sema01:** `Score: 10/10`.
+
+**If something's off:** Verdict lists `slurm_usable` → the Slurm node is drained or Slurm is not set up (Chapter 22); `sinfo -R` on dgx-spark-1. `k8s_ready_gpu` false right after the rebuild → the GPU Operator needs a few minutes to advertise the GPU; re-run `30.1 Validate`. More in Chapter 29 §5 and Chapter 19.
+
+#### Run it
 
 **Semaphore UI:** one template after the other, each ending in `failed=0`:
 

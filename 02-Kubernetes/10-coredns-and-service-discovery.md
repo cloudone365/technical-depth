@@ -128,6 +128,26 @@ Run from `02-Kubernetes/lab` with the lab kubeconfig (`export KUBECONFIG="$PWD/.
 
 ### 5.1 Inspect the resolvers
 
+#### What this lab does (manifests `lab/manifests/root/30-networking`, `lab/manifests/dev-lab/30-networking`)
+
+- **Applies** the network toolbox (unchanged if Chapter 08 or 09 already did): `netshoot-host` on the root in `platform-tools`, and in dev-lab `lab-tools`: `netshoot`, `echo`, and the two DNS test pods `dns-default` (inherits `ndots:5`) and `dns-ndots1` (`ndots:1`, `single-request-reopen`).
+- **Reads** the `resolv.conf` of a root pod and the two tenant pods, dev-lab's `kube-dns` Service and its root copy, the `dnsPolicy` the syncer wrote on the root pods, and both Corefiles.
+- **Read-only:** nothing in CoreDNS is changed yet.
+
+#### What to look for
+
+| Item | Healthy value |
+|---|---|
+| `netshoot-host` `resolv.conf` | `nameserver 10.43.0.10`, search starts with `platform-tools.svc.cluster.local` |
+| `dns-default` `resolv.conf` | `nameserver` = dev-lab's `kube-dns` ClusterIP (a `10.43.x.y`, not `10.43.0.10`), search starts with `lab-tools.svc.cluster.local`, `options ndots:5` |
+| `dns-ndots1` `resolv.conf` | same nameserver, `options ndots:1 single-request-reopen` |
+| root copies of the `dns-lab` pods | `None` and that same nameserver |
+| dev-lab Corefile | note its `forward` line, §5.5 needs it |
+
+**If something's off:** a tenant pod with `nameserver 10.43.0.10` means the syncer didn't rewrite its DNS (check the vCluster's CoreDNS pod in `vc-dev-lab` is Running). More in §7.
+
+#### Run it
+
 ```bash
 cd "02-Kubernetes/lab"
 kubectl --context spark-root apply -k manifests/root/30-networking         # netshoot-host
@@ -153,6 +173,23 @@ Note the `forward` line in dev-lab's Corefile: it tells you whether a tenant's e
 
 ### 5.2 Turn on query logging and add the `lab.local` zone (root)
 
+#### What this lab does (manifest `lab/manifests/root/30-networking/coredns-corefile.yaml`)
+
+- **Saves** kubeadm's Corefile ConfigMap to `/tmp/coredns-before.yaml`, then **replaces** the root's Corefile with kubeadm's default plus `log` (every query) and a `lab.local:53` block forwarding to `192.168.0.1`.
+- CoreDNS's `reload` plugin picks it up within about 30 s, no restart.
+- **Starts** a background `kubectl logs -f` of the root CoreDNS pods into `/tmp/coredns.log` for §5.3.
+- Only the root's CoreDNS changes. The vClusters' CoreDNS is untouched.
+
+#### What to look for
+
+1. **Command exit:** `configmap/coredns configured`, plus a warning about the missing last-applied annotation. The warning is expected.
+2. **Reload:** the `grep -i reload` line shows a `Reloading` / `Reloading complete` message from the `reload` plugin.
+3. **Background job:** `jobs` lists the `kubectl logs` job as Running.
+
+**If something's off:** no reload line after 35 s usually means the Corefile has a syntax error and CoreDNS kept the old one: read `kubectl --context spark-root -n kube-system logs -l k8s-app=kube-dns --tail=20`. More in §7.
+
+#### Run it
+
 The root's Corefile is kubeadm's ConfigMap; the lab file is kubeadm's default plus `log` and a `lab.local:53` block:
 
 ```bash
@@ -166,6 +203,23 @@ kubectl --context spark-root -n kube-system logs -l k8s-app=kube-dns -f --tail=0
 `kubectl apply` warns that the ConfigMap lacks the last-applied annotation — expected, kubeadm created it.
 
 ### 5.3 Measure the amplification
+
+#### What this lab does (root query log, `tcpdump` in the dev-lab DNS pods)
+
+- **Root:** one lookup of `huggingface.co` from `netshoot-host`, counted in the root CoreDNS query log from §5.2.
+- **dev-lab:** the same lookup from `dns-default` and `dns-ndots1`, counted with `tcpdump` on each pod's `eth0` (those queries go to dev-lab's CoreDNS, so the root log can't see them). Then 50 lookups each, timed.
+- **Read-only:** nothing is changed. `kill %1` stops the background log job.
+
+#### What to look for
+
+1. **Root:** `netshoot-host: 10 queries` (8 if the host has no `search lab.local`), all NXDOMAIN except the last `A IN huggingface.co. NOERROR`.
+2. **`dns-default`:** 8 queries, A and AAAA for each of the 3 search domains and the real name.
+3. **`dns-ndots1`:** 2 queries, `A? huggingface.co.` and `AAAA? huggingface.co.`.
+4. **Timing:** `dns-ndots1`'s `real` time is lower than `dns-default`'s. The gap depends on the upstream, so expect a difference rather than a fixed number.
+
+**If something's off:** extra pairs in the dev-lab counts mean the vCluster also appended the node's search domains, which is expected on some releases. An empty root count means the log job isn't running (re-run the last line of §5.2). More in §7.
+
+#### Run it
 
 **Root pod, from the root CoreDNS's query log:**
 
@@ -227,6 +281,30 @@ done
 
 ### 5.4 Service discovery records — and where they stop
 
+#### What this lab does (`dig` from `netshoot` in dev-lab and `netshoot-host` on the root)
+
+- Resolves the `echo` Services in dev-lab (A, headless and SRV records) and dev-lab's own `kubernetes` Service.
+- Tries names across the boundary: a root name from dev-lab, a dev-lab name from the root, the root's own name for the echo Service, and `dgx-spark-2.lab.local` through the `lab.local` zone.
+- Optional: compares a root name from `mock-llm-canary` in `llm-serving` with the Service's ClusterIP.
+- **Read-only.**
+
+#### What to look for
+
+| Query | Healthy value |
+|---|---|
+| `echo.lab-tools…` | one ClusterIP |
+| `echo-headless.lab-tools…` | three `10.42.0.x` pod IPs |
+| `SRV _http._tcp.echo…` | a record pointing at `echo.lab-tools.svc.cluster.local.` port 80 |
+| `kps-prometheus.observability…` from dev-lab | empty |
+| `echo.lab-tools…` from the root | empty |
+| `echo-x-lab-tools-x-dev-lab.vc-dev-lab…` from the root | the same ClusterIP as the first line |
+| `dgx-spark-2.lab.local` | the address your site DNS has for it; empty is fine with only one Spark if there's no record |
+| `mock-llm-canary` lookup vs `get svc kps-prometheus` | the same IP |
+
+**If something's off:** `dgx-spark-2.lab.local` empty while your site DNS has the record means the `lab.local` block wasn't applied (§5.2). More in §7.
+
+#### Run it
+
 ```bash
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- dig +short echo.lab-tools.svc.cluster.local
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- dig +short echo-headless.lab-tools.svc.cluster.local
@@ -251,6 +329,24 @@ kubectl --context spark-root -n llm-serving exec deploy/mock-llm-canary -- cat /
 ```
 
 ### 5.5 Outage drill
+
+#### What this lab does (drill `breakfix 07`)
+
+- `scripts/breakfix.sh inject 07` scales the root's `kube-system/coredns` Deployment to 0. The vClusters' own CoreDNS keeps running.
+- Tests name and IP access from a root pod and from a dev-lab pod, then `answer 07` explains, and `reset 07` scales CoreDNS back to 2 replicas.
+- At the end, turns query logging off again (or restores `/tmp/coredns-before.yaml`).
+- While injected, every root pod loses name resolution, including Traefik, KEDA and the model servers. Keep the drill short.
+
+#### What to look for
+
+1. **Root, by name:** `name lookup failed`.
+2. **Root, by IP:** an HTTP code (`200` or a redirect such as `302` from Grafana): the network is fine, DNS isn't.
+3. **dev-lab:** `echo.lab-tools` still answers with a pod name (`← cluster names still work`). Whether `huggingface.co` fails depends on the `forward` line you read in §5.1.
+4. **After `reset 07`:** `kubectl --context spark-root -n kube-system get deploy coredns` shows `2/2`, and `scripts/verify.sh platform` reports `CoreDNS ready`.
+
+**If something's off:** if the root name lookup still works during the drill, the CoreDNS pods may still be shutting down (`lameduck 5s`); check `get deploy coredns` shows `0/0` and retry. More in §7.
+
+#### Run it
 
 ```bash
 scripts/breakfix.sh inject 07

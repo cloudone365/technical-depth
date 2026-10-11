@@ -575,6 +575,23 @@ ansible_python_interpreter=/usr/bin/python3
 What the variables do: `ansible_user` is the automation account, `ansible_ssh_private_key_file` is the key that play 1 creates (ssh automatically uses the `-cert.pub` file next to it), `StrictHostKeyChecking=accept-new` accepts a host key the first time you see it, and the interpreter line pins Python so Ansible never re-discovers it.
 
 ### 8.9 Create the task template
+
+#### What this lab does (template `whoami-lab`)
+
+- **Play 1, inside the Semaphore container on sema01:** creates `/tmp/lab_ssh/id_ed25519` once, logs in to vault01 with the AppRole from the variable group `vault-approle`, and has Vault sign the public key for the principal `svc-ansible`. The certificate lands next to the key as `id_ed25519-cert.pub` and is valid for 15 minutes.
+- **Play 2, on 192.168.0.201 and .202:** logs in as `svc-ansible` with that certificate, becomes root with NOPASSWD sudo, and runs `whoami`.
+- **What it changes:** nothing on the targets. The only new files are the key and certificate inside the container. Vault adds one AppRole login and one `sign/ansible` entry to its audit log per run.
+
+#### What to look for
+
+1. **Semaphore run:** two plays, `failed=0`. Play 1 shows `ok` or `changed` and hides the AppRole, signing and save tasks (`no_log`). The second play's tasks are `ok`, because `whoami` has `changed_when: false`.
+2. **The debug task** prints `who.stdout: root` once per target. `root` proves SSH with the certificate and sudo without a password both work.
+3. **The three-system check in §8.10:** `Accepted publickey … ED25519-CERT` in the target's sshd log, a `sign/ansible` count on vault01 that grows by one per run, and `Principals: svc-ansible` with a validity window of about 15 minutes on sema01.
+
+**If something's off:** play 1 fails → vault01 is sealed after a reboot (`vault operator unseal` twice) or the `secret_id` in the variable group is wrong. Play 2 `Permission denied (publickey)` → the target doesn't trust the CA yet (§5) or a clock is off (§10.2). `Timeout waiting for privilege escalation prompt` → the NOPASSWD sudoers file is missing. More in §12.
+
+#### Run it
+
 **Semaphore UI:** **Task Templates**, **New Template**, type **Ansible Playbook**:
 
 | Field | Value |
@@ -621,6 +638,34 @@ docker compose exec semaphore ssh-keygen -L -f /tmp/lab_ssh/id_ed25519-cert.pub 
 **Why:** once the chain works, every operational task is just another template that imports the same certificate play. For each file below: save it in `playbooks/` in your repository, run `git add . && git commit -m "add playbook" && git push` (on your Mac, in `~/lab-playbooks`), then create a template as in 8.9 (same inventory, repository and variable group) with the matching playbook path. Run each one as a **dry run** first if your Semaphore version offers it; it uses `--check` and changes nothing.
 
 ### 10.1 update_ubuntu.yaml (rolling OS updates)
+
+#### What this lab does (playbook `update_ubuntu.yaml`)
+
+- **Play 1:** the same 15-minute certificate from vault01 as `whoami-lab`.
+- **Checks first:** each target must be Ubuntu and have at least 1024 MB free on `/`. A target that fails either check stops the run before apt touches it.
+- **Updates one host at a time** (`serial: 1`, `max_fail_percentage: 0`): refreshes the package index (skipped if it is less than an hour old), installs the available updates like `apt upgrade`, then removes unneeded packages and old downloads.
+- **Reboots only if you ask:** it checks `/var/run/reboot-required` and reboots only with the extra variable `allow_reboot=true`. By default nothing reboots.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`. Because of `serial: 1` the log shows the update play twice, once for .201 and once for .202. On a first run expect `changed` on *Install available updates* when packages were pending; a re-run soon after shows `changed=0`.
+2. **The "Summary for this host" line**, once per target:
+   ```
+   192.168.0.201: packages changed = True, reboot needed = True, rebooted = False
+   ```
+   | Field | Healthy value |
+   |---|---|
+   | `packages changed` | `True` on a first run with pending updates, `False` on a re-run |
+   | `reboot needed` | `True` after a kernel or libc update, otherwise `False` |
+   | `rebooted` | `False` unless you passed `allow_reboot=true` |
+3. **`reboot needed = True` with `rebooted = False`** is not an error, but the host still runs the old kernel. Reboot it in a maintenance window, or re-run with `allow_reboot=true`.
+4. **On a target**, the Verify 10.1 commands below: `Requested-By` names the automation account and `apt list --upgradable` is empty.
+
+**If something's off:** *Make sure there is enough free space* fails → clean up `/` or lower `min_free_root_mb`. An apt task fails with a lock error → unattended-upgrades was running; the tasks already wait up to 120–300 s, so re-run. More in §12.
+
+#### Run it
+
+Save the file below in `playbooks/`, push it, and create a template for it as described at the start of §10.
 
 ```yaml
 # playbooks/update_ubuntu.yaml
@@ -705,6 +750,35 @@ uname -r; uptime -s                        # running kernel and last boot time
 ```
 
 ### 10.2 sync_time.yaml (time zone and NTP)
+
+#### What this lab does (playbook `sync_time.yaml`)
+
+- **Play 1:** the same 15-minute certificate from vault01.
+- **Detects the time service** on each target: chrony if `systemctl is-active chrony` says `active`, otherwise systemd-timesyncd.
+- **Time zone:** sets `America/New_York` (variable `timezone`) only if the target has a different one.
+- **chrony hosts:** makes sure `chrony.conf` reads `/etc/chrony/sources.d` (a backup copy is kept on the first change) and writes the lab servers to `/etc/chrony/sources.d/lab.sources`. The Ubuntu default sources stay.
+- **timesyncd hosts:** writes `/etc/systemd/timesyncd.conf.d/10-lab.conf` and switches NTP on.
+- **Then it waits** up to about 2 minutes for the clock to report synchronized, and prints `timedatectl`. The service restarts only when its file changed.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`. A first run shows `changed` on *Write the lab NTP sources* (or *Write the lab NTP servers*), possibly *Set the time zone*, and the restart handler. A re-run shows `changed=0`.
+2. **The wait task** (*Wait until chrony reports …* or *Wait until timesyncd reports …*) is `ok`, not `FAILED`. It fails if the target can't reach any NTP server.
+3. **The "Show them" line** per target starts with `uses chrony` or `uses timesyncd`. In the `timedatectl` lines look for:
+
+   | Line | Healthy value |
+   |---|---|
+   | `Time zone` | `America/New_York (…)`, or the zone you set |
+   | `System clock synchronized` | `yes` |
+   | `NTP service` | `active` |
+
+4. **On a target**, the Verify 10.2 commands below list your servers in `chronyc sources` and show `Leap status: Normal`.
+
+**If something's off:** the wait task fails → outbound UDP 123 is blocked; check `chronyc sources -v` on the target, or use an internal NTP server in `ntp_servers`. A clock that is right but certificate logins still fail → check vault01 and sema01 as well; they need correct time too. More in §12.
+
+#### Run it
+
+Save the file below in `playbooks/`, push it, and create a template for it as described at the start of §10.
 
 ```yaml
 # playbooks/sync_time.yaml

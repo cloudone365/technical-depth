@@ -89,13 +89,33 @@ Argo CD runs in the root's `argocd` namespace. For dev-lab and dev-llms it's an 
 ## 2. Lab
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "02-Kubernetes/lab"
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 ```
 
 ### 2.1 Install Argo CD on the root and register the vClusters
 
+#### What this lab does (scripts `install-addons.sh argocd` and `argocd-register-vclusters.sh`)
+
+- **Installs Argo CD** `v3.1.8` (`ARGOCD_VERSION` in `versions.env`) from the upstream `install.yaml` into namespace `argocd` on the root, and waits up to 10 min for `argocd-server`.
+- **Registers dev-lab and dev-llms:** for each, reads the admin kubeconfig vCluster exported into Secret `vc-<name>` in `vc-<name>`, and writes a `cluster` Secret `cluster-<name>` in `argocd` with the API URL and client certificate. No `argocd` CLI needed.
+- **UI access:** reads the initial admin password and port-forwards `argocd-server` to https://localhost:8443.
+- **Nothing is synced yet.** No Applications exist until §2.2.
+
+#### What to look for
+
+1. **Script output:** `[PASS] Argo CD destination dev-lab → https://192.168.0.111:443` and the same for `dev-llms` → `.112`.
+2. **Cluster Secrets:** two rows, `cluster-dev-lab` and `cluster-dev-llms`. Decoded, `SERVER` is `https://192.168.0.111:443` and `https://192.168.0.112:443`.
+3. **Password:** a random string, printed once.
+4. **UI:** *Settings → Clusters* lists `in-cluster`, `dev-lab` and `dev-llms`. The browser warns about the self-signed certificate; that's expected.
+
+**If something's off:** `Argo CD not installed` from the register script → run `install-addons.sh argocd` first. A vCluster shows as unreachable in the UI → check `kubectl --context dev-lab get ns` from the MacBook; if that fails too, see Chapter 26 §3.11.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/install-addons.sh argocd                       # Argo CD (versions.env ARGOCD_VERSION) into argocd on spark-root
 scripts/argocd-register-vclusters.sh                   # cluster Secrets for dev-lab and dev-llms
 kubectl --context spark-root -n argocd get secret -l argocd.argoproj.io/secret-type=cluster \
@@ -108,7 +128,33 @@ The `SERVER` column is base64; `echo <value> | base64 -d` shows `https://192.168
 
 ### 2.2 Point it at your fork and sync
 
+#### What this lab does (manifest `lab/gitops/applications.yaml`)
+
+- **Edits** `applications.yaml` locally so every `repoURL` points at your fork.
+- **Creates 23 Applications** in `argocd`: one per `manifests/<cluster>/<layer>`, with destination `in-cluster` (root platform, vCluster budgets, LLM stack) or `https://192.168.0.111:443` / `https://192.168.0.112:443` (the vClusters). Table in §1.1.
+- **Auto-sync with `selfHeal: true`.** Namespace, budget and storage layers have `prune: false`; the other layers prune.
+- **Optional app-of-apps:** a parent Application `spark-app-of-apps` that syncs the `gitops` folder itself, so the children are applied wave by wave.
+- **Not touched:** the vCluster Helm releases, the add-ons, and the hand-run labs (`root/12-cgroups`, `root-llms/80-distributed`, `root-llms/90-serving`).
+
+#### What to look for
+
+1. **Count:** `get applications` lists 23 rows.
+2. **Status after a few minutes:**
+
+   | Applications | Healthy value |
+   |---|---|
+   | most | `Synced` / `Healthy` |
+   | `spark-root-llms-40-ingress`, `spark-root-llms-20-scheduling` | `Synced` once Traefik and Kueue are installed on the root; `SyncFailed`/`Missing` before |
+   | `spark-root-95-observability` | `Synced` once kube-prometheus-stack's CRDs are on the root |
+
+3. **DEST column:** `https://kubernetes.default.svc` for `spark-root-*`, `.111` for `spark-dev-lab-*`, `.112` for `spark-dev-llms-*`.
+
+**If something's off:** `ComparisonError` / repository not found → the `sed` didn't change `repoURL`, or the fork is private without credentials in Argo CD. An app stuck retrying with `namespace not found` → it ran before its namespace layer; the `retry` block (5 tries) normally clears it, or use the app-of-apps.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 sed -i 's|github.com/cloudone365/technical-depth.git|github.com/<you>/technical-depth.git|' gitops/applications.yaml   # your fork
 kubectl --context spark-root apply -n argocd -f gitops/applications.yaml
 kubectl --context spark-root -n argocd get applications \
@@ -120,6 +166,7 @@ Expected after a few minutes: every app `Synced` / `Healthy`. `spark-root-llms-4
 Applied like this, the Applications all start at once, and the sync waves don't order them — waves order resources *within one sync*. The `retry` block (5 tries, backoff to 3 min) is what lets a layer whose namespace doesn't exist yet succeed on a later try. For real ordering, sync `applications.yaml` itself from a parent **app-of-apps**:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -n argocd -f - <<'YAML'
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -139,7 +186,24 @@ Now the parent applies the children wave by wave. Argo CD waits for a child to b
 
 ### 2.3 Watch drift correction — in a vCluster
 
+#### What this lab does (a manual patch that Argo CD reverts)
+
+- **Patches** `tenant-alpha`'s ResourceQuota `tenant-budget` inside dev-lab to `limits.cpu: 4`, a change that isn't in Git.
+- **Argo CD** (Application `spark-dev-lab-10-tenancy`, `selfHeal: true`) sees the drift through dev-lab's API server and puts `500m` back. Nothing on the root changes.
+- **Optional:** the same experiment on a root budget (`vc-dev-llms/vcluster-budget` or `llm-serving/serving-budget`) reverts the same way.
+
+#### What to look for
+
+1. **Sync status:** `OutOfSync` right after the patch, then `Synced` again. Repeat the `get application` command if you only see `Synced`; the revert can be quick.
+2. **Quota:** `limits.cpu` back to `500m` within a few minutes.
+3. **Ceiling unaffected:** even while the patch is live, dev-lab can't use more than the root's `vcluster-budget` of 2 CPU.
+
+**If something's off:** the value stays at `4` → the app's auto-sync is off (paused for a drill, see the note below) or the app isn't `Healthy`; check `kubectl --context spark-root -n argocd get application spark-dev-lab-10-tenancy`.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab -n tenant-alpha patch resourcequota tenant-budget --type merge -p '{"spec":{"hard":{"limits.cpu":"4"}}}'
 kubectl --context spark-root -n argocd get application spark-dev-lab-10-tenancy -o jsonpath='{.status.sync.status}{"\n"}'   # OutOfSync, then Synced
 kubectl --context dev-lab -n tenant-alpha get resourcequota tenant-budget -o jsonpath='{.spec.hard.limits\.cpu}{"\n"}'   # back to 500m
@@ -150,6 +214,23 @@ Argo CD on the root noticed a change inside dev-lab's own API server and reverte
 > **Drills vs GitOps:** with `selfHeal: true`, Argo CD "fixes" most `breakfix.sh` injections by itself within minutes, which spoils the exercise. Pause the app first: `kubectl --context spark-root -n argocd patch application <app> --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}'`, then re-apply `gitops/applications.yaml` afterwards (`kubectl --context spark-root apply -n argocd -f gitops/applications.yaml`).
 
 ### 2.4 A change the right way: raise tenant-beta's GPU slices
+
+#### What this lab does (a Git change to `manifests/dev-lab/10-tenancy/quotas.yaml`)
+
+- **Raises** `tenant-beta`'s `requests.nvidia.com/gpu` from `"1"` to `"2"` in Git, on a branch.
+- **Checks it locally** with `tests/budget_check.py`, then in CI on your PR (static checks plus the kind job with the root and both vClusters).
+- **After the merge,** Argo CD syncs `spark-dev-lab-10-tenancy` to dev-lab. `scripts/verify.sh tenancy` is the gate. A `git revert` undoes it the same way.
+
+#### What to look for
+
+1. **`budget_check.py`:** ends with `budget check OK` for `"2"`. With `"3"` it prints a `FAIL:` line for tenant-beta's GPU ceiling against the `vc-dev-lab` budget and exits non-zero.
+2. **CI:** all jobs green on the PR.
+3. **After the sync:** `kubectl --context dev-lab -n tenant-beta get resourcequota tenant-budget -o jsonpath='{.spec.hard.requests\.nvidia\.com/gpu}'` → `2`, and `verify.sh tenancy` ends `0 failed`.
+4. **After a revert:** the same query shows `1` again.
+
+**If something's off:** the quota in dev-lab doesn't change after the merge → Argo CD tracks a different `repoURL` or branch than the one you merged into (§2.2).
+
+#### Run it
 
 1. Branch, then edit `manifests/dev-lab/10-tenancy/quotas.yaml` (`requests.nvidia.com/gpu: "2"` in tenant-beta).
 2. Run `python3 tests/budget_check.py`: an inner ceiling of 2 fits dev-lab's 2 slices; `"3"` would fail (`tenant-beta GPU ceiling > vc-dev-lab budget`). The two tenants' ceilings may add up to more than the vCluster — they're ceilings, not reservations.

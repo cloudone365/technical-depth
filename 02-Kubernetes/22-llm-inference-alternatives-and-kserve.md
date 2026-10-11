@@ -122,13 +122,38 @@ All three ask for the same 32 Gi (request = limit) and 0.20 of the pool: `servin
 ## 5. Lab
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "02-Kubernetes/lab"
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 ```
 
 ### 5.1 Baseline: vLLM prefix-cache effect
 
+#### What this lab does (script `lab/scripts/ttft_probe.py`)
+
+- **Target:** the vLLM engine from Chapter 20 (`llm-serving/vllm` on the root, port 8000, `--enable-prefix-caching`), reached with a `kubectl port-forward`. Nothing is deployed or changed.
+- **Probe:** sends 10 streaming chat requests that share one long system prompt (about 1,740 words), then 10 whose prompt starts with a random UUID, so no prefix can be reused. Each asks for 8 tokens.
+- **Output:** the cold first request, the median time to first token (TTFT) for both groups, and the ratio. That ratio is your prefix-cache baseline for §5.2.
+
+#### What to look for
+
+1. **Rollout:** `deployment "vllm" successfully rolled out`.
+2. **Probe output:**
+
+   | Line | Healthy value |
+   |---|---|
+   | `first request (cold)` | the slowest number: nothing is cached yet |
+   | `shared prefix  median TTFT` | clearly below the unique-prefix median |
+   | `speed-up from prefix cache` | well above `1.0x` |
+
+3. **Record** the shared and unique medians and the speed-up in §5.6.
+
+**If something's off:** a speed-up near `1.0x` means prefix caching is off or the prompt changed between requests (check the engine flags). `connection refused` means the port-forward isn't running or vLLM is parked (KEDA `paused-replicas`, Chapter 20 §9). More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving rollout status deploy/vllm          # from Chapter 20
 kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
 python3 scripts/ttft_probe.py --url http://localhost:8000 --model qwen2.5-0.5b -n 10
@@ -139,7 +164,27 @@ Record `shared prefix median`, `unique prefix median` and the speed-up.
 
 ### 5.2 Swap to SGLang
 
+#### What this lab does (manifests `lab/manifests/root-llms/90-serving/sglang`)
+
+- **Parks vLLM:** sets the KEDA annotation `autoscaling.keda.sh/paused-replicas=0` on its ScaledObject (or scales it to 0 if KEDA isn't there). This keeps the comparison clean; it is not needed for the quota.
+- **Creates** Deployment `sglang` (image `lmsysorg/sglang:spark`, starts at `replicas: 0`) and Service `sglang` on port 30000 in the root's `llm-serving`, then scales it to 1.
+- **Engine:** serves `Qwen/Qwen2.5-0.5B-Instruct` as `qwen2.5-0.5b` with RadixAttention prefix caching, `--mem-fraction-static=0.20`, 1500m CPU · 32 Gi (request = limit) · 1 GPU slice. Weights go to the `model-cache` PVC.
+- **First run is slow:** the image pull and model download can take many minutes, which is why the rollout waits up to 30 min.
+- **Measures** the same TTFT probe as §5.1 on port 30000 and reads SGLang's own metrics.
+
+#### What to look for
+
+1. **Pods:** `kubectl --context spark-root -n llm-serving get pods` shows `sglang-…` `1/1 Running` and no `vllm-…` pod.
+2. **Startup log:** a `max_total_num_tokens=…` line (the KV-cache size SGLang reserved) and Uvicorn running on port 30000. No `ERROR` lines.
+3. **Probe:** shared-prefix median clearly below unique-prefix median, speed-up well above `1.0x`. Put the numbers next to vLLM's in §5.6.
+4. **Metrics:** `sglang:cache_hit_rate` above 0 after the probe; `sglang:num_running_reqs` back at 0 when idle.
+
+**If something's off:** `0/1` with `exceeded quota: serving-budget` → two other engines still hold the budget (`kubectl --context spark-root -n llm-serving get pods`). `CreateContainerConfigError` about `hf-token` → the Secret from Chapter 20's `vllm` layer is missing. `exec format error` → wrong image tag for arm64/sm_121. More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite \
   || kubectl --context spark-root -n llm-serving scale deploy vllm --replicas=0
 kubectl --context spark-root apply -k manifests/root-llms/90-serving/sglang
@@ -155,9 +200,26 @@ Parking vLLM here is for clean numbers, not for the quota: SGLang would fit besi
 
 ### 5.3 Structured output (JSON schema)
 
+#### What this lab does (a `curl` against `sglang:30000`)
+
+- **Request:** one chat completion to the SGLang engine from §5.2 with an OpenAI-style `response_format` that carries a JSON schema: `name` (string), `memory_gb` (integer), `unified` (boolean), all required.
+- **Engine side:** SGLang constrains decoding so only tokens that keep the output valid against the schema can be produced.
+- **Nothing changes** in the cluster. You only need the port-forward.
+
+#### What to look for
+
+1. **`jq .` prints an object** with exactly the keys `name`, `memory_gb`, `unified`. A `jq` parse error means the output wasn't valid JSON.
+2. **Types match:** `memory_gb` is a number without quotes, `unified` is `true` or `false`.
+3. **Repeat it** 5–10 times: the shape must hold every time. The values may be wrong (a 0.5B model guesses); the structure may not.
+
+**If something's off:** `null` from the first `jq` usually means an error object came back instead of `choices`: run the `curl` without the `jq` filters to read it. Port 30000 refused → SGLang isn't at `1/1` (§5.2).
+
+#### Run it
+
 Both engines accept OpenAI-style `response_format` with a JSON schema:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving port-forward svc/sglang 30000 &
 curl -s localhost:30000/v1/chat/completions -H 'Content-Type: application/json' -d '{
  "model":"qwen2.5-0.5b","max_tokens":128,
@@ -172,7 +234,29 @@ Expected: valid JSON with exactly those three keys, **every time**. The engine c
 
 ### 5.4 The same model through KServe (RawDeployment)
 
+#### What this lab does (script `scripts/install-addons.sh kserve` + manifests `lab/manifests/root-llms/90-serving/kserve`)
+
+- **Parks SGLang** (scale to 0). vLLM stays parked from §5.2.
+- **Installs on the root only:** cert-manager (namespace `cert-manager`), the KServe controller (namespace `kserve`) and KServe's cluster runtimes, with RawDeployment as the default mode (no Knative, no Istio). Versions come from `versions.env`. The vClusters get none of it.
+- **Creates** ServingRuntime `vllm-spark` (`nvcr.io/nvidia/vllm:25.09-py3`, port 8080, `--gpu-memory-utilization=0.20`, its own startup and readiness probes) and InferenceService `qwen-small` (`hf://Qwen/Qwen2.5-0.5B-Instruct`, 1 replica) in `llm-serving`.
+- **KServe generates** a predictor Deployment with a storage-initializer init container that downloads the model to `/mnt/models`, a Service `qwen-small-predictor` (port 80 → 8080) and, depending on min/max replicas, an HPA.
+- **Resources:** the predictor takes 1500m · 32 Gi (request = limit) · 1 slice from `serving-budget`. The cert-manager and KServe controllers have no quota; they use the root's platform headroom.
+
+#### What to look for
+
+1. **CRD counts:** a dozen or more on `spark-root`, `0` on `dev-llms`.
+2. **Controllers:** all pods `Running` in `kserve` and in `cert-manager`.
+3. **InferenceService:** `qwen-small` reaches `READY True` (the first run waits for the image pull and the model download).
+4. **Generated objects:** a Deployment and a Service labelled `serving.kserve.io/inferenceservice=qwen-small`.
+5. **Endpoint:** `/v1/models` lists `qwen-small`. The TTFT probe prints the same four lines as in §5.1.
+6. **Cost:** `Allocated resources` on the root node rises after the install by the controllers' requests; `serving-budget` only counts the predictor pod.
+
+**If something's off:** webhook errors on apply → cert-manager isn't ready yet; wait and re-apply. Predictor stuck in `Init` → read the storage-initializer log (`-c storage-initializer`). Predictor Deployment denied with `serving workloads must define a readinessProbe` → the ServingRuntime lost its probes. More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving scale deploy sglang --replicas=0
 scripts/install-addons.sh kserve                      # cert-manager + KServe + cluster runtimes on the root, RawDeployment default
 kubectl --context spark-root get crd | grep -cE 'kserve|cert-manager'        # a dozen or more
@@ -192,10 +276,29 @@ The cost of the operator is visible too: compare `kubectl --context spark-root d
 
 ### 5.5 (Optional) GGUF with Ollama, outside Kubernetes
 
+#### What this lab does (a Docker container on dgx-spark-1)
+
+- **Starts** `ollama/ollama` with plain Docker on the Spark, GPU through `--gpus=all`, API on port **11434**, models in the Docker volume `ollama`.
+- **Pulls** the GGUF build of `qwen2.5:0.5b` on first use and answers one prompt.
+- **Measures** TTFT with the same probe through Ollama's OpenAI-compatible `/v1` API.
+- **Removes** the container at the end. The `ollama` volume with the downloaded model stays until you `docker volume rm ollama`.
+- **Kubernetes is not involved:** no namespace, quota, slice or PriorityClass covers this container.
+
+#### What to look for
+
+1. **`ollama run`** prints one sentence about unified memory.
+2. **Probe:** the same four lines as §5.1. Record the cold and shared-prefix TTFT in §5.6.
+3. **Invisible to the cluster:** while the container runs, `kubectl --context spark-root -n llm-serving describe resourcequota serving-budget` shows no change, while `free -h` on the Spark shows less memory available.
+4. **Cleanup:** `docker ps` no longer lists `ollama`.
+
+**If something's off:** `could not select device driver "" with capabilities: [[gpu]]` → Docker's NVIDIA runtime is missing (01-Ansible Chapter 11, template `11.1 Containers`). `port is already allocated` → an old `ollama` container is still there: `docker rm -f ollama`. More in §7.
+
+#### Run it
+
 For a quick single-user comparison on the host (DGX OS ships Docker, which shares containerd with the kubelet but not its accounting):
 
 ```bash
-ssh dgxadmin@192.168.0.100
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 docker run -d --gpus=all -p 11434:11434 -v ollama:/root/.ollama --name ollama ollama/ollama
 docker exec ollama ollama run qwen2.5:0.5b "One sentence about unified memory."
 python3 scripts/ttft_probe.py --url http://localhost:11434 --model qwen2.5:0.5b -n 5   # Ollama speaks the OpenAI API at /v1
@@ -218,6 +321,7 @@ docker rm -f ollama
 ### 5.7 Back to the baseline
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root delete -k manifests/root-llms/90-serving/kserve
 kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas- \
   || kubectl --context spark-root -n llm-serving scale deploy vllm --replicas=1

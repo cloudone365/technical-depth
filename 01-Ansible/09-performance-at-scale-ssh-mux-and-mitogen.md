@@ -52,6 +52,30 @@ flowchart LR
 
 ## 2. Build the simulated fleet
 
+#### What this lab does (playbook `09.1-fleet-sim.yml`)
+
+- **On dgx-spark-1:** copies `tools/fleet-sim/Dockerfile` and your public key to `/opt/fleet-sim/`, builds the image `fleet-node:latest` (Ubuntu 24.04 with `sshd`, `python3`, `sudo`; native arm64), and starts `fleet_size` containers (64 with the `-e fleet_size=64` below; the default is 32) named `fleet-001` … `fleet-064`. Each one publishes its SSH port on **22001–22064**, is capped at 0.25 CPU and 256 MiB, and carries the label `spark.lab/fleet-sim=true`.
+- **Inside each fake node:** user `dgxadmin` with password-less sudo and your key in `authorized_keys`; `MaxStartups 200:30:400` so the fake sshd doesn't throttle the benchmark.
+- **On the MacBook:** writes `.cache/fleet.ini`, an inventory group `fleet` that points every fake node at `192.168.0.100:<port>`.
+- **What is not touched:** the Spark's own sshd, Kubernetes and the GPU. The containers run outside Kubernetes, so under the benchmark they compete with your pods for up to 16 of the 20 cores; run it when the LLMs aren't busy.
+- **Clean-up:** the same playbook with `-e fleet_state=absent` removes the containers (§7).
+
+#### What to look for
+
+1. **Command exit:** `failed=0`. The first run shows `changed` on the build directory, the Dockerfile, `authorized_keys`, the image, the 64 containers and `fleet.ini`. On a re-run, `Build image` still shows `changed` (it has `rebuild: always`); everything else is `ok`.
+2. **64 containers running:**
+   ```bash
+   # ▶ dgx-spark-1 (ssh dgx-spark-1)
+   docker ps --filter label=spark.lab/fleet-sim=true -q | wc -l     # 64
+   ```
+3. **Every fake node answers.** The `ansible … -m ping` line below prints one line per node; healthy is `fleet-001 | SUCCESS => {"changed": false, "ping": "pong"}`. Count them:
+   ```bash
+   # ▶ MacBook · 01-Ansible/lab (venv active)
+   ansible -i .cache/fleet.ini fleet -m ping -f 64 -o | grep -c SUCCESS     # 64
+   ```
+
+**If something's off:** `Permission denied (publickey)` on every fake node means the image got no key: the play reads `~/.ssh/id_ed25519.pub` on the controller (`spark_admin_pubkeys` in `group_vars/all.yml`), so a MacBook with only an RSA key leaves `authorized_keys` empty. `Connection refused` on some ports means those containers didn't start: `docker ps -a --filter label=spark.lab/fleet-sim=true` on the Spark. More in §6.
+
 ```dockerfile
 # lab/tools/fleet-sim/Dockerfile
 # A minimal "fake node": sshd + python3, arm64-native on the Spark.
@@ -154,6 +178,8 @@ CMD ["/usr/sbin/sshd", "-D", "-e"]
       when: fleet_state == 'present'
 ```
 
+#### Run it
+
 ```bash
 # ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
@@ -191,6 +217,29 @@ The benchmark workload (facts plus ten `copy` tasks, a typical baseline shape):
 ---
 
 ## 3. Run the experiment matrix
+
+#### What this lab does (playbook `09.2-fleet-bench.yml`)
+
+- **Workload:** on every fake node, gathers facts, writes ten small files `/etc/bench-0.conf` … `/etc/bench-9.conf` (with `become`), and runs `dpkg -s python3`. The files live inside the containers; the Spark itself is not changed.
+- **The `bench` function** runs that playbook once per setting, with only one thing changed per row: forks, SSH multiplexing, pipelining, strategy, fact gathering. It deletes the mux sockets in `~/.ansible/cp/` before each run so every row starts cold.
+- **Output:** one line `<label>,<seconds>` per row, appended to `.cache/bench.csv` on the MacBook. The seconds come from the `ansible.posix.timer` callback's `Playbook run took …` line.
+- **Load:** the `f64` rows run 64 parallel SSH sessions from the MacBook and push the fake nodes to their 0.25-CPU caps on the Spark.
+
+#### What to look for
+
+1. **Each row prints a number.** `bench` hides the playbook output, so an empty value after the comma (for example `mux-f5,`) means that run failed or never reached the timer line; run that one row's `ansible-playbook` command by hand to see why.
+2. **`.cache/bench.csv`** has the seven rows below (more if you add Mitogen):
+   ```bash
+   # ▶ MacBook · 01-Ansible/lab (venv active)
+   column -s, -t < .cache/bench.csv
+   ```
+   Compare the shape with the table below, not the absolute numbers. The first row also does the first-time file writes (10 `changed` per node); every later run is `changed=0`, so if `baseline-f5` looks unfairly slow, run it once more and keep the second value.
+3. **The saturation point:** during `mux-pipe-f64`, `top` on the MacBook shows many `ansible-playbook` workers near 100 % CPU, and `docker stats` on the Spark shows fake nodes at their 25 % CPU cap. When `f64` is not faster than `f20`, you have found your controller's limit.
+4. **No throttling:** the `grep -c 'beginning MaxStartups throttling'` line prints `0`. Note that it reads the Spark's own sshd journal; the fake nodes' sshd logs to `docker logs fleet-NNN` instead.
+
+**If something's off:** random `UNREACHABLE` at high forks means connection limits (§4.4) or a controller that ran out of memory (`free -m`/Activity Monitor during the run). All rows empty usually means the `fleet` inventory is gone: `ls .cache/fleet.ini`, and re-run §2 if needed. More in §6.
+
+#### Run it
 
 Keep everything identical except one variable per run. `ANSIBLE_CALLBACKS_ENABLED=ansible.posix.timer` prints the wall time.
 
@@ -291,11 +340,26 @@ A reasonable starting point is `forks ≈ 2–4 × controller cores`, capped by 
 
 ### 4.5 Mitogen, with eyes open
 
+#### What this lab does (playbook `09.2-fleet-bench.yml` under Mitogen)
+
+- **Installs** the `mitogen` Python package into the lab venv on the MacBook. Nothing changes on the Spark, in `ansible.cfg` or in Semaphore.
+- **Runs** the same benchmark playbook at `-f 20` with the strategy `mitogen_linear`, set only through environment variables for that one command.
+
+#### What to look for
+
+1. **Command exit:** `failed=0`, and the same `ok`/`changed` counts as a normal run (`changed=0` once the bench files exist).
+2. **The timer line** `Playbook run took …` at the end. Compare it with your `mux-pipe-f20` row; that is the like-for-like row (same forks, same workload).
+3. **To get it into `.cache/bench.csv`,** run it through `bench` with the same two variables, for example `bench mitogen-f20 ANSIBLE_FORKS=20 ANSIBLE_STRATEGY_PLUGINS=<the path above> ANSIBLE_STRATEGY=mitogen_linear`.
+
+**If something's off:** `unsupported Ansible version` means this Mitogen release doesn't support the venv's `ansible-core` (`pip show mitogen ansible-core`); pin a compatible pair or leave Mitogen out. More in §6.
+
 Mitogen replaces per-task SSH and Python start-up with a persistent interpreter tree and can be several times faster on task-heavy plays. The trade-offs:
 
 - It **lags ansible-core releases**. Check the Mitogen changelog for your exact `ansible-core` version before upgrading either one.
 - Some modules and connection plugins behave differently under it (become edge cases, `async`, `raw`).
 - It isn't supported inside AWX execution environments by Red Hat.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)

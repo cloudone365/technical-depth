@@ -197,6 +197,23 @@ flowchart LR
 
 ### Task 0 · Toolchain (your MacBook)
 
+#### What this lab does (script `lab/tests/run-local-checks.sh`)
+
+- **Static checks, no Spark needed:** `yamllint`; `kustomize build` of every folder plus `kubeconform` on every manifest, break/fix and policy fixture; the audit policy diffed against 01-Ansible's copy; `tests/budget_check.py`; `promtool` on the alert rules; the Grafana dashboard regenerated and compared; `py_compile` of every lab Python file; `shellcheck` on the scripts.
+- **One local process:** starts `mock_llm.py` on `localhost:8000`, checks `/health` and that a streamed answer has 6 SSE events, then stops it.
+- **Helm templates:** if `helm` is installed, renders the vCluster, Traefik, kube-prometheus-stack and metrics-server values against their charts (needs internet for the chart repos).
+- Nothing is installed anywhere. `API=1` adds server-side dry runs against the three contexts; you don't need that here.
+
+#### What to look for
+
+1. **Command exit:** the last line is `ALL LOCAL CHECKS PASSED`. The script stops at the first failing step (`set -e`), so the last `==` header printed names the step that failed.
+2. **`== budgets add up`** prints the budget table and `budget check OK`.
+3. **`== helm template`** prints `vclusters/dev-lab.yaml OK`, `vclusters/dev-llms.yaml OK` and one `OK` per add-on values file.
+
+**If something's off:** `command not found` for `kubeconform`, `promtool` or `shellcheck` → install the tool (the CI workflow lists them). `== mock-llm functional` failing → port 8000 is already in use on the MacBook.
+
+#### Run it
+
 ```bash
 git clone https://github.com/cloudone365/technical-depth.git && cd "technical-depth/02-Kubernetes/lab"
 pip install yamllint shellcheck-py pyyaml     # plus kubectl, helm, kubeconform, promtool (see CI workflow)
@@ -206,6 +223,32 @@ tests/run-local-checks.sh
 **Gate:** `ALL LOCAL CHECKS PASSED`.
 
 ### Task 1 · Root cluster (01-Ansible, from Semaphore)
+
+#### What this lab does (templates `19.1 Kubernetes`, `20.1 GPU Operator`; script `lab/scripts/preflight.sh`)
+
+- **`19.1 Kubernetes`:** kubeadm root cluster v1.36 on dgx-spark-1 (control plane and worker, no control-plane taint), Cilium, MetalLB with pool `192.168.0.110–119`, kubelet reservations of 3 CPU and 12 GiB, audit log, Secret encryption, and the etcd snapshot timer. It writes the kubeconfig with context `spark-root` to sema01's state volume.
+- **`20.1 GPU Operator`:** the GPU Operator with time-slicing, so the node advertises 15 `nvidia.com/gpu`.
+- **`fetch-kubeconfig.sh sema01`:** copies `kubeconfig-spark-lab.yaml` from sema01 into `01-Ansible/lab/.cache/` on the MacBook.
+- **`preflight.sh`:** read-only checks of the host, the root cluster and (if they exist yet) the vClusters. The host checks (`nproc`, `nvidia-smi`, `systemctl`, `/data/k8s`) only mean something on the Spark: run preflight there.
+
+#### What to look for
+
+1. **Semaphore runs:** both end `failed=0`. A first run of `19.1` shows many `changed`; a re-run is mostly `ok`.
+2. **Preflight summary:** `… passed, … warnings, 0 failed`, with these lines among the `[PASS]`:
+
+   | Line | Healthy value |
+   |---|---|
+   | `kubeadm` | `v1.36.5` (the value in `versions.env`) |
+   | taint | `dgx-spark-1 schedulable (no control-plane taint)` |
+   | GPU | `dgx-spark-1 allocatable nvidia.com/gpu=15 (time-slices)` |
+   | MetalLB | `MetalLB pool lab-pool (192.168.0.110–119)` |
+   | memory | `MemTotal 121 GiB (unified CPU+GPU pool)` |
+
+3. **vClusters:** before Task 3 the two vCluster lines are `[....] … not reachable yet`. That's expected at this stage.
+
+**If something's off:** `k3s is still installed` → template `19.2 Reset Kubernetes` with `reset_remove_k3s=true`. `no nvidia.com/gpu allocatable` → re-run `20.1`. More in §8 (gate 1).
+
+#### Run it
 
 In Semaphore (project `spark-lab`): run `19.1 Kubernetes`, then `20.1 GPU Operator` (break-glass CLI: `ansible-playbook playbooks/19.1-kubernetes.yml -l dgx-spark-1,localhost -K`). Then on your MacBook:
 
@@ -220,6 +263,24 @@ cd "../../02-Kubernetes/lab" && scripts/preflight.sh
 
 ### Task 2 · Control plane hardening
 
+#### What this lab does (`kubectl replace` of all Secrets, script `lab/scripts/etcd-drill.sh`)
+
+- **Re-encrypts:** rewrites every root Secret unchanged, so each is stored with the current encryption key (Chapter 03 §5 Task 1).
+- **`etcd-drill.sh status`:** member list, endpoint status, alarms, newest snapshots and the snapshot timer (Chapter 02 §5.1).
+- **`etcd-drill.sh snapshot`:** one on-demand snapshot `/var/lib/etcd-snapshots/etcd-dgx-spark-1-<ts>-drill.db`.
+- Nothing is reconfigured. The two `etcd-drill.sh` lines and `systemctl` run on the Spark (they use `sudo etcdctl` and the etcd certificates there); the `kubectl` line works from the MacBook.
+
+#### What to look for
+
+1. **Re-encryption:** no output and no error (the command sends its output to `/dev/null`).
+2. **`status`:** 1 member `dgx-spark-1`, `IS LEADER true`, empty alarm list.
+3. **`snapshot`:** ends `saved /var/lib/etcd-snapshots/etcd-dgx-spark-1-…-drill.db`, after an `etcdutl snapshot status` table with a non-zero `TOTAL KEYS`.
+4. **Timer:** `etcd-snapshot.timer` listed with a `NEXT` time at most 6 h away.
+
+**If something's off:** `etcdctl missing` or version errors → re-run `19.1 Kubernetes`. More in §8 (gate 2) and Chapter 02 §7.
+
+#### Run it
+
 ```bash
 kubectl --context spark-root get secrets -A -o json | kubectl --context spark-root replace -f - >/dev/null
 scripts/etcd-drill.sh status && scripts/etcd-drill.sh snapshot
@@ -229,6 +290,36 @@ systemctl list-timers etcd-snapshot.timer
 **Gate:** 1 etcd member, leader, no alarms, ≥ 1 snapshot, timer scheduled. Secrets in etcd start with `k8s:enc:aescbc:v1:` (Chapter 03 §5 Task 1).
 
 ### Task 3 · Platform add-ons and vClusters
+
+#### What this lab does (script `lab/scripts/install-addons.sh all`)
+
+Installs seven add-ons on the root, one after the other (versions from `versions.env`):
+
+- **`storage`:** local-path-provisioner on `/data/k8s`, StorageClasses `local-nvme` and `local-nvme-retain`, `local-path` as default.
+- **`metrics-server`:** `kubectl top` and HPAs (Helm, `kube-system`).
+- **`kps`:** kube-prometheus-stack in `observability`, Grafana on NodePort `32000`. Waits up to 15 min.
+- **`vclusters`:** root namespaces, budgets and Cilium boundary for the vClusters, then `dev-lab` (`.111`) and `dev-llms` (`.112`) with Helm, and both contexts merged into your kubeconfig.
+- **`traefik`:** namespaces `llm-serving`, `batch`, `ingress`, the Gateway API CRDs, and Traefik `traefik-lab` in `ingress` on `192.168.0.115`.
+- **`kueue`, `keda`:** the controllers in `kueue-system` and `keda`. The queues come later with `apply-lab.sh`.
+
+A first run pulls many images and takes a while. Re-running is safe (`helm upgrade --install`, `kubectl apply`).
+
+#### What to look for
+
+1. **Command exit:** the script stops at the first error. A full run prints `192.168.0.115` after the Traefik step and ends with `deployment "keda-operator" successfully rolled out`.
+2. **Root pods:** the second command prints `root: all pods Running/Completed`.
+3. **vClusters:** `scripts/verify.sh vclusters` shows `dev-lab root budget: 2 4Gi 2` and `dev-llms root budget: 2 4Gi 2`, and ends `0 failed`.
+4. **Endpoints:**
+
+   | Check | Healthy value |
+   |---|---|
+   | `kubectl --context spark-root -n ingress get svc traefik-lab` | `EXTERNAL-IP 192.168.0.115` |
+   | http://192.168.0.100:32000 | Grafana login page |
+   | `kubectl config get-contexts -o name` | `spark-root`, `dev-lab`, `dev-llms` |
+
+**If something's off:** a vCluster never Ready → its PVC is `Pending` because storage wasn't installed first. Traefik without an IP → the MetalLB pool. More in §8 (gate 3).
+
+#### Run it
 
 ```bash
 scripts/install-addons.sh all          # all on the root: storage metrics-server kps vclusters traefik kueue keda
@@ -240,6 +331,33 @@ scripts/verify.sh vclusters
 
 ### Task 4–5 · Tenancy, policies and workloads
 
+#### What this lab does (scripts `lab/scripts/apply-lab.sh`, `verify.sh`)
+
+- **Root:** PriorityClasses and platform namespaces, vCluster budgets and Cilium boundary, the syncer APF lane, `netshoot-host`, the `slice-ledger` controller, the `node-probe` DaemonSet, the `gemm-contention` Deployment at 0 replicas, and the observability objects (scrape targets, alert rules, dashboard).
+- **Root, LLM stack:** namespaces and budgets (`serving-budget`, `batch-budget`), CEL policies, the `model-cache` PVC, the mock OpenAI API with Traefik Ingress and HTTPRoute, Qdrant, and the Kueue flavor, `spark-cq` and LocalQueue `train`.
+- **dev-lab:** tenant namespaces, quotas, RBAC, NetworkPolicies, CEL policies, the tenant APF lane, and the networking tools in `lab-tools`. **dev-llms:** `llm-sandbox`, its budget and the CEL policies.
+- **Folders whose CRDs are missing are skipped** with a `[WARN] skip …` line instead of failing. `verify.sh` then checks the result; its admission part uses server-side dry runs and creates nothing.
+
+#### What to look for
+
+1. **`apply-lab.sh` summary:** `… passed, … warnings, 0 failed`. Any `[WARN] skip` line names the add-on that's missing (Traefik, Kueue, kps).
+2. **`verify.sh` summary:** `0 failed`, with these lines:
+
+   | Line | Healthy value |
+   |---|---|
+   | `llm-serving serving-budget` | `8 90Gi 6` |
+   | `batch batch-budget` | `2 12Gi 3` |
+   | `Kueue spark-cq` | `2 12Gi 3` |
+   | `tenant-alpha quota limits.cpu` | `500m` |
+   | admission | 12 `allowed` / `denied` lines, all `[PASS]` |
+   | StorageClasses | `local-path`, `local-nvme`, `local-nvme-retain` |
+
+3. **`model-cache`** may show `[....] model-cache is 'Pending'`: the class binds on first use (Task 7). That line is information, not a failure.
+
+**If something's off:** admission fixtures fail → a namespace label from `<cluster>/00-platform` is missing; re-apply it. `context dev-lab unreachable — skipping` → go back to Task 3. More in §8 (gates 3–4).
+
+#### Run it
+
 ```bash
 scripts/apply-lab.sh                   # root (incl. root-llms) → dev-lab → dev-llms
 scripts/verify.sh platform vclusters llm-budget tenancy admission storage
@@ -248,6 +366,31 @@ scripts/verify.sh platform vclusters llm-budget tenancy admission storage
 **Gate:** all PASS, including `llm-serving serving-budget: 8 90Gi 6`, `batch batch-budget: 2 12Gi 3` and `Kueue spark-cq: 2 12Gi 3`.
 
 ### Task 6 · GPU
+
+#### What this lab does (`scripts/verify.sh gpu`, manifest `lab/manifests/root/70-gpu/gemm-solo.yaml`)
+
+- **`verify.sh gpu`:** checks the node labelled `spark.lab/gpu=gb10`, its 15 allocatable slices and the GPU Operator's validator, then creates `tenant-beta/gpu-smoke` **inside dev-lab**, waits up to 180 s for it to succeed, prints its first log line and deletes it.
+- **`gemm-solo`:** a one-off Job in the root's `platform-tools` on one time-slice (1 CPU, 4–8 Gi): `nvcr.io/nvidia/pytorch:25.09-py3` multiplies two 8192 × 8192 bf16 matrices 50 times and prints one JSON line. The first run pulls the PyTorch image (about 10 GB), so it takes several minutes.
+- Nothing is reconfigured.
+
+#### What to look for
+
+1. **`verify.sh gpu`:** four `[PASS]` lines ending `gpu-smoke: GPU 0: NVIDIA GB10 (UUID: GPU-…)`, and `0 failed`.
+2. **The `gemm-solo` JSON line:**
+
+   | Field | Healthy value |
+   |---|---|
+   | `device` | `NVIDIA GB10` |
+   | `cc` | `12.1` |
+   | `tflops` | a number in the tens; with nothing else on the GPU, close to the host baseline from 01-Ansible `11.2 CUDA smoke` (≈ 46.6 on this lab's Spark) |
+   | `mem_total_gib` | `121.7` |
+   | `mem_free_gib` | below the total; on UMA it tracks host memory |
+
+3. **Record** the `tflops` value. Chapter 16's contention lab compares against it.
+
+**If something's off:** `gpu-smoke did not succeed` with phase `Pending` → dev-lab's 2 slices are in use (break/fix 02). `gemm-solo` stuck in `ContainerCreating` → still pulling the image (`kubectl describe` shows `Pulling`). More in §8 (gate 6).
+
+#### Run it
 
 ```bash
 scripts/verify.sh gpu                  # gpu-smoke from inside dev-lab
@@ -258,6 +401,31 @@ kubectl --context spark-root -n platform-tools logs -f job/gemm-solo
 **Gate:** gpu-smoke PASS. Baseline TFLOPS recorded.
 
 ### Task 7 · Serving
+
+#### What this lab does (manifests `lab/manifests/root-llms/60-storage/model-prefetch-job.yaml`, `90-serving/vllm`; `scripts/verify.sh ingress serving`)
+
+- **Prefetch:** Job `llm-serving/model-prefetch` downloads `Qwen/Qwen2.5-0.5B-Instruct` with `hf download` into the shared `model-cache` PVC (`/models/hf`). It's the first pod to use that PVC, so the PVC binds now.
+- **vLLM:** Deployment `llm-serving/vllm`, 1 replica of `nvcr.io/nvidia/vllm:25.09-py3`, served as `qwen2.5-0.5b`, `--gpu-memory-utilization=0.20`, 1 GPU slice, 32 Gi memory with request = limit. The first run pulls the vLLM image, which takes a while.
+- **`verify.sh ingress serving`:** through Traefik on `192.168.0.115` it calls the mock OpenAI API (`llm.lab.local`, `gw.lab.local`) and counts streamed events; then it sends one chat completion to vLLM from inside its pod.
+- Nothing else changes. vLLM's memory comes out of `serving-budget` (90 Gi).
+
+#### What to look for
+
+1. **Prefetch:** `wait` prints `job.batch/model-prefetch condition met`; the log ends `downloaded Qwen/Qwen2.5-0.5B-Instruct@main in …s`.
+2. **vLLM:** `rollout status` prints `deployment "vllm" successfully rolled out`.
+3. **`verify.sh` lines:**
+
+   | Line | Healthy value |
+   |---|---|
+   | `Traefik LoadBalancer IP` | `192.168.0.115` |
+   | `Ingress llm.lab.local/v1/models` | `→ 200` |
+   | `SSE streaming through ingress` | 10 or more events |
+   | `mock-llm ready` | `[PASS]` |
+   | `vLLM answered a chat completion` | `[PASS]` |
+
+**If something's off:** vLLM `Pending` with `Insufficient memory` → other models or a training job hold the shared pool. vLLM restarting → `kubectl --context spark-root -n llm-serving logs deploy/vllm` (download, image architecture, memory fraction). More in §8 (gate 7).
+
+#### Run it
 
 ```bash
 kubectl --context spark-root apply -f manifests/root-llms/60-storage/model-prefetch-job.yaml
@@ -271,6 +439,22 @@ scripts/verify.sh ingress serving
 
 ### Task 8 · Batch
 
+#### What this lab does (script `lab/tests/kueue-gang-test.sh`, manifests `lab/manifests/root-llms/80-distributed/base`)
+
+- **Gang test:** applies `gang-a` and `gang-b` in the root's `batch` (each 3 pods × 1 slice, queue `train`), checks that Kueue admits exactly one whole and keeps the other suspended with no pods, then deletes both.
+- **DDP:** Job `batch/ddp` with 2 ranks (each 1 CPU · 6 Gi · 1 slice, request = limit) behind headless Service `ddp-workers`, gang-admitted through queue `train`. Rank 0 runs an all-reduce sweep from 1 MiB to 1 GiB with `BACKEND=gloo` (one Spark: two ranks can't share one GPU under NCCL) and a correctness check. It uses the NGC PyTorch image.
+- Nothing else changes; the Job stays until you delete it.
+
+#### What to look for
+
+1. **Gang test:** three lines, `workloads: gang-a=True gang-b=False` (or the other way round), `jobs: …=false …=true` and `PASS: one gang admitted whole, the other held whole (no partial start)`.
+2. **DDP log (rank 0):** `backend=gloo world=2 device=cpu`, a table of six sizes with `algbw_GB/s` and `busbw_GB/s`, and the last line `correctness OK: sum(1..2) = 3.0`.
+3. **Quota while it runs:** `kubectl --context spark-root get clusterqueue spark-cq -o jsonpath='{.status.flavorsUsage}'` shows 2 CPU and 12Gi in use: the DDP job fills `spark-cq`'s CPU and memory, and uses 2 of its 3 slices.
+
+**If something's off:** `FAIL: expected exactly 1 admitted gang, got 0` → Kueue isn't running or `root-llms/20-scheduling` isn't applied. DDP pods `Pending` with `Insufficient memory` after admission → the models fill the shared pool; training waits for serving by design. More in §8 (gate 8).
+
+#### Run it
+
 ```bash
 tests/kueue-gang-test.sh
 kubectl --context spark-root apply -k manifests/root-llms/80-distributed/base
@@ -280,6 +464,24 @@ kubectl --context spark-root -n batch logs -f -l job-name=ddp --prefix
 **Gate:** gang test PASS. DDP prints `correctness OK` (2 ranks × 1 CPU · 6 Gi · 1 slice fill `spark-cq` exactly).
 
 ### Task 9 · Operations
+
+#### What this lab does (manifests `lab/manifests/root/95-observability`, scripts `verify.sh observability`, `collect-diag.sh`, `breakfix.sh`)
+
+- **Observability objects:** a Service and EndpointSlice for the host's node_exporter on `:9100` with a ServiceMonitor, ServiceMonitors `vcluster-workloads` and `llm-workloads`, the alert rules (`SparkUMAPressure`, `VClusterQuotaNearlyExhausted`, `PodsPendingOnGPU`, `VLLMQueueBacklog`, `EtcdSlowFsync`, `EtcdDbNearQuota` and others), and dashboard ConfigMap `spark-k8s-dashboard` that Grafana's sidecar loads.
+- **`verify.sh observability`:** asks Prometheus how many targets are `up` and how many model-server targets carry a `vcluster` label, and checks the dashboard ConfigMap.
+- **`collect-diag.sh`:** read-only; writes `diag-<timestamp>.tar.gz` in the current folder with nodes, objects, describes and logs from all three API servers.
+- **`breakfix.sh list`:** prints the scenarios; nothing is injected until you run `inject`.
+
+#### What to look for
+
+1. **`verify.sh observability`:** `[PASS] Prometheus: N targets up` with N of 5 or more, the model-server line, `[PASS] Grafana dashboard ConfigMap`, and `0 failed`.
+2. **Grafana** (http://192.168.0.100:32000): dashboard *Spark · Kubernetes* has data in every row, including series with `vcluster="root", vnamespace="llm-serving"`.
+3. **Diag bundle:** the script ends `[PASS] wrote diag-<timestamp>.tar.gz (<size>)`; `tar tzf` on it shows `diag-…/root/`, `diag-…/dev-lab/` and `diag-…/dev-llms/`. Run on the Spark, it also adds host files (`meminfo.txt`, `nvidia-smi-q.txt`, journals).
+4. **Drills:** after each one, `scripts/breakfix.sh reset <NN>` and a clean `scripts/verify.sh`.
+
+**If something's off:** `[WARN] Prometheus: only N targets up` → open http://192.168.0.100:32000 → Explore, query `up == 0` to see which target is down. `[....] no model-server targets yet` → vLLM or Traefik isn't deployed (Task 7).
+
+#### Run it
 
 ```bash
 kubectl --context spark-root apply -k manifests/root/95-observability

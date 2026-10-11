@@ -138,13 +138,41 @@ The middle row is the nested-cluster version of a cloud fact: device plugins, DR
 ## 5. Lab
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "02-Kubernetes/lab"
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 ```
 
 ### 5.1 Eager vs compiled on the GB10
 
+#### What this lab does (manifests `lab/manifests/root/70-gpu` + Job `compile-compare.yaml`)
+
+- **Kustomization:** creates or updates ConfigMap `gemm-bench` (holds `gemm_bench.py` and `compile_compare.py`) and the Deployment `gemm-contention` at 0 replicas, both in the root's `platform-tools`.
+- **Job `compile-compare`:** one pod (`nvcr.io/nvidia/pytorch:25.09-py3`, requests 4 CPU · 8 Gi, limits 16 Gi · 1 GPU slice, priority 0, `backoffLimit: 0`) runs the benchmark block (BF16, B=8, T=1024, D=4096) three ways: eager, `torch.compile`, and `torch.compile(mode="max-autotune")`, 50 iterations each.
+- **Long first run:** the PyTorch image is large, and max-autotune spends minutes trying kernel configs.
+- **No quota is charged:** `platform-tools` has none. The slice shows up on the node and in the `gpu-slice-ledger`.
+
+#### What to look for
+
+1. **Job:** `kubectl --context spark-root -n platform-tools get job compile-compare` reaches `1/1` completions.
+2. **Log lines:**
+
+   | Line | Healthy value |
+   |---|---|
+   | `device=` | `NVIDIA GB10 cc=(12, 1)` |
+   | `eager` | the highest ms/iter |
+   | `compile-default`, `compile-max` | lower ms/iter than eager |
+   | TFLOPS column | at or below the ≈ 46.6 TFLOPS bf16 GEMM baseline of this Spark; the example below is illustrative |
+   | `compile time` | tens of seconds for default, minutes for max-autotune |
+
+3. **Slice accounting:** while the pod runs, the root node's `Allocated resources` counts one more `nvidia.com/gpu`; the same node seen from `dev-llms` shows the same allocatable.
+
+**If something's off:** `configmap "gemm-bench" not found` → the kustomization wasn't applied first. Pending with `Insufficient nvidia.com/gpu` → all 15 slices are taken; read the ledger. Triton or `sm_121` errors → image without Blackwell support. More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root/70-gpu                 # ConfigMap gemm-bench (+ gemm-contention at 0 replicas)
 kubectl --context spark-root get cm -n platform-tools gpu-slice-ledger -o yaml   # who holds slices right now (Chapter 06 controller)
 kubectl --context spark-root apply -f manifests/root/70-gpu/compile-compare.yaml
@@ -165,7 +193,24 @@ While it runs, compare the two views of the GPU: `kubectl --context spark-root d
 
 ### 5.2 See the generated kernels
 
+#### What this lab does (Job `compile-compare` with `TORCH_LOGS=output_code`)
+
+- **Deletes** the finished Job from §5.1 and re-creates it with the same spec, except the env var `TORCH_LOGS` set to `output_code`.
+- **Inductor then prints** the Python/Triton source of every kernel it generates into the pod log. The benchmark itself runs again (same duration as §5.1).
+- **You only read logs.** Nothing else changes.
+
+#### What to look for
+
+1. **Kernel names:** the first `grep` lists `def triton_…` functions with `@triton.jit` decorators.
+2. **The fused kernel:** in the second `grep`, one kernel that loads the GEMM output, applies GELU (`tanh`), adds the residual and does the RMS reduction, all in one body.
+3. **Timing:** the log still ends with the three ms/iter lines from §5.1.
+
+**If something's off:** `logs` returns nothing yet → the pod is still pulling or compiling; add `-f`. No `triton_` lines → the env patch didn't take: `kubectl --context spark-root -n platform-tools get job compile-compare -o jsonpath='{..env}'`. More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n platform-tools delete job compile-compare
 kubectl --context spark-root apply -f manifests/root/70-gpu/compile-compare.yaml --dry-run=client -o json \
   | jq '.spec.template.spec.containers[0].env[0].value="output_code"' | kubectl --context spark-root apply -f -
@@ -177,9 +222,25 @@ Look for one kernel that loads the GEMM output, applies `tanh`-GELU, adds the re
 
 ### 5.3 The cost side: cold starts and recompiles
 
+#### What this lab does (a one-off pod `recompile`)
+
+- **Starts** a temporary pod `recompile` in the root's `platform-tools` (`nvcr.io/nvidia/pytorch:25.09-py3`, requests 2 CPU · 4 Gi, limits 8 Gi · 1 slice). `--rm` deletes it when the script ends.
+- **Script:** compiles one `Linear(1024, 1024)` with `torch.compile`, then calls it with T = 128, 256, 512 and 1024, timing each call including any compilation.
+
+#### What to look for
+
+1. **Four lines** `<T> <seconds> s`.
+2. **Shape of the numbers:** the first two or three take seconds each (a compile per new shape); after PyTorch switches to a dynamic-shape graph, the last is much faster.
+3. **Pod gone** afterwards: `kubectl --context spark-root -n platform-tools get pod recompile` → `NotFound`.
+
+**If something's off:** `pods "recompile" already exists` → an earlier run was interrupted: delete the pod and retry. The command hangs → the pod is Pending (no free slice) or still pulling the image; check `get pod recompile` from a second terminal. More in §7.
+
+#### Run it
+
 Change `T` (sequence length) between calls and compilation reruns for each new shape unless you mark it dynamic:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n platform-tools run recompile --rm -i --restart=Never --image=nvcr.io/nvidia/pytorch:25.09-py3 \
   --overrides='{"spec":{"containers":[{"name":"recompile","image":"nvcr.io/nvidia/pytorch:25.09-py3","stdin":true,"command":["python3","-c","import torch,time\nm=torch.compile(torch.nn.Linear(1024,1024).cuda())\nfor T in (128,256,512,1024):\n  t=time.time(); m(torch.randn(T,1024,device=\"cuda\")); torch.cuda.synchronize(); print(T, round(time.time()-t,2), \"s\")"],"resources":{"requests":{"cpu":"2","memory":"4Gi"},"limits":{"nvidia.com/gpu":"1","memory":"8Gi"}}}]}}'
 ```
@@ -189,6 +250,7 @@ Expected: the first two or three shapes take seconds each (compile), and then Py
 ### 5.4 Clean up
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n platform-tools delete job compile-compare --ignore-not-found
 ```
 

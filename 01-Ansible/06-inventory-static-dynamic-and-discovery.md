@@ -70,6 +70,41 @@ enable_plugins = ansible.builtin.yaml, ansible.builtin.ini, spark_mdns, ansible.
 
 ### 3.1 Fact-driven groups with `constructed`
 
+#### What this lab does (inventory `inventory/zz-constructed.yml`)
+
+- **Fact cache:** `04.2-ping.yml` gathers facts from dgx-spark-1 and stores them on the MacBook in `.cache/facts/` (the `jsonfile` cache in `ansible.cfg`, valid for 2 hours: `fact_caching_timeout = 7200`).
+- **Custom fact:** `04.3-baseline.yml --tags facts` runs only the `spark_facts` role. It installs `/etc/ansible/facts.d/spark.fact` on the Spark and re-reads facts, so `ansible_local.spark` (GPU, CX-7 ports, memory, DGX OS release) lands in the cache too. The `baseline` part of that playbook is not run.
+- **Groups from facts:** `zz-constructed.yml` turns the cached facts into groups: `gpu_ready` (nvidia-smi answered), `fabric_cabled` (at least one CX-7 port is `Up`), `uma_pressure` (MemAvailable below 16 GiB), plus keyed groups `driver_<major>`, `cuda_<version>` and `arch_<arch>`.
+- **What changes:** only the fact script on the Spark. `ansible-inventory` and `--list-hosts` just read files.
+- **MacBook only:** Semaphore loads the file `hosts.yml`, not the `inventory/` directory, so these groups don't exist in Semaphore tasks.
+
+#### What to look for
+
+1. **Command exit:** both playbooks end with `failed=0`. On the first `--tags facts` run, the facts.d directory and the fact script show `changed`; a re-run shows `changed=0`.
+2. **The cache holds the custom fact:**
+   ```bash
+   # ▶ MacBook · 01-Ansible/lab (venv active)
+   jq '.ansible_local.spark | {gpu: .gpu.present, driver: .gpu.driver_version, cuda: .gpu.cuda_driver_api, avail_gib: .memory.available_gib, cx7_up: .cx7.up}' .cache/facts/dgx-spark-1
+   ```
+   | Field | Healthy value |
+   |---|---|
+   | `gpu` | `true` |
+   | `driver` | `580.xx.xx` |
+   | `cuda` | the "CUDA Version" from the `nvidia-smi` banner, for example `13.0` |
+   | `avail_gib` | about 119 on an idle Spark; lower while models are loaded. Below 16 puts the host in `uma_pressure` |
+   | `cx7_up` | `[]` on a single Spark with no QSFP cable; the port names once the fabric is cabled (Chapter 13) |
+3. **`ansible-inventory --graph`** shows `dgx-spark-1` under `@gpu_ready`, `@driver_580`, `@cuda_<your cuda value>` and `@arch_aarch64`, and **not** under `@uma_pressure`. `@fabric_cabled` only appears when a CX-7 port is up. The example output below has `dgx-spark-2` too; with one Spark you see only `dgx-spark-1`.
+4. **Check a pattern before you use it.** `--list-hosts` prints the hosts a pattern selects without running anything:
+   ```bash
+   # ▶ MacBook · 01-Ansible/lab (venv active)
+   ansible 'gpu_ready:&k8s_control_plane:!uma_pressure' --list-hosts    # hosts (1): dgx-spark-1
+   ```
+   With one Spark, `k8s_workers` is empty in `hosts.yml` (dgx-spark-1 is the control plane), so the `gpu_ready:&k8s_workers:!uma_pressure` example below matches no hosts. `driver_570` doesn't exist on a 580 Spark, and `slurm_compute[1]` needs a second Spark. That is the expected result, not an error in your inventory.
+
+**If something's off:** constructed groups missing means the cache is empty or older than 2 hours, or `04.3-baseline.yml --tags facts` didn't run: re-run both playbooks. `gpu_ready` missing while the Spark is up means the fact script reported an error: `jq .ansible_local.spark.gpu.error .cache/facts/dgx-spark-1`. `strict: false` hides expression errors, so set `strict: true` while you debug. More in §5.
+
+#### Run it
+
 ```yaml
 # lab/inventory/zz-constructed.yml
 ---
@@ -141,6 +176,40 @@ These state-based patterns are a MacBook tool for the reason above. In Semaphore
 > **Stale facts = wrong groups.** Constructed groups are only as fresh as the cache (`fact_caching_timeout = 7200`). For safety-critical targeting (drain, upgrade), refresh first: `ansible spark -m setup -a filter=ansible_local`.
 
 ### 3.2 Discovery: a custom mDNS inventory plugin
+
+#### What this lab does (inventory plugin `inventory_plugins/spark_mdns.py`)
+
+- **Listen:** `avahi-browse -p -r -t _ssh._tcp` lists every SSH service announced over mDNS on the LAN. The only change to the Spark is installing `avahi-utils`.
+- **Plugin:** reads those lines (live, or from a saved capture with `from_file:`), keeps the IPv4 answers whose name matches `^dgx-spark-\d+$` (and the interface, if you set `interface:`), and adds them to group `spark` with `ansible_host`, `ansible_port`, `ansible_user: dgxadmin` and `mdns_interface`. Each host also lands in a `seen_on_<interface>` group.
+- **On the MacBook:** the capture is taken on the Spark over SSH and saved to `.cache/mdns.txt`; a copy of the config in `.cache/spark.mdns.yml` points at it. Both files are git-ignored.
+- **Compare:** the `comm` diff at the end lists hosts that are declared but not seen, and hosts that are seen but not declared.
+- No playbook runs and nothing is configured; this is inventory only.
+
+#### What to look for
+
+1. **The raw capture** has an `=` line for the Spark with its management address:
+   ```bash
+   # ▶ MacBook · 01-Ansible/lab (venv active)
+   grep '^=' .cache/mdns.txt | grep IPv4
+   ```
+   Healthy: a line like `=;<iface>;IPv4;dgx-spark-1;_ssh._tcp;local;dgx-spark-1.local;192.168.0.100;22;`. Lines for other devices and `IPv6` lines are normal; the plugin drops them.
+2. **`--graph`** shows `@spark:` with `dgx-spark-1` (and `dgx-spark-2` if it's on) and one `@seen_on_<iface>` group. `<iface>` is the interface name on the machine that listened, so for a capture taken on the Spark it is the Spark's own NIC (the management NIC is `enP7s7`).
+3. **The address is the management address:**
+   ```bash
+   # ▶ MacBook · 01-Ansible/lab (venv active)
+   ansible-inventory -i .cache/spark.mdns.yml --host dgx-spark-1
+   ```
+   | Variable | Healthy value |
+   |---|---|
+   | `ansible_host` | `192.168.0.100` |
+   | `ansible_port` | `22` |
+   | `ansible_user` | `dgxadmin` |
+   | `mdns_interface` | the listening NIC, e.g. `enP7s7` |
+
+   Trap: if the Spark announces itself on more than one interface, the last line in the capture wins and `ansible_host` can be another address. Set `interface:` in the copy to the management NIC and run `--graph` again.
+4. **Declared vs seen:** the `comm` diff below prints nothing when the two lists agree. On the MacBook use `.cache/spark.mdns.yml` in the second line instead of `inventory-examples/spark.mdns.yml`, because `avahi-browse` doesn't exist on macOS.
+
+**If something's off:** an empty capture means Avahi isn't running on the Spark or the listener is on another L2 segment (`systemctl status avahi-daemon` on the Spark). `Unable to parse … as an inventory source` means the file name doesn't end in `spark.mdns.yml`, so the plugin ignores it. More in §5.
 
 DGX OS advertises SSH over mDNS, which is how NVIDIA's `discover-sparks` script finds peers (`avahi-browse -p -r -t _ssh._tcp`). The same mechanism can feed Ansible:
 
@@ -266,6 +335,8 @@ keyed_groups:
     prefix: seen_on
 ```
 
+#### Run it
+
 Discovery is an interactive tool, not something Semaphore runs: the lab's Semaphore image has no Avahi, and multicast doesn't cross into a container's bridge network anyway. Take the raw view on a Spark (or any Linux machine on the Sparks' LAN):
 
 ```bash
@@ -331,6 +402,8 @@ comm -3 <(ansible-inventory -i inventory --list | jq -r '.spark.hosts[]' | sort)
 
 ### 3.3 NetBox as source of truth (optional; NetBox runs on the Spark, Ansible on the MacBook)
 
+#### What this lab does (playbook `06.1-netbox-seed.yml`)
+
 **Idea:** so far the inventory is files you write by hand (§2) or what the network announces (§3.2). In a real data centre, the list of machines, their ports, cables and IP addresses lives in a **CMDB**, usually [NetBox](https://netbox.dev), and Ansible reads its inventory from there. In this exercise you:
 
 1. run NetBox in Docker on the Spark;
@@ -343,6 +416,27 @@ comm -3 <(ansible-inventory -i inventory --list | jq -r '.spark.hosts[]' | sort)
 | **Cost** | four containers (NetBox, worker, PostgreSQL, Redis), roughly 1–2 GB of memory; remove them at the end (step 7) |
 | **Files** | [`playbooks/06.1-netbox-seed.yml`](lab/playbooks/06.1-netbox-seed.yml) · [`inventory-examples/netbox.yml`](lab/inventory-examples/netbox.yml) |
 | **Time** | ~30 min, most of it NetBox's first start |
+
+- **On the Spark:** `netbox-docker` in `~/netbox-docker`, published on port **8081**. The first start runs the database migrations and takes several minutes. Nothing else on the Spark changes.
+- **On the MacBook:** `06.1-netbox-seed.yml` runs with `connection: local` and only calls NetBox's API with the token from `NETBOX_TOKEN`. It never logs in to the Spark. Every module compares first, so a re-run changes nothing.
+- **Read-back:** `inventory-examples/netbox.yml` (plugin `netbox.netbox.nb_inventory`) groups devices by role, site and tag, and sets `ansible_host` from each device's primary IPv4.
+
+#### What to look for
+
+1. **NetBox is up:** on the Spark, `docker compose ps` shows the `netbox` container `(healthy)`, and from the MacBook `curl -sI http://192.168.0.100:8081/login/` answers with an HTTP status line.
+2. **Playbook exit:** `failed=0`. The first run shows `changed` on the shared objects (manufacturer, device type, role, site, tags), the device, the interfaces and the addresses; the second run shows `changed=0`. If the very first task (`A NetBox API token is set`) fails, the token isn't exported in this terminal.
+3. **In the NetBox UI** (Devices → Devices → dgx-spark-1):
+   | Item | Healthy value |
+   |---|---|
+   | Interfaces | `enP7s7` (management only), `enp1s0f1np1`, `enP2p1s0f1np1` (MTU 9000) |
+   | IP addresses | `192.168.0.100/24`, `192.168.100.11/24`, `192.168.101.11/24` |
+   | Primary IPv4 | `192.168.0.100/24` |
+   | Role / site / tag | `gpu-node` / `home-lab` / `k8s-control-plane` |
+4. **Read-back:** `--graph` lists `dgx-spark-1` under the role, site and tag groups (step 6); `--host dgx-spark-1` shows `ansible_host: 192.168.0.100`; the `ping` returns `"ping": "pong"`. With one Spark, the Validation item "both Sparks" means only dgx-spark-1.
+
+**If something's off:** the table "If something fails" after step 7 covers the common cases: missing `pynetbox` or collection (step 4), NetBox still starting, and a read-only or wrong token. More in §5.
+
+#### Run it
 
 **Step 1 · Start NetBox on the Spark.** DGX OS has Docker already. If `docker ps` says *permission denied*, put `sudo` in front of the `docker` commands.
 

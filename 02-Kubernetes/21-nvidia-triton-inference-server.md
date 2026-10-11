@@ -129,15 +129,36 @@ With vLLM's 1.5 CPU / 32 Gi / 1 slice on top: 3.4 CPU, 48.4 Gi, 2 slices — it 
 ## 5. Lab
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "02-Kubernetes/lab"
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 ```
 
 ### 5.1 Deploy
 
+#### What this lab does (manifests `lab/manifests/root-llms/90-serving/triton`)
+
+- **Three ConfigMaps** in `llm-serving` hold the model repository: `triton-preprocess`, `triton-scorer`, `triton-pipeline`.
+- **Deployment `triton`:** an init container `layout` copies the ConfigMaps into an `emptyDir` at `/repo`; then Triton (`tritonserver:25.09-pyt-python-py3`) loads three models. Requests one GPU slice, 1 CPU and 12 Gi (request = limit).
+- **Service `triton`:** HTTP 8000, gRPC 8001 (`appProtocol: kubernetes.io/h2c`), metrics 8002.
+- **Job `triton-perf`**, created **suspended**: the load test for §5.3. It does nothing until you unsuspend it.
+- **vLLM keeps running.** Both fit `serving-budget` (§3.4). The first start pulls about 15 GB of image.
+
+#### What to look for
+
+1. **Command exit:** `apply -k` creates 3 ConfigMaps, the Service, the Deployment and the Job; `rollout status` prints `deployment "triton" successfully rolled out`.
+2. **`layout` log:** five files under `/repo`: two `config.pbtxt` plus `model.py` for preprocess and scorer, and `pipeline/config.pbtxt`.
+3. **Triton log:** `pipeline`, `preprocess` and `scorer` all `READY`, and three `Started …` lines for gRPC 8001, HTTP 8000 and metrics 8002.
+4. **Quota after the apply:** `serving-budget` shows one more GPU slice and 12 Gi more memory used than before (2 Gi more once `triton-perf` runs).
+
+**If something's off:** `exceeded quota: serving-budget` or `Insufficient memory` in `kubectl --context spark-root -n llm-serving get events` → park an engine (Chapter 20 §9). A model `UNAVAILABLE` with `ModuleNotFoundError: torch` → wrong image tag. More in §7.
+
+#### Run it
+
 vLLM can stay running: both fit `serving-budget` (§3.4).
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving describe resourcequota serving-budget | grep -E 'requests.cpu|limits.memory|gpu'
 kubectl --context spark-root apply -k manifests/root-llms/90-serving/triton
 kubectl --context spark-root -n llm-serving logs deploy/triton -c layout
@@ -161,7 +182,27 @@ If the rollout never starts, look for `exceeded quota: serving-budget` (other en
 
 ### 5.2 Talk to it
 
+#### What this lab does (port-forward to Service `triton`, `nvidia-smi` on the Spark)
+
+- **Opens a port-forward** from the MacBook's `localhost:8000` (HTTP) and `localhost:8002` (metrics) to the `triton` Service, in the background of this terminal. If vLLM's port-forward from Chapter 20 still holds `localhost:8000`, stop it first.
+- **Asks Triton** for its health, its repository index and the ensemble's steps, then sends one inference with two texts.
+- **Checks on the Spark** which GPU processes exist and which pod's cgroup they belong to.
+- **Nothing is changed.** §5.3 reuses the port-forward.
+
+#### What to look for
+
+1. **Health:** `200`.
+2. **Repository index:** three lines, `pipeline`, `preprocess`, `scorer`, each `"state":"READY"`.
+3. **Ensemble steps:** `"preprocess"` then `"scorer"`.
+4. **Inference:** `{"name":"SCORE","datatype":"FP32","shape":[2,1],"data":[…, …]}`: two scores for two inputs.
+5. **GPU processes:** `triton_python_backend_stub` lines whose `pod…` part matches the UID of the `triton-…` pod, with dashes written as underscores. A `vllm` process may also be listed if vLLM runs.
+
+**If something's off:** `bind: address already in use` → another port-forward holds 8000; stop it (`jobs`, then `kill %N`). Empty `data` or an error about `TEXT` → check the request's input name and shape against `curl -s localhost:8000/v2/models/pipeline/config`. No Triton process in `nvidia-smi` → the scorer fell back to CPU (§7).
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving port-forward svc/triton 8000 8002 &
 curl -s localhost:8000/v2/health/ready -o /dev/null -w '%{http_code}\n'           # 200
 curl -s -X POST localhost:8000/v2/repository/index | jq -c '.[]'
@@ -175,6 +216,7 @@ Expected: `{"name":"SCORE","datatype":"FP32","shape":[2,1],"data":[0.5…,0.4…
 Confirm the scorer really runs on the GPU, and that the GPU process belongs to the Triton pod:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 ssh dgxadmin@192.168.0.100 'for p in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader); do
   echo "$p $(cat /proc/$p/comm) $(grep -o "pod[0-9a-f_-]*" /proc/$p/cgroup | head -1)"; done'
 kubectl --context spark-root -n llm-serving get pods -o custom-columns=UID:.metadata.uid,NAME:.metadata.name | grep triton
@@ -184,7 +226,27 @@ Expected: `triton_python_backend_stub` processes whose cgroup contains `pod<uid>
 
 ### 5.3 Load test and batching efficiency
 
+#### What this lab does (Job `triton-perf`, then a scorer config change)
+
+- **Reads the scorer's counters** (`nv_inference_count`, `nv_inference_exec_count`) from `localhost:8002` before and after the test.
+- **Unsuspends `triton-perf`:** `perf_analyzer` sends gRPC requests to the `pipeline` model at concurrency 1, 3, 5 … 31 (range `1:32:2`) and prints throughput and latency per step. It charges 500m CPU and 2 Gi to `serving-budget`, no GPU.
+- **Computes the average batch size** the scorer achieved: requests ÷ executions.
+- **Second run:** you set `max_queue_delay_microseconds: 0` for the scorer, re-apply, restart Triton (the init container copies the repository only at start) and repeat. The re-apply re-creates `triton-perf` suspended.
+
+#### What to look for
+
+1. **Command exit:** `job.batch/triton-perf patched`; the log prints one `Concurrency: N, throughput: …, latency …` line per step and ends.
+2. **Throughput** rises with concurrency until the GPU or the Python stub saturates.
+3. **Average batch size**, with the lab config: well above 1.
+4. **With `max_queue_delay_microseconds: 0`:** average batch size falls towards 1, and throughput at high concurrency falls with it.
+5. **Prometheus** gives the same ratio with the PromQL below, if kps is installed (Chapter 17 §5.4).
+
+**If something's off:** the awk line prints `nan`, `inf` or an error → the port-forward on 8002 was not running when `before` or `after` was read; restart it and repeat. The Job stays at 0 pods → quota: `kubectl --context spark-root -n llm-serving describe job triton-perf`. More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 before=$(curl -s localhost:8002/metrics | awk '/^nv_inference_(count|exec_count)\{model="scorer"/ {print $2}' | paste -sd' ')
 kubectl --context spark-root -n llm-serving patch job triton-perf -p '{"spec":{"suspend":false}}'
 kubectl --context spark-root -n llm-serving logs -f job/triton-perf | grep -E 'Concurrency|Throughput|p99 latency'
@@ -202,6 +264,7 @@ sum(rate(nv_inference_count{vcluster="root", model="scorer"}[5m]))
 Expected shape: throughput rises with concurrency until the GPU or Python stub saturates, and **average batch size climbs well above 1**. Now set `max_queue_delay_microseconds: 0` in `model_repository/scorer/config.pbtxt`, then re-apply and restart (the init container only copies the repository at start):
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving delete job triton-perf
 kubectl --context spark-root apply -k manifests/root-llms/90-serving/triton
 kubectl --context spark-root -n llm-serving rollout restart deploy/triton && kubectl --context spark-root -n llm-serving rollout status deploy/triton
@@ -211,13 +274,43 @@ and repeat. Batch size falls towards 1, and throughput at high concurrency falls
 
 ### 5.4 Instance groups
 
+#### What this lab does (edit `model_repository/scorer/config.pbtxt`)
+
+- **Changes the scorer's `instance_group`** from `count: 2` to `count: 1` on GPU 0.
+- **Re-applies and restarts** Triton as in §5.3, then repeats the §5.3 load test.
+
+#### What to look for
+
+1. **Triton log** after the restart: `scorer` `READY` again.
+2. **`perf_analyzer`:** p99 latency at the same concurrency is higher than with two instances. Put `count: 2` back afterwards.
+
+**If something's off:** no change at all → Triton still runs the old config: check that the ConfigMap changed (`kubectl --context spark-root -n llm-serving get cm triton-scorer -o yaml | grep count`) and that the pod restarted.
+
+#### Run it
+
 Change `count: 2` → `count: 1` for `scorer`, re-apply and restart as above, and repeat §5.3. With one instance, compute can't overlap with the Python stub's CPU work, and p99 latency rises at the same concurrency.
 
 ### 5.5 gRPC: east-west and through the gateway
 
+#### What this lab does (pod `grpc-test`, then `perf_analyzer` in Docker on the MacBook)
+
+- **East-west:** a temporary pod `grpc-test` in `llm-serving` runs `perf_analyzer` against `triton:8001` over gRPC at concurrency 4, then is removed (`--rm`). It gets 50m / 512 Mi from the `llm-serving` LimitRange.
+- **Through the gateway:** after you add the `GRPCRoute` `triton.lab.local` (Chapter 11 §5.9), the same test runs from Docker on the MacBook through Traefik on `192.168.0.115:80`.
+- **Nothing else is changed.** The SDK image is large; the first pull on each side takes a while.
+
+#### What to look for
+
+1. **Both runs** end with a `Concurrency: 4, throughput: …, latency …` line and no errors.
+2. **p99 latency** through the gateway is higher than east-west. The difference is the extra hop: MacBook → MetalLB `.115` → Traefik → Triton.
+
+**If something's off:** the gateway run fails with `UNAVAILABLE` → the GRPCRoute is missing or not `Accepted` (Chapter 11 §5.9 shows how to check). `--network host` is not needed on macOS: `--add-host` alone points `triton.lab.local` at `192.168.0.115`. More in §7.
+
+#### Run it
+
 Inside the cluster, straight to the Service (east-west, routed by kube-proxy):
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving run grpc-test --rm -it --restart=Never --image=nvcr.io/nvidia/tritonserver:25.09-py3-sdk -- \
   perf_analyzer -m pipeline -u triton:8001 -i grpc --string-data "hello spark" --concurrency-range 4
 ```
@@ -225,6 +318,7 @@ kubectl --context spark-root -n llm-serving run grpc-test --rm -it --restart=Nev
 The pod has no `resources`, so the llm-serving LimitRange gives it 50m / 512 Mi — enough for the client, and it keeps the quota happy. Through Traefik: add the `GRPCRoute` from Chapter 11 §5.9 (host `triton.lab.local`), then from a laptop with Docker:
 
 ```bash
+# ▶ MacBook · any folder
 docker run --rm --network host --add-host triton.lab.local:192.168.0.115 nvcr.io/nvidia/tritonserver:25.09-py3-sdk \
   perf_analyzer -m pipeline -u triton.lab.local:80 -i grpc --string-data "hello spark" --concurrency-range 4
 ```
@@ -234,6 +328,7 @@ Compare p99 latency between the two: the difference is the gateway hop (laptop �
 ### 5.6 Clean up
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root delete -k manifests/root-llms/90-serving/triton
 ```
 

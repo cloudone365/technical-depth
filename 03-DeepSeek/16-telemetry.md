@@ -171,6 +171,23 @@ The power metric is the GPU's share only, so tokens/J is an upper bound for the 
 
 ### Task 5.1 · Deploy the rules and the dashboard
 
+#### What this lab does (manifests `lab/observability`)
+
+- **Checks the dashboard JSON** against what `gen_dashboard.py` generates now, on the MacBook.
+- **PrometheusRule `spark-reasoning`** in `observability` (label `release: kps`): nine alerts in three groups (§3.3).
+- **ConfigMap `deepseek-serving-dashboard`** with the label `grafana_dashboard: "1"`; Grafana's sidecar loads it. Nothing in `llm-serving` changes.
+
+#### What to look for
+
+1. **`dashboard in sync`**.
+2. **Groups:** `spark-reasoning spark-gb10 spark-day2`.
+3. **Label:** `{"grafana_dashboard":"1"}`.
+4. **Grafana** at `http://192.168.0.100:32000` lists **Spark · LLM serving (DeepSeek)** with 27 panels.
+
+**If something's off:** a `diff` message instead of `dashboard in sync` means someone edited the JSON by hand; regenerate it. The dashboard missing in Grafana means the label didn't arrive or the sidecar watches another namespace. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 python3 observability/gen_dashboard.py | diff -q - observability/deepseek-serving-dashboard.json && echo "dashboard in sync"
@@ -182,6 +199,29 @@ kubectl --context spark-root -n observability get cm deepseek-serving-dashboard 
 Expected: `dashboard in sync`, groups `spark-reasoning spark-gb10 spark-day2`, and the label `grafana_dashboard: "1"` so the Grafana sidecar loads it. Open Grafana at `http://192.168.0.100:32000` → **Spark · LLM serving (DeepSeek)**.
 
 ### Task 5.2 · Check that every source is scraped
+
+#### What this lab does (Prometheus API, host commands on dgx-spark-1)
+
+- **Six instant queries** through a port-forward to `kps-prometheus` on `localhost:9090`, printing how many series each returns.
+- **On the Spark:** `/proc/meminfo`, `nvidia-smi` and `dcgmi`, to compare the panels with what the host reports. Read-only.
+
+#### What to look for
+
+1. **The six counts:**
+
+   | Query | Healthy value |
+   |---|---|
+   | `up{job="vllm"}` | 1 or more while a model is serving |
+   | `spark_gpu_up`, `spark_uma_available_bytes` | 1 or more |
+   | `DCGM_FI_DEV_GPU_UTIL` | 0 is fine with the textfile collector; above 0 with DCGM enabled |
+   | `kube_cronjob_status_last_successful_time{…}` | one per CronJob that has succeeded |
+   | `traefik_service_requests_total` | above 0 |
+
+2. **On the Spark:** `MemTotal` ≈ 121.7 GiB (`/proc/meminfo` shows kB), `memory.used` `[N/A]`, and `MemAvailable` close to the **UMA available** panel (about 119 GiB on an idle Spark).
+
+**If something's off:** 0 for `up{job="vllm"}` with a model serving → the ServiceMonitor `llm-workloads` isn't applied. 0 for `spark_gpu_up` → the 01-Ansible textfile collector isn't running (`systemctl status spark-gpu-metrics.timer`). More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -208,6 +248,18 @@ Expected: `MemTotal` ≈ 121.7 GiB, `memory.used` reads `[N/A]`, and `MemAvailab
 
 ### Task 5.3 · Unit-test the alerts
 
+#### What this lab does (`promtool test rules`, `lab/observability/rules.test.yaml`)
+
+- **Extracts the rule groups** from the PrometheusRule into a temporary plain rules file, runs the unit tests with synthetic series, then deletes the temporary file. Runs only on the MacBook; no cluster needed.
+
+#### What to look for
+
+1. **`SUCCESS`** at the end, and the temporary `rules.extracted.yaml` is gone.
+
+**If something's off:** `promtool: command not found` → install it (Prometheus release or `brew install prometheus`). `No module named yaml` → `pip install pyyaml`. A failing test prints the expected and the actual alerts; read which rule changed. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 python3 -c "
@@ -219,6 +271,20 @@ open('observability/rules.extracted.yaml','w').write(yaml.safe_dump({'groups': g
 Expected: `SUCCESS`. The tests prove that 30 % truncation fires `ReasoningTruncated` and 5 % doesn't, that a failed `weights-verify` Job fires `DayTwoJobFailed`, and that an idle-only throttle bit stays quiet.
 
 ### Task 5.4 · Load it and watch the panels move
+
+#### What this lab does (script `lab/scripts/serve-model.sh`, tool `lab/tools/eval_harness.py`)
+
+- **Serves r1-7b** (a no-op apart from the smoke test if it already serves).
+- **Sends the math suite** (40 word problems) with 16 requests in parallel and up to 8,192 tokens each, through a port-forward. Nothing is changed in the cluster.
+
+#### What to look for
+
+1. **The harness** prints `math  N/40 acc=… p50=…s mean_out_tokens=… reasoning_share=…` and a `run: … output tokens in …s = … tok/s aggregate` line.
+2. **On the dashboard during the run:** output tokens/s and TTFT rise, the KV-cache usage climbs towards 1.0, the waiting gauge goes above 0, and UMA available stays well above ~8 GiB. Fill in the table.
+
+**If something's off:** flat panels while the harness runs → the dashboard's data source or the vLLM scrape (Task 5.2). Some panels empty, others fine → a metric renamed in your vLLM image. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -245,6 +311,21 @@ With concurrency 16 and a 7B model at its catalog `util`, the KV cache fills and
 
 ### Task 5.5 · Make an alert fire for real
 
+#### What this lab does (tool `lab/tools/eval_harness.py`, alert `ReasoningTruncated`)
+
+- **Three math runs** at temperature 0 with `max_tokens` 256: almost every R1 answer is cut off (`finish_reason=length`).
+- **The rule** fires when more than 20 % of requests end with `length` for 15 minutes. Keep traffic going that long; three runs may be shorter, so repeat the loop if needed.
+
+#### What to look for
+
+1. **The harness:** accuracy near 0 and `mean_out_tokens` at about 256.
+2. **The finish reasons panel:** `length` dominates.
+3. **`http://localhost:9090/alerts`:** `ReasoningTruncated` goes Pending, then Firing, and shows in Alertmanager; after the traffic stops it resolves.
+
+**If something's off:** the alert stays Pending and then clears → traffic stopped before 15 minutes; run the loop longer. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 2
@@ -257,6 +338,22 @@ kill $pf
 `max_tokens 256` truncates almost every R1 chain. With ~15 minutes of sustained traffic, `ReasoningTruncated` goes Pending, then Firing. Check `http://localhost:9090/alerts` (port-forward as in Task 5.2) and Alertmanager. The **finish reasons** panel shows `length` dominating. Stop the traffic and watch it resolve.
 
 ### Task 5.6 · Day-2 panels
+
+#### What this lab does (CronJob `catalog-drift`)
+
+- **Runs the drift report once** as Job `cd-test` in `llm-serving`. It fails on purpose when a catalog entry has moved upstream since pinning (Chapter 15).
+- **Cleans up** by deleting the Job.
+
+#### What to look for
+
+1. **The last log lines:** one line per model (`ok`, `UNPINNED`, `MOVED`) and `… models, N moved upstream since pinning`.
+2. **Failed day-2 Jobs** panel shows `cd-test` when it failed.
+3. **Trap:** `DayTwoJobFailed` matches only Job names starting with `weights-verify`, `catalog-drift`, `vault-sync`, `webui-backup`, `litellm-db-backup` or `rag-ingest`. A Job named `cd-test` shows on the panel but does not fire the alert. To see the alert, create it as `catalog-drift-test` instead.
+4. **After the delete,** the panel clears.
+
+**If something's off:** the Job succeeds → no entry has moved, so nothing fails; the panel stays empty, which is correct. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -273,6 +370,19 @@ kubectl --context spark-root -n llm-serving delete job cd-test
 ```
 
 ### Task 5.7 · Silence `VLLMDown` for a training window
+
+#### What this lab does (Alertmanager API)
+
+- **Creates one silence** in `kps-alertmanager` for `alertname=VLLMDown`, from now for 4 hours, commented "training window: vLLM parked". The rule itself is unchanged; other alerts still notify.
+
+#### What to look for
+
+1. **The reply:** `{"silenceID":"…"}`.
+2. **Alertmanager UI → Silences:** the silence is active with your comment and end time.
+
+**If something's off:** `endsAt` errors → both `date` variants failed; set the time by hand in RFC 3339 form. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab

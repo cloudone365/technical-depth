@@ -148,6 +148,7 @@ The root ServiceMonitor `llm-workloads` (in [`vcluster-workloads.yaml`](lab/mani
 All commands run from `02-Kubernetes/lab` with the lab kubeconfig:
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "02-Kubernetes/lab"
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 scripts/apply-lab.sh root                                   # includes root-llms: namespaces, quotas, model-cache PVC, mock-llm, Qdrant
@@ -156,7 +157,33 @@ kubectl --context spark-root -n llm-serving describe resourcequota serving-budge
 
 ### 5.1 Prefetch weights, then deploy
 
+#### What this lab does (script `lab/scripts/apply-lab.sh root`, manifests `root-llms/60-storage` and `root-llms/90-serving/vllm`)
+
+- **Setup (the block above):** `apply-lab.sh root` applies the root platform manifests and the LLM stack: namespaces `llm-serving` and `batch`, their quotas, the `model-cache` PVC (StorageClass `local-nvme-retain`), `mock-llm`, Qdrant and the Kueue queue.
+- **Secret `hf-token`** in `llm-serving`, from `$HF_TOKEN` (or the value `none`; the smoke model is public).
+- **Job `model-prefetch`:** downloads `Qwen/Qwen2.5-0.5B-Instruct` into `model-cache`. On the Spark the files land under `/data/k8s/retain/llm-serving/model-cache`.
+- **Drops the page cache** on the Spark, so the load starts from a clean memory picture.
+- **Deployment `vllm`** and Service `vllm` (port 8000): one GPU slice, 1.5 CPU, 32 Gi memory (request = limit), `--gpu-memory-utilization=0.20`, `strategy: Recreate`. The first start pulls the NGC vLLM image (many GB) and captures CUDA graphs, so give it several minutes.
+
+#### What to look for
+
+1. **Command exit:** `wait` prints `job.batch/model-prefetch condition met`; `apply -k` prints `deployment.apps/vllm` and `service/vllm` created.
+2. **The vLLM log** shows, in order: `Loading weights`, `Model loading took … GiB`, `Available KV cache memory: … GiB`, `GPU KV cache size: … tokens`, CUDA graph capture, `Uvicorn running on http://0.0.0.0:8000`. Write down your KV-cache size; §3.1 predicts about 21 GiB at 0.20 for this model.
+3. **What was charged:**
+
+   | Check | Healthy value |
+   |---|---|
+   | `serving-budget` `requests.nvidia.com/gpu` | `1` of `6` used (more if other engines run) |
+   | `serving-budget` `limits.memory` | `32Gi` plus the always-on helpers: about 34.4 Gi of 90 Gi (§9) |
+   | node *Allocated resources* | the vLLM pod's 32 Gi and 1500m included |
+   | `get pods -o wide` | one `vllm-…` pod, `1/1 Running`, on `dgx-spark-1` |
+
+**If something's off:** `model-prefetch` fails → read `kubectl --context spark-root -n llm-serving logs job/model-prefetch` (network or token). The pod restarts during startup → the liveness probe, see §7. `exceeded quota: serving-budget` in the ReplicaSet events, or `Insufficient memory` → other engines hold the pool; park one (§9). More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving create secret generic hf-token --from-literal=token="${HF_TOKEN:-none}" \
   --dry-run=client -o yaml | kubectl --context spark-root apply -f -
 kubectl --context spark-root apply -f manifests/root-llms/60-storage/model-prefetch-job.yaml
@@ -182,6 +209,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000
 (Numbers are illustrative. Note yours.) Then look at what the quota and the scheduler charged:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving describe resourcequota serving-budget | grep -E 'memory|requests.cpu|gpu'
 kubectl --context spark-root describe node dgx-spark-1 | grep -A9 'Allocated resources'
 kubectl --context spark-root -n llm-serving get pods -o wide | grep vllm
@@ -191,7 +219,23 @@ The pod's 32 Gi, 1.5 CPU and 1 slice appear in `serving-budget` (checked when th
 
 ### 5.2 First request (streaming)
 
+#### What this lab does (port-forward to Service `vllm`)
+
+- **Opens a port-forward** from the MacBook's `localhost:8000` to the `vllm` Service, in the background of this terminal.
+- **Lists the served models** and sends one streaming chat request (64 tokens at most).
+- **Nothing is changed** in the cluster. §5.4 and §5.6 reuse this port-forward, so keep the terminal open.
+
+#### What to look for
+
+1. **`/v1/models`** prints `qwen2.5-0.5b`.
+2. **The stream** prints one sentence about unified memory, word by word, then returns to the prompt.
+
+**If something's off:** `connection refused` on `localhost:8000` → the port-forward is not running (it stops when the pod restarts); start it again. Empty answer → check the model name in the request matches `/v1/models`. Tokens arrive all at once → buffering somewhere in front (§7).
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
 curl -s localhost:8000/v1/models | jq -r '.data[].id'
 curl -sN localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
@@ -204,9 +248,36 @@ The port-forward goes laptop → root API server → the kubelet on dgx-spark-1 
 
 ### 5.3 Watch UMA during load and restart
 
+#### What this lab does (script `lab/scripts/uma-watch.sh` on dgx-spark-1)
+
+- **Prints a line every 2 s:** host `MemAvailable`, page cache (`Cached`), and the vLLM pod's cgroup `memory.current` and `memory.max`.
+- **You restart `deploy/vllm`** in another terminal and watch memory leave and come back. With `Recreate`, the old pod's memory is freed before the new pod loads.
+- **Optional experiment:** switch the Deployment to `RollingUpdate`, repeat, and see both copies in memory at once. Then set it back to `Recreate`.
+- **The script only reads.** It runs on the Spark because it reads `/sys/fs/cgroup`, and it uses `kubectl` and `bc` there.
+
+#### What to look for
+
+1. **Command exit:** a header line, then one line every 2 s, until Ctrl-C.
+2. **Compare with this table:**
+
+   | Column | Healthy value |
+   |---|---|
+   | `pod.mem.max` | `34359738368` (32 Gi in bytes, the limit) |
+   | `pod.mem.current` | well below the limit once loaded |
+   | `MemAvailable` | below the idle ~119 GiB by roughly the engine's 0.20 share while vLLM runs |
+
+3. **During a `Recreate` restart:** `MemAvailable` rises when the old pod exits, then falls while the new pod loads. It never drops by two engines' worth.
+4. **With `RollingUpdate`:** `MemAvailable` dips by about two engines' worth (0.40 of the pool) while both pods run.
+
+**If something's off:** `cgroup … not found` or `cat: …/memory.current: No such file` → the pod name is stale after a restart; start the script again with the new pod. `bc: command not found` → install `bc` on the Spark.
+
+#### Run it
+
 On the Spark (the script reads `/sys/fs/cgroup`; the context defaults to `spark-root`, and only a sandbox pod needs `dev-llms` as third argument):
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+# from 02-Kubernetes/lab in a copy of this repo on the Spark, with the lab kubeconfig exported
 scripts/uma-watch.sh llm-serving "$(kubectl --context spark-root -n llm-serving get pod -l app=vllm -o jsonpath='{.items[0].metadata.name}')" spark-root 2
 ```
 
@@ -214,7 +285,24 @@ The `pod.mem.max` column is the 32 Gi limit as the kernel sees it, in the pod's 
 
 ### 5.4 Graceful rollout with streams in flight
 
+#### What this lab does (5 streams + `rollout restart deploy/vllm`)
+
+- **Starts 5 long streaming requests** (up to 1500 tokens each) through the §5.2 port-forward.
+- **Restarts the vLLM Deployment** 3 s later, while the streams are still running.
+- **Shows the graceful path:** the old pod leaves the Service endpoints, the `preStop` sleep (15 s) and the 120 s grace period let running generations finish, and only then is the engine stopped.
+
+#### What to look for
+
+1. **Command exit:** `deployment.apps/vllm restarted`.
+2. **Five lines** `data: [DONE]`, one per stream. A missing line means a stream was cut.
+3. **Afterwards:** a new `vllm-…` pod becomes `1/1 Running` after its startup; the port-forward is gone, so start it again (§5.2).
+
+**If something's off:** fewer than five `[DONE]` → a generation took longer than the 120 s grace; lower `max_tokens` or raise `terminationGracePeriodSeconds`. `curl` fails immediately → the port-forward from §5.2 was not running.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 ( for i in $(seq 5); do curl -sN localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
    -d '{"model":"qwen2.5-0.5b","stream":true,"max_tokens":1500,"messages":[{"role":"user","content":"Count slowly."}]}' \
    | tail -1 & done; wait ) &
@@ -225,9 +313,28 @@ Expected: each stream ends with `data: [DONE]`. The preStop sleep and 120 s grac
 
 ### 5.5 Benchmark
 
+#### What this lab does (manifest `lab/manifests/root-llms/90-serving/vllm/vllm-bench.yaml`)
+
+- **Job `vllm-bench`** in `llm-serving`: runs `vllm bench serve` against `http://vllm:8000` three times, at concurrency 1, 8 and 32. Each pass sends 128 random prompts (1024 tokens in, 256 out).
+- **Prints** throughput, TTFT, TPOT, ITL and end-to-end latency for each pass.
+- **Charges** 500m CPU and 1.5 Gi to `serving-budget`; no GPU slice. The Job deletes itself an hour after it finishes.
+- **Second run with a neighbour:** `gemm-contention` at 2 replicas on the root, then back to 0.
+
+#### What to look for
+
+1. **Command exit:** `job.batch/vllm-bench created`; the log shows three blocks, `=== max-concurrency 1`, `8`, `32`.
+2. **In each block:** `Successful requests: 128`. Fewer means requests failed.
+3. **The shape** in the table below: throughput rises a lot from 1 to 8 and again to 32; TTFT and TPOT rise with concurrency.
+4. **With `gemm-contention` running:** lower throughput and higher latency at every level. That drop is the cost of a GPU neighbour from another namespace.
+
+**If something's off:** `exceeded quota: serving-budget` → other engines hold the rest of the 90 Gi; park one (§9). `Connection refused` in the log → `vllm` is not ready (restarted in §5.4?); wait for `1/1` and run the Job again (delete it first).
+
+#### Run it
+
 The benchmark client is small: 500m CPU and a 1.5 Gi memory limit bring `serving-budget` to 2.4 of 8 CPU and 35.9 of 90 Gi next to vLLM (§9). Check the headroom first if other engines are running:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving describe resourcequota serving-budget | grep -E 'requests.cpu|limits.memory'
 kubectl --context spark-root apply -f manifests/root-llms/90-serving/vllm/vllm-bench.yaml
 kubectl --context spark-root -n llm-serving logs -f job/vllm-bench
@@ -247,7 +354,25 @@ Now repeat with `gemm-contention` at 2 replicas **on the root** (`kubectl --cont
 
 ### 5.6 Observability and alerts
 
+#### What this lab does (manifests `lab/manifests/root/95-observability`)
+
+- **Reads vLLM's own metrics** through the §5.2 port-forward: running and waiting requests, KV-cache use, preemptions.
+- **Applies `95-observability`** (if Chapter 17 hasn't): the ServiceMonitor `llm-workloads` that scrapes `vllm` and adds the `vcluster`/`vnamespace`/`vservice`/`vpod` labels, the alert rules and the dashboard.
+- **Queries Prometheus** through a port-forward on `localhost:9090` and shows which labels the vLLM series carry.
+- **Optional:** force `VLLMQueueBacklog` (more than 32 waiting for 5 min) with a lower `--max-num-seqs` and a higher benchmark concurrency, then put both back.
+
+#### What to look for
+
+1. **`/metrics`** prints `vllm:num_requests_running`, `vllm:num_requests_waiting` and a KV-cache line (`kv_cache_usage_perc`, or `gpu_cache_usage_perc` on older releases), all with numbers.
+2. **The Prometheus query** prints exactly one line: `root llm-serving vllm-… ← llm-serving/vllm-…`.
+3. **Grafana** (http://192.168.0.100:32000), row *Serving SLOs*: TTFT p95, TPOT p95, queue and KV-cache panels have data after a benchmark run.
+
+**If something's off:** the query prints nothing → Prometheus hasn't scraped `vllm` yet (wait one scrape interval) or the ServiceMonitor is missing (`kubectl --context spark-root -n observability get servicemonitors`). `curl` to `localhost:9090` fails → start the port-forward in this terminal. More in Chapter 17 §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 curl -s localhost:8000/metrics | grep -E '^vllm:(num_requests_(running|waiting)|kv_cache_usage_perc|gpu_cache_usage_perc|num_preemptions)' | head
 kubectl --context spark-root apply -k manifests/root/95-observability
 kubectl --context spark-root -n observability port-forward svc/kps-prometheus 9090 &
@@ -259,7 +384,28 @@ Expected: one line, `root llm-serving vllm-… ← llm-serving/vllm-…` — on 
 
 ### 5.7 Queue-depth autoscaling (KEDA)
 
+#### What this lab does (script `install-addons.sh keda`, manifest `lab/manifests/root-llms/90-serving/autoscaling.yaml`)
+
+- **Installs KEDA** on the root (namespace `keda`).
+- **Creates two ScaledObjects** in `llm-serving`, both querying `http://kps-prometheus.observability.svc:9090`:
+  - `vllm`: scales on `vllm:num_requests_waiting` (target 16), with `minReplicaCount` and `maxReplicaCount` both 1. On one Spark it only shows the metric.
+  - `mock-llm`: scales on open connections at Traefik (target 8), from 1 up to 6 replicas, cooldown 120 s.
+- **Sends load** to `mock-llm` through Traefik at `llm.lab.local` (400 streaming requests, 64 at a time).
+- **From now on KEDA owns the replica count** of `vllm` and `mock-llm`; use the pause annotation in §9 to park vLLM.
+
+#### What to look for
+
+1. **Command exit:** `install-addons.sh keda` ends after `deploy/keda-operator` rolls out; `apply -f` creates two ScaledObjects.
+2. **`get scaledobject,hpa`:** both ScaledObjects `READY` `True`, and one HPA per ScaledObject (`keda-hpa-vllm`, `keda-hpa-mock-llm`).
+3. **Under load:** `get deploy mock-llm -w` shows the replica count climb, up to 6.
+4. **After the load:** the count goes back down after the cooldown (120 s) and the HPA's scale-down window.
+
+**If something's off:** ScaledObject not `Ready` with `connection refused` or `no such host` → kps not installed or wrong `serverAddress` (§7). No scale-out → `curl` can't reach `llm.lab.local`: add `192.168.0.115 llm.lab.local` to `/etc/hosts` on the MacBook. More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/install-addons.sh keda                                      # on the root
 kubectl --context spark-root -n observability get svc kps-prometheus  # what the ScaledObjects query
 kubectl --context spark-root apply -f manifests/root-llms/90-serving/autoscaling.yaml
@@ -269,6 +415,7 @@ kubectl --context spark-root -n llm-serving get scaledobject,hpa
 KEDA creates an HPA in `llm-serving`; the root's controller-manager scales the Deployment and creates or deletes the pods. With `maxReplicaCount: 1`, the vLLM ScaledObject only shows the metric (`kubectl --context spark-root -n llm-serving get hpa -w` → current/target). The `mock-llm` ScaledObject really scales on in-flight connections at Traefik (needs `192.168.0.115 llm.lab.local` in your laptop's `/etc/hosts`):
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 seq 400 | xargs -P64 -I{} curl -sN -o /dev/null http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":200}' &
 kubectl --context spark-root -n llm-serving get deploy mock-llm -w        # 2 → up to 6, back after cooldown
 ```
@@ -280,6 +427,7 @@ From now on, KEDA owns `deploy/vllm`'s replica count: `kubectl scale` alone is u
 ## 6. Verify
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/verify.sh llm-budget storage serving observability
 ```
 
@@ -364,6 +512,7 @@ CPU and slices are split exactly (3 + 8 + 2 = 13 CPU, 2 + 6 + 3 = 11 slices); on
 So the rule for 21–23 is **two engines side by side**: `serving-budget` holds two 32 Gi engines (or vLLM + Triton, or vLLM + P/D), and memory, i.e. the sum of their util values, is the real limit (§2). Three 32 Gi engines overflow the quota even though their util sum (0.60) would fit; running three 7–8B models needs requests/limits trimmed to the measured peak (Chapter 14 §5.5). To make room for a third engine, or for a bigger model, park one like this:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 # park vLLM (KEDA-safe: the annotation scales to 0 and keeps it there)
 kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite \
   || kubectl --context spark-root -n llm-serving scale deploy vllm --replicas=0

@@ -206,6 +206,28 @@ The two output formats, one JSON object per line:
 
 ### 5.1 Run the pipeline without a GPU
 
+#### What this lab does (tool `lab/tools/synth_data.py` against `lab/tests/mock_openai.py`)
+
+- **Mock endpoint:** starts a deterministic OpenAI-compatible server on `127.0.0.1:18780`, in the background on the MacBook. No cluster, no GPU.
+- **Pipeline:** 2 rounds × 8 generated instructions, filters, answers, judge, and self-play DPO pairs.
+- **Writes** `out/mock-sft.jsonl` and `out/mock-dpo.jsonl` in ms-swift's format, then stops the mock with `kill %1`.
+
+#### What to look for
+
+1. **Summary line:** `generated 16 instructions → 11 new after filtering, 9 SFT rows kept, 9 DPO pairs`.
+2. **Drop reasons:**
+
+   | Reason | Count |
+   |---|---|
+   | `duplicate` | 2 |
+   | `near-duplicate`, `needs a non-text input`, `refusal`, `repetitive`, `too short` | 1 each |
+
+3. **`head -2`:** rows of the form `{"messages": [{"role": "user", …}, {"role": "assistant", …}]}`.
+
+**If something's off:** `Connection refused` → the mock wasn't up yet; wait a second and rerun. `Address already in use` → another mock still runs on 18780 (`kill %1` or pick another port). More in §7.
+
+#### Run it
+
 `tests/mock_openai.py` is a deterministic OpenAI-compatible endpoint: asked for new instructions it returns a canned list with duplicates, near-duplicates, a too-short line and a multimodal task on purpose, so every filter has work to do.
 
 ```bash
@@ -217,9 +239,24 @@ head -2 out/mock-sft.jsonl
 kill %1
 ```
 
-Expected: a summary line (`generated N instructions → M new after filtering, K SFT rows kept, P DPO pairs`) followed by the drop reasons — `duplicate`, `near-duplicate`, `too short`, `needs a non-text input` — and the two files.
+The answers are rule-based and wrong by design; this run tests the plumbing and the filters, not quality.
 
 ### 5.2 Serve a generator
+
+#### What this lab does (`serve-model.sh qwen3-4b-instruct`)
+
+- **Serves** Qwen3-4B-Instruct-2507 as the main model behind `svc/vllm` (util 0.12, 20 Gi, non-thinking, `hermes` tool parser; ~8.1 GB download on the first run). It replaces the current main model.
+- **Port-forward:** `svc/vllm` to `127.0.0.1:8000`.
+- **Alternatives:** `--side` keeps `qwen3-8b` as main; `qwen3-0.6b --sandbox` tries things in `dev-llms` first.
+
+#### What to look for
+
+1. **Script output:** `[PASS] vllm ready with qwen3-4b-instruct`, `[PASS] answer: 144  (reasoning chars: 0)` (an Instruct-2507 model never thinks), `0 failed`.
+2. **Port-forward:** `Forwarding from 127.0.0.1:8000 -> 8000`.
+
+**If something's off:** `[FAIL] budget` → park a side model first. More in [Chapter 04 §7](04-serving-qwen-with-vllm-and-sglang.md).
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
@@ -231,6 +268,23 @@ kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000:8000 &
 If `qwen3-8b` is the main model and should stay, serve the generator next to it instead (`scripts/serve-model.sh qwen3-4b-instruct --side`, then `port-forward svc/vllm-qwen3-4b-instruct 8000:8000`). To try changed flags or a new model first, use the sandbox: `scripts/serve-model.sh qwen3-0.6b --sandbox` (context `dev-llms`, namespace `llm-sandbox`).
 
 ### 5.3 Generate from your own seeds
+
+#### What this lab does (`synth_data.py` against the served generator)
+
+- **Writes** six seed instructions to `out/seeds.txt`.
+- **Generates** 6 rounds × 10 instructions with Qwen3-4B-Instruct, filters them, answers each, judges each answer (keep ≥ 6 of 10) and builds DPO pairs from a second, high-temperature answer.
+- **Writes** `out/sft.jsonl` and `out/dpo.jsonl`. Nothing on the cluster changes; this is inference only.
+
+#### What to look for
+
+1. **Exit code 0** and a summary line with SFT rows kept above 0.
+2. **The funnel:** fill the table below from the summary and `dropped` lines.
+3. **`wc -l`:** row counts that match the summary.
+4. **Your own reading of twenty rows:** on-topic, no paraphrases of each other, no `<think>` text.
+
+**If something's off:** `0 SFT rows kept` and exit 1 → the generator ignored the numbered-list format; ask it the prompt by hand. Most rows `near-duplicate` → seeds too similar or `--max-sim` too strict. More in §7.
+
+#### Run it
 
 Write 6–10 seed instructions that look like what your team asks, one per line, then generate:
 
@@ -265,6 +319,21 @@ Read twenty SFT rows yourself. If many are off-topic, your seeds are too broad; 
 
 ### 5.4 Check the judge
 
+#### What this lab does (`synth_data.py --min-score 1` + a small stats script)
+
+- **Generates** a second set with `--min-score 1`, so every answer the judge scored is kept, into `out/judge-all.jsonl` (`--seed 1` for a different sample).
+- **Prints** the row count and the median answer length. You then label 30 rows by hand and compare with "judge score ≥ 6".
+
+#### What to look for
+
+1. **Stats line:** `N rows, answer length p50 … words`, with N close to the number of instructions that survived filtering.
+2. **Your κ** between your labels and the judge (workbook E17). Record it.
+3. **Verbosity bias:** are the rows you rejected mostly the short ones the judge liked, or the reverse?
+
+**If something's off:** the judge gives nearly everything 8–9 → a lenient rubric or self-preference; try another judge model (§5.5).
+
+#### Run it
+
 Label 30 rows yourself as good / bad, then compare with "judge score ≥ 6". To see the judge's verdict on every answer, not only the kept ones, run with `--min-score 1` into a separate file, label those rows, and re-score them by hand against the threshold:
 
 ```bash
@@ -283,6 +352,21 @@ Compute κ between your labels and the judge (workbook E17), and check whether t
 
 ### 5.5 Try a second generator
 
+#### What this lab does (`serve-model.sh qwen3-8b` + `synth_data.py --no-think`)
+
+- **Switches** the main model to Qwen3-8B (util 0.20, 32 Gi). The port-forward breaks when the pod changes; restart it.
+- **Generates** from the same seeds with thinking off (`enable_thinking=false`) into `out/sft-8b.jsonl`.
+
+#### What to look for
+
+1. **`serve-model.sh`:** `[PASS] vllm ready with qwen3-8b`.
+2. **Funnel:** compare with §5.3, and rows kept per minute of wall time.
+3. **No thinking text:** `grep -c '<think>' out/sft-8b.jsonl` prints `0`.
+
+**If something's off:** `<think>` in rows → `--no-think` is missing. `Connection refused` → restart the port-forward.
+
+#### Run it
+
 Serve `qwen3-8b` and generate with `--no-think` from the same seeds (`--seed` fixed), then compare the funnels and read a sample from each. Notice how many rows each keeps per minute of wall time, and whether the 8B's answers are noticeably better for your seeds. The cheaper generator wins unless the difference shows in the rows.
 
 ```bash
@@ -295,6 +379,20 @@ python3 tools/synth_data.py --url http://127.0.0.1:8000 --model qwen3-8b --no-th
 (Restart the port-forward if it dropped while the model switched.)
 
 ### 5.6 A verifier instead of a judge (CPU)
+
+#### What this lab does (`out/verify.py`)
+
+- **Runs** each candidate function plus four tests in a separate, isolated Python process (`-I`, temporary directory, 5 s timeout) on the MacBook. Generated code never runs in the verifier's own process.
+- **Uses** two hand-written candidates, or candidates you ask the served model for.
+
+#### What to look for
+
+1. **Output:** `['pass', 'fail'] covered: True` with the two hand-written candidates.
+2. **With model candidates:** at least one `pass` means the problem is covered and the passing answer is a training row.
+
+**If something's off:** every candidate `timeout` → a loop in the candidates; the timeout did its job.
+
+#### Run it
 
 Where you can check, check. This runs candidate Python against tests in a separate, isolated interpreter with a timeout — the core of rejection sampling (§3.5). Run it on the MacBook with candidates you generate from the served model (ask it for `is_palindrome` four times at temperature 0.8), or with the two hand-written ones below.
 
@@ -330,9 +428,26 @@ results = [verify(c, TESTS) for c in candidates]
 print(results, "covered:", "pass" in results)
 ```
 
-Expected: `['pass', 'fail'] covered: True`. For real use, add resource limits or run the verifier in a pod with no network and a read-only filesystem; a subprocess on your laptop is enough for this exercise, the Spark host is never the place.
+For real use, add resource limits or run the verifier in a pod with no network and a read-only filesystem; a subprocess on your laptop is enough for this exercise, the Spark host is never the place.
 
 ### 5.7 Hand the data to ms-swift
+
+#### What this lab does (ConfigMaps `qwen-sft-data` / `qwen-dpo-data`, training window, `swift-sft.yaml`)
+
+- **Creates or updates** ConfigMaps `qwen-sft-data` and `qwen-dpo-data` in `batch` from your files; the Jobs mount them at `/data/train.jsonl`.
+- **Opens the training window** (vLLM paused, `training-window` overlay: `batch` 8 CPU · 80 Gi). Park side engines and `bge-m3` too, as in Chapter 07 Task 5.3.
+- **Submits** `swift-sft` with `DATASET=/data/train.jsonl` instead of Alpaca-GPT4.
+
+#### What to look for
+
+1. **ConfigMaps:** `configmap/qwen-sft-data created` (or `configured`), same for `qwen-dpo-data`.
+2. **Workload and pod:** Workload `ADMITTED True`, Job active, pod `Running`.
+3. **Log:** the dataset loaded from `/data/train.jsonl`, with about as many rows as `wc -l out/sft.jsonl` (2 % go to the eval split), not 2,000.
+4. **Afterwards:** window closed (everyday quotas, no pause annotation).
+
+**If something's off:** `configmap … too long` → file over ~1 MiB; copy it into `qwen-train`. Workload not admitted → window not open or vLLM still holds the pool. More in §7.
+
+#### Run it
 
 The Jobs read your file from a ConfigMap mounted at `/data` (see the headers of `swift-sft.yaml` and `swift-dpo.yaml`). ConfigMaps are limited to ~1 MiB: fine for a few thousand short rows; for more, copy the file into the `qwen-train` PVC instead.
 

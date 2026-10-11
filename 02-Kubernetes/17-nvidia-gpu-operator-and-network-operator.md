@@ -178,13 +178,40 @@ The dashboard is *generated* by [`gen_dashboard.py`](lab/manifests/root/95-obser
 ## 5. Lab
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 export KUBECONFIG="$PWD/01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"   # spark-root, dev-lab, dev-llms
 cd "02-Kubernetes/lab"
 ```
 
 ### 5.1 Read the operator's state
 
+#### What this lab does (kubectl, read-only)
+
+- **On the root:** reads the GPU Operator's `ClusterPolicy` (overall state and which components are switched on), its DaemonSets and pods in `gpu-operator`, the last lines of the validator log, and the time-slicing profile in ConfigMap `time-slicing-config`.
+- **From inside dev-lab:** checks what a tenant sees: no `gpu-operator` namespace, but 15 allocatable slices and a RuntimeClass `nvidia`.
+- **Nothing is changed.**
+
+#### What to look for
+
+1. **Command exit:** every command prints output, except `get ns gpu-operator` in dev-lab, which must say `NotFound`.
+2. **Compare with this table:**
+
+   | Line/Field | Healthy value |
+   |---|---|
+   | ClusterPolicy state | `ready` |
+   | `driver`, `toolkit`, `cdi`, `mig`, `dcgmExporter` | all `false` (DGX OS owns the driver and toolkit) |
+   | `devicePlugin` | `{"name":"time-slicing-config","default":"any"}` |
+   | `gpu-operator` pods | all `Running` or `Completed` (validator jobs complete) |
+   | time-slicing profile `any` | `replicas: 15` and `failRequestsGreaterThanOne: true` |
+   | dev-lab allocatable | `15` |
+   | dev-lab RuntimeClass | `nvidia` |
+
+**If something's off:** state `notReady` → find the pod that is not ready and read its logs; usually the validator, pointing at a host driver or containerd runtime problem. Any of driver/toolkit/cdi `true` → the Helm values drifted; re-run 01-Ansible `20.1-gpu-operator.yml`. More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root get clusterpolicies.nvidia.com -o jsonpath='{.items[0].status.state}{"\n"}'
 kubectl --context spark-root -n gpu-operator get ds,pods -o wide
 kubectl --context spark-root get clusterpolicies.nvidia.com cluster-policy -o json \
@@ -198,6 +225,7 @@ Expected: `ready`; `{"driver":false,"toolkit":false,"cdi":false,"mig":false,"dcg
 Now look for the operator from inside a vCluster:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab get ns gpu-operator                     # NotFound — the operator is root-only
 kubectl --context dev-lab get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'   # 15
 kubectl --context dev-lab get runtimeclass nvidia                 # from manifests/common/runtimeclass
@@ -207,7 +235,31 @@ The tenant sees the *result* (15 allocatable slices, GFD labels, a RuntimeClass)
 
 ### 5.2 Labels GFD wrote — and who can use them
 
+#### What this lab does (kubectl, then script `lab/scripts/verify.sh gpu`)
+
+- **Lists the `nvidia.com/` labels** GPU Feature Discovery wrote on `dgx-spark-1` on the root, and counts the same labels as `dev-llms` sees them through node sync.
+- **Runs `scripts/verify.sh gpu`:** checks the GB10 node label, allocatable slices and the operator validator, then creates `gpu-smoke` in dev-lab (`tenant-beta`), waits for it and deletes it.
+- **Nothing else is changed.**
+
+#### What to look for
+
+1. **Command exit:** the label list is not empty; the `grep -c` count in dev-llms equals the number of `nvidia.com/` lines on the root.
+2. **Labels on the root** include `nvidia.com/gpu.compute.major=12`, `nvidia.com/gpu.replicas=15` and `nvidia.com/gpu.sharing-strategy=time-slicing` (full list in Chapter 15 §3.2).
+3. **`verify.sh gpu` output:**
+   ```
+   [PASS] GB10 node: dgx-spark-1
+   [PASS] allocatable nvidia.com/gpu=15 (platform 2 · llm-serving 6 · batch 3 · dev-lab 2 · dev-llms 2)
+   [PASS] operator-validator Running
+   [PASS] gpu-smoke: GPU 0: NVIDIA GB10 (UUID: GPU-…)
+   ```
+   No `[FAIL]` lines. A `[WARN]` on allocatable means the node does not offer 15 slices.
+
+**If something's off:** fewer labels in dev-llms → node sync lagging; check the vCluster syncer logs. `[FAIL] gpu-smoke did not succeed` → the line shows the pod's phase and state; `Pending` usually means the dev-lab GPU quota is used up. More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root get node dgx-spark-1 -o json \
   | jq -r '.metadata.labels | to_entries[] | select(.key|startswith("nvidia.com/")) | "\(.key)=\(.value)"' | sort
 kubectl --context dev-llms get node dgx-spark-1 --show-labels | tr ',' '\n' | grep -c '^nvidia.com/'
@@ -218,6 +270,7 @@ Both commands count the same labels: node sync copies them into `dev-llms`, so a
 Then prove the full chain from a tenant namespace:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/verify.sh gpu          # applies manifests/dev-lab/70-gpu/gpu-smoke.yaml in dev-lab/tenant-beta
 ```
 
@@ -225,7 +278,33 @@ Expected: `[PASS] allocatable nvidia.com/gpu=15 (platform 2 · llm-serving 6 · 
 
 ### 5.3 Switch a node to "whole GPU" and back
 
+#### What this lab does (ConfigMap `gpu-operator/time-slicing-config`, node label)
+
+- **Adds a second device-plugin profile** `whole-gpu` (no time-slicing) to the ConfigMap `time-slicing-config`. The default profile `any` (15 slices) stays.
+- **Labels the node** `nvidia.com/device-plugin.config=whole-gpu`. The device plugin restarts with that profile, and the node advertises **1** `nvidia.com/gpu` instead of 15, in all three clusters at once.
+- **Runs the `gemm-solo` benchmark** (Chapter 15 §5.4) on the whole GPU, then removes the label so the node goes back to 15.
+- **What stays:** the `whole-gpu` key remains in the ConfigMap until the next 01-Ansible `20.1-gpu-operator.yml` run rewrites it. Quotas are never touched.
+
+#### What to look for
+
+1. **Command exit:** `patch` prints `configmap/time-slicing-config patched`, `label` prints `node/dgx-spark-1 labeled`.
+2. **After the switch:**
+
+   | Check | Value with `whole-gpu` | Value after switching back |
+   |---|---|---|
+   | root allocatable / `gpu.replicas` label | `1  1` | `15` |
+   | dev-llms allocatable | `1` | `15` |
+   | `serving-budget` `requests.nvidia.com/gpu` | still `6` | `6` |
+
+3. **The benchmark** prints one JSON line. With no other GPU pods, its TFLOPS should be close to your Chapter 15 baseline B.
+4. **Other GPU pods:** while the node advertises 1, any new GPU pod in any cluster is `Pending` with `Insufficient nvidia.com/gpu`. Pods already running keep their allocation.
+
+**If something's off:** allocatable still 15 after 45 s → the device plugin has not restarted yet; wait and check `kubectl --context spark-root -n gpu-operator get pods`. `gemm-solo` stays `Pending` → another pod already holds the single GPU. Allocatable stuck at 1 after removing the label → see the device-plugin row in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n gpu-operator patch cm time-slicing-config --type merge \
   -p '{"data":{"whole-gpu":"version: v1\nflags:\n  migStrategy: none\n"}}'
 kubectl --context spark-root label node dgx-spark-1 nvidia.com/device-plugin.config=whole-gpu --overwrite
@@ -238,6 +317,7 @@ kubectl --context spark-root -n llm-serving get resourcequota serving-budget -o 
 Run a benchmark on the whole GPU, then switch back:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n platform-tools delete job gemm-solo --ignore-not-found
 kubectl --context spark-root apply -k manifests/root/70-gpu        # the gemm-bench ConfigMap
 kubectl --context spark-root apply -f manifests/root/70-gpu/gemm-solo.yaml
@@ -252,7 +332,36 @@ Use `whole-gpu` for a benchmark or a big single-model run, when you want no one 
 
 ### 5.4 Observability stack
 
+#### What this lab does (script `lab/scripts/install-addons.sh kps`, manifests `lab/manifests/root/95-observability`)
+
+- **Installs kube-prometheus-stack** (Helm release `kps`) on the root in `observability`: Prometheus (15 days of history on local NVMe), Alertmanager and Grafana on NodePort **32000**. Values: `lab/addons/kube-prometheus-stack-values.yaml`.
+- **Applies `95-observability`:** a Service and EndpointSlice `spark-host-exporters` that point Prometheus at the host node_exporter on `192.168.0.100:9100`, the scrape config for model servers (`vcluster-workloads.yaml`), the alert rules (`rules.yaml`) and the dashboard **Spark · Kubernetes**.
+- **Generates load** to light up the dashboard: 2 `gemm-contention` pods, the `cpu-throttle` pod and break/fix 02 (dev-lab asks for 6 slices and has 2).
+- **Fills the GPU on purpose** with `slice-hog` in `platform-tools` (one pod more than the free slices) to fire `PodsPendingOnGPU`, then removes everything.
+- **Takes time:** both alerts need 10 minutes (`for: 10m`) before they fire.
+
+#### What to look for
+
+1. **Command exit:** `install-addons.sh kps` ends after `deploy/kps-grafana` rolls out; `apply -k` prints `created` lines; `get prometheus,alertmanager,servicemonitors,prometheusrules` lists one Prometheus, one Alertmanager, and the lab's ServiceMonitors and rules.
+2. **Targets** (first `curl`): every `job` shows `up`, including `spark-host-exporters`. With Traefik and a model server running, the second `curl` lists entries with `vcluster` `root` and the value `1`. Empty is fine before Chapters 11 and 20.
+3. **KEDA address:** the ScaledObject's `serverAddress` is `http://kps-prometheus.observability.svc:9090`, and the `promq` pod prints the start of a JSON answer (`{"status":"success",…`). No ScaledObject yet is fine before Chapter 20 §5.7.
+4. **Grafana:** http://192.168.0.100:32000, user `admin`, password `change-me` unless you changed it (do). Dashboard **Spark · Kubernetes**: GPU utilization and slices in use rise with `gemm-contention`; the throttling panel shows `cpu-throttle`.
+5. **Alerts** after 10–12 minutes:
+
+   | Step | Alert | Expected state |
+   |---|---|---|
+   | break/fix 02 injected | `VClusterQuotaNearlyExhausted` for `vc-dev-lab` | `firing` |
+   | break/fix 02 injected | `PodsPendingOnGPU` | absent: the Pending pods exist only inside dev-lab |
+   | `slice-hog` running | `PodsPendingOnGPU` for `platform-tools` | `firing`, with exactly 1 `slice-hog` pod Pending |
+
+6. **After cleanup:** `gemm-contention` at 0 replicas, no `slice-hog`, no `cpu-throttle`, and the port-forward stopped (`kill %1` works only in the same terminal that started it).
+
+**If something's off:** `curl` to `localhost:9090` fails → the port-forward is not running in this terminal. `spark-host-exporters` down → node_exporter on the Spark (`curl 192.168.0.100:9100/metrics`). No alert after 12 minutes → check the rule loaded (`curl -s localhost:9090/api/v1/rules`) and that `kube-state-metrics` is `up`. More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/install-addons.sh kps
 kubectl --context spark-root apply -k manifests/root/95-observability
 kubectl --context spark-root -n observability get prometheus,alertmanager,servicemonitors,prometheusrules
@@ -266,6 +375,7 @@ Expected targets `up`: apiserver, kubelet, kube-state-metrics, coredns, kube-pro
 Check the address KEDA uses — the root's Prometheus Service, no replicated copy in between:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving get scaledobjects -o jsonpath='{range .items[*]}{.metadata.name}{"  "}{.spec.triggers[0].metadata.serverAddress}{"\n"}{end}'
 kubectl --context spark-root -n batch run promq --rm -i --restart=Never --image=nicolaka/netshoot:v0.13 \
   -- curl -s 'http://kps-prometheus.observability.svc:9090/api/v1/query?query=up' | head -c 200; echo
@@ -274,6 +384,7 @@ kubectl --context spark-root -n batch run promq --rm -i --restart=Never --image=
 Open Grafana at `http://192.168.0.100:32000` → dashboard **Spark · Kubernetes**. Generate some signal and watch each row respond:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n platform-tools scale deploy gemm-contention --replicas=2   # GPU util, slices in use
 kubectl --context spark-root apply -f manifests/root/12-cgroups/cpu-throttle.yaml         # throttling panel
 scripts/breakfix.sh inject 02                                                             # dev-lab asks for 6 slices, has 2
@@ -282,12 +393,14 @@ scripts/breakfix.sh inject 02                                                   
 Watch the alerts for 10–12 minutes:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 curl -s localhost:9090/api/v1/alerts | jq -r '.data.alerts[] | "\(.labels.alertname) \(.labels.namespace // "") \(.state)"'
 ```
 
 Expected: `VClusterQuotaNearlyExhausted vc-dev-lab firing` (the `requests.nvidia.com/gpu` budget is at 2/2) — and **no** `PodsPendingOnGPU`. The four Pending bf02 pods exist only in dev-lab's API server; the root's kube-state-metrics never saw them. Now make the root itself run out of slices, which is what `PodsPendingOnGPU` is for:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh reset 02
 USED=$(kubectl --context spark-root get pods -A -o json | jq '[.items[] | select(.spec.nodeName != null and (.status.phase=="Running" or .status.phase=="Pending")) | .spec.containers[].resources.limits["nvidia.com/gpu"] // "0" | tonumber] | add')
 kubectl --context spark-root -n platform-tools create deployment slice-hog --replicas=$((15 - USED + 1)) \
@@ -299,6 +412,7 @@ kubectl --context spark-root -n platform-tools get pods -l app=slice-hog | grep 
 `platform-tools` has no quota, so the root can take every slice — including the ones dev-lab, dev-llms, `llm-serving` and `batch` are "budgeted". The platform's 2 slices are a convention, not a control. After 10 minutes `PodsPendingOnGPU` fires for `platform-tools`. Clean up:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n platform-tools delete deploy slice-hog
 kubectl --context spark-root -n platform-tools scale deploy gemm-contention --replicas=0
 kubectl --context spark-root delete -f manifests/root/12-cgroups/cpu-throttle.yaml; kill %1
@@ -306,7 +420,25 @@ kubectl --context spark-root delete -f manifests/root/12-cgroups/cpu-throttle.ya
 
 ### 5.5 DCGM exporter (when supported)
 
+#### What this lab does (template `20.1 GPU Operator` with `gpu_operator_dcgm_exporter: true`)
+
+- **Checks first** that DCGM on the Spark can see the GB10 (`dcgmi discovery -l`). If it can't, stop here and keep DCGM off.
+- **Re-runs the GPU Operator template** with one extra variable. The operator then adds the `nvidia-dcgm-exporter` DaemonSet in `gpu-operator`, serving metrics on port **9400**. Driver, toolkit and time-slicing settings are not changed.
+- **Reads a few DCGM metrics** through a short port-forward: GPU utilization, temperature, power.
+
+#### What to look for
+
+1. **`dcgmi discovery -l`** lists one GPU, the GB10.
+2. **Semaphore run:** `failed=0`; expect `changed` on the Helm release (the DCGM exporter is added).
+3. **Exporter:** `kubectl --context spark-root -n gpu-operator get ds nvidia-dcgm-exporter` shows 1 ready pod.
+4. **Metrics:** the `curl` prints `DCGM_FI_DEV_GPU_UTIL`, `DCGM_FI_DEV_GPU_TEMP` and `DCGM_FI_DEV_POWER_USAGE` lines with numbers.
+
+**If something's off:** `dcgmi` lists no GPU → this DGX OS release's DCGM doesn't support the GB10 yet; leave `gpu_operator_dcgm_exporter` false, since the host textfile metrics feed the same panels. Exporter pod crash-looping → its logs; turn it back off with the same template and `false`. More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 ssh dgxadmin@192.168.0.100 'dcgmi discovery -l'        # must list GB10
 # Semaphore: run template "20.1 GPU Operator" with extra variables {"gpu_operator_dcgm_exporter": true}
 # (break-glass CLI: cd "../../01-Ansible/lab" && ansible-playbook playbooks/20.1-gpu-operator.yml -l dgx-spark-1,localhost -K -e gpu_operator_dcgm_exporter=true)
@@ -318,9 +450,34 @@ If `dcgmi` doesn't list the GB10 on your DGX OS release, keep it off. The textfi
 
 ### 5.6 (2 Sparks) Network Operator for RDMA pod networking
 
+#### What this lab does (Helm chart `network-operator`, manifests `lab/manifests/root/85-network-operator`)
+
+- **Installs the NVIDIA Network Operator** in `nvidia-network-operator`, with its own NFD switched off (the GPU Operator already runs NFD). It does not install a NIC driver: DGX OS ships it.
+- **Applies `nicclusterpolicy.yaml`:** the RDMA shared device plugin (resource `rdma/rdma_shared_cx7`, 16 per Spark, on the CX-7 ports `enp1s0f1np1` and `enP2p1s0f1np1`), Multus, CNI plugins and whereabouts IPAM. A `MacvlanNetwork` `cx7-rdma` creates the NetworkAttachmentDefinition in `batch`, with addresses `192.168.100.100–199` and MTU 9000.
+- **Runs a test pod** `rdma-test` in `batch` that prints its interfaces and RDMA devices, then deletes it. It uses the NGC PyTorch image, so the first start may pull for a while.
+- **One Spark only:** skip this lab. It needs dgx-spark-2 joined to the root and the CX-7 cabled between the two.
+
+#### What to look for
+
+1. **Command exit:** `helm install … --wait` returns `STATUS: deployed`; NicClusterPolicy state `ready`.
+2. **Compare with this table:**
+
+   | Check | Healthy value |
+   |---|---|
+   | allocatable `rdma/rdma_shared_cx7` | `16` on each Spark |
+   | `get network-attachment-definitions -n batch` | `cx7-rdma` |
+   | `rdma-test` log, `ip -br addr` | `eth0` with `10.42.x.x` (Cilium) and `net1` with an address in `192.168.100.100–199` |
+   | `rdma-test` log, `ibv_devices` | at least one RoCE device |
+   | `network-status` annotation | two entries: `eth0` and `net1` |
+
+**If something's off:** NicClusterPolicy not ready → Multus from `21.1-multus-rdma.yml` may already be installed; use one installer only. `rdma-test` stuck in `ContainerCreating` with `cx7-rdma not found` → the NAD is not in `batch`. More in §7.
+
+#### Run it
+
 Prerequisites: dgx-spark-2 joined the root (Chapter 05 §9), 01-Ansible `13.1-fabric.yml` and `13.2-rdma-perftest.yml` passed, and **01-Ansible `21.1-multus-rdma.yml` not applied** (both install Multus and an RDMA device plugin).
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 helm repo add nvidia https://helm.ngc.nvidia.com/nvidia && helm repo update
 helm search repo nvidia/network-operator -l | head -3          # pick a release and pin it
 NETOP_VERSION=<chosen chart version>
@@ -335,6 +492,7 @@ kubectl --context spark-root -n batch get network-attachment-definitions        
 The `MacvlanNetwork` names `networkNamespace: batch` on purpose. Multus looks up a NetworkAttachmentDefinition in the namespace of the pod it is wiring, and the training pods run in the root's `batch` namespace. The pod only names the network in its `k8s.v1.cni.cncf.io/networks: cx7-rdma` annotation:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -f manifests/root-llms/85-network-operator/rdma-test-pod.yaml
 kubectl --context spark-root -n batch wait --for=condition=Ready pod/rdma-test --timeout=5m
 kubectl --context spark-root -n batch logs rdma-test
@@ -350,6 +508,7 @@ Expected: allocatable `rdma/rdma_shared_cx7: 16` per Spark (`rdmaHcaMax: 16`). I
 ## 6. Verify
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/verify.sh gpu observability
 ```
 

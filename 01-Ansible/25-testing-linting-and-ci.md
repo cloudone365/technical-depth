@@ -33,6 +33,37 @@ flowchart TB
 
 ## 2. Static and fixture layers: one script
 
+#### What this lab does (script `lab/tests/run-local-checks.sh`)
+
+- **Where it runs:** on the MacBook, inside `01-Ansible/lab`, with the lab's virtual environment active. The same script is the `static` job in GitHub Actions (§4). Nothing touches a Spark, sema01 or vault01.
+- **Static layer:** `yamllint -s .`, `ansible-playbook --syntax-check` on every file in `playbooks/`, a check that `ansible_managed` appears only in `.j2` templates, then `ansible-lint` with the `production` profile.
+- **Fixture layer:** runs the Chapter 07 Jinja katas, feeds the captured avahi output in `tests/fixtures/` to the `spark_mdns` inventory plugin, and runs `tools/spark_drift_report.py` on `tests/fixtures/drift-sample.json`, which must exit `2` (drift found).
+- **Code layer:** `py_compile` on the Python tools, the `spark.fact` script and the inventory plugins; `bash -n` on the shell scripts.
+- **The listing below is shortened.** The file in the repo also stops early with a hint when the venv is not active, and runs the syntax check *before* `ansible-lint` so a parse error shows Ansible's own message.
+
+#### What to look for
+
+1. **Exit code:** `0`, and the last line is `ALL LOCAL CHECKS PASSED`. The script uses `set -e`, so it stops at the first failing layer.
+2. **The section headers**, printed in this order. If the run stops, the last header printed is the layer that failed:
+   ```
+   == yamllint
+   == syntax-check
+   == ansible_managed only in .j2
+   == ansible-lint
+   == jinja katas
+   == mdns plugin
+   == drift report
+   == python tools
+   == shell
+   ALL LOCAL CHECKS PASSED
+   ```
+3. **Lint warnings are not failures.** Lines tagged as warnings (for example `line-length` from yamllint, or rules on the `experimental` warn list) can show up while the run still passes.
+4. **The mDNS check uses a fixture**, so it expects `dgx-spark-1` and `dgx-spark-2` even when you own only one Spark. That is correct: it tests the parser, not your network.
+
+**If something's off:** `yamllint not found` (or another tool) → activate the venv: `source ~/.venvs/spark-ansible/bin/activate`. `couldn't resolve module/action` in lint → the collections are not installed in `./collections`. A lint result that differs from CI → compare `ansible-lint --version` in both places. More in §5.
+
+#### Run it
+
 ```bash
 # lab/tests/run-local-checks.sh
 #!/usr/bin/env bash
@@ -115,6 +146,30 @@ Then add a case to `run-local-checks.sh`. The Jinja katas (Chapter 07) are this 
 ---
 
 ## 3. Molecule on the Spark (arm64)
+
+#### What this lab does (Molecule scenario `roles/spark_baseline/molecule/default`)
+
+- **Where it runs:** on dgx-spark-1, so the test container is native arm64 with no emulation. It creates a Python venv at `~/.venvs/molecule` and installs `requirements.txt` there (Molecule and its Docker plugin come from that file).
+- **Test container:** an `ubuntu:24.04` arm64 container named `noble-arm64`, running systemd, privileged, with the host's cgroup tree mounted. `prepare.yml` installs `python3` into it with `raw`, because the base image has none.
+- **Converge:** applies the `spark_baseline` role inside the container with `spark_baseline_container_mode: true`. That skips the parts a container cannot do (sysctl and RDMA module settings, the timezone, the headless target, adding the admin user to the `docker` group) and installs only `chrony`, `jq`, `ethtool` and `openssh-server`.
+- **Idempotence and verify:** converges a second time and fails on any `changed`, then runs four checks: `sshd -t`, `PermitRootLogin no`, persistent journald, and a `pool` line in `chrony.conf`.
+- **What is not changed:** the Spark host itself. The role runs only inside the container, and `molecule test` destroys the container at the end. The first run pulls `ubuntu:24.04` and installs packages, so it takes a few minutes.
+
+#### What to look for
+
+1. **Command exit:** `molecule test` returns `0`, and the step list runs `dependency → destroy → create → prepare → converge → idempotence → verify → destroy` without stopping.
+2. **Idempotence step:** it must report success with no task listed as changed. If it lists a task, that task is not idempotent; this is the most useful result of the whole layer.
+3. **Verify step:** all four tasks (`Sshd config validates`, `Root login disabled`, `Journald is persistent`, `Chrony is configured`) show `ok`.
+4. **Clean up:** after `molecule test`, no test container is left:
+   ```bash
+   # ▶ dgx-spark-1 (ssh dgx-spark-1)
+   docker ps -a --filter name=noble-arm64     # header line only
+   ```
+   After `molecule converge` the container stays up on purpose; remove it with `molecule destroy` when you are done.
+
+**If something's off:** `exec format error` → the image is not arm64 or you ran it off the Spark. Create hangs → the systemd container needs `privileged: true`, `cgroupns_mode: host` and `/sys/fs/cgroup` mounted rw. Idempotence fails on `apt` → add `cache_valid_time`. More in §5.
+
+#### Run it
 
 ```yaml
 # lab/roles/spark_baseline/molecule/default/molecule.yml
@@ -270,6 +325,28 @@ jobs:
 ```
 
 ### 4.1 Register the Spark as a self-hosted runner
+
+#### What this lab does (workflow `.github/workflows/ansible-lab-ci.yml` + runner on dgx-spark-1)
+
+- **Runner:** installs the GitHub Actions runner in `~/actions-runner` on dgx-spark-1, registers it with the label `spark`, and installs it as a systemd service with `svc.sh`. GitHub adds the labels `self-hosted`, `linux` and `ARM64` itself.
+- **`static` job:** runs on a GitHub-hosted `ubuntu-latest` runner on every PR and push to `main` that touches `01-Ansible/lab/**`. It installs ansible-core 2.18, ansible-lint, yamllint and the collections, then runs `tests/run-local-checks.sh` (§2).
+- **`molecule-arm64` job:** runs only when you start the workflow by hand (`workflow_dispatch`) with the `molecule` box ticked, and only after `static` passed. It runs on the Spark runner and does the same `molecule test` as §3.
+- **What is not changed:** the runner never runs for pull requests, and no job talks to sema01 or vault01. Only the runner folder and its service are added to the Spark.
+
+#### What to look for
+
+1. **Runner online:** GitHub repo → Settings → Actions → Runners shows the Spark runner as *Idle*, with the labels `self-hosted`, `Linux`, `ARM64`, `spark`. On the Spark:
+   ```bash
+   # ▶ dgx-spark-1 (ssh dgx-spark-1)
+   cd ~/actions-runner && sudo ./svc.sh status      # active (running)
+   ```
+2. **A PR run:** the `ansible-lab` workflow shows the `static` job green and the `molecule-arm64` job as *skipped*. Skipped is correct for every event except a manual dispatch.
+3. **A manual run:** Actions → ansible-lab → Run workflow, tick *molecule*. Both jobs go green, and the Molecule job's log shows it ran on your Spark runner.
+4. **Branch protection (§4.2):** a PR with a lint error cannot be merged.
+
+**If something's off:** the Molecule job stays *Queued* → the runner is offline or its labels don't match `self-hosted, linux, ARM64, spark`. Lint passes locally but fails in CI → version difference, see §5.
+
+#### Run it
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)

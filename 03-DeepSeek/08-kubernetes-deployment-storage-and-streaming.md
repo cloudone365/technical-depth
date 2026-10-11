@@ -322,6 +322,23 @@ kubectl --context spark-root get ns llm-serving batch ingress observability
 
 ### Task 5.1 · Render everything and diff two models
 
+#### What this lab does (`kubectl kustomize`, `gen_overlays.py --check`)
+
+- **Where:** on the MacBook only. Rendering is local; nothing is sent to the cluster.
+- **Renders** the root kustomization (the tool, eval-data and catalog ConfigMaps), counts the objects in every model overlay and in `k8s/apps`, and diffs the rendered `r1-7b` against `r1-32b-fp8`.
+- **Checks** that the committed overlays match `models.yaml`.
+
+#### What to look for
+
+1. **Root kustomization:** `ConfigMap/deepseek-tools`, `ConfigMap/deepseek-evaldata`, `ConfigMap/deepseek-catalog` and `ConfigMap/deepseek-train`.
+2. **Per overlay:** `4 objects` (Secret `hf-token`, Deployment, Service, ServiceMonitor) for every `k8s/models/*`.
+3. **The diff** touches only args, the `MODEL`/`SERVED_NAME` env values, memory request and limit (`28Gi` vs `58Gi`) and the `model` labels.
+4. **Overlay check:** `14 overlays checked, 0 drifted`.
+
+**If something's off:** `accumulating resources … no such file` → run from `03-DeepSeek/lab`; the overlays find 02's base by relative path. Extra lines in the diff → a generated file was edited by hand; `--check` names it. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl kustomize . | yq -N '.kind + "/" + .metadata.name'
@@ -330,9 +347,29 @@ diff <(kubectl kustomize k8s/models/r1-7b) <(kubectl kustomize k8s/models/r1-32b
 python3 scripts/gen_overlays.py --check
 ```
 
-Expected: three ConfigMaps from the root kustomization; four objects per model overlay (Secret `hf-token`, Deployment, Service, ServiceMonitor from the base). The diff shows only args, env values, memory request and limit, and `model` labels. Anything else means somebody edited a generated file, and `--check` reports it.
+Expected: four ConfigMaps from the root kustomization (three in `llm-serving`, `deepseek-train` in `batch`); four objects per model overlay (Secret `hf-token`, Deployment, Service, ServiceMonitor from the base). The diff shows only args, env values, memory request and limit, and `model` labels. Anything else means somebody edited a generated file, and `--check` reports it.
 
 ### Task 5.2 · The three validation layers, and a failure only the third one catches
+
+#### What this lab does (script `lab/tests/run-local-checks.sh`, `02-Kubernetes/lab/tests/pod_template_check.py`)
+
+- **Without `API=1`:** everything CI runs, on the MacBook: yamllint, overlay sync, budget checks, kustomize + kubeconform, promtool rules and alert tests, shellcheck, and the tools against local mocks. Needs python3 with CPU torch and pyyaml, kubectl, kubeconform, promtool and shellcheck.
+- **With `API=1`:** additionally a server-side dry run of every manifest against `spark-root`, and a pod-level check of every pod template (PSA, the CEL policies, quotas). **It re-applies 02's `00-platform`, `10-tenancy` and `20-scheduling`, briefly applies the training window for the training Jobs, then puts the everyday quotas back.** Don't run it while a training window is open.
+- **The single `pod_template_check.py` call** checks two pod templates: the `r1-7b` Deployment and the `eval` Job.
+- **The two broken edits** (`hostNetwork: true` in `eval.yaml`, a `:latest` image in a copy of an overlay) are yours to make and revert.
+
+#### What to look for
+
+1. **Local run:** ends with `ALL LOCAL CHECKS PASSED`.
+2. **`API=1` run:** the same last line, with `… pod templates checked, 0 rejected` for both the serving and the training sections.
+3. **Single check:** `2 pod templates checked, 0 rejected`.
+4. **With `hostNetwork: true`:** a `REJECTED … :: Job/eval …` line naming PodSecurity `baseline` and host namespaces, though `--dry-run=server` on the Job alone passes.
+5. **With `:latest`:** a `REJECTED` line from the CEL policy for pinned tags.
+6. **After reverting:** `git status` shows `eval.yaml` unchanged.
+
+**If something's off:** `kubeconform: command not found` (or promtool, shellcheck) → install it on the MacBook. A training window you had open is closed after `API=1` → that's the script's last step; re-apply the window. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -348,6 +385,31 @@ python3 ../../02-Kubernetes/lab/tests/pod_template_check.py k8s/models/r1-7b k8s
 Now add `hostNetwork: true` to the pod spec in `k8s/jobs/eval.yaml` and run the last command again. The Job object passes `--dry-run=server`, but the pod check rejects it (`violates PodSecurity "baseline:latest": host namespaces`). Without that layer you would find out from a Job stuck at 0 pods. Repeat with `image: …:latest` in a copy of an overlay: the CEL policy rejects it. Revert both.
 
 ### Task 5.3 · Serve a model and inspect the live objects
+
+#### What this lab does (`kubectl apply -k .`, `serve-model.sh r1-7b`)
+
+- **Applies the ConfigMaps** (`deepseek-tools`, `deepseek-evaldata`, `deepseek-catalog` in `llm-serving`; `deepseek-train` in `batch`).
+- **Serves `r1-7b`:** prefetch into `model-cache`, apply the overlay (util 0.20, **28 Gi** request = limit, one GPU slice), wait, smoke test.
+- **Inspects** the Deployment, Service, ServiceMonitor and PVC, the pod's args, priority, QoS and resources, and the quota; then the cache directory and free space on the Spark. All read-only.
+
+#### What to look for
+
+1. **`serve-model.sh`:** `0 failed`.
+2. **Pod and quota:**
+
+   | Field | Healthy value |
+   |---|---|
+   | `Priority` | `50000` (`spark-serving`) |
+   | `QoS Class` | `Burstable` |
+   | `Requests` / `Limits` memory | `28Gi` / `28Gi` |
+   | `nvidia.com/gpu` | `1` |
+   | PVC `model-cache` | `Bound`, class `local-nvme-retain` |
+   | `serving-budget` used memory | includes the 28 Gi |
+3. **On the Spark:** `du` lists one `models--…` directory per model you've served (r1-7b about 15G); `df -h /data` leaves room for the working set (§3.8).
+
+**If something's off:** `du` finds nothing → the PVC's host path differs; `kubectl --context spark-root get pv` shows it. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -370,6 +432,27 @@ df -h /data
 ```
 
 ### Task 5.4 · Measure the NVMe, then cold vs warm loads
+
+#### What this lab does (Job `02-Kubernetes/lab/manifests/root/60-storage/fio-job.yaml`, then vLLM restarts)
+
+- **fio:** a 64 Gi `local-nvme` scratch PVC and Job `fio-ai` in `platform-tools`: four 45-second profiles on a 16 GB file (sequential 1M read and write, random 128k read, random 4k read).
+- **Restarts vLLM twice:** once with the weights still in page cache (warm), once right after dropping the page cache on the Spark (cold), timing `rollout status` each time. The model stays `r1-7b`.
+
+#### What to look for
+
+1. **fio:** a `[weights-seqread-1m]` section with a `READ:` bandwidth line; record it for §3.6's formula.
+2. **Restart timings:**
+
+   | Row | Healthy value |
+   |---|---|
+   | `Loading weights took` (warm) | seconds |
+   | `Loading weights took` (cold) | close to 15 GB ÷ your seq-read bandwidth |
+   | `Graph capturing finished` | the largest part of both restarts |
+3. **`rollout status`** ends with `successfully rolled out` within the 30 min timeout.
+
+**If something's off:** warm restart no faster than cold → the page cache was already evicted; check `free -g` on the Spark. Clean up the fio Job and PVC with `kubectl --context spark-root delete -f manifests/root/60-storage/fio-job.yaml` from `02-Kubernetes/lab`. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
@@ -398,6 +481,21 @@ Run it once with a warm page cache, then again right after the `drop_caches` com
 
 ### Task 5.5 · Watch the page cache compete for UMA
 
+#### What this lab does (shell on dgx-spark-1)
+
+- **Reads the `r1-7b` safetensors files** from the model-cache host path into nothing, so the kernel keeps them in page cache.
+- **Drops the page cache** with `drop_caches` and shows memory again. Nothing in Kubernetes changes; the running vLLM pod keeps its memory.
+
+#### What to look for
+
+1. **`free -g` `buff/cache`:** grows by about 15 after the `cat`, then falls back after `drop_caches`.
+2. **`available`:** falls by the same amount while the pages are cached, although no pod requested anything.
+3. **Totals:** `total` stays at 121 (GiB) throughout.
+
+**If something's off:** `No such file or directory` on the `cat` → `r1-7b` isn't in the cache yet, or the path differs (Task 5.3's `du`). More in §7.
+
+#### Run it
+
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
 free -g                                           # note buff/cache
@@ -411,6 +509,22 @@ None of those 15 GB appeared in any quota or pod request. That is the gap betwee
 
 ### Task 5.6 · Pin what you downloaded
 
+#### What this lab does (CronJob `lab/k8s/ops/weights-verify.yaml`)
+
+- **Creates CronJob `weights-verify`** in `llm-serving` (nightly at 03:17) and starts one run now as Job `wv-now`.
+- **Trust on first use:** for every cached snapshot without a manifest, it hashes the files and writes `/models/manifests/<repo>@<commit>.json`. Later runs verify against those manifests and fail on any change.
+- Reads the weights from `model-cache`; only the manifests directory is written.
+
+#### What to look for
+
+1. **First run:** one `== NEW  <repo>@<commit>` line per cached snapshot, each with `N files, X GiB hashed in …s`.
+2. **A second run** (`create job --from=cronjob/weights-verify wv-2`): `== CHECK … ` with `✓ weights match manifest` for each snapshot.
+3. **Job status:** `wv-now` `Complete`.
+
+**If something's off:** `MISSING`, `CHANGED` or `EXTRA` lines → the cached bytes differ from the manifest; re-download that snapshot. Hashing large models takes minutes. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root apply -f k8s/ops/weights-verify.yaml
@@ -421,6 +535,23 @@ kubectl --context spark-root -n llm-serving logs -f job/wv-now
 Expected: `== NEW  deepseek-ai_DeepSeek-R1-Distill-Qwen-7B@<commit>` for each snapshot on the first run, `== CHECK … OK` later. Chapter 15 runs it nightly.
 
 ### Task 5.7 · Stream through every hop
+
+#### What this lab does (script `lab/tools/stream_probe.py`)
+
+- **Needs the app stack** (`k8s/apps`, Chapter 12) and `192.168.0.115 api.lab.local webui.lab.local` in the MacBook's `/etc/hosts`.
+- **Reads the LiteLLM master key** from Secret `litellm-master-key` into `$KEY` (not printed).
+- **Streams one R1 request** four times: straight to vLLM (port-forward :8000), through LiteLLM (port-forward :4000, alias `reasoning-fast`), and through Traefik on 192.168.0.115 by name and by IP. Read-only.
+
+#### What to look for
+
+1. **Each probe** prints `ttfb`, `first reasoning`, `first answer`, chunk counts, `ITL p50/p99` and `finish_reason=stop`.
+2. **Across hops:** `ttfb` grows by a few ms per hop; `ITL p50` stays within about 1 ms; `first answer` is set by the thinking length.
+3. **Never:** a `BUFFERED`, `TRUNCATED` or `REASONING IN CONTENT` line.
+4. **Raw curl:** `data:` lines with `reasoning_content` deltas first, then `content` deltas.
+
+**If something's off:** `401` at LiteLLM or Traefik → `$KEY` is empty or the header is missing. `404` from Traefik → the Host header doesn't match the HTTPRoute (`api.lab.local`). More in §7.
+
+#### Run it
 
 Prerequisites: `kubectl --context spark-root apply -k k8s/apps` (Chapter 12), and on the MacBook `/etc/hosts` contains `192.168.0.115 api.lab.local webui.lab.local` (Traefik's MetalLB address on the root).
 
@@ -460,6 +591,22 @@ curl -sN http://api.lab.local/v1/chat/completions -H "Authorization: Bearer $KEY
 
 ### Task 5.8 · Drill D04 — the 30-second gateway, and D08 — 404 model not found
 
+#### What this lab does (script `lab/scripts/breakfix.sh`, drills D04 and D08)
+
+- **D04 inject:** rewrites `timeout` and `request_timeout` in ConfigMap `litellm-config` from 900 to 30 s and restarts Deployment `litellm`. **`reset D04`** re-applies `k8s/apps/litellm.yaml` and restarts it again.
+- **D04 test:** one long proof request with up to 16,384 tokens through Traefik and LiteLLM.
+- **D08:** changes nothing; it prints a harness command that uses the Hugging Face repo id as the model name, which you run against vLLM.
+
+#### What to look for
+
+1. **D04:** the stream stops at about 30 s with an error, while the same request straight to vLLM (hop 1) completes. The LiteLLM log shows a timeout.
+2. **After `reset D04`:** a long request through `api.lab.local` completes again.
+3. **D08:** the harness gets `404` (model does not exist); `/v1/models` lists `r1-7b`, the served name.
+
+**If something's off:** D04 doesn't cut at 30 s → the request finished in under 30 s; use a longer prompt or larger `--max-tokens`. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/breakfix.sh inject D04
@@ -480,6 +627,22 @@ scripts/breakfix.sh answer D08
 
 ### Task 5.9 · Make a hop buffer, then catch it
 
+#### What this lab does (patch on HTTPRoute `litellm`)
+
+- **Adds 02's `llm-body-limit` middleware** (Traefik `buffering`) as a filter on the LiteLLM HTTPRoute in `llm-serving`.
+- **Probes the stream** through Traefik once.
+- **Removes the filter** by re-applying `k8s/apps/litellm.yaml`.
+
+#### What to look for
+
+1. **Patch:** `httproute.gateway.networking.k8s.io/litellm patched`.
+2. **Probe:** if your Traefik version buffers responses in that middleware, a `BUFFERED` line and `first answer` ≈ `total`. If not, the stream looks normal; note which.
+3. **After re-apply:** a new probe shows no `BUFFERED` line.
+
+**If something's off:** the patch fails with `filters` already present → the route was patched before; re-apply `k8s/apps/litellm.yaml` and try again. More in §7.
+
+#### Run it
+
 Attach 02's `llm-body-limit` middleware (Traefik `buffering`) to the LiteLLM route:
 
 ```bash
@@ -493,6 +656,24 @@ kubectl --context spark-root apply -f k8s/apps/litellm.yaml          # remove th
 Expected: if your Traefik version buffers responses in that middleware, the probe prints `BUFFERED` and `first answer ≈ total`; users see nothing until the answer is complete. Put request-size limits on a separate non-streaming route, or enforce them in LiteLLM.
 
 ### Task 5.10 · (2×) Share the cache with dgx-spark-2 over NFS/RDMA
+
+#### What this lab does (read-only checks of the NFS/RDMA share)
+
+- **Needs dgx-spark-2** and 01-Ansible `15.1-nfs-rdma.yml` already run. With only dgx-spark-1, skip it.
+- **On dgx-spark-1:** lists the NFS exports.
+- **On dgx-spark-2:** checks the mount options and reads one weight blob of `r1-7b` over the share with `dd` to measure throughput. Nothing is written.
+
+#### What to look for
+
+| Check | Healthy value |
+|---|---|
+| `showmount -e localhost` | `/srv/models 192.168.100.0/24` |
+| `mount \| grep /mnt/models` | `proto=rdma,port=20049` |
+| `dd` | a GB/s figure; compare it with Task 5.4's local seq read |
+
+**If something's off:** `proto=tcp` → `rpcrdma` isn't loaded or the port is wrong. `ls` finds no `models--deepseek-ai--DeepSeek-R1-Distill-Qwen-7B` → the share exports another directory than the model cache. More in §7.
+
+#### Run it
 
 01-Ansible `15.1-nfs-rdma.yml` (run from Semaphore) exports `/srv/models` from dgx-spark-1 to the CX-7 subnet and mounts it on dgx-spark-2 at `/mnt/models`.
 

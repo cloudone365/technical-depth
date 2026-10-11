@@ -149,8 +149,31 @@ A tenant can't tell a degraded rail from a slow job. The platform team's health 
 
 ### 5.1 Inventory the CX-7 (1 Spark)
 
+#### What this lab does (commands on dgx-spark-1)
+
+- **Maps RDMA devices to network interfaces** (`ibdev2netdev`, `rdma link show`) for the ConnectX-7.
+- **Reads link state and speed** of the two CX-7 netdevs, `enp1s0f1np1` and `enP2p1s0f1np1`, with `ethtool` and `ip`.
+- **Lists the NVIDIA/Mellanox PCIe functions** (vendor ID `15b3`).
+- **Nothing is changed.** Works with one Spark; without a QSFP cable the links are simply down.
+
+#### What to look for
+
+1. **Command exit:** every command prints output.
+2. **Compare with this table:**
+
+   | Line/Field | Healthy value |
+   |---|---|
+   | `ibdev2netdev` | `rocep1s0f1 port 1 ==> enp1s0f1np1` and `roceP2p1s0f1 port 1 ==> enP2p1s0f1np1` |
+   | `ethtool` `Speed` / `Link detected` | `200000Mb/s` / `yes` on a cabled port. With one Spark and no cable, `Link detected: no` is fine |
+   | `ip -br link` | `UP` with a cable, `DOWN` or `NO-CARRIER` without |
+   | `lspci -d 15b3:` | ConnectX-7 entries on two different PCIe buses (one per root) |
+
+**If something's off:** no RDMA devices at all → the DGX OS RDMA packages or the `mlx5_ib` module are missing (`lsmod | grep mlx5`). Cable plugged but `Link detected: no` → reseat the cable; see the link-flap row in §7.
+
+#### Run it
+
 ```bash
-ssh dgxadmin@192.168.0.100
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 ibdev2netdev                               # rocep1s0f1 port 1 ==> enp1s0f1np1 (Up) …
 for i in enp1s0f1np1 enP2p1s0f1np1; do ethtool $i | grep -E 'Speed|Link detected'; ip -br link show $i; done
 rdma link show
@@ -161,7 +184,32 @@ Note that one physical QSFP cage shows up as **two** netdevs and two RDMA device
 
 ### 5.2 Size real fabrics
 
+#### What this lab does (script `lab/scripts/fabric_calc.py`)
+
+- **Runs a sizing calculator** on the MacBook for four designs: two Sparks back to back, one 32-node scalable unit, 127 nodes, and 64 nodes on next-generation 128-port 800 Gb/s switches.
+- **Prints** endpoints, rails, tiers, leaf and spine switch counts, cables, per-GPU bandwidth and bisection bandwidth for a non-blocking rail-optimised fabric.
+- **Touches nothing** on the Spark or in any cluster. Plain Python, no packages needed.
+
+#### What to look for
+
+1. **Command exit:** each run prints a `key: value` list and exits 0.
+2. **Compare with §3.2:**
+
+   | Run | leaves | spines | cables | bisection_tbps |
+   |---|---|---|---|---|
+   | `--nodes 2 --gpus 1` | 0 | 0 | 1 (`back-to-back cable`) | 0.2 |
+   | `--nodes 32 --gpus 8 --radix 64` | 8 | 4 | 512 | 51.2 |
+   | `--nodes 127 --gpus 8 --radix 64` | 32 | 16 | 2040 | 203.2 |
+   | `--nodes 64 --gpus 8 --radix 128 --link-gbps 800` | 8 | 4 | 1024 | 204.8 |
+
+3. **Exercise answer** for the 127-node design: 2040 cables × 2 = 4080 transceivers.
+
+**If something's off:** `No such file or directory` → run it from `02-Kubernetes/lab`.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 cd "02-Kubernetes/lab"
 python3 scripts/fabric_calc.py --nodes 2 --gpus 1 --radix 2 --link-gbps 200
 python3 scripts/fabric_calc.py --nodes 32 --gpus 8 --radix 64 --link-gbps 400
@@ -173,7 +221,31 @@ Exercise: how many optical transceivers does the 127-node design need, if every 
 
 ### 5.3 (2 Sparks) Baseline and counters
 
+#### What this lab does (playbook `13.2-rdma-perftest.yml`, then `ethtool -S`)
+
+- **Measures the host RDMA baseline** between the two Sparks with the 01-Ansible perftest playbook, with no Kubernetes involved.
+- **Reads the CX-7 error and flow-control counters** on dgx-spark-1 (CRC, symbol errors, discards, pause frames, CNPs, link-down events), showing only the non-zero ones.
+- **Then you run the NCCL job** of Chapter 18 §5.5 and read the counters again.
+- **Nothing is reconfigured.** **One Spark only:** skip this lab; there is no link to measure.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`, and the bandwidth it reports is at least **180 Gb/s** (the 01-Ansible gate).
+2. **Counters before the run:** CRC, symbol and `link_down` counters absent (0). Pause counters may already be non-zero from earlier runs.
+3. **Counters after the NCCL run:**
+
+   | Counter | Healthy change |
+   |---|---|
+   | pause (PFC) counters | rise during the run only |
+   | `discard` counters | stay 0 |
+   | `crc` / `symbol` errors | stay 0 |
+
+**If something's off:** CRC or symbol errors growing → cable, optic or dirty connector. Huge pause counters and collapsing throughput → PFC/QoS mismatch between the two ends (`14.1-roce-qos.yml`). More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 # host RDMA baseline: Semaphore template for playbooks/13.2-rdma-perftest.yml (two Sparks, so no --limit)
 ssh dgxadmin@192.168.0.100 'ethtool -S enp1s0f1np1 | grep -E "crc|symbol|discard|pause|cnp|link_down" | grep -v ": 0$"'
 ```
@@ -182,7 +254,26 @@ Then run the NCCL job (Chapter 18 §5.5) and diff the counters before and after.
 
 ### 5.4 (2 Sparks) Degrade the fabric and watch NCCL
 
+#### What this lab does (`ip link` on dgx-spark-2, overlay `80-distributed/two-spark`)
+
+- **Takes one logical half of the CX-7 down** on dgx-spark-2: `enP2p1s0f1np1`. The other half stays up.
+- **Runs the two-Spark NCCL job** (Chapter 18 §5.5) on the degraded link and filters its log for the devices used and the bandwidth.
+- **Brings the interface back up** and deletes the job.
+- **One Spark only:** skip this lab.
+
+#### What to look for
+
+1. **Command exit:** `ip link set … down` and `up` return silently; the job is created.
+2. **The NCCL log:** a `WARN` about the missing HCA, or `NET/IB : Using` with only one device listed.
+3. **The `1073741824` row:** `busbw_GB/s` about **half** of your normal two-Spark value.
+4. **Afterwards:** `ssh dgxadmin@192.168.0.101 'ip -br link show enP2p1s0f1np1'` shows `UP` again.
+
+**If something's off:** busbw doesn't drop → the job ran before the interface went down, or NCCL used the other HCA from the start; check the `NET/IB` line. The interface does not come back → `sudo netplan apply` on dgx-spark-2 (01-Ansible `cx7_fabric`). More in §7.
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 # take ONE logical half down on dgx-spark-2 for the duration of a run
 ssh dgxadmin@192.168.0.101 'sudo ip link set enP2p1s0f1np1 down'
 kubectl --context spark-root delete -k manifests/root-llms/80-distributed/two-spark --ignore-not-found
@@ -196,9 +287,27 @@ Expected: NCCL warns about the missing HCA or uses only one device, and large-me
 
 ### 5.5 Build a fabric health check
 
+#### What this lab does (script `/tmp/fabric-health.sh` on a Spark, a node taint on the root)
+
+- **Writes a small check script** to `/tmp/fabric-health.sh` on the Spark. For both CX-7 interfaces it checks: link `up`, MTU `9000`, and CRC, symbol and link-down error counters at 0. Exit 0 means healthy.
+- **Simulates what a failing check would do** in Kubernetes: taints dgx-spark-2 `spark.lab/fabric=degraded:NoSchedule` on the root, runs the two-Spark job, and shows rank 1 can't be placed. Then removes the job and the taint.
+- **With one Spark:** run the script on dgx-spark-1. Without a cable it fails, which is the correct answer. Skip the taint part: it needs dgx-spark-2, and tainting your only node stops new pods in all three clusters (break/fix 13).
+
+#### What to look for
+
+1. **Script:** prints `HEALTHY` on a cabled, healthy Spark. Otherwise it prints one line per problem, such as `enP2p1s0f1np1 down` or `enp1s0f1np1 mtu 1500`, and no `HEALTHY`.
+2. **Taint, as seen from dev-lab:** `describe node dgx-spark-2` in `dev-lab` shows `spark.lab/fabric=degraded:NoSchedule`, synced from the root.
+3. **The job:** rank 1 `Pending` with the event `1 node(s) had untolerated taint {spark.lab/fabric: degraded}`.
+4. **After cleanup:** `kubectl --context spark-root describe node dgx-spark-2 | grep -i taint` shows `<none>`.
+
+**If something's off:** the script fails with `ethtool: command not found` → install `ethtool` on the Spark. The taint does not appear in dev-lab → node sync lag; wait a few seconds. More in §7.
+
+#### Run it
+
 A pre-flight any scheduler could call before admitting a multi-node job:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 cat > /tmp/fabric-health.sh <<'EOF'
 #!/usr/bin/env bash
 # exit 0 = healthy; non-zero = do not schedule distributed jobs here
@@ -217,6 +326,7 @@ chmod +x /tmp/fabric-health.sh && /tmp/fabric-health.sh && echo HEALTHY
 In Kubernetes, this becomes a node-problem-detector custom plugin on the **root**. A failing check sets a node condition, and a taint keeps distributed jobs away. Simulate the outcome by hand:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root taint node dgx-spark-2 spark.lab/fabric=degraded:NoSchedule
 kubectl --context dev-lab describe node dgx-spark-2 | grep -i taint         # synced into the vCluster too
 kubectl --context spark-root apply -k manifests/root-llms/80-distributed/two-spark

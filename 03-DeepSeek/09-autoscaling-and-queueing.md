@@ -156,6 +156,22 @@ kubectl --context spark-root -n batch get localqueue train
 
 ### Task 5.1 · Office hours for vLLM
 
+#### What this lab does (ScaledObject `lab/k8s/autoscale/vllm-office-hours.yaml`)
+
+- **Serves `r1-7b`** (util 0.20, **28 Gi** request = limit) with `serve-model.sh`.
+- **Replaces 02's ScaledObject `vllm`** in `llm-serving` (same name) with one that allows 0 replicas: a cron trigger holds 1 replica Mon–Fri 08:00–20:00 in the timezone you set (the file says `Europe/London`), and a Prometheus trigger on running + waiting requests keeps or brings back one replica while requests are in flight. Cooldown 900 s.
+- **Outside the window**, after 15 quiet minutes, vLLM scales to 0 and its 28 Gi go back to the LLM pool. Nothing else changes.
+
+#### What to look for
+
+1. **ScaledObject:** `get scaledobject vllm` shows `READY True`, and `ACTIVE True` inside the window.
+2. **HPA:** `keda-hpa-vllm` exists with min 1 (KEDA handles 0 ↔ 1 itself).
+3. **After the window ends** (set `end` a few minutes ahead to see it): 15 min later `get deploy vllm` shows `0/0`, and the node's `Allocated resources` memory drops by 28 Gi.
+
+**If something's off:** vLLM never scales to 0 → a request is still running, something probes it, or the timezone puts you inside the window. `already managed by ScaledObject` → a second ScaledObject targets `vllm`. More in §7.
+
+#### Run it
+
 Edit the timezone and window in `k8s/autoscale/vllm-office-hours.yaml` first. To see the scale-down now, set `start`/`end` to a window that ends a few minutes from now.
 
 ```bash
@@ -167,7 +183,7 @@ kubectl --context spark-root -n llm-serving get scaledobject vllm
 kubectl --context spark-root -n llm-serving get hpa keda-hpa-vllm -w
 ```
 
-Expected: `READY True`, `ACTIVE True` inside the window. After it ends and 15 min pass with no requests, the Deployment goes to `0/0` and its 32 Gi leave the node's allocated memory:
+Expected: `READY True`, `ACTIVE True` inside the window. After it ends and 15 min pass with no requests, the Deployment goes to `0/0` and its 28 Gi (the `r1-7b` pod's request = limit) leave the node's allocated memory:
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -176,6 +192,21 @@ kubectl --context spark-root describe node dgx-spark-1 | grep -A9 'Allocated res
 ```
 
 ### Task 5.2 · Measure the cold start you just paid for
+
+#### What this lab does (patch `minReplicaCount` on the ScaledObject)
+
+- **Brings vLLM back** from 0 by setting the ScaledObject's `minReplicaCount` to 1, and times the rollout to Ready.
+- **Restores** `minReplicaCount: 0` afterwards. The model is whatever the Deployment holds (`r1-7b` after Task 5.1); switch with `serve-model.sh` to time the others.
+
+#### What to look for
+
+1. **`time … rollout status`:** ends with `successfully rolled out`; the `real` time is your cold start. Fill in one row per model.
+2. **Order of magnitude:** minutes, not seconds. Weights come from page cache or NVMe; most of the time is engine init and CUDA-graph capture (Chapter 08 §3.6).
+3. **After the second patch:** `get scaledobject vllm -o jsonpath='{.spec.minReplicaCount}'` prints `0`.
+
+**If something's off:** the pod stays `Pending` → the pool is full (a training Job or another engine); `kubectl --context spark-root describe node dgx-spark-1 | grep -A9 'Allocated resources'`. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -196,6 +227,22 @@ That is the latency the first morning user would see if you scaled to zero on de
 
 ### Task 5.3 · Everyday quota: a training Job waits
 
+#### What this lab does (Job `lab/k8s/jobs/sft.yaml`)
+
+- **Applies** the `deepseek-train` ConfigMap and the `deepseek-ckpt` PVC (90 Gi, `local-nvme-retain`) in `batch`.
+- **Submits Job `sft`** (LoRA SFT of R1-Distill-Qwen-1.5B) suspended to LocalQueue `train` with priority `routine`. Its pod asks for **4 CPU · 48 Gi** (request = limit) and 1 slice.
+- **Everyday quota** for `spark-cq` is 2 CPU · 12 Gi, so Kueue does not admit it. Nothing is evicted; serving is untouched. Leave it queued for Task 5.4.
+
+#### What to look for
+
+1. **Workload:** `get workloads -o wide` lists the `sft` workload in queue `train` with `ADMITTED` empty or false.
+2. **Message:** the workload condition says it couldn't assign flavors, naming `cpu` and/or `memory` as insufficient in `spark-cq`.
+3. **No pod:** `kubectl --context spark-root -n batch get pods` shows no `sft-…` pod.
+
+**If something's off:** the workload is admitted → the training window is still open from an earlier chapter; check `batch-budget`. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root apply -k .                                  # deepseek-train ConfigMap in batch
@@ -207,6 +254,23 @@ kubectl --context spark-root -n batch describe workloads | grep -iE -A3 'message
 Expected: the workload is **not admitted**. The `sft` pod asks for 4 CPU · 48 Gi (request = limit) · 1 slice, more than `spark-cq`'s everyday 2 CPU · 12 Gi, so Kueue keeps the Job suspended with a message naming the resource. Nothing was evicted and vLLM never noticed. Leave the Job queued.
 
 ### Task 5.4 · Open the training window
+
+#### What this lab does (manifests `02-Kubernetes/lab/manifests/root-llms/training-window`)
+
+- **Parks serving:** pauses the vLLM ScaledObject at 0, scales `sglang`, `trtllm`, `llama-server` and `bge-m3` to 0 if they exist, and waits until the vLLM pod is gone.
+- **Applies the window:** `serving-budget` 8 CPU · 90 Gi → 2 CPU · 10 Gi; `batch-budget` and ClusterQueue `spark-cq` 2 CPU · 12 Gi → 8 CPU · 80 Gi. GPU slices unchanged.
+- **Kueue reacts on its own:** the queued `sft` from Task 5.3 is admitted and its pod starts.
+
+#### What to look for
+
+1. **`serving-budget`:** hard `requests.cpu` `2` and `limits.memory` `10Gi`, with used below hard (mock LLM, Qdrant, LiteLLM, Open WebUI). If used is above 10Gi, park more.
+2. **`spark-cq`:** `cpu` `8`, `memory` `80Gi`, `nvidia.com/gpu` `3`.
+3. **Admission:** within seconds `sft` is `ADMITTED`; `flavorsUsage` shows 4 CPU and 48Gi used.
+4. **Pod:** `kubectl --context spark-root -n batch get pods` shows an `sft-…` pod `Running` (it first pip-installs and downloads the 1.5B model).
+
+**If something's off:** `sft` admitted but its pod `Pending` with `Insufficient memory` → a model server still holds memory on the node. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
@@ -230,6 +294,24 @@ kubectl --context spark-root get clusterqueue spark-cq -o jsonpath='{.status.fla
 
 ### Task 5.5 · An urgent run preempts routine work
 
+#### What this lab does (Jobs `grpo` and `grpo-urgent` in `batch`)
+
+- **Submits `grpo`** (routine, 4 CPU · 48 Gi). With `sft` holding 48 Gi of the window's 80 Gi, it waits.
+- **Submits `grpo-urgent`:** the same Job renamed, labelled `kueue.x-k8s.io/priority-class: urgent` and cut to 20 steps (rendered with `yq` on the MacBook).
+- **Kueue preempts:** it evicts `sft` back to pending and admits `grpo-urgent`; the routine Jobs then run one after the other. An evicted Job restarts from the beginning.
+- **Clean-up:** deletes `sft`, `grpo` and `grpo-urgent`.
+
+#### What to look for
+
+1. **Before the urgent Job:** `sft` admitted, `grpo` pending.
+2. **After:** an event with reason `Preempted` on the `sft` workload, `grpo-urgent` admitted and its pod `Running`.
+3. **Later:** `grpo-urgent` `Complete`, then `sft` or `grpo` admitted again, never two at once.
+4. **Clean-up:** `kubectl --context spark-root -n batch get jobs` empty.
+
+**If something's off:** no preemption → the `priority-class` label is missing on the copy; without it Kueue uses the pod PriorityClass and every lab Job looks equal. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root apply -f k8s/jobs/grpo.yaml
@@ -245,6 +327,22 @@ Expected: every lab training Job asks for 4 CPU · 48 Gi, so only one fits the w
 
 ### Task 5.6 · End the window
 
+#### What this lab does (re-apply `root-llms/10-tenancy` and `20-scheduling`)
+
+- **Puts the everyday quotas back:** `serving-budget` 8 CPU · 90 Gi, `batch-budget` and `spark-cq` 2 CPU · 12 Gi.
+- **Brings serving back:** removes the pause from the vLLM ScaledObject and scales `bge-m3` to 1 if it exists. vLLM starts only inside office hours (or while a request waits).
+- **Not changed:** Jobs, PVCs and checkpoints in `batch`. Running training pods aren't evicted, but vLLM waits `Pending` until their memory is free.
+
+#### What to look for
+
+1. **Before:** `get jobs` in `batch` shows nothing running you still need.
+2. **Quotas:** `serving-budget` hard `8` CPU and `90Gi`; `spark-cq` back to `2` and `12Gi`.
+3. **vLLM:** `rollout status` ends with `successfully rolled out` (inside office hours).
+
+**If something's off:** vLLM stays `0/0` inside office hours → the pause annotation is still there; check it with `kubectl --context spark-root -n llm-serving get scaledobject vllm -o yaml | grep paused`. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n batch get jobs                          # nothing still running that you need
@@ -258,6 +356,24 @@ kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout
 Expected: `serving-budget` back at 8 CPU · 90Gi, `spark-cq` at 2 CPU · 12Gi, vLLM Ready (inside office hours). End the window *after* the training pods have finished: lowering `batch-budget` under what is in use doesn't evict them, but vLLM's pod waits Pending until their memory is free.
 
 ### Task 5.7 · The same model through KServe
+
+#### What this lab does (InferenceService `lab/k8s/kserve/r1-1.5b.yaml`)
+
+- **Installs 02's `vllm-spark` ServingRuntime** and deletes 02's demo InferenceService `qwen-small` (32 Gi) so the new one fits the quota.
+- **Creates InferenceService `r1-1-5b`** in `llm-serving` (RawDeployment): R1-Distill-Qwen-1.5B from `hf://`, util 0.10, 16K context, the reasoning parser, **14 Gi** (request = limit), one slice. A `storage-initializer` init container downloads the weights.
+- **Streams one request** through a port-forward to `svc/r1-1-5b-predictor` and lists the Deployment, Service and HPA that KServe generated.
+- **Budget:** next to vLLM `r1-7b` (0.20) and bge-m3 (0.06) the util sum is 0.36.
+- **Clean-up:** deletes the InferenceService.
+
+#### What to look for
+
+1. **`get isvc r1-1-5b`:** `READY True` after download and load.
+2. **Stream probe:** `first reasoning` before `first answer`, `finish_reason=stop`, and no `REASONING IN CONTENT` line.
+3. **Generated objects:** a Deployment, Service and HPA labelled `serving.kserve.io/inferenceservice=r1-1-5b`; the init container name is `storage-initializer`.
+
+**If something's off:** InferenceService not ready with `exceeded quota` → `qwen-small` or another engine still holds memory. `no matches for kind "InferenceService"` → run `scripts/install-addons.sh kserve` in 02-Kubernetes/lab first. More in §7.
+
+#### Run it
 
 The lab's InferenceService overrides the runtime's 32 Gi with 14 Gi request = limit and util 0.10, the same budget as the `r1-1.5b` overlay. Next to vLLM r1-7b (28 Gi), bge-m3 (9 Gi) and the apps it fits `serving-budget`; 02's demo `qwen-small` (32 Gi) on top would not, so delete it first.
 

@@ -173,6 +173,24 @@ kubectl --context dev-lab get sc           # the root's classes, seen from insid
 
 ### 5.1 StatefulSet: identity and data survive the pod
 
+#### What this lab does (manifests `lab/manifests/root-llms/00-platform`, `10-tenancy`, `50-workloads`)
+
+- **Root, `llm-serving`:** the namespaces and tenancy (unchanged if Chapter 08 or 11 already applied them), then Qdrant: StatefulSet `qdrant` (1 replica, `qdrant/qdrant:v1.13.4-unprivileged`), PVC `data-qdrant-0` on `local-nvme-retain` (20 Gi), and the PDBs `qdrant` (`maxUnavailable: 0`) and `mock-llm` (`minAvailable: 1`).
+- **Data:** creates collection `spark` with 2 vectors through a port-forward on `localhost:6333`.
+- **Failure test:** deletes pod `qdrant-0` and checks the new pod finds the same data.
+- Data lands on the Spark's NVMe at `/data/k8s/retain/llm-serving/data-qdrant-0`. The first run pulls the Qdrant image.
+
+#### What to look for
+
+1. **Rollout:** `rollout status` ends with `statefulset rolling update complete …`, then `qdrant-0` is `1/1 Running` and `data-qdrant-0` is `Bound`.
+2. **dev-lab comparison:** on the root, `vc-dev-lab` has only the StatefulSet `dev-lab` and no Deployment; the echo pods have the same IPs on both sides.
+3. **Writes:** both `jq .status` lines print `"ok"`, and `points_count` is `2`.
+4. **After the delete:** `qdrant-0` Ready again within 120 s, `points_count` still `2`, and `sudo ls …/collections/` on the Spark lists `spark`.
+
+**If something's off:** `data-qdrant-0` stuck `Pending` means the `local-nvme-retain` class is missing (run `scripts/install-addons.sh storage`, Chapter 13). Port-forward errors usually mean an earlier `port-forward` is still holding 6333 (`kill %1`). More in §7.
+
+#### Run it
+
 ```bash
 kubectl --context spark-root apply -k manifests/root-llms/00-platform
 kubectl --context spark-root apply -k manifests/root-llms/10-tenancy
@@ -221,6 +239,21 @@ Who recreated `qdrant-0`? The root's StatefulSet controller, which saw its pod d
 
 ### 5.2 Canary a StatefulSet update with `partition`
 
+#### What this lab does (StatefulSet `llm-serving/qdrant`)
+
+- Sets `partition: 1`, stages a new image (`v1.13.5-unprivileged`) without rolling it, reads the two revisions, then rolls back and sets `partition: 0` again.
+- With one replica, no pod is restarted at any point.
+
+#### What to look for
+
+1. **Pod image:** still `qdrant/qdrant:v1.13.4-unprivileged` after `set image`.
+2. **Revisions:** `qdrant-<hash1> → qdrant-<hash2>`, two different hashes.
+3. **After the undo:** `currentRevision` and `updateRevision` are equal again and `partition` is `0`.
+
+**If something's off:** if `qdrant-0` restarted, `partition` was not set before `set image` (check `kubectl --context spark-root -n llm-serving get sts qdrant -o jsonpath='{.spec.updateStrategy}'`). More in §7.
+
+#### Run it
+
 With one replica, `partition: 1` means *no pod updates*. That's useful for staging a new image spec without rolling it:
 
 ```bash
@@ -236,6 +269,24 @@ kubectl --context spark-root -n llm-serving patch sts qdrant -p '{"spec":{"updat
 The ControllerRevisions behind `currentRevision`/`updateRevision` live in the root's etcd next to the StatefulSet: `kubectl --context spark-root -n llm-serving get controllerrevisions`. For a StatefulSet written inside a vCluster they would live in that vCluster's SQLite, and `kubectl --context spark-root -n vc-dev-lab get controllerrevisions` would show only the vCluster's own. With 3 replicas (3 nodes), `partition: 2` updates only `qdrant-2`. Watch it, then lower the partition step by step.
 
 ### 5.3 DaemonSet: one probe per GPU node (root)
+
+#### What this lab does (manifests `lab/manifests/root/00-platform`, `root/50-workloads`)
+
+- **Root, `platform-tools`:** DaemonSet `spark-node-probe` on every node labelled `spark.lab/gpu=gb10`. Every 15 s it writes the GB10 temperature and `MemAvailable` to `/var/lib/prometheus/node-exporter/k8s_node_probe.prom` on the host, where the host node-exporter (port 9100) picks it up.
+- It sees the GPU through `NVIDIA_VISIBLE_DEVICES=all`, so it takes none of the 15 GPU slices.
+- **Cordon test:** cordons dgx-spark-1, restarts the DaemonSet, checks the pod comes back, uncordons. While cordoned, no new pod can start in any of the three clusters, so keep it short.
+- The first run pulls `nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04`.
+
+#### What to look for
+
+1. **DaemonSet:** `DESIRED 1`, `READY 1` (2 with dgx-spark-2).
+2. **Textfile and `/metrics`** (on the Spark): two lines, `spark_probe_gpu_temp_celsius{node="dgx-spark-1"}` with a plausible temperature (tens of °C, not `NaN`), and `spark_probe_mem_available_bytes{node="dgx-spark-1"}`, about 1.2e+11 on an idle Spark (≈ 119 GiB), less under load.
+3. **While cordoned:** the restarted probe pod is `Running` again.
+4. **Afterwards:** `kubectl --context spark-root get nodes` shows `Ready` without `SchedulingDisabled`.
+
+**If something's off:** `DESIRED 0` means the node lacks the `spark.lab/gpu=gb10` label. `NaN` for the temperature means `nvidia-smi` failed in the pod (the default runtime isn't `nvidia`, Chapter 16). No `spark_probe_` lines on :9100 means node-exporter's textfile directory differs from the hostPath. More in §7.
+
+#### Run it
 
 ```bash
 kubectl --context spark-root apply -k manifests/root/00-platform
@@ -265,6 +316,24 @@ kubectl --context spark-root uncordon dgx-spark-1
 The DaemonSet pod comes back on a cordoned node because the DaemonSet controller adds a toleration for `node.kubernetes.io/unschedulable` to every pod it creates, and `operator: Exists` covers any other taint.
 
 ### 5.4 Indexed Job: shards, per-index retries, corrupt input (dev-lab)
+
+#### What this lab does (manifest `lab/manifests/dev-lab/50-workloads/tokenizer-indexed-job.yaml`)
+
+- **dev-lab, `tenant-alpha`:** namespaces and tenancy (unchanged if already applied), then Job `tokenize-shards`: 8 indexes, 2 at a time, each pod 200m CPU and about 5 s of work.
+- **Quota test:** raises `parallelism` to 3. The third pod would need 600m of tenant-alpha's 500m, so dev-lab's API server refuses it.
+- **Corrupt shard:** re-creates the Job with `BAD_SHARD=3`. Index 3 exits 42, `podFailurePolicy` marks it failed without retries.
+- Deletes the Job after each run. Nothing is created on the root except the host copies of the pods in `vc-dev-lab`.
+
+#### What to look for
+
+1. **Watch:** never more than 2 `tokenize-shards-…` pods Running at once.
+2. **Quota event:** `FailedCreate … exceeded quota: tenant-budget, … limited: limits.cpu=500m,requests.cpu=500m`.
+3. **Clean run:** `completedIndexes` is `0-7`.
+4. **Corrupt run:** `completed=0-2,4-7 failed=3`, and exactly one pod for index 3, status `Error`.
+
+**If something's off:** pods `Pending` with no events usually means the root quota on `vc-dev-lab` refused them (Chapter 14). `apply` failing with `field is immutable` on the second run means the first Job wasn't deleted yet. More in §7.
+
+#### Run it
 
 ```bash
 kubectl --context dev-lab apply -k manifests/dev-lab/00-platform
@@ -309,6 +378,30 @@ tokenize-shards-3-…   0/1   Error   0   …        ← exactly one pod: FailIn
 The job is marked `Failed` only after the remaining indexes have finished (one failed index is within `maxFailedIndexes: 1`), so the `wait` can take a minute. Re-run *only* shard 3 after fixing the data: launch a Job with `completions: 8` and a `JOB_COMPLETION_INDEX`-aware skip list, or a one-off pod with `JOB_COMPLETION_INDEX=3`. Clean up with `kubectl --context dev-lab -n tenant-alpha delete job tokenize-shards`.
 
 ### 5.5 PDBs and drain — across the nesting
+
+#### What this lab does (tenant PDB in dev-lab, drill `breakfix 11`)
+
+- **dev-lab:** creates PDB `lab-tools/echo` (`minAvailable: 2`). The syncer copies it to the root as `vc-dev-lab/echo-x-lab-tools-x-dev-lab`.
+- **Drill:** `breakfix.sh inject 11` re-applies `root-llms/50-workloads` (Qdrant and its PDB) and prints a drain command. You run it with `--dry-run=server`: the root answers as if draining, but nothing is evicted.
+- **Runbook (optional, only on a real maintenance day):** snapshot Qdrant, scale it to 0, drain, uncordon, scale back. A real drain stops all three clusters and every model on a one-node lab.
+
+#### What to look for
+
+1. **`get pdb -A` on the root:**
+
+   | PDB | Healthy value |
+   |---|---|
+   | `llm-serving/mock-llm` | `MIN AVAILABLE 1`, `ALLOWED DISRUPTIONS 1` (once `40-ingress` is applied) |
+   | `llm-serving/qdrant` | `MAX UNAVAILABLE 0`, `ALLOWED DISRUPTIONS 0` |
+   | `vc-dev-lab/echo-x-lab-tools-x-dev-lab` | `MIN AVAILABLE 2`, `ALLOWED DISRUPTIONS 1` |
+
+2. **Drain dry-run:** `Cannot evict pod as it would violate the pod's disruption budget` for `qdrant-0`, and `evicting pod vc-dev-lab/dev-lab-0` / `vc-dev-llms/dev-llms-0 (server dry run)` for the vCluster control planes.
+3. **The node is unchanged:** `kubectl --context spark-root get nodes` shows no `SchedulingDisabled` after a dry run.
+4. **Clean-up:** the last line deletes the demo PDB in dev-lab.
+
+**If something's off:** no `echo-x-lab-tools-x-dev-lab` PDB on the root means PDB sync is off in `vclusters/dev-lab.yaml` (`sync.toHost.podDisruptionBudgets.enabled`). If the node shows `SchedulingDisabled`, a drain ran without `--dry-run`: uncordon it. More in §7.
+
+#### Run it
 
 Two kinds of PDB meet at the root's Eviction API: the LLM stack's, which are root objects, and tenants', which a syncer copies down. Write a tenant PDB in dev-lab for its echo Deployment (3 replicas, Chapter 09), then list both kinds on the root:
 

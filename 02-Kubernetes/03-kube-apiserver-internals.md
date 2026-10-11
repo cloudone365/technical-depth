@@ -153,6 +153,23 @@ The root audit log sees what reached the root: a tenant's pod appears as a **cre
 
 ### Task 1 · Prove audit logging and Secret encryption (on the Spark)
 
+#### What this lab does (reads `kube-apiserver.yaml`, raw `etcdctl` read)
+
+- **Reads the flags** kubeadm put on the root API server: `--audit-policy-file`, `--audit-log-*` and `--encryption-provider-config`.
+- **Creates one Secret,** `default/enc-test` (`password=hunter2`), on the root and reads its raw value from etcd with the etcd `healthcheck-client` certificate.
+- **Optional re-encryption:** the `kubectl replace` line rewrites every root Secret unchanged, so each one is stored again with the current key.
+- Nothing is reconfigured and nothing restarts. Runs on the Spark, because the etcd certificates exist only there.
+
+#### What to look for
+
+1. **Flags:** the `grep` prints the audit lines and `--encryption-provider-config=/etc/kubernetes/encryption/config.yaml`.
+2. **Raw value:** the `od -c` output starts `k 8 s : e n c : a e s c b c : v 1 : k e y 1 :`, then binary. `hunter2` appears nowhere.
+3. **Re-encryption** (if you ran it) prints `re-encrypted` and no errors.
+
+**If something's off:** plaintext in the raw value → encryption is off; see the "Secrets readable in etcd" row in §7. `context deadline exceeded` from `etcdctl` → wrong endpoint or certificate (Chapter 02 §7).
+
+#### Run it
+
 ```bash
 cd "02-Kubernetes/lab"
 sudo grep -E 'audit-|encryption-provider' /etc/kubernetes/manifests/kube-apiserver.yaml
@@ -172,6 +189,30 @@ kubectl --context spark-root get secrets -A -o json | kubectl --context spark-ro
 
 ### Task 2 · Apply tenancy, admission and APF
 
+#### What this lab does (manifests `lab/manifests/dev-lab/00-platform`…`16-apf`, `dev-llms/00-platform`…`15-admission`, `root-llms/00-platform`…`15-admission`, `root/16-apf`)
+
+- **dev-lab:** tenant namespaces with PSA labels, PriorityClasses and RuntimeClass (`00-platform`); `tenant-budget` quotas, LimitRanges, the `spark-tenant-developer` / `spark-gpu-viewer` roles and their bindings, NetworkPolicies (`10-tenancy`); the four CEL policies (`15-admission`); the APF lane `spark-tenants` (`16-apf`).
+- **dev-llms:** `llm-sandbox`, `sandbox-budget` and its LimitRange, the same four CEL policies.
+- **Root, LLM stack:** namespaces `llm-serving`, `batch`, `ingress`; `serving-budget`, `batch-budget`, LimitRanges, the `ci-deployer` ServiceAccount and the `llm-serving` NetworkPolicy; the CEL policies bound to `llm-serving` and `batch`.
+- **Root, APF:** the lane `spark-vcluster-syncers` for the vCluster syncers.
+- Nothing restarts. Re-applying is safe.
+
+#### What to look for
+
+1. **Command exit:** each `apply` prints `created` on a first run and `unchanged` on a re-run, with no `error:` lines.
+2. **Policies in dev-lab:** the last command lists four: `spark-gpu-slice-limits`, `spark-no-latest-tag`, `spark-no-nvidia-env-bypass`, `spark-serving-needs-readiness`.
+3. **APF objects:**
+   ```bash
+   # ▶ MacBook · 02-Kubernetes/lab
+   kubectl --context dev-lab get flowschema spark-tenants
+   kubectl --context spark-root get flowschema spark-vcluster-syncers
+   ```
+   Each prints one row, with priority level `spark-tenants` and `spark-vcluster-syncers`.
+
+**If something's off:** `no matches for kind "ValidatingAdmissionPolicy"` → the API server is older than 1.30; check `kubectl version`. An apply that fails on `dev-lab` or `dev-llms` with a connection error → that vCluster isn't reachable (Chapter 04 §8).
+
+#### Run it
+
 ```bash
 for d in 00-platform 10-tenancy 15-admission 16-apf; do kubectl --context dev-lab apply -k manifests/dev-lab/$d; done
 for d in 00-platform 10-tenancy 15-admission; do kubectl --context dev-llms apply -k manifests/dev-llms/$d; done
@@ -181,6 +222,23 @@ kubectl --context dev-lab get validatingadmissionpolicies
 ```
 
 ### Task 3 · Create real users (in dev-lab)
+
+#### What this lab does (script `lab/scripts/make-user.sh`)
+
+- **Key and CSR:** makes an ed25519 key and a certificate request with `CN=<user>` and `O=<group>` in `02-Kubernetes/lab/.cache/`.
+- **Signing:** submits it to **dev-lab's** CSR API (signer `kubernetes.io/kube-apiserver-client`, valid 7 days), approves it as dev-lab admin, and saves the certificate.
+- **Kubeconfig:** writes `.cache/<user>.kubeconfig` pointing at dev-lab's API with that certificate. Your main kubeconfig is not changed.
+- Nothing on the root changes. Running it again replaces the user's CSR and files.
+
+#### What to look for
+
+1. **Script output:** `[PASS] …/.cache/alice.kubeconfig  (CN=alice, O=team-alpha, cluster dev-lab, valid 7 days)`, and the same for `bob` with `team-beta`.
+2. **`kubectl auth whoami`** as Alice: `Username alice`, `Groups [team-alpha system:authenticated]`.
+3. **Against the root:** `error: You must be logged in to the server (Unauthorized)`. That 401 is the expected result: the root doesn't trust dev-lab's CA.
+
+**If something's off:** a `Forbidden` (403) instead of `Unauthorized` (401) against the root means the certificate *was* accepted there, so it was signed by the wrong CA; check the third argument of `make-user.sh` (default `dev-lab`). More in §7 (first row).
+
+#### Run it
 
 ```bash
 scripts/make-user.sh alice team-alpha          # signed by dev-lab's CA
@@ -205,6 +263,23 @@ KUBECONFIG=$ALICE kubectl --server https://192.168.0.100:6443 --insecure-skip-tl
 The root doesn't trust dev-lab's CA, so Alice isn't even a user there. That's a 401, not a 403.
 
 ### Task 4 · Probe RBAC before users hit it
+
+#### What this lab does (`kubectl auth can-i` in dev-lab and on the root)
+
+- **Impersonation checks** as dev-lab admin: what `alice` in group `team-alpha` may do in `tenant-alpha`, `tenant-beta` and cluster-wide.
+- **One real request** as Alice into `tenant-beta`, which must be refused.
+- **The syncer's rights on the root:** what ServiceAccount `vc-dev-lab:vc-dev-lab` may do in `vc-dev-lab`, `vc-dev-llms` and `llm-serving`.
+- **Read-only:** nothing is created or changed.
+
+#### What to look for
+
+1. **The five-line table** matches the expected output below exactly: `yes`, `no`, `no`, `no`, `yes`. `watch secrets` is `no` on purpose: the tenant role allows Secrets without `watch`.
+2. **Alice into `tenant-beta`:** `Error from server (Forbidden): pods is forbidden: User "alice" cannot list resource "pods" … in the namespace "tenant-beta"`.
+3. **The syncer:** a list of rights in `vc-dev-lab`, and `no` for both `create pods` lines (other vCluster, LLM stack).
+
+**If something's off:** `yes` where you expect `no` → a ClusterRoleBinding grants more than `spark-gpu-viewer`; `kubectl --context dev-lab get clusterrolebinding -o wide | grep team-`. All `no` → `10-tenancy` isn't applied in dev-lab (Task 2). More in §7 (second row).
+
+#### Run it
 
 ```bash
 kubectl --context dev-lab auth can-i --list -n tenant-alpha --as=alice --as-group=team-alpha | head -20
@@ -240,6 +315,22 @@ kubectl --context spark-root auth can-i create pods -n llm-serving --as=system:s
 ```
 
 ### Task 5 · Exercise the admission policies (server-side dry run)
+
+#### What this lab does (script `lab/scripts/verify.sh admission`, fixtures `lab/tests/policy/`)
+
+- **Twelve fixtures:** each YAML in `tests/policy/` names its target cluster (`# cluster:`) and the expected result (`# expect: allow|deny`) in a comment.
+- **Dry run:** the script sends each one with `kubectl create --dry-run=server` to that cluster, so the request goes through authentication, RBAC, PSA, the CEL policies, LimitRanges and quotas, and is then thrown away. Nothing is created.
+- **Fixtures cover:** `:latest` and untagged images, two GPU slices in one container, the `NVIDIA_*` env bypass, a privileged tenant pod, a pod over the LimitRange or the memory quota, serving workloads without a readiness probe (root and dev-llms), and three that must pass.
+
+#### What to look for
+
+1. **Command exit:** 12 `[PASS]` lines (3 `allowed`, 9 `denied`) and a summary ending `0 failed`.
+2. **The full denial** for `deny-gpu-two-slices`: `ValidatingAdmissionPolicy 'spark-gpu-slice-limits' with binding 'spark-gpu-slice-limits' denied request: tenant containers may request at most 1 nvidia.com/gpu time-slice`.
+3. **A `[FAIL]`** line prints the fixture, the cluster, the expected result and the API server's message: read the message, it names the stage that answered.
+
+**If something's off:** a `deny-…` fixture allowed → the policy's binding doesn't match the namespace; check the namespace labels (`spark.lab/tenant=true`, `spark.lab/tier=serving`) from `00-platform`. An `allow-…` fixture denied by quota → something else already uses that namespace's budget. More in §7.
+
+#### Run it
 
 ```bash
 scripts/verify.sh admission
@@ -284,6 +375,23 @@ The CEL behind it uses optional-field access, so pods without `resources` don't 
 
 ### Task 6 · API Priority & Fairness under load — both layers
 
+#### What this lab does (32 background LIST loops as Alice, metrics from both API servers)
+
+- **Load:** terminal A starts 32 background loops that run `kubectl -n tenant-alpha get pods` as Alice as fast as they can. All of them land in dev-lab's lane `spark-tenants` (10 shares, 16 queues, per-user fairness).
+- **Watching:** terminal B polls dev-lab's `/metrics` for that lane every 2 s. Terminal C times one request as Bob and one root request, and dumps the root's priority levels.
+- **Nothing is reconfigured.** `pkill` stops the loops. The load costs CPU on the Spark while it runs, so don't leave it on.
+
+#### What to look for
+
+1. **dev-lab metrics (terminal B):** `apiserver_flowcontrol_current_inqueue_requests` and `…_current_executing_requests` for `priority_level="spark-tenants"` above 0 while the loops run; `rejected_requests_total` may start counting (Alice gets some `429`s).
+2. **Bob stays fast:** the `time` for Bob's `get pods` stays well under a second (about 100 ms).
+3. **The root barely notices:** `kubectl --context spark-root get nodes` is as fast as before, and the root's `spark-vcluster-syncers` row shows little activity, because LISTs of tenant pods are answered from dev-lab's own database.
+4. **Cleanup:** after `pkill`, `pgrep -fc "kubectl -n tenant-alpha get pods"` prints `0`.
+
+**If something's off:** no `spark-tenants` series at all → Alice's requests matched another FlowSchema; check that Alice's certificate group is `team-alpha` (Task 3) and that `dev-lab/16-apf` is applied. More in §7 (`429` row).
+
+#### Run it
+
 Generate tenant load as Alice (32 parallel LIST loops), and watch as admin in dev-lab *and* at the root:
 
 ```bash
@@ -307,6 +415,21 @@ Expected: in dev-lab, `current_inqueue_requests{priority_level="spark-tenants"}`
 
 ### Task 7 · Query the audit log
 
+#### What this lab does (one pod as Alice, `jq` over `/var/log/kubernetes/audit/audit.log`)
+
+- **Creates one pod** as Alice: `tenant-alpha/audit-demo` (`pause:3.10`, restricted-PSA security settings) in dev-lab. The syncer creates its host copy `vc-dev-lab/audit-demo-x-tenant-alpha-x-dev-lab` on the root.
+- **Reads the root audit log** on the Spark with `sudo jq` and prints the last three pod **create** events in `vc-dev-lab`: time, user, name, response code.
+- Nothing is reconfigured. The exercise at the end (an audit log for dev-lab itself) is optional and changes `vclusters/dev-lab.yaml`.
+
+#### What to look for
+
+1. **The pod:** `kubectl --context dev-lab -n tenant-alpha get pod audit-demo` shows `Running`.
+2. **The audit line:** `user` is `system:serviceaccount:vc-dev-lab:vc-dev-lab` (the syncer), `name` ends in `-x-tenant-alpha-x-dev-lab`, `code` is `201`. Alice's name is not in the root log.
+
+**If something's off:** no matching line → the `jq` ran on the MacBook instead of the Spark, or the log rotated (100 MB × 5); look in `audit-*.log` next to it. Alice's `run` refused with `violates PodSecurity` → the `--overrides` JSON was cut while pasting. More in §7.
+
+#### Run it
+
 ```bash
 KUBECONFIG=$ALICE kubectl -n tenant-alpha run audit-demo --image=registry.k8s.io/pause:3.10 \
   --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"audit-demo","image":"registry.k8s.io/pause:3.10","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}'
@@ -329,7 +452,7 @@ The root saw the **syncer** create the pod. To answer "which *person* did it?", 
 scripts/verify.sh tenancy admission
 ```
 
-Expected: `21 passed, 0 warnings, 0 failed`.
+Expected: `22 passed, 0 warnings, 0 failed` (10 tenancy checks + 12 admission fixtures).
 
 ---
 

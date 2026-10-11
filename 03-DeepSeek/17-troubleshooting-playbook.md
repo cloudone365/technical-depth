@@ -162,6 +162,30 @@ It is read-only: it never restarts, scales or patches anything.
 
 ### Task 5.1 · Baseline: a healthy triage
 
+#### What this lab does (scripts `lab/scripts/serve-model.sh`, `lab/scripts/llm-triage.sh`)
+
+- **Puts the stack in a known state:** r1-7b in `deploy/vllm`, and the Chapter 12 apps applied (bge-m3, LiteLLM + PostgreSQL, Open WebUI).
+- **Runs the triage once** and saves it to `results/triage-known-good.txt`. The triage is read-only: it never restarts, scales or patches anything.
+- **On the Spark:** the host facts the triage's `host` section would read (it skips them on the MacBook).
+
+#### What to look for
+
+1. **The triage summary:** `… passed, … warnings, 0 failed`. Key lines:
+
+   | Section | Healthy line |
+   |---|---|
+   | serving | `[PASS] vLLM Ready`, `[PASS] reasoning parser on`, `util 0.20   max-model-len …` |
+   | gateway | `[PASS] LiteLLM Ready`, `[PASS] router timeout 900s`, `[PASS] LiteLLM DB present` |
+   | secrets | `[PASS] secret … set` for the three Secrets (a `[WARN] … placeholder` until Chapter 15's sync has run) |
+   | day-2 | `[PASS] no failed Jobs in llm-serving` |
+   | host | `not on the Spark … skipped` from the MacBook |
+
+2. **On the Spark:** `MemAvailable` high (about 119 GiB minus what the running engines hold), a GB10 line with real temperature and power, and an Xid count of `0`.
+
+**If something's off:** `can't exec into vLLM` → the pod isn't Running; use logs and describe. Counters all 0 → a fresh pod with no traffic yet. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh r1-7b
@@ -182,6 +206,34 @@ sudo dmesg | grep -ci xid
 ```
 
 ### Task 5.2 · Run the drills, timed
+
+#### What this lab does (script `lab/scripts/breakfix.sh`, `lab/breakfix/`, tools `stream_probe.py`, `model_math.py`)
+
+- **Breaks the serving stack on purpose, one fault at a time** (§3.1): D01, D02, D03, D05, D07 replace `deploy/vllm` with a broken overlay; D04 lowers LiteLLM's timeouts to 30 s; D06 only prints a client command. `reset` re-applies the catalog overlay (D04: the LiteLLM manifest).
+- **D03 serves r1-32b in BF16 at 0.70:** park bge-m3 and side models first. If its weights (~61 GiB) aren't cached yet, the pod downloads them itself; prefetch with `scripts/serve-model.sh r1-32b` beforehand.
+- **`stream_probe.py`** times one streamed request directly to vLLM and one through Traefik → LiteLLM; **`model_math.py`** does the D03 arithmetic on the MacBook.
+
+#### What to look for
+
+1. **`list`:** D01–D08 with their titles.
+2. **Signals per drill:**
+
+   | Drill | Signal that gives it away |
+   |---|---|
+   | D01 | triage `[FAIL] R1-style model without --reasoning-parser`; `<think>` in `content` |
+   | D02 | pod not Ready or `OOMKilled`; vLLM log about free memory |
+   | D03 | startup error: KV cache can't hold one max-length sequence |
+   | D04 | triage `[FAIL] router timeout 30s < 900`; the probe through LiteLLM ends with an error after about 30 s, the direct one finishes |
+   | D05 | triage `[WARN] secret hf-token still holds the placeholder`; `401`/`GatedRepoError` |
+   | D06 | `finish_reason=length` and long completions at temperature 0 |
+   | D07 | triage `[FAIL] tool model without --enable-auto-tool-choice` |
+
+3. **The D03 arithmetic:** read the `KV cache` line, not `verdict`. At 131,072 it says `… tokens = 0 concurrent sequences at 131,072 context`; at 16,384 it says 5. (`verdict` reports ✓ for both: it only checks that the weights fit.)
+4. **Times:** under 10 minutes each; fill in the table.
+
+**If something's off:** `reset` doesn't restore because something else changed meanwhile → `scripts/serve-model.sh <name>`. After the loop, D05's reset leaves `llama-3.1-8b` serving and D04's reset re-applies the placeholder `litellm-master-key`: run `scripts/serve-model.sh r1-7b` and the vault-sync Job (Chapter 15 Task 5.3). D03 failing earlier than the KV error → another engine still holds memory. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -231,6 +283,21 @@ python3 tools/model_math.py deepseek-r1-distill-qwen-32b --util 0.70 --ctx 16384
 
 ### Task 5.3 · Try the fix in the sandbox first
 
+#### What this lab does (vCluster `dev-llms`, overlay `lab/k8s/models/r1-1.5b`)
+
+- **Reads the sandbox quota** in `llm-sandbox` on `dev-llms`.
+- **Server-side dry run** of the `r1-1.5b` overlay: the API server runs admission and validation, but nothing is created. The root cluster is not touched.
+
+#### What to look for
+
+1. **Quota:** `sandbox-budget` with `requests.cpu` 1500m, `requests.memory` 3Gi and 2 GPU slices: the namespace's share of the vCluster's 2 CPU · 4 Gi.
+2. **Dry run:** each object reports `… (server dry run)`, with no `Error from server`. A Deployment dry run checks the object and admission webhooks; it creates no pod, so the quota is not tested here.
+3. **Trap:** the overlay's objects carry `namespace: llm-serving`. If kubectl answers `the namespace from the provided object "llm-serving" does not match the namespace "llm-sandbox"`, render and retarget instead: `kubectl kustomize k8s/models/r1-1.5b | sed 's/namespace: llm-serving/namespace: llm-sandbox/' | kubectl --context dev-llms apply --dry-run=server -f -`.
+
+**If something's off:** `context "dev-llms" does not exist` → fetch the vCluster kubeconfig (02-Kubernetes Chapter 04). More in §7.
+
+#### Run it
+
 For a manifest-level fix (D01, D07), prove the corrected args on the small model in `dev-llms` before you touch the root:
 
 ```bash
@@ -242,6 +309,19 @@ kubectl --context dev-llms -n llm-sandbox apply --dry-run=server -k k8s/models/r
 The sandbox has 2 CPU · 4 Gi · 2 slices, so only a tiny model actually runs there; the server-side dry run still checks admission and the args.
 
 ### Task 5.4 · Collect a support bundle
+
+#### What this lab does (script `02-Kubernetes/lab/scripts/collect-diag.sh`)
+
+- **Collects logs, describes and events** from `llm-serving`, `batch`, `observability` and `ingress` on the root (and the vClusters it can reach) into `./diag-<timestamp>.tar.gz` in `02-Kubernetes/lab`. Read-only.
+
+#### What to look for
+
+1. **The script ends** with `[PASS] wrote diag-<timestamp>.tar.gz (<size>)`.
+2. **`tar tzf`** lists files under `diag-<timestamp>/`, including the `llm-serving` pod logs and describes.
+
+**If something's off:** a file named `<context>-UNREACHABLE.txt` in the bundle means that cluster's API didn't answer; the rest is still collected. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab

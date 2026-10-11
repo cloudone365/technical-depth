@@ -210,6 +210,42 @@ export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 
 ### 5.1 Capacity, allocatable, and the budget layers
 
+#### What this lab does (manifests `dev-lab/00-platform`, `dev-lab/10-tenancy`; drills `breakfix 01`, `02`; test `lab/tests/budget_check.py`)
+
+- **Reads** the node's capacity and allocatable, the kubelet reservations in `/var/lib/kubelet/config.yaml`, and the quotas at each layer: `vcluster-budget` on `vc-dev-lab`, `tenant-budget` in dev-lab, `serving-budget` and `batch-budget` on the root.
+- **Drill 01 (dev-lab):** Deployment `bf01-big` in `tenant-alpha`, 3 × 250m against a 500m tenant quota. `reset 01` deletes it.
+- **Drill 02 (dev-lab):** Deployment `bf02-gpu` in `lab-tools`, 6 pods × 1 GPU slice against the root's 2-slice `vcluster-budget`. `reset 02` deletes it. The first run pulls `nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04`.
+- **`budget_check.py`:** a static check of the repo files, no cluster needed. It prints the split table and checks request = limit on every GPU container in `root-llms`.
+- **BestEffort test:** a bare `pause` pod in dev-lab `lab-tools`, deleted right after.
+
+#### What to look for
+
+1. **Node:** capacity `cpu 20`, allocatable `cpu 17`, `nvidia.com/gpu 15`, allocatable memory about 109.7 GiB (shown in `Ki`).
+2. **Kubelet config:** `systemReserved` 2 CPU · 6Gi, `kubeReserved` 1 CPU · 2Gi, `evictionHard` `memory.available: 4Gi`.
+3. **Drills:**
+
+   | Drill | Healthy result |
+   |---|---|
+   | 01 | `bf01-big` `2/3`, ReplicaSet event `exceeded quota: tenant-budget`, `grep -c bf01` on the root prints `2` |
+   | 02 | 2 Running, 4 Pending; the Pending pod's event quotes `exceeded quota: vcluster-budget … requests.nvidia.com/gpu=2`; no scheduler events |
+
+4. **`budget_check.py`:** the table below, then `budget check OK`. Without `kubectl` on the PATH it also prints `training window not checked`, which is harmless.
+   ```text
+                     CPU  mem GiB  slices
+   allocatable      17.0    109.7      15
+   vc-dev-lab        2.0      4.0       2
+   vc-dev-llms       2.0      4.0       2
+   root keeps       13.0    101.7      11
+     platform        3.0     11.7       2
+     llm-serving     8.0     90.0       6
+     batch           2.0     12.0       3
+   ```
+5. **BestEffort test:** `Burstable` with the `lab-tools` LimitRange defaults.
+
+**If something's off:** a fourth `bf02` pod Running means `vcluster-budget` on `vc-dev-lab` isn't applied (`kubectl --context spark-root apply -k manifests/root/05-vclusters`). `budget check` failing names the file that disagrees. More in §7.
+
+#### Run it
+
 ```bash
 kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.capacity}{"\n"}{.status.allocatable}{"\n"}' | jq -c '{cpu, memory, "nvidia.com/gpu"}'
 sudo grep -A3 -E '^(systemReserved|kubeReserved|evictionHard):' /var/lib/kubelet/config.yaml
@@ -268,6 +304,25 @@ Expected: `Burstable {"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memor
 
 ### 5.2 Read the cgroups behind each QoS class (root)
 
+#### What this lab does (manifest `lab/manifests/root/12-cgroups/qos-trio.yaml`, script `lab/scripts/cgroup-inspect.sh`)
+
+- **Root, `platform-tools`:** three `pause` pods, `qos-guaranteed` (500m · 256Mi, request = limit), `qos-burstable` (100m · 64Mi request, 512Mi limit) and `qos-besteffort` (nothing).
+- **Reads** each pod's cgroup v2 files under `/sys/fs/cgroup/kubepods*` (`cpu.max`, `cpu.weight`, `memory.max`, `memory.current`, `cpu.stat`, `memory.events`) and the `oom_score_adj` of its processes. Runs on the Spark, read-only.
+- Repeats this for a bare pod `qos-v` in dev-lab, found through its root copy. All test pods are deleted at the end.
+
+#### What to look for
+
+| Pod | `cpu.max` | `memory.max` | `oom_score_adj` |
+|---|---|---|---|
+| `qos-guaranteed` | `50000 100000` | `268435456` | `-997` |
+| `qos-burstable` | `max 100000` | `536870912` | between 2 and 999 |
+| `qos-besteffort` | `max 100000` | `max` | `1000` |
+| dev-lab `qos-v` (root copy `vc-dev-lab/qos-v-x-lab-tools-x-dev-lab`) | `max 100000` | `268435456` | `qos=Burstable` |
+
+**If something's off:** `[FAIL] cgroup for pod uid … not found` means the script ran on the MacBook instead of the Spark. More in §7.
+
+#### Run it
+
 ```bash
 kubectl --context spark-root apply -k manifests/root/00-platform
 kubectl --context spark-root apply -f manifests/root/12-cgroups/qos-trio.yaml
@@ -314,6 +369,21 @@ kubectl --context spark-root delete -f manifests/root/12-cgroups/qos-trio.yaml
 
 ### 5.3 CPU throttling: slow with no error
 
+#### What this lab does (manifest `lab/manifests/root/12-cgroups/cpu-throttle.yaml`)
+
+- **Root, `platform-tools`:** pod `cpu-throttle`, 4 busy-loop processes under a 200m CPU limit.
+- After 30 s reads its `cpu.stat`, then deletes the pod. Nothing else changes.
+
+#### What to look for
+
+1. **`cpu.stat`:** `nr_throttled` close to `nr_periods` (ratio above 0.9), and `throttled_usec` large and growing.
+2. **`kubectl top`** (if metrics-server is installed): about `200m` CPU, never more.
+3. **The pod** stays `Running` with no restarts and no error: throttling only shows up in these counters.
+
+**If something's off:** `nr_throttled 0` means the limit isn't applied (check `cpu.max` is `20000 100000`). More in §7.
+
+#### Run it
+
 ```bash
 kubectl --context spark-root apply -f manifests/root/12-cgroups/cpu-throttle.yaml
 sleep 30; scripts/cgroup-inspect.sh platform-tools cpu-throttle | grep -A3 'cpu.stat'
@@ -324,6 +394,21 @@ kubectl --context spark-root delete -f manifests/root/12-cgroups/cpu-throttle.ya
 Expected: `nr_throttled` close to `nr_periods` and `throttled_usec` growing by a large amount every second (4 threads want 4 cores, the limit gives 0.2). In Grafana: *CPU throttling (top 5)*. **Throttling is the #1 hidden cause of slow tokenizers and data loaders.** Their CPU limit is far below their thread count. In this lab it bites dev-lab tenants first: `tenant-budget` requires `limits.cpu`, so every tenant pod gets a `cpu.max`.
 
 ### 5.4 Memory limit → OOMKilled (a vCluster pod)
+
+#### What this lab does (drill `breakfix 04`)
+
+- **dev-lab, `lab-tools`:** pod `bf04-oom` allocates 512 MiB under a 256 MiB limit. It is killed and restarts again and again (`restartPolicy: Always`).
+- Reads its last termination state in dev-lab and its root cgroup's `memory.events` (on the Spark), then `reset 04` deletes it.
+
+#### What to look for
+
+1. **Pod status:** `OOMKilled` or `CrashLoopBackOff`, `RESTARTS` above 0.
+2. **`lastState.terminated`:** `"reason": "OOMKilled"`, `"exitCode": 137`.
+3. **`memory.events`:** `oom_kill` above 0.
+
+**If something's off:** a pod that stays `Running` means the limit isn't 256Mi (`kubectl --context dev-lab -n lab-tools get pod bf04-oom -o jsonpath='{.spec.containers[0].resources}'`). More in §7.
+
+#### Run it
 
 ```bash
 scripts/breakfix.sh inject 04
@@ -336,6 +421,23 @@ scripts/breakfix.sh reset 04
 Expected: `"reason":"OOMKilled","exitCode":137`, and `oom_kill` > 0 in `memory.events`. The kernel killed the process on the root; the kubelet reported it on the root pod; the syncer copied the status into dev-lab. A tenant sees the right answer without any access to the node.
 
 ### 5.5 The UMA question: is CUDA memory charged to the pod?
+
+#### What this lab does (manifest `lab/manifests/root/12-cgroups/uma-cgroup-experiment.yaml`)
+
+- **Root, `platform-tools`:** pod `uma-cgroup-experiment` with a 4 Gi memory limit and 1 GPU slice. It allocates 16 GiB on the GPU with PyTorch, prints its cgroup `memory.current`, holds it for 30 s and prints `survived`, unless it is OOM-killed first.
+- **In parallel** `uma-watch.sh` (on the Spark) prints the host pool and the pod's cgroup every second. Read-only.
+- The first run pulls `nvcr.io/nvidia/pytorch:25.09-py3`, a large image, so it takes a while. The pod is deleted at the end.
+
+#### What to look for
+
+1. **Log line `start:`** shows a small `memory.current` (well under 1 GiB).
+2. **Then one of two outcomes**, see the table under the block: `OOMKilled` around 4 GiB (CUDA memory is charged), or `allocated 16 GiB on GPU: cgroup memory.current=…` with a small value, then `survived` (it isn't).
+3. **`uma-watch.sh`:** `MemAvailable` drops by about 16 GiB while the allocation is held, whichever outcome you get.
+4. **Record** the outcome with the driver version (580.x on this lab's Spark).
+
+**If something's off:** a pod stuck `Pending` with `Insufficient nvidia.com/gpu` means all 15 slices are in use. `ContainerCreating` for minutes is the image pull. More in §7.
+
+#### Run it
 
 The experiment runs on the root in `platform-tools`: it needs a GPU slice and a 4 Gi limit it's allowed to blow through, and its answer is about the node, not about any tenant.
 
@@ -360,6 +462,23 @@ kubectl --context spark-root delete -f manifests/root/12-cgroups/uma-cgroup-expe
 ```
 
 ### 5.6 (Optional, risky) Node-level pressure
+
+#### What this lab does (drill `breakfix 15`)
+
+- **Root, `platform-tools`:** Job `bf15-uma` (`spark-preemptible`, 1 Gi request, 110 Gi limit) grabs 92 % of `MemAvailable` and holds it for 2 minutes. It stops itself after 150 s.
+- **Effect:** node `MemoryPressure`, and the kubelet evicts pods in every cluster once `memory.available` falls below 4 Gi, possibly including model servers in `llm-serving` and vCluster pods. On UMA this also starves the GPU.
+- Asks you to type `yes` first. Only run it when an outage of the whole Spark is acceptable.
+
+#### What to look for
+
+1. **Job log:** `MemAvailable=… GiB, grabbing … GiB`, then `holding`.
+2. **Node conditions:** `MemoryPressure True` while it holds, `False` again a few minutes after it ends.
+3. **Evictions:** `reason=Evicted` events, BestEffort and `spark-preemptible` pods first.
+4. **Afterwards:** `scripts/verify.sh platform` passes again.
+
+**If something's off:** if the node stays under pressure after 150 s, run `scripts/breakfix.sh reset 15` and check `free -h` on the Spark. More in §7.
+
+#### Run it
 
 ```bash
 scripts/breakfix.sh inject 15      # asks for confirmation; self-terminates after 150 s

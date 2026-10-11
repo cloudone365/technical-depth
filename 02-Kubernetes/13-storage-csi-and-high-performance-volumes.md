@@ -155,6 +155,31 @@ export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 
 ### 5.1 StorageClasses, the WFFC lifecycle, and the quotas
 
+#### What this lab does (script `lab/scripts/install-addons.sh storage`, manifests `root-llms/10-tenancy`, `root-llms/60-storage`, `dev-lab/10-tenancy`)
+
+- **Root, storage:** installs local-path-provisioner in `local-path-storage`, points it at `/data/k8s`, adds the classes `local-nvme` (Delete) and `local-nvme-retain` (Retain), and marks `local-path` as the default. The provisioner is restarted once.
+- **Quota checks:** server-side dry runs, nothing persisted: the model cache against `serving-budget` on the root, and a 60 Gi claim against `tenant-alpha` in dev-lab.
+- **Model cache:** creates PVC `model-cache` (300 Gi, `local-nvme-retain`) in `llm-serving`. No directory is created on the disk yet.
+- The vClusters see the root's classes through `sync.fromHost.storageClasses`. Nothing in the vClusters is reconfigured.
+
+#### What to look for
+
+1. **Script exit:** ends with `deployment "local-path-provisioner" successfully rolled out`.
+2. Compare with these values:
+
+   | Check | Healthy value |
+   |---|---|
+   | `get sc` on the root | `local-path (default)`, `local-nvme`, `local-nvme-retain`, all `WaitForFirstConsumer` |
+   | `local-path-config` | a `nodePathMap` with `/data/k8s` |
+   | `get sc` in dev-llms | the same three names |
+   | `serving-budget` storage | hard `1Ti`; used plus the 300 Gi of `model-cache` stays under it |
+   | 60 Gi claim in `tenant-alpha` | refused by the LimitRange (max 50 Gi per PVC) |
+   | `model-cache` | `Pending`, event `WaitForFirstConsumer` |
+
+**If something's off:** `model-cache` `Pending` is the healthy state here. `exceeded quota: serving-budget` on the dry run means other PVCs in `llm-serving` already use most of the 1 Ti. More in §7.
+
+#### Run it
+
 ```bash
 sudo mkdir -p /data/k8s            # on the Spark (the 01-Ansible vclusters role already did)
 scripts/install-addons.sh storage
@@ -202,6 +227,30 @@ Expected: `model-cache  Pending  …  local-nvme-retain`, with event `WaitForFir
 
 ### 5.2 Prefetch the model (binds the PVC)
 
+#### What this lab does (manifest `lab/manifests/root-llms/60-storage/model-prefetch-job.yaml`)
+
+- **Secret:** creates `hf-token` in `llm-serving` from `$HF_TOKEN` (optional for the default model).
+- **Job `model-prefetch`:** downloads `Qwen/Qwen2.5-0.5B-Instruct@main` into `model-cache` at `/models/hf`. This first pod is what makes the root scheduler pick a node, so the PVC binds now.
+- **Disk:** the provisioner creates `/data/k8s/retain/llm-serving/model-cache` on dgx-spark-1.
+- The download takes seconds to minutes, depending on your link.
+
+#### What to look for
+
+1. **Job log:** ends with `downloaded Qwen/Qwen2.5-0.5B-Instruct@main in <n>s`.
+2. Compare the binding:
+
+   | Check | Healthy value |
+   |---|---|
+   | `get pvc model-cache` | `Bound`, `RWO`, `local-nvme-retain` |
+   | `selected-node` annotation | `dgx-spark-1` |
+   | PV | `/data/k8s/retain/llm-serving/model-cache  Retain  ["dgx-spark-1"]` |
+
+3. **`scripts/verify.sh storage`** now reports `model-cache Bound (root, llm-serving)`.
+
+**If something's off:** a log stuck on `pip install` or the download means the pod has no route to PyPI or Hugging Face (proxy, DNS: Chapter 10). `401`/`403` from Hugging Face means a gated model without a valid `hf-token`. More in §7.
+
+#### Run it
+
 ```bash
 kubectl --context spark-root -n llm-serving create secret generic hf-token --from-literal=token="$HF_TOKEN" 2>/dev/null || true
 kubectl --context spark-root apply -f manifests/root-llms/60-storage/model-prefetch-job.yaml
@@ -230,6 +279,23 @@ dgx-spark-1
 The download time is illustrative. Claim and PV are both root objects here, so there's nothing to translate. A claim made in a vCluster is different: `kubectl --context dev-lab get pv` may show a PV object while §5.3's claim exists, but that's a stand-in the syncer keeps so the claim looks bound inside the vCluster; the authoritative PV, with the hostPath and node affinity, is always the root's. To fetch a larger model for modules 03–06, edit `MODEL` and re-run (delete the finished Job first).
 
 ### 5.3 Retain vs Delete (dev-lab)
+
+#### What this lab does (PVC and pod in dev-lab `lab-tools`)
+
+- Creates PVC `throwaway` (1 Gi, `local-nvme`, reclaim Delete) and a `writer` pod that writes `/d/f` and exits.
+- On the root the claim becomes `vc-dev-lab/throwaway-x-lab-tools-x-dev-lab`, so the directory is `/data/k8s/vc-dev-lab/throwaway-x-lab-tools-x-dev-lab`.
+- Deletes the pod and the PVC, and checks the directory is gone.
+- The `claimRef` patch is optional: it only matters when you want to re-use a `Released` Retain PV.
+
+#### What to look for
+
+1. **Pod:** `writer` reaches `Succeeded` within 120 s.
+2. **On the Spark, before the delete:** `ls` lists `f`.
+3. **After the delete:** `ls` prints `No such file or directory`.
+
+**If something's off:** a `Pending` PVC in dev-lab with a syncer event about quota means the root's `vcluster-budget` refused the copy (§3.4). A directory that stays after the delete means the class was `local-nvme-retain`, not `local-nvme`. More in §7.
+
+#### Run it
 
 ```bash
 kubectl --context dev-lab apply -k manifests/dev-lab/00-platform
@@ -265,6 +331,31 @@ A recreated claim in `llm-serving` can then bind to it again (same class, compat
 
 ### 5.4 Measure the NVMe from inside a pod (root)
 
+#### What this lab does (manifest `lab/manifests/root/60-storage/fio-job.yaml`)
+
+- **Root, `platform-tools`:** PVC `fio-scratch` (64 Gi, `local-nvme`), ConfigMap `fio-profiles`, and Job `fio-ai` (4 CPUs).
+- **Benchmark:** four profiles one after another, 45 s each on a 16 GB file with `direct=1`: sequential read 1 MiB, sequential write 1 MiB, random read 128 KiB, random read 4 KiB. Expect a few minutes in total, plus writing the test file first.
+- **Output:** the log, and `result.all` in `/data/k8s/platform-tools/fio-scratch/` on the Spark.
+- The write phase loads the same NVMe that carries the root's etcd WAL. Clean up deletes the Job, PVC and data.
+
+#### What to look for
+
+1. **Job:** `fio-ai` completes; the log shows a `READ:` or `WRITE:` summary per profile.
+2. **JSON summary:** one row per profile. As a rough guide for this kind of NVMe:
+
+   | Profile | Healthy shape |
+   |---|---|
+   | `weights-seqread-1m` | several GB/s read |
+   | `checkpoint-seqwrite-1m` | several GB/s write |
+   | `small-randread-4k` | hundreds of thousands of read IOPS |
+   | any p99 | microseconds, not milliseconds |
+
+3. **Record the numbers** as your baseline for modules 03–08.
+
+**If something's off:** millisecond p99 latencies mean something else is using the disk at the same time. A Job that never starts is usually `fio-scratch` not binding (storage classes missing, §5.1). More in §7.
+
+#### Run it
+
 ```bash
 kubectl --context spark-root apply -k manifests/root/00-platform
 kubectl --context spark-root apply -f manifests/root/60-storage/fio-job.yaml
@@ -282,6 +373,23 @@ Record your numbers. They're your baseline for everything in modules 03–08. As
 Clean up: `kubectl --context spark-root delete -f manifests/root/60-storage/fio-job.yaml`.
 
 ### 5.5 What loading a model does to unified memory
+
+#### What this lab does (script `lab/scripts/uma-watch.sh`, needs vLLM from Chapter 20)
+
+- **Terminal A (on the Spark):** prints every 2 s the host's `MemAvailable` and `Cached`, and the vLLM pod's cgroup `memory.current` and `memory.max`. Read-only.
+- **Terminal B:** restarts `deploy/vllm` twice: once with a warm page cache, once after dropping the cache (`drop_caches`, needs sudo).
+- Without vLLM deployed there is no pod to watch: skip this lab until Chapter 20.
+
+#### What to look for
+
+1. **Header line:** `time  MemAvailable  Cached  pod.mem.current  pod.mem.max`.
+2. **During a cold load:** `Cached` climbs by about the model size, `MemAvailable` falls by about twice that.
+3. **`pod.mem.current`** stays far below the drop in `MemAvailable`: the page cache isn't charged to the pod.
+4. **At idle**, before the restarts, `MemAvailable` is close to the idle value of the Spark (≈ 119 GiB without models loaded), lower with the LLM stack running.
+
+**If something's off:** `cat: …/memory.current: No such file` means the pod was replaced: re-run terminal A with the new pod name. More in §7.
+
+#### Run it
 
 `uma-watch.sh` takes a pod's namespace, name and context (for a vCluster pod it finds the host copy first) and prints the host pool next to that pod's cgroup:
 

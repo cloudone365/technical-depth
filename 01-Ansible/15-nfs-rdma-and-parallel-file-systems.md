@@ -55,6 +55,29 @@ flowchart LR
 
 ## 3. Hands-on
 
+#### What this lab does (template `15.1 NFS RDMA`)
+
+- **Server (hosts in `nfs_server`, i.e. dgx-spark-1):** installs `nfs-kernel-server`, creates `/srv/models` (owner `dgxadmin`, mode `0775`), sets `rdma=y`, `rdma-port=20049`, `threads=16` and `vers3=n` in `/etc/nfs.conf`, and exports `/srv/models` to the two fabric subnets only (`/etc/exports.d/spark-models.exports`). nfs-server restarts only when `nfs.conf` changed.
+- **Server check:** fails the play unless `/proc/fs/nfsd/portlist` contains `rdma 20049`.
+- **Client (hosts in `nfs_client`, i.e. dgx-spark-2 once you add it):** installs `nfs-common`, loads `rpcrdma`, picks the server's CX-7 address in its own subnet (`192.168.100.11`), and mounts it at `/mnt/models` over RDMA with an automount entry in `/etc/fstab`. If the RDMA mount fails it mounts over TCP instead, then reports which transport is in use.
+- **Not touched:** the management network. The export is not visible from 192.168.0.0/24.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`. A first run shows `changed` on the packages, the directory, `nfs.conf`, the exports file and the mount; a re-run shows `changed=0`.
+2. **The server check passes:** *Confirm RDMA listener is registered* is `ok`. By hand:
+   ```bash
+   # ▶ dgx-spark-1 (ssh dgx-spark-1)
+   cat /proc/fs/nfsd/portlist      # contains "rdma 20049" (and "tcp 2049")
+   sudo exportfs -v                 # /srv/models to 192.168.100.0/24 and 192.168.101.0/24
+   ```
+3. **The client's *Report transport* task:** `/mnt/models mounted with proto=rdma`. `proto=tcp` means the fallback was used: the run still passes, so check this line by eye.
+4. **On dgx-spark-2:** the `nfsstat -m` command under "Run it" shows `proto=rdma,port=20049` for `/mnt/models`.
+
+**With only one Spark:** `nfs_client` is empty, so only the server half runs. That half works alone: items 1 and 2 are your checks, and `/srv/models` is ready as a local model folder (§3.1, Chapter 16). The mount and the transport check need dgx-spark-2 and a working CX-7 link (Chapter 13).
+
+**If something's off:** `rdma 20049` missing → `rpcrdma` not loaded or `rdma=y` not in `/etc/nfs.conf`. The client always falls back to TCP → CX-7 link down or the wrong server address. `access denied by server` → the client's address is not in the export subnets. More in §6.
+
 ```yaml
 # lab/roles/nfs_rdma/defaults/main.yml
 ---
@@ -194,6 +217,10 @@ nfs_rdma_tcp_fallback: true
         msg: "{{ nfs_rdma_mount_path }} mounted with {{ nfs_rdma_proto.stdout }}"
 ```
 
+#### Run it
+
+**Semaphore UI:** run the template **`15.1 NFS RDMA`**. Break-glass from the MacBook:
+
 ```bash
 # ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
@@ -207,6 +234,22 @@ ssh dgxadmin@192.168.0.101 'nfsstat -m | grep -A1 /mnt/models; cat /proc/fs/nfsd
 ```
 
 ### 3.1 Put a model in it once, and use it on both nodes
+
+#### What this lab does (exercise: one model download)
+
+- **Download on the server:** runs `huggingface-cli download` inside the NGC PyTorch container and writes Qwen2.5-7B-Instruct to `/srv/models/qwen2.5-7b-instruct` on dgx-spark-1's NVMe. The model is about 15 GB, so this takes a while; the container image is already local if you ran `11.2 CUDA smoke`.
+- **Read on the client:** dgx-spark-2 lists the same files under `/mnt/models`, over the RDMA mount. Nothing is copied.
+
+#### What to look for
+
+1. **The download** ends without errors, and `ls /srv/models/qwen2.5-7b-instruct` on dgx-spark-1 shows `config.json`, the tokenizer files and several `*.safetensors` shards.
+2. **On dgx-spark-2,** `ls -lh` shows the same shards with the same sizes as on the server.
+
+**With only one Spark:** do the download. It is the model that Chapter 16 §3.1 loads. Skip the dgx-spark-2 step.
+
+**If something's off:** `401` or `403` from Hugging Face → gated model or missing token: `export HF_TOKEN=…` first. `Permission denied` writing `/srv/models` → the role sets owner `dgxadmin`, mode `0775`; re-run `15.1 NFS RDMA`. On the client, `ls` hangs → the server is down and the `hard` mount waits (§6).
+
+#### Run it
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
@@ -224,6 +267,22 @@ ls -lh /mnt/models/qwen2.5-7b-instruct/*.safetensors
 For multi-node vLLM (NVIDIA's Ray-based Spark recipe), mount the **same path** in both containers: `-v /srv/models:/models` on dgx-spark-1 and `-v /mnt/models:/models` on dgx-spark-2, then pass `--model /models/...`. Identical paths inside the containers are what matters.
 
 ### 3.2 Measure it
+
+#### What this lab does (exercise: `fio` over the mount)
+
+- **Sequential read** of a 16 GB file on `/mnt/models` from dgx-spark-2, 1 MiB blocks, 4 jobs, direct I/O so the client's page cache doesn't hide the network. The first run creates `/mnt/models/fio.bin` on the server.
+- **Then the same over TCP,** to compare. `fio` is not in the baseline packages: `sudo apt install fio` on the client first.
+
+#### What to look for
+
+1. **The `READ: bw=…` summary line** for RDMA and for TCP. Expect both to be capped by the server's NVMe (or its page cache when the file is hot there), not by the 200G link.
+2. **Client CPU during each run** (`mpstat 1` or `top` in a second terminal): lower with RDMA. That is the main difference to record.
+
+**With only one Spark:** there is no remote client to measure. Running the same `fio` against `/srv/models` on dgx-spark-1 gives the local NVMe read speed, the ceiling the RDMA number will approach later.
+
+**If something's off:** RDMA and TCP numbers identical and CPU identical → check that the mount really is `proto=rdma` (`nfsstat -m`). More in §6.
+
+#### Run it
 
 ```bash
 # ▶ dgx-spark-2 (ssh dgx-spark-2)

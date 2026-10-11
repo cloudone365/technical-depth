@@ -288,7 +288,38 @@ How to drill properly: have someone else inject (or pick a random number), **tim
 
 ## 5. Lab
 
+#### What this lab does (scripts `lab/scripts/breakfix.sh` and `lab/scripts/collect-diag.sh`)
+
+- **Drills:** `breakfix.sh inject NN` applies one of the faults from §4 (manifests in `lab/breakfix/`, or a scale/patch/taint) into `spark-root` or `dev-lab`. The random pick covers 01–14; 15 (unified-memory pressure) is risky and only on purpose. `hint`, `answer` and `reset` only print text or undo that one fault.
+- **Support bundle:** `collect-diag.sh` writes `diag-<timestamp>.tar.gz` in the current folder: nodes, events, quotas, network policies, `readyz` and APF metrics from the root, per-namespace describes and logs, the same from inside each vCluster, and host files. It only reads.
+- **Syncer down:** scales dev-lab's control plane (StatefulSet `dev-lab` in `vc-dev-lab`) to 0 for a few minutes, then back to 1. Tenant pods keep running; only dev-lab's API is gone.
+- **Quota reject:** BF-02 starts 6 GPU pods in dev-lab; the root's `vcluster-budget` (2 slices) admits 2.
+- **Pool exhausted:** creates LoadBalancer Services `lb-fill-*` in `platform-tools` until MetalLB's 10-address pool (`192.168.0.110–119`) runs out, then deletes them.
+
+#### What to look for
+
+1. **`breakfix.sh list`:** 15 lines, `01`–`15`, each with its cluster (`dev-lab` or `spark-root`) and title.
+2. **Each drill:** you name the cluster and the cause before running `answer`, and write down your time and first useful command (§6 target: under 10 min).
+3. **Bundle:** `tar tzf` lists `diag-…/root/` (nodes, events, quotas, `ns/<namespace>/…`) and `diag-…/dev-lab/`, `diag-…/dev-llms/`.
+4. **Syncer down:**
+
+   | Check | Healthy value while scaled to 0 |
+   |---|---|
+   | `kubectl --context dev-lab … --request-timeout=5s` | fails (no API server) |
+   | root pods ending in `-x-lab-tools-x-dev-lab` | still `Running` |
+   | bundle | contains `dev-lab-UNREACHABLE.txt` |
+
+   After scaling back: `rollout status` succeeds and dev-lab answers again.
+5. **Quota reject:** the Pending pod's events in dev-lab name `vcluster-budget`; `grep -c bf02` on the root prints `2`.
+6. **Pool exhausted:** the first command lists the dev-lab (`.111`), dev-llms (`.112`) and Traefik (`.115`) Services, so `FREE` is usually 7. Exactly one `lb-fill` Service stays `<pending>`, with a MetalLB allocation-failure event.
+7. **End state:** `scripts/breakfix.sh reset all`, then `scripts/verify.sh` → `0 failed`.
+
+**If something's off:** a drill "fixes itself" within minutes → Argo CD `selfHeal` reverts it (Chapter 28 §2.3); pause that app first. dev-lab still unreachable after scaling back → wait for `rollout status`, then check the syncer log in `vc-dev-lab`. More in §3 (runbooks) and §3.11 (vCluster failures).
+
+#### Run it
+
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh list
 n=$(printf '%02d' $(( (RANDOM % 14) + 1 ))); echo "drill $n"; scripts/breakfix.sh inject "$n"   # 01–14; 15 only on purpose
 # … diagnose using §1 and §3 only …
@@ -301,6 +332,7 @@ Then rehearse the three vCluster-specific failures that `breakfix.sh` doesn't sc
 **Syncer down** (dev-lab's control plane):
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab -n lab-tools get pods                         # works
 kubectl --context spark-root -n vc-dev-lab scale statefulset dev-lab --replicas=0
 kubectl --context dev-lab -n lab-tools get pods --request-timeout=5s    # fails: no API server
@@ -313,6 +345,7 @@ kubectl --context spark-root -n vc-dev-lab rollout status statefulset dev-lab --
 **Root quota rejects a synced pod:** BF-02, then confirm both halves of the evidence:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh inject 02
 P=$(kubectl --context dev-lab -n lab-tools get pods -l app=bf02 --field-selector=status.phase=Pending -o name | head -1)
 kubectl --context dev-lab -n lab-tools describe "$P" | tail -4
@@ -323,6 +356,7 @@ scripts/breakfix.sh reset 02
 **MetalLB pool exhausted:** count what's left, then fill it from the root (the vCluster quotas would stop a tenant before the pool ran out):
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root get svc -A --field-selector spec.type=LoadBalancer \
   -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,IP:.status.loadBalancer.ingress[0].ip
 FREE=$((10 - $(kubectl --context spark-root get svc -A --field-selector spec.type=LoadBalancer --no-headers | wc -l)))

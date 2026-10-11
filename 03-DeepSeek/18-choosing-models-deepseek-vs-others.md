@@ -258,6 +258,28 @@ That fits the everyday split with room for `r1-1.5b` as a third model (0.10, 14 
 
 ### Task 5.1 · Predict before you measure
 
+#### What this lab does (tool `lab/tools/model_math.py`)
+
+- **Arithmetic only, on the MacBook:** parameters, attention type and KV per token for nine models, then the KV space and the single-stream decode ceiling for four of them at their catalog `util`. No cluster, no GPU.
+
+#### What to look for
+
+1. **`--compare` table:** the `KV/token` column matches §3.3 (Llama/Mistral 128 KiB, Qwen-7B 56 KiB, Qwen-32B 256 KiB, V2-Lite about 30 KiB).
+2. **The four detail runs:**
+
+   | Model | `KV cache` line | `decode ceiling` |
+   |---|---|---|
+   | llama-3.1-8b, 0.20, 32K | 6.4 GiB → 1 sequence | ≈ 16 tok/s |
+   | r1-distill-qwen-7b, 0.20, 32K | 7.2 GiB → 4 sequences | ≈ 18 tok/s |
+   | mixtral-8x7b FP8, 0.55 | 20.4 GiB → 20 sequences at 8,192 | ≈ 20 tok/s |
+   | v2-lite, 0.45, 16K | 22.5 GiB → 47 sequences | ≈ 50 tok/s |
+
+3. **Your written predictions** for math accuracy, `tok/ok` and single-stream speed, before Task 5.2.
+
+**If something's off:** `unknown model` → use the names `model_math.py` knows (the Hugging Face-style names above, not the catalog names). More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 python3 tools/model_math.py --compare llama-3.1-8b deepseek-r1-distill-llama-8b deepseek-r1-distill-qwen-7b \
@@ -271,6 +293,22 @@ done
 Write down, before running anything, which model you expect to win on math accuracy, on `tok/ok`, and on single-stream speed.
 
 ### Task 5.2 · R1 distillation on a fixed Llama base
+
+#### What this lab does (script `lab/scripts/compare-models.sh`)
+
+- **Token to the cluster:** stores your Hugging Face token at `kv/spark-lab/hf` and syncs it into Secret `hf-token` (Llama 3.1 is gated).
+- **For each of `llama-3.1-8b`, `r1-llama-8b`, `r1-7b`:** `serve-model.sh` prefetches and swaps `deploy/vllm` to that model (one chat model at a time), then `eval_harness.py` runs the math (40) and JSON (8) suites at concurrency 8, `max_tokens` 8192, through a port-forward on `127.0.0.1:18000`. Results go to `results/<model>.json`.
+- **Long run:** three model downloads (~15 GB each) and three full suite runs. The last model stays serving.
+
+#### What to look for
+
+1. **Each model** prints `[PASS] vLLM ready with <model>` and its two suite lines; none says `did not come up — skipped`.
+2. **The final table** has one row per model with `json acc`, `math acc`, `out tok`, `reason%`, `p50 s`, `tok/ok`, `tok/s`, `$/Mtok`.
+3. **Shape:** `reason%` about 0 for `llama-3.1-8b` and high for both distills; the distills spend many more `out tok` and `tok/ok`.
+
+**If something's off:** `llama-3.1-8b did not come up` with `401`/`GatedRepoError` in the prefetch → the token's account hasn't accepted the licence, or the sync didn't run. A row with `tok/ok` `inf` → no correct answers (check `max_tokens`). More in §7.
+
+#### Run it
 
 The Llama repo is gated: accept the licence on Hugging Face and store the token in Vault first.
 
@@ -298,6 +336,20 @@ Answer from your table: how many points of math accuracy did distillation add to
 
 ### Task 5.3 · Sampling sensitivity: why temperature 0 is a trap for R1
 
+#### What this lab does (tool `lab/tools/eval_harness.py`)
+
+- **Serves `r1-llama-8b`** and runs 20 math items at temperature 0, 0.6 and 1.0. Read-only apart from the model swap.
+
+#### What to look for
+
+1. **Three `math` lines:** `math  N/20 acc=… p50=…s mean_out_tokens=… reasoning_share=…`.
+2. **At temperature 0:** lower `acc` and higher `mean_out_tokens` than at 0.6 (some chains loop until 8192).
+3. **With `llama-3.1-8b`** the three lines are much closer to each other.
+
+**If something's off:** all three lines nearly equal for the R1 distill → only 20 items; repeat or drop `--limit`. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh r1-llama-8b
@@ -312,6 +364,21 @@ kill $pf
 Expected: at temperature 0 some chains loop until `max_tokens` (drill D06), accuracy drops and output tokens spike; 0.6 is the setting DeepSeek recommends. Repeat with `llama-3.1-8b`: the instruct model is much less sensitive.
 
 ### Task 5.4 · The Qwen triangle, with the format control first
+
+#### What this lab does (script `lab/scripts/compare-models.sh`)
+
+- **Parks bge-m3**, then serves and evaluates four 32B models one after the other: `r1-32b` (BF16, util 0.70, 87 Gi pod, runs alone), `r1-32b-fp8` (0.45), `qwq-32b-awq` and `qwen2.5-32b-awq` (0.30). bge-m3 comes back at the end.
+- **Long run:** four large downloads (the BF16 32B alone is ~61 GiB) and long reasoning chains at single-digit tok/s per stream. Plan hours.
+
+#### What to look for
+
+1. **Four rows** in the final table; no `skipped`.
+2. **Format control first:** `r1-32b` vs `r1-32b-fp8` accuracy within a few points, `tok/s` higher for FP8.
+3. **`qwen2.5-32b-awq`:** `reason%` about 0 and far fewer `out tok` than the three reasoners.
+
+**If something's off:** `r1-32b did not come up` → something else still holds memory (side models, a `k8s/multi` Deployment, batch Jobs); `describe quota serving-budget`. More in §7.
+
+#### Run it
 
 `r1-32b` is the BF16 32B at util 0.70: it runs alone. Park the side models and bge-m3 before the run and bring them back afterwards.
 
@@ -335,6 +402,21 @@ Read the format control first: `r1-32b` vs `r1-32b-fp8`. The accuracy difference
 
 ### Task 5.5 · The 7B pair and tool calls
 
+#### What this lab does (script `lab/scripts/compare-models.sh`, tool `lab/tools/agent_tools.py`)
+
+- **Compares `r1-7b` and `qwen2.5-7b-tools`** on the same suites, then serves `qwen2.5-7b-tools` and runs the Chapter 14 agent once against it.
+- **The agent is read-only:** `calculator` and `gpu_slices` (which needs your kubectl context on `spark-root`).
+
+#### What to look for
+
+1. **Table:** two rows; `qwen2.5-7b-tools` with `reason%` about 0 and far fewer `out tok`.
+2. **Agent:** `[step N] calculator(…)` steps (40 % and ≈ 24.34 GiB), then `ANSWER:`.
+3. **Same loop with `r1-7b` served:** fewer or no structured `[step N]` lines; the model often reasons about the tools in prose.
+
+**If something's off:** HTTP 400 about `"auto" tool choice` from `r1-7b` is expected: its overlay has no tool flags. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 MAX_TOKENS=8192 scripts/compare-models.sh r1-7b qwen2.5-7b-tools
@@ -348,6 +430,23 @@ kill $pf
 Expected: clean structured `tool_calls` from the instruct model. Serve `r1-7b` and run the same loop: the distill is not trained for tools and often reasons about them in prose instead.
 
 ### Task 5.6 · Two MoE designs: predicted vs measured speed, then batching
+
+#### What this lab does (tools `lab/tools/stream_probe.py`, `eval_harness.py`, `moe_router_demo.py`)
+
+- **Single stream:** serves `mistral-7b`, `mixtral-8x7b-fp8`, `v2-lite` and `r1-7b` in turn and streams one 512-token answer from each.
+- **Batching:** for the two MoE models and `mistral-7b`, 8 JSON items at concurrency 1, 4 and 16.
+- **Router demo:** a small simulation of expert routing on the MacBook. It needs PyTorch installed there (`pip install torch`).
+- **Long run:** up to four model downloads; `mixtral-8x7b-fp8` alone is ~43.5 GiB.
+
+#### What to look for
+
+1. **Probe lines:** `… ITL p50 … ms p99 … ms …` and `… total … s` per model. `1000 / ITL p50` should rank V2-Lite clearly first, below its ≈ 50 tok/s ceiling, with Mixtral FP8 near the dense 7Bs.
+2. **Batching lines:** `<model> c=N  run: … tok/s aggregate`, rising with N for all three; fill in the table and the `c16 / c1` ratio.
+3. **Router demo:** two tables per run (`WITHOUT` and `WITH` aux-loss-free bias balancing) with `max/mean expert load` and `idle experts` per step. With 8 experts, idle experts are rare; with 64, many sit idle in a step unless the bias balances them.
+
+**If something's off:** `REASONING IN CONTENT` or long thinking in a probe → that model is a reasoner; compare ITL, not total time. `No module named 'torch'` → install it on the MacBook. More in §7.
+
+#### Run it
 
 Single-stream speed for each model, compared with the ceiling in §3.4:
 
@@ -392,6 +491,24 @@ python3 tools/moe_router_demo.py --experts 64 --topk 6 --groups 1 --limited 1 --
 ```
 
 ### Task 5.7 · Two families at once, and the interference
+
+#### What this lab does (overlay `lab/k8s/multi/qwen2.5-7b-tools`, `lab/k8s/apps/litellm.yaml`)
+
+- **Budget check** from `models.yaml` on the MacBook.
+- **Two models side by side:** `r1-7b` in `deploy/vllm` and `vllm-qwen2-5-7b-tools` with its own Service (util 0.20, 28 Gi each).
+- **Repoints the `agent` alias:** a `sed` on your working copy of `k8s/apps/litellm.yaml`, re-applied, and LiteLLM restarted. That apply also writes the placeholder Secrets back; run the vault-sync Job afterwards (Chapter 15 Task 5.3).
+- **Interference test:** streams one `r1-7b` answer alone, then again while Qwen serves 16 parallel requests.
+
+#### What to look for
+
+1. **Budget:** `['r1-7b', 'qwen2.5-7b-tools'] Σ util 0.46 (56 GiB) pods 74 Gi of 90 OK`.
+2. **`get deploy -L model`:** `vllm` with `r1-7b` and `vllm-qwen2-5-7b-tools` with `qwen2.5-7b-tools`, both Ready.
+3. **`MemAvailable`** on the Spark well above 8 GiB.
+4. **ITL:** `r1-7b`'s `ITL p50`/`p99` higher with the busy neighbour than alone. Fill in the table.
+
+**If something's off:** the second Deployment Pending with `exceeded quota` → something else is in `llm-serving` (a third model, the training window). Undo with `delete -k k8s/multi/qwen2.5-7b-tools` and `git checkout k8s/apps/litellm.yaml`. More in §7.
+
+#### Run it
 
 Plan the budget from the catalog, not from memory:
 
@@ -449,6 +566,25 @@ wait $load; kill $pf1 $pf2
 Decide whether the increase is acceptable for your users or whether the second model belongs on dgx-spark-2. Restore the alias with `git checkout k8s/apps/litellm.yaml` when you remove the side model.
 
 ### Task 5.8 · Local vs hosted reasoning APIs
+
+#### What this lab does (LiteLLM hosted aliases, tools `eval_harness.py`, `stream_probe.py`)
+
+- **Provider keys** at `kv/spark-lab/providers` on vault01, a new `SYNC_MAP` entry for Secret `provider-keys`, two hosted aliases in `litellm-config` and two env vars on LiteLLM. These are edits you make to your working copy.
+- **Local run:** serves `r1-32b-fp8` and runs math and JSON at concurrency 8 with `max_tokens` 16384, with your measured watts for the cost.
+- **Hosted runs:** the same suites through `api.lab.local` for each hosted alias. **The lab's synthetic eval data leaves your network and costs money**; use a key with `max_budget`.
+- **Latency and break-even:** two streamed probes and a small cost calculation on the MacBook.
+- **Hybrid route (optional):** a hosted alias as the last `reasoning` fallback, tested with vLLM parked.
+
+#### What to look for
+
+1. **Report:** three rows (local and two hosted) with `math acc`, `json acc`, `tok/ok`, `p50 s`, `$/Mtok`.
+2. **Probes:** `ttfb`, `first reasoning`, `first answer` per alias; a hosted model may leave `first reasoning` empty.
+3. **Break-even script:** `fixed cost $…/month`, `break-even … M output tokens/month`, `capacity … M output tokens/month`.
+4. **Hybrid:** with vLLM parked, a `reasoning` request still answers, and the spend log shows the cost on the calling key. Remove the annotation afterwards.
+
+**If something's off:** `401` from a hosted alias → `provider-keys` missing or not synced, or the env vars aren't on the Deployment. Timeouts only to the providers → a default-deny egress policy in `llm-serving`. More in §7.
+
+#### Run it
 
 **Data leaves your network in this task.** Use only the lab's synthetic eval data.
 
@@ -540,6 +676,21 @@ Apply, park vLLM (`kubectl --context spark-root -n llm-serving annotate scaledob
 
 ### Task 5.9 · NVIDIA Nemotron: reasoning on demand
 
+#### What this lab does (overlay `lab/k8s/models/nemotron-nano-8b`)
+
+- **Removes the Task 5.7 side model** (if present) and serves `nemotron-nano-8b` (util 0.20) in `deploy/vllm`.
+- **Two requests** with the same question, one with the system prompt `detailed thinking on` at temperature 0.6, one with `detailed thinking off` at 0.
+
+#### What to look for
+
+1. **`serve-model.sh`** ends with `[PASS] vLLM ready with nemotron-nano-8b`.
+2. **Two lines:** `thinking on: N tokens → …` with many more tokens than `thinking off: N tokens → …`; both end with **14**.
+3. **The "on" content** contains a `<think>` section (no reasoning parser is set for Nemotron).
+
+**If something's off:** both modes equally short → the system prompt didn't arrive; check the request JSON. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root delete -k k8s/multi/qwen2.5-7b-tools --ignore-not-found
@@ -560,6 +711,21 @@ Expected: "on" produces a `<think>` section and many more tokens; "off" answers 
 
 ### Task 5.10 · All families, one table, one routing decision
 
+#### What this lab does (script `lab/scripts/compare-models.sh`, then `lab/k8s/apps/litellm.yaml`)
+
+- **Six 7–8B models** served and evaluated one after another, same suites and settings as Task 5.2. Models already in `model-cache` load without a download.
+- **Your routing decision** goes into `k8s/apps/litellm.yaml` and is applied with `apply -k k8s/apps` (which also writes the placeholder Secrets back: run the vault-sync Job afterwards).
+
+#### What to look for
+
+1. **Six rows** in the final table, none skipped.
+2. **The alias table** filled in from your numbers, one line of reason each.
+3. **After the apply:** `/v1/models` on `api.lab.local` lists your aliases; an alias whose model isn't serving still answers through `fallbacks`.
+
+**If something's off:** `llama-3.1-8b` skipped → gated repository, token or licence missing (Task 5.2). Any other model skipped → read its `serve-model.sh` lines for the prefetch or rollout error. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 MAX_TOKENS=8192 scripts/compare-models.sh r1-7b r1-llama-8b qwen2.5-7b-tools llama-3.1-8b mistral-7b nemotron-nano-8b
@@ -578,6 +744,23 @@ Add the licence and access column from §3.2 by hand. Then turn the tables into 
 Edit `k8s/apps/litellm.yaml` and apply with `kubectl --context spark-root apply -k k8s/apps`. Aliases that point at a model that isn't serving fail over through `fallbacks`.
 
 ### Task 5.11 · (2×) The 70B pair across two Sparks
+
+#### What this lab does (manifests `lab/k8s/multinode`)
+
+- **Namespace `llm-multinode`** (privileged Pod Security, for hostNetwork and `IPC_LOCK`).
+- **LeaderWorkerSet `vllm-70b`:** a Ray head on dgx-spark-1 (`192.168.100.11`) and a worker on dgx-spark-2, tensor parallel 2 over the CX-7, NCCL on RoCE. Each pod 80 Gi, util 0.60, `--max-model-len 16384`. Weights from an NFS export (`/srv/models` on the leader, `/mnt/models` on the worker). Port **8000** on the leader. Needs the LWS controller installed first.
+- **Then the Llama side:** the same manifest with the checkpoint and served name swapped.
+- **With only one Spark:** skip this Task. The worker can't be placed and the leader waits for the second GPU.
+
+#### What to look for
+
+1. **Leader log:** the `waiting for the worker's GPU to join Ray` lines stop, then vLLM starts with TP 2.
+2. **Serving:** `curl http://192.168.100.11:8000/v1/models` lists `r1-70b` (later `llama-3.3-70b`).
+3. **Harness rows** for both, with the Task 5.2 settings.
+
+**If something's off:** the leader loops on `waiting for the worker's GPU` → the worker can't reach `192.168.100.11:6379` or isn't scheduled. Both Sparks need their other model servers and batch parked. More in §7.
+
+#### Run it
 
 R1-Distill-Llama-70B vs Llama-3.3-70B-Instruct, both FP8 (~66 GiB of weights), split with tensor parallelism over dgx-spark-1 and dgx-spark-2 on the CX-7 fabric ([Chapter 04](04-scaling-beyond-one-spark.md)). On one Spark an FP8 70B only fits at util 0.70 with everything else parked, and leaves room for a single 32K sequence at about 4 tok/s (`model_math.py llama-3.3-70b --dtype fp8 --util 0.70`).
 

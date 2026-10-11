@@ -379,6 +379,38 @@ compactor:
 
 ### 4.1 Deploy
 
+#### What this lab does (template `27.1 Logging audit`)
+
+- **auditd (every Spark):** installs `auditd` and `audispd-plugins`, writes the watch rules to `/etc/audit/rules.d/60-spark.rules` (sudoers, sshd and the SSH CA file, netplan, Docker/CDI/containerd, `/etc/kubernetes`, kubelet config, Slurm, sysctl/modprobe, grub, dpkg, every root command) and loads them with `augenrules --load`.
+- **Loki (monitoring host, dgx-spark-1):** config in `/opt/spark-logging/config/loki.yaml`, data in `/opt/spark-logging/data`, container `loki` (`grafana/loki:3.5.1`) on host port **3100** with 30 days (`720h`) retention.
+- **Grafana data source:** adds `loki.yml` to the Chapter 12 Grafana provisioning folder and restarts the `spark-monitoring-grafana-1` container.
+- **Alloy (every Spark):** container `alloy` (`grafana/alloy:v1.9.1`) with `/etc/alloy/config.alloy`. It ships the systemd journal and `/var/log/audit/audit.log` to Loki, labelled with `host`, `unit`, `ident`, `level`, `transport`.
+- **ARA server (monitoring host):** a venv in `/opt/ara/venv`, an SQLite database in `/opt/ara/data`, and a systemd service `ara` on port **8000**.
+- The first run pulls the Loki and Alloy images and installs ARA with pip, so it takes a few minutes.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`. On a first run expect `changed` on the auditd rules (plus the `Load audit rules` handler), the Loki and Alloy containers, the data source and the ARA service. A re-run shows `changed=0`.
+2. **"Confirm rules are active"** is `ok`. It fails the play if the `network` rule is not loaded, so `ok` means auditd took the rules.
+3. **Endpoints**, with the commands below:
+
+   | Check | Healthy value |
+   |---|---|
+   | `curl -s http://192.168.0.100:3100/ready` | `ready` (it can say not ready for the first few seconds after a start) |
+   | `curl -s http://192.168.0.100:8000/api/v1/ \| jq 'keys'` | a JSON list of API endpoint names |
+4. **Containers and rules on the Spark:**
+   ```bash
+   # ▶ dgx-spark-1 (ssh dgx-spark-1)
+   docker ps --format '{{.Names}} {{.Status}}' | grep -E '^(loki|alloy) '   # both "Up …"
+   systemctl is-active ara                                                 # active
+   sudo auditctl -l | grep -c 'key='                                       # a number above 0
+   ```
+5. **Grafana:** http://192.168.0.100:3000 → Explore → data source **Loki** → `{host="dgx-spark-1"}` returns journal lines.
+
+**If something's off:** no logs in Loki → `docker logs alloy` on the Spark. Loki `permission denied` → `/opt/spark-logging/data` must be owned by uid 10001. `augenrules --load` fails → test the file with `auditctl -R`. More in §7.
+
+#### Run it
+
 **Semaphore UI:** run the template **`27.1 Logging audit`** (break-glass, on the MacBook in `01-Ansible/lab`: `ansible-playbook playbooks/27.1-logging-audit.yml -l dgx-spark-1,localhost -K`), then:
 
 ```bash
@@ -388,6 +420,23 @@ curl -s http://192.168.0.100:8000/api/v1/ | jq 'keys'           # ARA API
 ```
 
 ### 4.2 Record every playbook run in ARA
+
+#### What this lab does (exercise: ARA callback on the MacBook + `04.3-baseline.yml`)
+
+- **Client side only:** installs the `ara` Python package into the lab venv on the MacBook and points Ansible's callback path at it for this shell. The three `export` lines last only for this terminal.
+- **One recorded run:** runs `04.3-baseline.yml` against dgx-spark-1. The callback sends every play, task and result to the ARA server on `192.168.0.100:8000`.
+- **What is not changed:** Semaphore is not touched. Its runs are recorded only after you add `ara` to its image (the paragraph after the commands).
+
+#### What to look for
+
+1. **The playbook run:** `failed=0`. On a converged Spark it is `changed=0`, which is fine: ARA records `ok` results too.
+2. **`ara playbook list --limit 5`** shows your run at the top, with status `completed` and the path `playbooks/04.3-baseline.yml`.
+3. **`ara result list --playbook <id> --changed`** lists only the changed tasks. Empty is correct for a run with `changed=0`; to see entries, make a small change first (for example the swappiness drift from Chapter 26 §4.2) and re-run.
+4. **Browser:** http://192.168.0.100:8000 shows the same playbook in the ARA web UI.
+
+**If something's off:** `ara playbook list` is empty → the callback was not loaded: `echo $ANSIBLE_CALLBACK_PLUGINS` must print a path in *this* shell, and `curl $ARA_API_SERVER/api/v1/` must answer. More in §7.
+
+#### Run it
 
 The ARA callback runs on the **controller**. The lab's Semaphore image doesn't include it, so start on the MacBook:
 
@@ -404,6 +453,23 @@ ara result list --playbook <id> --changed      # every changed task, with the di
 To record the **Semaphore** runs too, add `ara` to [`semaphore/requirements-semaphore.txt`](lab/semaphore/requirements-semaphore.txt), rebuild the image (Chapter 04 §4), and put the three variables in the variable group's environment. Semaphore's task history already answers "who ran what, when"; ARA adds per-task results and diffs you can query. For AWX, install `ara` into the EE (Chapter 08) and set the variables in the job template environment (Chapter 24).
 
 ### 4.2b The management-plane trail: Semaphore, vault01, sshd
+
+#### What this lab does (template `04.2 Ping`, then read-only checks on three machines)
+
+- **One template run:** `04.2 Ping` logs in to vault01 with the Semaphore AppRole, gets a 15-minute SSH certificate, and pings the Spark as `svc-ansible`.
+- **Three read-only lookups:** the task in Semaphore's history and `ansible.log` on sema01, the `auth/approle/login` and `sign/ansible` requests in `/var/log/vault_audit.log` on vault01, and the `ED25519-CERT` login plus sudo lines on dgx-spark-1.
+- **Nothing is changed** anywhere apart from the new log lines the ping itself creates.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`, with `ok` for dgx-spark-1.
+2. **vault01:** the two newest lines are an `auth/approle/login` and a `sign/ansible` request (each may appear as a `request` and a `response` entry), with timestamps a second or two after the task started.
+3. **dgx-spark-1:** an `Accepted publickey for svc-ansible … ED25519-CERT ID vault-…` line at about the same time, followed by `svc-ansible … COMMAND=…` sudo lines (the ping play runs with `become: true`).
+4. **The join:** the three timestamps line up within a few seconds. That is the evidence that the login came from that Semaphore task.
+
+**If something's off:** no `ED25519-CERT` line → the run logged in with a plain key (a MacBook break-glass run, not Semaphore), or the journal unit is named `sshd` instead of `ssh`; try `journalctl -t sshd`. Nothing in vault01's log → the audit device is not enabled (Chapter 01 §3.5).
+
+#### Run it
 
 One template run leaves three matching records. **Semaphore UI:** run `04.2 Ping`, then:
 
@@ -443,6 +509,24 @@ Line the three up by time: the Semaphore task's start, the `sign/ansible` reques
 
 ### 4.4 auditd: prove it catches a manual change
 
+#### What this lab does (exercise: hand edit of `/etc/netplan/40-cx7.yaml` + `tools/drift-cycle.sh`)
+
+- **One manual change:** `sed` changes `mtu: 9000` to `mtu: 1500` in the CX-7 netplan file. It does not run `netplan apply`, so the live link keeps MTU 9000 until something applies the file.
+- **Two detectors:** `ausearch -k network` shows the edit (auditd watches `/etc/netplan/`), and the Chapter 26 drift cycle reports the `cx7_fabric` template as drifted.
+- **No auto-heal:** fabric is not a safe tag, so even `AUTO_HEAL=1` leaves it alone. A human puts it back with `13.1 Fabric`.
+- **One Spark:** the commands use dgx-spark-2 (192.168.0.101). With only dgx-spark-1, use `dgxadmin@192.168.0.100`, run `drift-cycle.sh` with `BECOME_ARGS="-K -l dgx-spark-1,localhost"`, and run `13.1 Fabric` with `--limit dgx-spark-1,localhost`.
+
+#### What to look for
+
+1. **`ausearch` output:** a `type=SYSCALL` record with `comm="sed"`, `key="network"`, and `auid=` set to the user who logged in (`dgxadmin` when you SSH in as `dgxadmin`; the example line shows `nvidia`). The `auid` is the human behind `sudo`.
+2. **Drift cycle:** `drift check exit=2`, and the report lists a `cx7_fabric` task for the edited Spark.
+3. **Loki (optional):** the query `{job="auditd"} |~ "key=\"network\""` in Grafana Explore shows the same event.
+4. **After `13.1 Fabric`:** `grep mtu /etc/netplan/40-cx7.yaml` on the Spark shows `9000` again, and a new drift run exits `0`.
+
+**If something's off:** `ausearch` returns `<no matches>` → the rules are not loaded (`sudo auditctl -l | grep netplan`); re-run `27.1 Logging audit`. The `sed` changed nothing → the file has no `mtu: 9000` line on this Spark; check with `grep mtu /etc/netplan/40-cx7.yaml`. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
 ssh dgxadmin@192.168.0.101 'sudo sed -i "s/mtu: 9000/mtu: 1500/" /etc/netplan/40-cx7.yaml'
@@ -454,6 +538,23 @@ tools/drift-cycle.sh      # drift reports the fabric template (and doesn't auto-
 **Semaphore UI:** a human puts it back with the template **13.1 Fabric** and `--limit dgx-spark-2,localhost` (break-glass, on the MacBook in `01-Ansible/lab`: `ansible-playbook playbooks/13.1-fabric.yml -K -l dgx-spark-2,localhost`).
 
 ### 4.5 The Kubernetes API audit log: root vs vCluster
+
+#### What this lab does (exercise: two writes, read from the root API audit log)
+
+- **Where the log comes from:** nothing new is installed. The `kubeadm_cluster` role (template `19.1 Kubernetes`) already started the root kube-apiserver with the audit policy and the log file `/var/log/kubernetes/audit/audit.log` on dgx-spark-1.
+- **Write 1 (root):** adds a harmless annotation `spark.lab/audit-test` to the `serving-budget` ResourceQuota in `llm-serving`. The quota values do not change.
+- **Write 2 (tenant):** creates a ConfigMap `audit-probe` in the `default` namespace of the `dev-lab` vCluster, then deletes it again.
+- **Read:** `jq` over the last 2000 lines of the root's audit log on dgx-spark-1, once for each write.
+
+#### What to look for
+
+1. **Write 1:** the `jq` line prints `{"user":"kubernetes-admin","verb":"patch","ns":"llm-serving","name":"serving-budget"}`. The user is whoever your kubeconfig authenticates as; with the lab's admin kubeconfig that is `kubernetes-admin`.
+2. **Write 2:** the user is **not** you but a ServiceAccount, `system:serviceaccount:vc-dev-lab:…`, and the name is the translated one, `audit-probe-x-default-x-dev-lab`. That is the vCluster syncer writing into `vc-dev-lab` on the root.
+3. **Clean up:** the last command deletes the ConfigMap. The annotation on `serving-budget` can stay; it has no effect on scheduling.
+
+**If something's off:** the `jq` command prints nothing → the event is older than the last 2000 lines (raise the `tail -n` value), or the file does not exist because the cluster was built before the audit flags were added; check with `sudo ls -l /var/log/kubernetes/audit/` on dgx-spark-1. `context "dev-lab" not found` → fetch the kubeconfig again with `tools/fetch-kubeconfig.sh sema01` (Chapter 19).
+
+#### Run it
 
 auditd sees *files* changing. It can't see `kubectl patch resourcequota`, which only touches etcd. For that, the `kubeadm_cluster` role starts the root kube-apiserver with `--audit-policy-file=/etc/kubernetes/audit/audit-policy.yaml` (from `roles/kubeadm_cluster/files/audit-policy.yaml`) and `--audit-log-path=/var/log/kubernetes/audit/audit.log`. The policy logs Secrets and ConfigMaps at `Metadata` only (never payloads), drops kubelet and health-check noise, and records **full request and response** for every write in `vc-dev-lab`, `vc-dev-llms`, `llm-serving`, `batch`, `gpu-operator` and `platform-tools`.
 

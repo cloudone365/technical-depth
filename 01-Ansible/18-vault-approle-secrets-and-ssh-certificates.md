@@ -208,6 +208,30 @@ Design choices worth copying:
 
 ### 3.2 The integration playbook: run it from Semaphore
 
+#### What this lab does (template `18.1 Vault integration`)
+
+- **Play 1 (`00-vault-cert.yml`, inside the Semaphore container):** logs in to vault01 with AppRole `semaphore`, gets a 15-minute SSH certificate for `svc-ansible` in `/tmp/lab_ssh/`, and reads `kv/spark-lab/ngc` into a hidden fact.
+- **Play 2 (localhost):** stops with an explanation unless it runs from Semaphore with `vault_lab_secrets_enabled: true`. Then it prints *what* it received (certificate path, secret names, whether the NGC key is real), never the values.
+- **Play 3 (dgx-spark-1):** runs the `container_runtime` role with that key: makes sure Docker and the NVIDIA toolkit are set up (as in `11.1 Containers`) and logs Docker in to `nvcr.io`. The GPU smoke tests are switched off.
+- **Nothing on vault01 changes;** the reads show up in its audit log.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0` for both `dgx-spark-1` and `localhost`. After `11.1 Containers` has run, expect `changed=0` on the Spark (the `nvcr.io` login is already there).
+2. **The *What we got* task** (full expected log under "Run it"):
+
+   | Line | Healthy value |
+   |---|---|
+   | `SSH certificate:` | `/tmp/lab_ssh/id_ed25519-cert.pub` |
+   | `Lab secrets read from kv/spark-lab/:` | `['ngc']` |
+   | `NGC key present:` | `True` |
+
+3. **The three checks under "Verify on all three systems":** vault01's audit log shows role `semaphore` with policies `[default semaphore-ssh spark-lab-read]` reading `kv/data/spark-lab/ngc`; the Spark's sshd log shows `Accepted publickey for svc-ansible … ED25519-CERT` and Docker's config holds `["nvcr.io"]`; the certificate on sema01 shows principal `svc-ansible` and a 15-minute validity.
+4. **The MacBook run** stops at the assert with "Run it from Semaphore …". That is the expected boundary, not an error to fix.
+5. **No secret in the log:** the NGC key appears nowhere in the task log, only `True`/`False`.
+
+**If something's off:** `Lab secrets read from kv/spark-lab/: []` → `vault_lab_secrets_enabled` is still false, or `17.1-vault.yml` hasn't attached `spark-lab-read`. `NGC key present: False` → the key is still `REPLACE_ME`. Play 1 fails at the AppRole login → vault01 sealed or the secret_id wrong. More in §5.
+
 [`playbooks/18.1-vault-integration.yml`](lab/playbooks/18.1-vault-integration.yml) makes the whole chain visible:
 
 ```yaml
@@ -247,6 +271,8 @@ Design choices worth copying:
   roles:
     - role: container_runtime
 ```
+
+#### Run it
 
 **Prerequisites:** Chapter 17 §3.2 / Chapter 04 §7 done (KV, policy, your real NGC key in `kv/spark-lab/ngc`), and `vault_lab_secrets_enabled` set to `true` in the variable group `vault-approle`.
 
@@ -318,6 +344,25 @@ hf_token: >-
 
 ### 3.4 ansible-vault keys from HashiCorp Vault
 
+#### What this lab does (script `lab/tools/vault-pass.sh`)
+
+- **Stores an ansible-vault password in vault01** at `kv/spark-lab/ansible-vault` (a random 32-byte value).
+- **Encrypts your NGC key with ansible-vault** into `lab/.cache/ngc.vault.yml` on the MacBook (git-ignored), using `tools/vault-pass.sh` as the password source. The script prints the password from vault01 to Ansible and writes nothing to disk.
+- **Uses it:** decrypts the file in an ad-hoc command, then runs `11.1-containers.yml` break-glass from the MacBook with the NGC key from that file instead of from play 1.
+- **MacBook only,** with your own admin `vault login`. Semaphore can't use this script (see the limits below).
+
+#### What to look for
+
+1. **`vault kv put`** prints a version number for `kv/spark-lab/ansible-vault`.
+2. **`.cache/ngc.vault.yml`** starts with `ngc_api_key: !vault |` followed by `$ANSIBLE_VAULT;1.1;AES256`: encrypted, not the key in clear.
+3. **The `ansible localhost` check** prints the first 6 characters of your key (`nvapi-`).
+4. **The break-glass run:** `failed=0`, and its NGC login task is `ok` or `changed`, not `skipping`.
+5. **`git status`** in the repository doesn't list `ngc.vault.yml` (`.cache/` is ignored).
+
+**If something's off:** `set VAULT_ADDR` → export `VAULT_ADDR` and `VAULT_CACERT` in that shell. `permission denied` → `vault login` with a token that can read `kv/data/spark-lab/ansible-vault`. `Decryption failed` → the password in vault01 changed after you encrypted; re-encrypt. More in §5.
+
+#### Run it
+
 Some values have to exist **without** Vault: the break-glass path runs when vault01 is down or unreachable. ansible-vault encrypts them in a file; HashiCorp Vault holds the *password* to that file. [`tools/vault-pass.sh`](lab/tools/vault-pass.sh) is the bridge:
 
 ```bash
@@ -356,6 +401,24 @@ Uncommenting `vault_password_file = ./tools/vault-pass.sh` in [`ansible.cfg`](la
 
 ### 3.5 Secret zero, hardened: rotate the secret_id with response wrapping (vault01 + Semaphore)
 
+#### What this lab does (exercise: secret_id rotation)
+
+- **Creates a new secret_id** for AppRole `semaphore` on vault01, bound to sema01's address (`192.168.0.210/32`), and delivers it inside a single-use wrapping token that expires after 5 minutes.
+- **Proves the binding:** a login from vault01 itself with the new secret_id is refused.
+- **Swaps it into Semaphore:** you paste it into the `vault_secret_id` secret of **both** projects (`lab` and `spark-lab`) and run `04.2 Ping` in each.
+- **Destroys the old secret_id** only after both pings pass. Role-level settings are not changed.
+
+#### What to look for
+
+1. **The wrapper:** `sys/wrapping/lookup` shows `creation_path auth/approle/role/semaphore/secret-id` and a 5-minute TTL; the first `vault unwrap` returns `secret_id` and `secret_id_accessor`; the second fails.
+2. **The CIDR binding:** the login from vault01 fails; the accessor lookup shows `cidr_list [192.168.0.210/32]` and your metadata.
+3. **Both projects:** `04.2 Ping` gives `failed=0` with the new secret_id, before and after the old one is destroyed.
+4. **At the end:** `vault list auth/approle/role/semaphore/secret-id` shows only the new accessor.
+
+**If something's off:** `04.2 Ping` fails at the AppRole login after the swap → the pasted value has a typo or a trailing space, or the task did not come from 192.168.0.210. Don't destroy the old accessor until both projects pass. More in §5.
+
+#### Run it
+
 **Why:** the static secret_id from Chapter 01 §4 never expires and works from anywhere on the LAN. Replace it with one that only works from sema01, and deliver it in a single-use wrapper.
 
 On vault01 (admin login):
@@ -393,6 +456,24 @@ vault list auth/approle/role/semaphore/secret-id                    # only the n
 **Semaphore UI:** run **04.2 Ping** once more. Next steps toward production (role-level, so they affect both projects; plan them): `secret_id_ttl` with a calendar reminder to rotate, `token_bound_cidrs=192.168.0.210/32`, and one AppRole per environment or template class (Chapter 01 §11, Chapter 04 §12).
 
 ### 3.6 SSH certificates: what's signed, what's refused, what can't be revoked
+
+#### What this lab does (script `lab/tools/vault-ssh-cert.sh`)
+
+- **Inspects a certificate** play 1 issued, inside the Semaphore container on sema01. Read-only.
+- **Signs a test key by hand** on vault01 with `tools/vault-ssh-cert.sh` (creates `~/semaphore_lab` and `~/semaphore_lab-cert.pub` there) and logs in to dgx-spark-1 as `svc-ansible` with it.
+- **Asks the CA for forbidden principals** (`root`, `dgxadmin`) to see the refusals.
+- **Nothing on the Spark changes.** The expiry test needs about 16 minutes of waiting after a task.
+
+#### What to look for
+
+1. **`ssh-keygen -L`:** `user certificate`, `Principals: svc-ansible`, a 15-minute `Valid:` window, `Extensions: permit-pty`.
+2. **The manual login:** prints `dgx-spark-1` and `root` (`sudo -n` works without a password for `svc-ansible`).
+3. **The refusals:** both `valid_principals=root` and `valid_principals=dgxadmin` return an error from Vault.
+4. **The expiry test:** 16 minutes after a task, the `ssh … svc-ansible@192.168.0.100 true` from the Semaphore container is refused; the next template run works again.
+
+**If something's off:** `Permission denied (publickey)` with a fresh certificate → the Spark doesn't trust this CA (`sudo sshd -T | grep trustedusercakeys`, Chapter 04 §3.2). `name is not a listed principal` → the login user isn't `svc-ansible`. More in §5.
+
+#### Run it
 
 Inspect a certificate play 1 issued (on sema01, in `~/semaphore`):
 

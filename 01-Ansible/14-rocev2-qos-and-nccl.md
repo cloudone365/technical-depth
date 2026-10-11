@@ -46,6 +46,30 @@ flowchart LR
 
 ## 2. Host QoS playbook (opt-in)
 
+#### What this lab does (template `14.1 RoCE QoS`)
+
+- **Tool check:** looks for `mlnx_qos`. If this DGX OS image doesn't have it, the host stops cleanly at *Stop with guidance when the tool is missing* and nothing is changed.
+- **Trust and PFC:** on each CX-7 port in `cx7_interfaces`, sets `--trust dscp` and the PFC vector `0,0,0,1,0,0,0,0` (pause only on priority 3, the RoCE class). Extra variable `roce_qos_pfc: false` gives ECN-only.
+- **ECN (DCQCN):** turns on the reaction point and notification point for priority 3 under `/sys/class/net/<port>/ecn/`.
+- **RDMA-CM ToS:** sets the default ToS for RDMA-CM connections (NCCL, NFS/RDMA) to `106` (DSCP 26 + ECT) in `/sys/kernel/config/rdma_cm/<rdma dev>/ports/1/default_roce_tos`.
+- **Runtime only:** all of it is lost at reboot. Nothing is written to a config file.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`. A first run shows `changed` on the trust/PFC, ECN and ToS tasks; a re-run shows `changed=0`.
+2. **The *Show trust + PFC lines* task** for each port: `Priority trust state: dscp`, and an `enabled` PFC line with `1` only under priority 3 (`0 0 0 1 0 0 0 0`).
+3. **The ECN task is allowed to "fail" quietly:** if a sysfs knob is missing it prints `missing /sys/class/net/…` and still shows `ok`. Check its output by eye.
+4. **On the Spark:**
+   ```bash
+   # ▶ dgx-spark-1 (ssh dgx-spark-1)
+   cat /sys/class/net/enp1s0f1np1/ecn/roce_rp/enable/3 /sys/class/net/enp1s0f1np1/ecn/roce_np/enable/3   # 1 and 1
+   sudo cat /sys/kernel/config/rdma_cm/rocep1s0f1/ports/1/default_roce_tos                              # 106
+   ```
+
+**With only one Spark:** this play needs no peer. It configures dgx-spark-1's own ports, so items 1–4 all work alone. What one Spark can't show is the effect: with no traffic between nodes, the priority-3 counters in §5 stay at zero.
+
+**If something's off:** the host ends early → `mlnx_qos` is not installed (expected on some images; §5). `missing …ecn…` → that ECN knob isn't exposed on this driver. Settings gone after a reboot → expected; persist them with the exercise below. More in §5.
+
 ```yaml
 # lab/playbooks/14.1-roce-qos.yml
 ---
@@ -150,6 +174,10 @@ flowchart LR
           systemd unit or AWX schedule at boot, or bake it into a oneshot service (exercise in Chapter 14).
 ```
 
+#### Run it
+
+**Semaphore UI:** run the template **`14.1 RoCE QoS`**. Break-glass from the MacBook:
+
 ```bash
 # ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
@@ -182,6 +210,39 @@ flowchart TB
 NVIDIA's Spark NCCL guide bootstraps over the **management** interface (`NCCL_SOCKET_IFNAME=enP7s7`, also passed to UCX and Open MPI) and lets NCCL discover the RoCE devices for data. The lab playbook does the same, but pins `NCCL_IB_HCA` from inventory, so it can't pick a wrong or down device.
 
 ### 3.2 Build and run
+
+#### What this lab does (template `14.2 NCCL test`)
+
+- **Build, on every Spark:** installs Open MPI and build tools, clones NCCL `v2.30.7-1` into `/home/dgxadmin/nccl` and builds it for `sm_121` (about 10 minutes the first time), then clones and builds `nccl-tests` with MPI in `/home/dgxadmin/nccl-tests`. Later runs skip both builds (`creates:`); delete `~/nccl/build` to force a rebuild.
+- **Run, from the first Spark:** `mpirun` starts one rank per Spark. Bootstrap and MPI use the management NIC (`enP7s7`); NCCL's data goes over the RDMA devices in `cx7_interfaces` (`NCCL_IB_HCA=rocep1s0f1,roceP2p1s0f1`). The test is `all_gather_perf` at a 16 GB message size, with `NCCL_DEBUG=INFO`.
+- **Needs two Sparks for the run:** with one Spark the run play ends at *Skip on single node*; the build still happens.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`. A first run shows `changed` on the packages, the two clones and the two builds; a re-run shows `changed=0`.
+2. **The *Result* task:**
+
+   | Line | Healthy value |
+   |---|---|
+   | `Avg bus bandwidth` | a number in GB/s, a sensible fraction of your `13.2 RDMA perftest` rate. perftest reports Gb/s, NCCL GB/s: divide perftest by 8 before comparing |
+   | `Transport line` | contains `NET/IB` and the `roce…` devices (§3.3). `NET/Socket` means TCP fallback; `unknown` means NCCL printed no network line |
+
+3. **Every channel uses RDMA:** in the full task log, every `Channel …` line ends in `via NET/IB/…` (§3.3).
+4. **The build on each Spark:**
+   ```bash
+   # ▶ dgx-spark-1 (ssh dgx-spark-1)
+   ls ~/nccl/build/lib/libnccl.so ~/nccl-tests/build/all_gather_perf   # both exist
+   ```
+
+**With only one Spark:** run the template anyway. The build play runs fully on dgx-spark-1, and the run play ends with `failed=0` at *Skip on single node*. You can then prove the build works on the GB10 with a single-rank run:
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+LD_LIBRARY_PATH=~/nccl/build/lib:/usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu/openmpi/lib \
+  ~/nccl-tests/build/all_gather_perf -b 1G -e 1G -g 1
+```
+Expect a results table with `0` in the `#wrong` columns and `Out of bounds values : 0 OK`. With one rank the bus bandwidth is 0 by definition (no data has to move between ranks), so this run says nothing about the CX-7 link or RDMA.
+
+**If something's off:** `mpirun` hangs → SSH between the Sparks on the management network (§5). `NET/Socket` → device names, port state or GID index (§3.3). `libnccl.so: cannot open` on node 2 → different paths on the two nodes. More in §5.
 
 ```yaml
 # lab/playbooks/14.2-nccl-test.yml
@@ -286,6 +347,10 @@ NVIDIA's Spark NCCL guide bootstraps over the **management** interface (`NCCL_SO
           - "Transport line   : {{ nccl_transport }}"
           - "If this says NET/Socket, RDMA isn't in use — see Chapter 14 troubleshooting."
 ```
+
+#### Run it
+
+**Semaphore UI:** run the template **`14.2 NCCL test`**. Break-glass from the MacBook:
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)

@@ -214,6 +214,22 @@ Metric names move between releases; `curl -s localhost:8000/metrics | grep -E '^
 
 ## 5. Lab
 
+#### What this lab does (preflight: `gen_overlays.py --check`, `serve-model.sh list`, quota and Deployment listing)
+
+- **Read-only checks** before any task: the generated overlays still match `models.yaml`, the catalog obeys the memory rule and every `set` fits the budget.
+- **Shows** the catalog, the `serving-budget` quota in `llm-serving` and which Deployments currently have replicas. Nothing is applied.
+
+#### What to look for
+
+1. **`gen_overlays.py --check`:** `9 overlays checked, 0 drifted, 0 catalog problems` (8 models plus the `qwen3-0.6b` sandbox overlay).
+2. **`serve-model.sh list`:** eight models from `qwen3-0.6b` (util 0.05, 10Gi) to `qwen3.6-35b-fp8` (util 0.45, 64Gi), then the five sets.
+3. **`serving-budget`:** hard limits `requests.cpu 8`, `requests.memory 90Gi`, `limits.memory 90Gi`, `requests.nvidia.com/gpu 6`; the used column shows what already runs.
+4. **Deployments:** know which ones have `REPLICAS` above 0 before you start; the budget check counts them.
+
+**If something's off:** `DRIFT k8s/models/…` → someone edited `models.yaml` without regenerating; run `python3 scripts/gen_overlays.py`. `error: context "spark-root" does not exist` → the `KUBECONFIG` export is missing.
+
+#### Run it
+
 All commands run from `04-Qwen/lab` with the lab kubeconfig:
 
 ```bash
@@ -227,6 +243,30 @@ kubectl --context spark-root -n llm-serving get deploy -o custom-columns=NAME:.m
 
 ### Task 1 · Try the overlay in the sandbox, then serve the everyday model
 
+#### What this lab does (script `lab/scripts/serve-model.sh`, `--sandbox` then main)
+
+- **Sandbox first:** `qwen3-0.6b --sandbox` applies `k8s/models/qwen3-0.6b/sandbox` in the `dev-llms` vCluster, namespace `llm-sandbox`: util 0.02, 3 Gi, `--max-model-len=2048`, eager mode (no CUDA graphs), weights downloaded into an `emptyDir` (no `model-cache` in the vCluster).
+- **Then the root:** `qwen3-8b` runs the budget check, prefetches ~16.4 GB into `model-cache`, replaces the main `deploy/vllm` on `spark-root` (util 0.20, 32 Gi, image `nvcr.io/nvidia/vllm:26.08-py3`) and smoke-tests it.
+- **Long first run:** the new vLLM image pull and the first CUDA-graph compile take minutes; later starts are faster.
+
+#### What to look for
+
+1. **Sandbox:** `[PASS] sandbox vLLM ready with qwen3-0.6b`, `[PASS] answer: 144 …`, and one `vllm-…` pod `1/1 Running` in `llm-sandbox`.
+2. **Root, `serve-model.sh qwen3-8b`:** `[PASS] budget: running … + qwen3-8b 0.2 ≤ 0.72`, `[PASS] weights cached`, `[PASS] vllm ready with qwen3-8b`, `[PASS] answer: 144  (reasoning chars: …)` with reasoning chars above 0 (the `qwen3` reasoning parser works), and `0 failed`.
+3. **Startup log:**
+
+   | Line | Healthy value |
+   |---|---|
+   | `GPU KV cache size` | about 45K tokens, close to your Chapter 01 Task 6 estimate |
+   | `Maximum concurrency for 32,768 tokens per request` | a bit above 1× |
+   | `Uvicorn running on` | present: the API server is up |
+
+4. **Image and args:** image `nvcr.io/nvidia/vllm:26.08-py3`; args include `--served-model-name=$(SERVED_NAME)`, `--gpu-memory-utilization=0.2`, `--reasoning-parser=qwen3`, `--tool-call-parser=hermes`.
+
+**If something's off:** a `[WARN] KEDA keeps deploy/vllm at 0` line → a training window left the pause annotation; remove it as the warning says. Sandbox pod Pending → the `llm-sandbox` quota is taken by another pod. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 scripts/serve-model.sh qwen3-0.6b --sandbox
@@ -236,9 +276,25 @@ kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -E 'Model lo
 kubectl --context spark-root -n llm-serving get deploy vllm -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}{.spec.template.spec.containers[0].args}{"\n"}'
 ```
 
-Expected: the sandbox pod Ready in `llm-sandbox` (a ~0.6B model at util 0.02, eager mode), then `PASS budget: running … + qwen3-8b 0.2 ≤ 0.72`, `PASS weights cached`, `PASS vllm ready with qwen3-8b` and `PASS answer: 144 (reasoning chars: …)` with a non-zero reasoning length — the parser works. The log's `GPU KV cache size` should match your Chapter 01 Task 6 estimate. Note it.
+Note the `GPU KV cache size`; later tasks compare against it.
 
 ### Task 2 · Parsers: reasoning and tool calls
+
+#### What this lab does (two `curl` requests through a port-forward)
+
+- **Port-forward:** `svc/vllm` to `localhost:8000`, in the background.
+- **Request 1:** a short question with thinking on (the default); shows whether the reasoning parser splits `<think>` out of `content`.
+- **Request 2:** thinking off plus one tool definition; shows whether the `hermes` tool parser turns the model's `<tool_call>` into OpenAI `tool_calls`.
+- **Read-only:** nothing on the cluster changes.
+
+#### What to look for
+
+1. **Request 1:** `content` is `No` (221 = 13 × 17) with no `<think>` text in it; `reasoning_chars` a few hundred.
+2. **Request 2:** `finish_reason: "tool_calls"` and one call to `get_gpu_util` whose `arguments` is the JSON string `{"node": "dgx-spark-1"}`.
+
+**If something's off:** the tool call shows up as text in `content` → wrong or missing `--tool-call-parser` / `--enable-auto-tool-choice` (§3.3). `curl: (7)` → the port-forward died after a pod restart; start it again.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
@@ -255,9 +311,26 @@ curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -
   | jq '.choices[0] | {finish_reason, tool_calls: .message.tool_calls}'
 ```
 
-Expected: the first answer `No` (221 = 13 × 17) with a few hundred reasoning characters and `content` free of `<think>`; the second `finish_reason: "tool_calls"` with `get_gpu_util` and `{"node": "dgx-spark-1"}` as a JSON string. If the tool call arrives as text in `content`, the parser is missing or wrong for the model (§3.3). Chapter 10 tests tool calling systematically with `tools/fc_check.py`.
+Chapter 10 tests tool calling systematically with `tools/fc_check.py`.
 
 ### Task 3 · A route through Traefik and a side model
+
+#### What this lab does (Ingress `qwen` + `serve-model.sh qwen3-4b-instruct --side`)
+
+- **Ingress:** creates `ingress/qwen` in `llm-serving` with two hosts on Traefik (192.168.0.115): `qwen.lab.local` → `svc/vllm`, `agent.qwen.lab.local` → `svc/vllm-qwen3-4b-instruct`. It reuses 02's `llm-body-limit` and `llm-ratelimit` middlewares. 02's `llm.lab.local` route is not touched.
+- **`/etc/hosts`:** adds one line on your MacBook (needs `sudo`).
+- **Side model:** a second engine `deploy/svc vllm-qwen3-4b-instruct` next to the main one: Qwen3-4B-Instruct-2507, util 0.12, 20 Gi, `hermes` tool parser, ~8.1 GB download. It has no KEDA ScaledObject.
+
+#### What to look for
+
+1. **Budget line:** `[PASS] budget: running 0.20 + qwen3-4b-instruct 0.12 ≤ 0.72` (plus 0.06 if BGE-M3 runs).
+2. **Streaming:** `data: {…}` lines arrive one by one through Traefik, not all at once at the end.
+3. **Second host:** `/v1/models` on `agent.qwen.lab.local` lists `qwen3-4b-instruct`.
+4. **Quota:** `describe resourcequota serving-budget` shows `requests.memory` used ≥ 52Gi (32 + 20) out of 90Gi.
+
+**If something's off:** `404 page not found` from Traefik → the Host header doesn't match; check the `/etc/hosts` line. Side pod Pending with `exceeded quota` → park something (§3.6). More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
@@ -291,9 +364,27 @@ curl -sN http://qwen.lab.local/v1/chat/completions -H 'Content-Type: application
 curl -s http://agent.qwen.lab.local/v1/models | jq -r '.data[].id'
 ```
 
-Expected: SSE lines arriving one by one through Traefik (no buffering), and `qwen3-4b-instruct` listed on the second host. `serve-model.sh` printed `running 0.20 + qwen3-4b-instruct 0.12 ≤ 0.72` (plus BGE-M3's share if the apps run). Check the quota now holds both engines: `kubectl --context spark-root -n llm-serving describe resourcequota serving-budget`.
+Check the quota now holds both engines: `kubectl --context spark-root -n llm-serving describe resourcequota serving-budget`.
 
 ### Task 4 · A long-context variant with YaRN
+
+#### What this lab does (catalog entry `qwen3-8b-128k` + `serve-model.sh`)
+
+- **Catalog:** you add `qwen3-8b-128k` to `models.yaml` (same weights as `qwen3-8b`, util 0.30, 40 Gi, `--max-model-len=131072`, YaRN factor 4 via `--hf-overrides`, `--max-num-seqs=4`) and generate its overlay `k8s/models/qwen3-8b-128k/`.
+- **Serve:** stops the side model from Task 3, then replaces the main `deploy/vllm` with the YaRN variant. No new download: the weights are already in `model-cache`.
+- **Needle test:** a Python client sends a ~100K-token prompt with one hidden sentence and asks for it.
+
+#### What to look for
+
+1. **`--check`:** `10 overlays checked, 0 drifted, 0 catalog problems`.
+2. **`serve-model.sh`:** `[PASS] budget: running … + qwen3-8b-128k 0.3 ≤ 0.72` and `[PASS] vllm ready with qwen3-8b-128k`.
+3. **Log:** the YaRN / `rope` settings and `max_model_len=131072` appear; `GPU KV cache size` is large enough for one 128K sequence.
+4. **Needle client:** about 100,000 prompt tokens, a prefill of tens of seconds (note it), and an answer naming the blue fan tray.
+5. **Plain `qwen3-8b`:** the same request returns 400 with `maximum context length is 32768`.
+
+**If something's off:** `curl`/`urlopen` connection refused → restart the port-forward (it was bound to the old pod). `No available memory for the cache blocks` → util 0.30 is too small for your weights + one 128K sequence; see §7.
+
+#### Run it
 
 Add a catalog entry next to `qwen3-8b` (KV for one 128K sequence of Qwen3-8B is 18 GiB, so util rises to 0.30 and the memory rule asks for at least 40 GiB):
 
@@ -329,9 +420,26 @@ print(r["usage"]["prompt_tokens"], "prompt tokens ->", r["choices"][0]["message"
 PY
 ```
 
-Restart the port-forward after the switch (it was bound to the old pod). Expected: roughly 100K prompt tokens, a prefill that takes tens of seconds (note it), and the needle found. Send the same request to plain `qwen3-8b` and read the 400 (`maximum context length is 32768`). Put `qwen3-8b` back as the main model when done and decide whether to keep the entry — a YaRN instance should serve only long-document traffic.
+Restart the port-forward after the switch (it was bound to the old pod). Send the same request to plain `qwen3-8b` and read the 400 (`maximum context length is 32768`). Put `qwen3-8b` back as the main model when done and decide whether to keep the entry — a YaRN instance should serve only long-document traffic.
 
 ### Task 5 · FP8 KV cache and speculative decoding
+
+#### What this lab does (two temporary catalog variants + `02-Kubernetes/lab/scripts/ttft_probe.py`)
+
+- **Variants:** `qwen3-8b-fp8kv` (`--kv-cache-dtype=fp8`) and `qwen3-8b-spec` (Qwen3-0.6B as a draft model, 4 speculative tokens). Each is served as the main model in turn; the draft's weights must be prefetched first by serving `qwen3-0.6b` once.
+- **Measure:** the KV size from the startup log, TTFT with the 02 probe at concurrency 1, and vLLM's speculative-decoding counters from `/metrics`.
+- **Temporary:** remove the variants from `models.yaml` and regenerate when you're done.
+
+#### What to look for
+
+1. **FP8 KV:** `GPU KV cache size` roughly twice the plain engine's at the same util 0.20.
+2. **Probe output** for each engine: `first request (cold)`, `shared prefix median TTFT`, `unique prefix median TTFT`, `speed-up from prefix cache: …x`. Record them next to the plain engine's.
+3. **Speculative decoding:** `vllm:spec_decode_num_accepted_tokens` and `vllm:spec_decode_num_draft_tokens` both above 0; acceptance rate = accepted ÷ draft.
+4. **Decision:** keep a variant only if it wins on your prompts (and for FP8 KV, only if answers on your evaluation set don't change).
+
+**If something's off:** no `spec_decode` metrics → the speculative config didn't load; grep the log for `peculative`. Slower with speculation → expected at high concurrency (§3.5); measure at concurrency 1.
+
+#### Run it
 
 Create two temporary variants the same way (or edit `qwen3-8b`'s `args` and regenerate between runs):
 
@@ -349,9 +457,27 @@ python3 ../../02-Kubernetes/lab/scripts/ttft_probe.py --url http://localhost:800
 curl -s localhost:8000/metrics | grep -E '^vllm:spec_decode_num_(accepted|draft)_tokens'
 ```
 
-Expected: FP8 KV roughly doubles `GPU KV cache size` at the same util; speculative decoding changes the per-stream token rate (the probe's timings) and exposes an acceptance counter — acceptance rate = accepted / draft. Record both against the plain engine; keep a variant only if it wins on your prompts (and for FP8 KV, only if answers on your evaluation set don't change). For `qwen3.6-35b-fp8`, try `'--speculative-config={"method": "mtp", "num_speculative_tokens": 1}'` instead — no draft model needed.
+Speculative decoding changes the per-stream token rate (the probe's timings). For `qwen3.6-35b-fp8`, try `'--speculative-config={"method": "mtp", "num_speculative_tokens": 1}'` instead — no draft model needed.
 
 ### Task 6 · The same model in SGLang
+
+#### What this lab does (02 manifests `root-llms/90-serving/sglang` + `ttft_probe.py`)
+
+- **Park vLLM:** the KEDA pause annotation scales `deploy/vllm` to 0, so each engine has the GB10 alone.
+- **SGLang:** applies the 02 `sglang` Deployment and Service (image `lmsysorg/sglang:spark`, port 30000, 32 Gi), patches its args to serve Qwen3-8B as `qwen3-8b` with `--mem-fraction-static=0.20`, the `qwen3` reasoning parser and the `qwen25` tool parser, and scales it to 1. It reads the same weights from `model-cache`; the first start pulls the SGLang image.
+- **Compare:** the 02 TTFT probe against SGLang, then against vLLM after you swap back (SGLang to 0, vLLM un-paused).
+- **CPU sketch:** a 40-line radix tree on the MacBook shows how SGLang reuses prefixes.
+
+#### What to look for
+
+1. **Rollout:** `deployment "sglang" successfully rolled out`; the log shows `max_total_num_tokens=…` (SGLang's KV capacity, comparable with vLLM's `GPU KV cache size`) and no `ERROR`.
+2. **Probe, both engines:** `speed-up from prefix cache` clearly above 1× (prefix caching works in both). Record the medians per engine; on this GB10 the winner depends on the workload.
+3. **Swap back:** `deployment "vllm" successfully rolled out` after the annotation is removed.
+4. **Radix sketch:** `prefix tokens reused: …/… = 90%` or close to it.
+
+**If something's off:** SGLang pod `CreateContainerConfigError` → the base Deployment needs Secret `hf-token` (not optional there); sync it from Vault (Chapter 06 Task 5.1). CrashLoop with an unknown model or parser → the `spark` image predates it (§7).
+
+#### Run it
 
 Park vLLM so each engine has the GB10 alone, then point the 02 SGLang Deployment at Qwen3-8B:
 
@@ -382,7 +508,7 @@ kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/nul
 python3 ../../02-Kubernetes/lab/scripts/ttft_probe.py --url http://localhost:8000 --model qwen3-8b -n 10
 ```
 
-Expected: both engines show a large TTFT gap between shared-prefix and unique-prefix requests (prefix caching works in both). Note which engine is faster on each; on this GB10 the difference is workload-specific — record it rather than assuming. `max_total_num_tokens` in the SGLang log is its KV capacity, comparable with vLLM's `GPU KV cache size`.
+Note which engine is faster on each; record it rather than assuming. `max_total_num_tokens` in the SGLang log is its KV capacity, comparable with vLLM's `GPU KV cache size`.
 
 How RadixAttention differs from vLLM's block hashing: SGLang keeps every cached prefix in a radix tree whose edges are token sequences. Matching walks the tree token by token, a new branch splits an edge, running requests pin their path, and unreferenced leaves are evicted least-recently-used first. The data structure in 40 lines:
 
@@ -423,9 +549,25 @@ print(f"prefix tokens reused: {hit}/{total} = {hit/total:.0%}")
 PY
 ```
 
-Expected: about 90 % of prompt tokens reused — the agent pattern (same system prompt and tool schemas, short new turns) that Chapter 10 builds on.
+About 90 % of prompt tokens are reused: the agent pattern (same system prompt and tool schemas, short new turns) that Chapter 10 builds on.
 
 ### Task 7 · Benchmark the catalog's main models
+
+#### What this lab does (Job `vllm-bench` from `02-Kubernetes/lab/manifests/root-llms/90-serving/vllm/vllm-bench.yaml`)
+
+- **Job in `llm-serving`:** runs `vllm bench serve` against `svc/vllm` with 128 random prompts (1,024 tokens in, 256 out) at concurrency 1, 8 and 32. `sed` swaps in the served model name and tokenizer.
+- **Small footprint:** 500m CPU, 1–1.5 Gi memory, no GPU; it reads the tokenizer from `model-cache` read-only. Its image is the 02 base vLLM image (`25.09-py3`), which the node may need to pull.
+- **You repeat it** for each model you serve as the main model.
+
+#### What to look for
+
+1. **Job log:** three `=== max-concurrency` blocks, each with `Successful requests: 128`, output token throughput, and TTFT / TPOT / ITL / E2EL percentiles.
+2. **Shape:** output tok/s rises from c = 1 to c = 32; TTFT p99 rises with it.
+3. **The table below filled** for at least two models. At c = 1 the 3B-active MoE models decode faster per stream than the dense 8B.
+
+**If something's off:** `Successful requests` below 128 → the served name in `--model` doesn't match the overlay (`sed` expressions). The Job already exists → delete it first (the first command does).
+
+#### Run it
 
 Use 02's benchmark Job with the model swapped in (it runs vLLM's own `vllm bench serve` client against `svc/vllm`):
 

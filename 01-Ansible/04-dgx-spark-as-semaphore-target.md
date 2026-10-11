@@ -113,17 +113,27 @@ No `pong`? Then the Spark doesn't take your key as `dgxadmin` on 192.168.0.100 y
 
 ## 3. Make dgx-spark-1 trust vault01 (on your MacBook)
 
-**Why:** this is Chapter 01 §5 for the Spark, as a playbook instead of by hand. `04.1-semaphore-target.yml`:
-
-- creates `svc-ansible` without a password;
-- gives it NOPASSWD sudo (checked with `visudo -c` before it lands);
-- writes vault01's CA public key to `/etc/ssh/trusted-user-ca-keys.pem`;
-- adds `/etc/ssh/sshd_config.d/10-vault-ca.conf`, which trusts the CA and allows `svc-ansible` only key or certificate logins (checked with `sshd -t`);
-- reloads sshd.
-
-Your `dgxadmin` login is untouched, so you can't lock yourself out.
+**Why:** this is Chapter 01 §5 for the Spark, as a playbook instead of by hand. Your `dgxadmin` login is untouched, so you can't lock yourself out.
 
 ### 3.1 Run it
+
+#### What this lab does (playbook `04.1-semaphore-target.yml`, from the MacBook)
+
+- **On localhost:** reads vault01's SSH CA public key from `https://192.168.0.211:8200/v1/ssh-client-signer/public_key` (a public endpoint, no token) and checks it is one line starting with `ssh-`. Play 1 is skipped, because the MacBook has no `vault_role_id`.
+- **Account:** creates `svc-ansible` on the Spark with no password, and gives it NOPASSWD sudo in `/etc/sudoers.d/90-svc-ansible` (checked with `visudo -cf` before it lands).
+- **CA trust:** writes the CA key to `/etc/ssh/trusted-user-ca-keys.pem` and adds `/etc/ssh/sshd_config.d/10-vault-ca.conf`, which trusts the CA and allows `svc-ansible` only key or certificate logins (checked with `sshd -t`). It also removes the old `50-vault-ca.conf` drop-in if one is there.
+- **sshd:** reloaded (not restarted) when one of those files changed, then the play reads `sshd -T` to prove the setting is live.
+
+#### What to look for
+
+1. **Command exit:** recap `failed=0`. A first run shows `changed` on the account, the sudoers file, the CA file and `10-vault-ca.conf`, plus the *Reload sshd* handler. A re-run shows `changed=0` on `dgx-spark-1`.
+2. **"Check sshd loaded the CA"** is `ok`. It fails the play if sshd didn't pick up `TrustedUserCAKeys`.
+3. **§3.2 below:** the SHA256 fingerprint on the Spark matches vault01's.
+4. **§3.3 below:** the CA test from vault01 prints `dgx-spark-1` and `root`.
+
+**If something's off:** *Read the CA public key* fails with `certificate verify failed` → `.cache/vault-ca.crt` is missing (§2). It fails with `Vault is sealed` → unseal vault01 (§2). `Missing sudo password` → add `-K`. More in §13.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
@@ -161,6 +171,31 @@ Expected: `dgx-spark-1` and `root`. `01-Ansible/lab/tools/vault-ssh-cert.sh` doe
 ---
 
 ## 4. Give Semaphore the lab's tools and a place to keep state (on sema01)
+
+#### What this lab does (files `lab/semaphore/`, built on sema01)
+
+- **Image:** builds `semaphore-spark-lab:local` from the stock `semaphoreui/semaphore` image plus `kubectl` v1.36.5, `helm` v3.18.3, `jq`, `rsync`, the Python libraries in `requirements-semaphore.txt` and the collections in `lab/requirements.yml`.
+- **State folder:** creates `/opt/spark-lab/cache` on sema01 (owner uid 1001, mode 0700) and mounts it in the container as `/var/lib/spark-lab/cache`.
+- **Settings:** sets `ANSIBLE_CONFIG`, `SPARK_LAB_CACHE`, the fact-cache and log paths, and forwards them into every task through `SEMAPHORE_FORWARDED_ENV_VARS`.
+- **What it doesn't touch:** PostgreSQL, the Chapter 01 project `lab`, its keys and its task history. Only the `semaphore` container is recreated.
+
+#### What to look for
+
+1. **`docker compose build semaphore`** ends without an error (a few minutes), and `docker compose up -d` reports the `semaphore` container as recreated.
+2. **Verify 4 below:**
+
+   | Check | Healthy value |
+   |---|---|
+   | `docker compose ps` | `postgres` and `semaphore` Up; the semaphore image is `semaphore-spark-lab:local` |
+   | `kubectl version --client` | `Client Version: v1.36.5` |
+   | `helm version --short` | `v3.18.x` |
+   | `ansible-galaxy collection list kubernetes.core` | 5.x or newer |
+   | `echo $SPARK_LAB_CACHE` + `touch` | `/var/lib/spark-lab/cache`, then `writable` |
+   | `echo $SEMAPHORE_FORWARDED_ENV_VARS` | a list that includes `ANSIBLE_CONFIG` and `SPARK_LAB_CACHE` |
+
+**If something's off:** `touch` fails → the host folder isn't owned by uid 1001 (repeat the `install -d` line). The build can't find a file → the repository isn't at `~/technical-depth` on sema01, which the override's build context expects. More in §13.
+
+#### Run it
 
 **Why:** two things differ from the Ubuntu targets.
 
@@ -238,6 +273,27 @@ The inventory file comes with its `group_vars/` and `host_vars/`, so addresses, 
 **One Spark or two:** `dgx-spark-2` is commented out in the inventory, so the templates need no limit. When dgx-spark-2 joins, uncomment its lines in `hosts.yml` (groups `spark`, `k8s_workers`, `nfs_client`) and push. If you ever add a `--limit` to a template, include `localhost`: play 1 and all the Kubernetes plays run there.
 
 ### 5.6 First template: `04.2 Ping`
+
+#### What this lab does (template `04.2 Ping`)
+
+- **Play 1, in the Semaphore container on sema01:** checks that the lab's `ansible.cfg` is in use, creates the key `/tmp/lab_ssh/id_ed25519` once, logs in to vault01 with the AppRole from `vault-approle`, and saves a 15-minute certificate for `svc-ansible` next to the key. The kv read is skipped while `vault_lab_secrets_enabled` is `false`.
+- **Play 2, on dgx-spark-1:** logs in as `svc-ansible` with that certificate, becomes root, gathers facts, runs `ping` (SSH plus Python, not ICMP), and prints one line about the machine.
+- **What it changes:** nothing on the Spark. It is the first time sema01, vault01 and the Spark work together.
+
+#### What to look for
+
+1. **Semaphore run:** two plays, `failed=0`. `localhost` shows `changed` on every run, because a new certificate is saved each time; that is expected. `dgx-spark-1` shows `changed=0`.
+2. **The "Show what we are talking to" line** (§6.1 explains it):
+   ```
+   dgx-spark-1 aarch64 20 cores 121.7 GiB Ubuntu 24.04 kernel 6.x-…-nvidia
+   ```
+   `aarch64`, `20 cores` and about 121.7 GiB are fixed for a Spark; the kernel version depends on your DGX OS release.
+3. **No interpreter warning** (`discovered Python interpreter`). If you see one, Semaphore isn't using the lab's `ansible.cfg`.
+4. **The three-system proof** in Verify 5 below: `ED25519-CERT` in the Spark's sshd log, a growing `sign/ansible` count on vault01, and `svc-ansible` as the certificate's principal on sema01.
+
+**If something's off:** first find which play failed. Play 1 → sema01 to vault01 (sealed Vault, wrong `secret_id`, missing `ANSIBLE_CONFIG`). Play 2 `Permission denied (publickey)` → the Spark refused the certificate (§3 not run, or clock skew). The tables in *If the first run of `04.2 Ping` fails* below cover each message; more in §13.
+
+#### Run it
 
 **Semaphore UI:** **Task Templates → New Template**, type *Ansible Playbook*:
 
@@ -384,18 +440,18 @@ ansible-playbook playbooks/04.2-ping.yml -K     # -K prompts for dgxadmin's sudo
 Expected output (trimmed; your exact numbers and kernel will differ):
 
 ```
-ok: [dgx-spark-1] => msg: dgx-spark-1 aarch64 20 cores 119.6 GiB Ubuntu 24.04 kernel 6.x-…-nvidia
+ok: [dgx-spark-1] => msg: dgx-spark-1 aarch64 20 cores 121.7 GiB Ubuntu 24.04 kernel 6.x-…-nvidia
 ```
 
 > The kernel reports about 121.7 GiB (`MemTotal: 127598768 kB` on dgx-spark-1) of the 128 GiB installed: firmware and carve-outs take the rest. The `spark_expected.mem_total_gib_min: 110` guard allows for that.
 
-Ad-hoc commands are how you poke a box without writing a playbook. Semaphore runs playbooks, not ad-hoc commands, so these run **from your MacBook** as `dgxadmin` (no Semaphore variable group → your own key). Name the host instead of the group `spark` while the optional dgx-spark-2 isn't there:
+Ad-hoc commands are how you poke a box without writing a playbook. Semaphore runs playbooks, not ad-hoc commands, so these run **from your MacBook** as `dgxadmin` (no Semaphore variable group → your own key). Name the host instead of the group `spark` while the optional dgx-spark-2 isn't there. `group_vars/spark.yml` sets `ansible_become: true`, so every ad-hoc command against a Spark uses sudo; `-K` asks for dgxadmin's sudo password (without it: `Missing sudo password`):
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
-ansible dgx-spark-1 -m command -a "nvidia-smi --query-gpu=name,driver_version --format=csv"
-ansible dgx-spark-1 -m shell   -a "free -g | head -2"
-ansible dgx-spark-1 -m setup   -a "filter=ansible_processor*"
+ansible dgx-spark-1 -K -m command -a "nvidia-smi --query-gpu=name,driver_version --format=csv"
+ansible dgx-spark-1 -K -m shell   -a "free -g | head -2"
+ansible dgx-spark-1 -K -m setup   -a "filter=ansible_processor*"
 ansible dgx-spark-1 -b -K -m apt -a "name=nvtop state=present"   # -b = become, -K = dgxadmin's sudo password
 ```
 
@@ -591,7 +647,7 @@ print(json.dumps({
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
 ansible-playbook playbooks/04.3-baseline.yml -K --tags facts -v    # break-glass: only the spark_facts role
-ansible dgx-spark-1 -m setup -a "filter=ansible_local" | less      # ad-hoc, from the MacBook
+ansible dgx-spark-1 -K -m setup -a "filter=ansible_local" | less   # ad-hoc, from the MacBook
 ```
 
 Expected (excerpt, example values):
@@ -601,7 +657,7 @@ Expected (excerpt, example values):
    "gpu":  {"present": true, "name": "NVIDIA GB10", "driver_version": "580.82.09",
             "compute_cap": "12.1", "cuda_driver_api": "13.0", ...},
    "cx7":  {"up": ["enP2p1s0f1np1", "enp1s0f1np1"], "ports": {...}},
-   "memory": {"total_gib": 119.6, "available_gib": 112.3, ...},
+   "memory": {"total_gib": 121.7, "available_gib": 112.3, ...},
    "dgx_release": {"present": true, ...}}}
 ```
 
@@ -614,6 +670,37 @@ Every later role reads these instead of re-running `nvidia-smi`. A typical use i
 ```
 
 ### 6.3 OS baseline
+
+#### What this lab does (template `04.3 Baseline`)
+
+- **Custom fact (role `spark_facts`, tag `facts`):** installs `/etc/ansible/facts.d/spark.fact` (§6.2) and re-reads facts, so `ansible_local.spark` describes the GPU, CUDA, CX-7, memory and DGX OS release.
+- **Packages:** installs the list in `spark_base_packages` (`group_vars/spark.yml`: chrony, jq, htop, nvtop, the RDMA tools, …) and puts an apt hold on every installed NVIDIA driver package, so an `apt upgrade` can't move the driver.
+- **Kernel:** writes the lab's sysctls to `/etc/sysctl.d/90-spark.conf` and loads them, and adds `/etc/modules-load.d/spark-rdma.conf` (`ib_uverbs`, `rdma_ucm`, `rpcrdma`).
+- **SSH and users:** adds `dgxadmin` to the `sudo` and `docker` groups, installs your key, and writes `/etc/ssh/sshd_config.d/60-spark-hardening.conf` (no root login, TCP forwarding kept for the DGX Dashboard). Password login stays on while `spark_baseline_ssh_disable_passwords` is `false`.
+- **Time and logs:** time zone `America/New_York`, a templated `/etc/chrony/chrony.conf`, and persistent journald capped at 4 GB (`/etc/systemd/journald.conf.d/60-spark.conf`).
+- **Headless:** switches the default and the running target to `multi-user.target`, which stops gdm and the desktop without a reboot.
+
+#### What to look for
+
+1. **Dry run** (`--check --diff`): `failed=0` and a preview of the changes. *Report missing holds as drift* shows `changed` if NVIDIA holds are missing.
+2. **First real run:** `failed=0`, with `changed` on the files above, the holds, the headless switch and the handlers (*Reload sshd*, *Restart chrony*, *Restart journald*). **Second run:** `changed=0` on `dgx-spark-1` (`localhost` still shows the new certificate from play 1).
+3. **The headless "Report" task:**
+   ```
+   default target graphical.target → multi-user.target; MemAvailable … GiB → … GiB
+   ```
+   On a re-run the first part reads `multi-user.target → multi-user.target`. The second number is usually one to a few GiB higher on the first run.
+4. **Verify 6 in §6.5:**
+
+   | Check | Healthy value |
+   |---|---|
+   | `apt-mark showhold \| grep -c nvidia` | above 0 |
+   | `sysctl -n vm.max_map_count` | `1048576` |
+   | `sshd -T` | `permitrootlogin no`, `allowtcpforwarding yes` |
+   | `systemctl get-default` / `is-active gdm` | `multi-user.target` / `inactive` |
+   | `ansible_local.spark.gpu` | `present: true`, `name: NVIDIA GB10`, `compute_cap: "12.1"`, driver 580.x |
+   | `ansible_local.spark.memory.total_gib` | about 121.7; `available_gib` about 119 on an idle Spark |
+
+**If something's off:** `Could not get lock /var/lib/dpkg/lock-frontend` → unattended-upgrades is running; the package task retries 3 times, otherwise wait and re-run. The second run isn't `changed=0` → run it with `--diff -v` and find the task. `ansible_local` is empty → the fact script printed something that isn't JSON (`sudo /etc/ansible/facts.d/spark.fact | jq .`). More in §13.
 
 The `spark_baseline` role installs the tooling you'll need in every later chapter, pins the NVIDIA driver stack against accidental upgrades, applies sysctl, SSH and time settings, and makes DGX OS headless.
 
@@ -748,6 +835,8 @@ free -g                        # compare "available" with the Report line
 
 To undo it, set `spark_baseline_headless: false` (for example as a template extra variable) so the role leaves the target alone, and switch back on the Spark: `sudo systemctl set-default graphical.target && sudo reboot`. The variable alone doesn't restore the desktop; the role never switches back on its own.
 
+#### Run it
+
 **Semaphore UI:** run `04.3 Baseline` with *Dry run* ticked (`--check --diff`) for the preview, then run it for real, then run it again. Break-glass from the MacBook:
 
 ```bash
@@ -775,11 +864,11 @@ ansible-playbook playbooks/04.3-baseline.yml -K                  # again → cha
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
-ansible dgx-spark-1 -m command -a "test -x /etc/ansible/facts.d/spark.fact"
+ansible dgx-spark-1 -K -m command -a "test -x /etc/ansible/facts.d/spark.fact"
 ansible dgx-spark-1 -m command -a "apt-mark showhold" -b -K | grep -c nvidia     # > 0
 ansible dgx-spark-1 -m command -a "sysctl -n vm.max_map_count" -b -K             # 1048576
 ansible dgx-spark-1 -m command -a "sshd -T" -b -K | grep -E 'permitrootlogin|allowtcpforwarding'
-ansible dgx-spark-1 -m command -a "systemctl get-default"                         # multi-user.target
+ansible dgx-spark-1 -K -m command -a "systemctl get-default"                      # multi-user.target
 ```
 
 - [ ] `04.2 Ping` reports `dgx-spark-1 aarch64 20 cores … Ubuntu 24.04` with `failed=0`
@@ -798,6 +887,30 @@ ansible dgx-spark-1 -m command -a "systemctl get-default"                       
 
 ## 7. Lab secrets in vault01 (once; vault01 + MacBook)
 
+#### What this lab does (playbook `17.1-vault.yml` from the MacBook, then template `18.1 Vault integration`)
+
+- **Checks what Chapter 01 built and never rewrites it:** the signing role `ssh-client-signer/roles/ansible` must allow `svc-ansible`, and the AppRole `semaphore` must exist.
+- **Adds the lab's secret store on vault01:** a KV v2 engine at `kv/`, the read-only policy `spark-lab-read` (`kv/data/spark-lab/*`), attached to AppRole `semaphore` next to `semaphore-ssh`, and a placeholder `kv/spark-lab/ngc` with `api_key=REPLACE_ME`. The placeholder is written only if the secret doesn't exist, so a re-run never overwrites your real key.
+- **Your NGC key:** you store it by hand on vault01 (Task 7.3), then switch `vault_lab_secrets_enabled` to `true` in Semaphore (Task 7.4).
+- **`18.1 Vault integration`:** play 1 now also reads `kv/spark-lab/*`, the play reports what it got without printing values, and the `container_runtime` role (Chapter 11) runs on the Spark with that key: Docker and NVIDIA toolkit settings, the CDI spec, and the `nvcr.io` login. Its smoke tests are off.
+- **What it doesn't touch:** the SSH CA, the signing role, the AppRole's other settings and the audit log stay as Chapter 01 built them. The admin token is never written to disk.
+
+#### What to look for
+
+1. **`17.1-vault.yml`:** recap `failed=0` on `localhost`. A first run shows `changed` on *Mount KV v2*, *Write the lab policy*, *Attach the lab policy* and *Seed placeholder secrets*. A re-run shows `changed=0`.
+2. **Verify 7 on vault01** (at the end of this section): `token_policies` lists `[semaphore-ssh spark-lab-read]`, and the stored key starts with `nvapi-`, not `REPLAC`.
+3. **`18.1 Vault integration` log**, task *What we got (no secret values)*:
+   ```
+   Lab secrets read from kv/spark-lab/: ['ngc']
+   NGC key present: True
+   ```
+   `NGC key present: False` means the value is still `REPLACE_ME`. On the Spark, *Log in to nvcr.io* shows `ok` or `changed`, never `skipping`. *Report container GPU visibility* prints `skipped` on both lines: the smoke tests are off in 18.1.
+4. **Other `changed` tasks in 18.1:** if `11.1 Containers` hasn't run yet, expect `changed` on `daemon.json` and the CDI spec. That is the Chapter 11 runtime being set up, not a problem.
+
+**If something's off:** `export VAULT_TOKEN=… and run again` → the token isn't in this shell (Task 7.2). `permission denied` (403) → you used a non-root token. 18.1 stops with *Run it from Semaphore …* → it ran from the MacBook, or `vault_lab_secrets_enabled` is still `false`. The table *If a command fails* below has the rest; more in §13.
+
+#### Run it
+
 **What this section does, in one sentence:** it gives vault01 a safe place for the lab's passwords and keys (a key-value store called `kv/`), lets Semaphore *read* that place, and puts your NVIDIA NGC API key in it.
 
 **Why:** some lab playbooks need secrets, for example the NGC API key that `11.1-containers.yml` uses to pull NVIDIA images. They belong in vault01, next to the SSH CA, not in the repository. Until now Semaphore's AppRole can only *sign SSH keys*; after this section it can also *read* `kv/spark-lab/*`. Changing what the AppRole may do needs an **admin** token (the root token from Chapter 01 §3.4), which Semaphore must never hold, so you do it by hand, once.
@@ -806,13 +919,7 @@ ansible dgx-spark-1 -m command -a "systemctl get-default"                       
 
 **What you need:** vault01 unsealed (Chapter 01 §3.4), its root token (printed by `vault operator init` in Chapter 01), your NGC personal key (`nvapi-…`, Task 7.0), and `.cache/vault-ca.crt` in the lab folder (§2).
 
-[`17.1-vault.yml`](lab/playbooks/17.1-vault.yml) (role [`vault_config`](lab/roles/vault_config/)) runs on the MacBook but only talks to vault01's HTTPS API (`ansible.builtin.uri`); it doesn't need the `vault` program on the MacBook. It:
-
-- **checks** what Chapter 01 built (the signing role allows `svc-ansible`; AppRole `semaphore` exists) and never rewrites it;
-- mounts a KV v2 engine at `kv/`;
-- writes the read-only policy `spark-lab-read` (`kv/data/spark-lab/*`);
-- adds it to AppRole `semaphore`, so its tokens carry `semaphore-ssh` **and** `spark-lab-read`;
-- seeds a placeholder `kv/spark-lab/ngc` (value `REPLACE_ME`).
+[`17.1-vault.yml`](lab/playbooks/17.1-vault.yml) (role [`vault_config`](lab/roles/vault_config/)) runs on the MacBook but only talks to vault01's HTTPS API (`ansible.builtin.uri`); it doesn't need the `vault` program on the MacBook. What it adds is listed under *What this lab does* above; afterwards the AppRole's tokens carry `semaphore-ssh` **and** `spark-lab-read`.
 
 **Task 7.0 · Create your NGC key (browser, once).** NGC is NVIDIA's container registry (`nvcr.io`); an account is free.
 
@@ -1143,7 +1250,7 @@ A diagnostic sequence worth memorising (MacBook):
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
-ansible dgx-spark-1 -m ping -vvv 2>&1 | grep -E 'ESTABLISH|EXEC|SSH:'   # is it SSH, sudo or Python?
+ansible dgx-spark-1 -K -m ping -vvv 2>&1 | grep -E 'ESTABLISH|EXEC|SSH:'   # is it SSH, sudo or Python?
 ansible-playbook playbooks/04.3-baseline.yml --list-tasks --list-tags
 ansible-playbook playbooks/04.3-baseline.yml --start-at-task "Harden sshd (drop-in, validated before reload)" -K
 ```

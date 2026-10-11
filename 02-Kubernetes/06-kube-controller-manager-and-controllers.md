@@ -154,6 +154,27 @@ The `sudo` lines run on the Spark (`ssh dgxadmin@192.168.0.100`).
 
 ### 5.1 Who is leader, and is it renewing? Three controller-managers on one node
 
+#### What this lab does (read-only: Leases, `pgrep`, `crictl`, `/proc/<pid>/cmdline`)
+
+- Shows the root's leader Leases for `kube-controller-manager` and `kube-scheduler` and watches `renewTime` move.
+- On the Spark, finds every `kube-controller-manager` process (the root's and one per vCluster) and prints the flags that matter: `--controllers`, `--leader-elect`, `--kubeconfig`, node CIDR allocation.
+- Lists the Leases inside dev-lab.
+- **Read-only:** nothing is changed.
+
+#### What to look for
+
+| Check | Healthy value |
+|---|---|
+| Lease `HOLDER` (root) | `dgx-spark-1_<uuid>` for both |
+| `renewTime` in the `watch` | moves forward every ~2 s |
+| `pgrep -a kube-controller` | three processes |
+| root controller-manager flags | `--allocate-node-cidrs=true`, `--cluster-cidr=10.42.0.0/16`, leader election on |
+| vCluster controller-manager flags | `--kubeconfig` pointing at its own API server; node-facing controllers switched off in `--controllers=` |
+
+**If something's off:** `renewTime` stuck for more than 15 s → the root controller-manager is down or starved; `sudo crictl ps -a --name kube-controller-manager`. Only one process → a vCluster control-plane pod isn't running (`kubectl --context spark-root -n vc-dev-lab get pods`). More in §7.
+
+#### Run it
+
 ```bash
 kubectl --context spark-root -n kube-system get lease kube-controller-manager kube-scheduler \
   -o custom-columns=NAME:.metadata.name,HOLDER:.spec.holderIdentity,RENEWED:.spec.renewTime,DURATION:.spec.leaseDurationSeconds
@@ -179,6 +200,25 @@ kubectl --context dev-lab -n kube-system get lease
 What to look for: the root's has `--allocate-node-cidrs=true --cluster-cidr=10.42.0.0/16` (node IPAM, Chapter 08) and leader election on. The vClusters' point their `--kubeconfig` at their own API server, and their `--controllers=` list should switch off the node-facing controllers (look for `-nodelifecycle`, `-nodeipam`, `-attachdetach` and the persistent-volume ones): a vCluster has no real nodes or volumes of its own — those jobs belong to the root. Whether there's a controller-manager Lease inside dev-lab tells you whether leader election is on for a single replica; explain what you see from the `--leader-elect` flag.
 
 ### 5.2 Watch the Deployment → ReplicaSet → Pod chain react (in dev-lab)
+
+#### What this lab does (manifests `lab/manifests/dev-lab/30-networking`, then edits of `deploy/echo`)
+
+- **Applies** the networking tools in dev-lab's `lab-tools`, among them Deployment `echo` with 3 replicas (unchanged if Chapter 04 already did it).
+- **Deletes one echo pod,** so dev-lab's ReplicaSet controller creates a replacement.
+- **Rolls out a new image** (`agnhost:2.52`), waits for it, lists the ReplicaSets, then `rollout undo` back to the previous one.
+- **Looks at the root:** no Deployment or ReplicaSet for echo in `vc-dev-lab`, only bare host pods.
+- Everything happens in dev-lab; the root only sees pods come and go. Leaves echo at its original image.
+
+#### What to look for
+
+1. **Events (background watch):** `SuccessfulCreate` from `replicaset-controller` within about 1 s of the delete, then `Scheduled`, `Pulled`, `Created`, `Started`, and `ScalingReplicaSet` pairs from `deployment-controller` during the rollout.
+2. **ReplicaSets after the rollout:** two for `app=echo`; the old one at `0` desired, kept for rollback.
+3. **`rollout undo`** prints `deployment.apps/echo rolled back`.
+4. **Root view:** `get deploy,rs` in `vc-dev-lab` lists nothing for echo; the host pods have names ending `-x-lab-tools-x-dev-lab` and no ReplicaSet owner.
+
+**If something's off:** the replacement pod stays `Pending` with no scheduler events → the root refused it (dev-lab's budget, Chapter 04 §6.4). More in §7.
+
+#### Run it
 
 ```bash
 kubectl --context dev-lab apply -k manifests/dev-lab/30-networking     # echo Deployment (3 replicas) in lab-tools
@@ -206,6 +246,30 @@ kubectl --context spark-root -n vc-dev-lab get pods -o custom-columns=HOST:.meta
 The host pods have no ReplicaSet owner. (The `OWNER` column shows what vCluster set instead, if anything — typically an object of the vCluster itself, so that deleting the vCluster lets the root's garbage collector clean its pods up.)
 
 ### 5.3 Quota controller: `status.used` is written by a controller, not admission — twice
+
+#### What this lab does (manifest `lab/manifests/dev-lab/50-workloads/tokenizer-indexed-job.yaml`, then a short stop of the root's controller-manager)
+
+- **Indexed Job** `tenant-alpha/tokenize-shards` in dev-lab: 8 shards, 2 pods at a time, each 200m CPU and 256–512 Mi (`python:3.12-slim`). Each pod makes 20 000 short documents, counts their tokens, sleeps 5 s and prints one line. The Job is deleted automatically an hour after it finishes.
+- **Quota readings** from dev-lab's `tenant-budget` and the root's `vcluster-budget` while it runs.
+- **Controller outage (risky step):** moves `/etc/kubernetes/manifests/kube-controller-manager.yaml` to `/etc/kubernetes/`, so the kubelet stops the root's controller-manager. While it's down you scale echo in dev-lab and delete the `slice-ledger` pod on the root. Moving the file back restarts it. Run the `sudo` lines on the Spark.
+
+#### What to look for
+
+1. **While the Job runs:** dev-lab's `tenant-budget` shows `requests.cpu 400m/500m`, `limits.cpu 400m/500m`, `pods 2/10`; the root's `vcluster-budget` counts the same pods again, plus the control plane.
+2. **During the outage:**
+
+   | Check | Healthy value |
+   |---|---|
+   | echo in dev-lab after `scale --replicas=1` | 1 pod: dev-lab's controllers keep working |
+   | root `vcluster-budget` `requests.cpu` used | unchanged after the scale-down |
+   | `slice-ledger` pod on the root | gone and **not** replaced |
+
+3. **After the manifest is back** (about 30 s): the root's `requests.cpu` used drops and `slice-ledger` is back. `kubectl --context spark-root -n kube-system get pods | grep controller-manager` shows it `Running`.
+4. **The Job:** `completedIndexes` reads `0-7`, and each pod logs `shard=<i> docs=20000 tokens=100000 sha=…`.
+
+**If something's off:** the controller-manager doesn't come back → check that the file is in `/etc/kubernetes/manifests/` again and read `sudo crictl logs` of its container. Never leave a copy as a second file in `manifests/`: the kubelet runs every file there. More in §7 (first row).
+
+#### Run it
 
 ```bash
 kubectl --context dev-lab -n tenant-alpha describe resourcequota tenant-budget
@@ -248,12 +312,27 @@ kubectl --context dev-lab -n tenant-alpha get job tokenize-shards -o jsonpath='{
 ```
 
 ```text
-[pod/tokenize-shards-0-xxxxx/tok] shard=0 docs=20000 tokens=120000 sha=…
+[pod/tokenize-shards-0-xxxxx/tok] shard=0 docs=20000 tokens=100000 sha=…
 …
 0-7
 ```
 
 ### 5.4 Garbage collection: cascade vs orphan
+
+#### What this lab does (`delete --cascade=orphan`, re-apply `dev-lab/30-networking`)
+
+- Prints the owner of echo's ReplicaSet (the Deployment), deletes Deployment `echo` **without** its children, then re-applies the same manifest so a new Deployment adopts the orphaned ReplicaSet.
+- All in dev-lab. The echo pods keep running the whole time; the root sees no change.
+
+#### What to look for
+
+1. **Before:** the ReplicaSet's `ownerReferences` names `kind: Deployment`, `name: echo`, `controller: true`.
+2. **After the orphan delete:** `get rs,pod -l app=echo` still lists the ReplicaSet and 3 pods.
+3. **After re-apply:** the last command prints `echo`, the new Deployment now owns the old ReplicaSet, and no new pods were created.
+
+**If something's off:** a second ReplicaSet appears instead of an adoption → the pod template changed between the delete and the re-apply (for example the §5.2 image change wasn't undone), so the hash no longer matches.
+
+#### Run it
 
 ```bash
 kubectl --context dev-lab -n lab-tools get rs -l app=echo -o jsonpath='{.items[0].metadata.ownerReferences}' | jq
@@ -266,6 +345,25 @@ kubectl --context dev-lab -n lab-tools get rs -l app=echo -o jsonpath='{.items[0
 Adoption is a controller feature, and a common surprise when two Deployments share a selector. All of it happened in dev-lab's database with dev-lab's garbage collector; the root saw only that the pods kept running.
 
 ### 5.5 Run your own controller (on the root)
+
+#### What this lab does (manifests `lab/manifests/root/45-controller`, `root/70-gpu`; `breakfix.sh inject 02`)
+
+- **`slice-ledger`:** Deployment in the root's `platform-tools` running `slice_ledger.py` on `python:3.12-slim`. It lists and watches every pod on the root, counts `nvidia.com/gpu` per node and per namespace, and writes ConfigMap `platform-tools/gpu-slice-ledger`. Resync every 60 s, 15 slices per node. Its RBAC: read pods everywhere, create ConfigMaps, update only `gpu-slice-ledger`.
+- **GPU holders to count:** `gemm-contention` (NGC PyTorch GEMM loop, 1 slice each) scaled to 2 on the root, and break/fix 02 in dev-lab (6 pods, of which the root admits 2).
+- **Robustness tests:** a 130 s quiet period, a hand-edit of the ConfigMap, and an RBAC check. At the end you scale `gemm-contention` to 0 and reset break/fix 02.
+- The first `gemm-contention` pod pulls the NGC PyTorch image (about 10 GB).
+
+#### What to look for
+
+1. **Log:** `relist: N GPU pods, resourceVersion=…`, then `reconciled: dgx-spark-1=X/15` lines as pods start. X goes up by 2 for `gemm-contention` and by 2 for break/fix 02, on top of whatever the model servers already hold.
+2. **Ledger JSON:** `"capacity": 15`, `used` equal to X, holders listing two `platform-tools/gemm-contention-…` pods and two `vc-dev-lab/bf02-gpu-…-x-lab-tools-x-dev-lab` pods with their dev-lab names; `by-namespace` with `"platform-tools": 2, "vc-dev-lab": 2`. The 4 `Pending` bf02 pods are not listed.
+3. **Idempotency:** `grep -c reconciled` after the quiet period prints `0`.
+4. **Least privilege:** `auth can-i update configmaps/other …` prints `no`.
+5. **Tamper test:** after the scale to 1, the ledger changes, so the controller rewrites the ConfigMap and `jq .used` prints a number again, one lower than before. Without that change the word `tampered` would have stayed: that's the bug the exercise below asks you to fix.
+
+**If something's off:** the pod crash-loops with `403` in its log → the RBAC objects in `slice-ledger.yaml` weren't applied. No `reconciled` lines at all → no GPU pods are running yet. More in §7.
+
+#### Run it
 
 ```bash
 kubectl --context spark-root apply -k manifests/root/45-controller     # already there if you ran scripts/apply-lab.sh root
@@ -318,6 +416,23 @@ scripts/breakfix.sh reset 02; kill %1
 > **Exercise:** the tamper test reveals a real bug. The controller compares against *its own last write*, not the live object, so a tamper survives until the next change. Fix it by reading the ConfigMap in `reconcile()` and comparing with that. This is exactly why client-go controllers compare against the informer cache of the object they own.
 
 ### 5.6 The syncer is a controller too
+
+#### What this lab does (deletes one echo host pod at the root; reads `managedFields` and APF metrics)
+
+- Watches echo's pods in dev-lab, then deletes one echo **host copy** in the root's `vc-dev-lab`.
+- Lists the field managers of the echo host pods and reads the root's APF counter for the lane `spark-vcluster-syncers`.
+- Nothing is reconfigured. echo ends up with 3 pods again, all new copies made by the syncer.
+
+#### What to look for
+
+1. **The watch in dev-lab:** the matching virtual pod goes `Terminating`, and a new echo pod appears and turns `Running` within seconds.
+2. **At the root:** a new host pod `echo-…-x-lab-tools-x-dev-lab` replaces the deleted one.
+3. **Managers:** the `uniq -c` output lists two names per host pod: the vCluster syncer and `kubelet`.
+4. **APF:** at least one `apiserver_flowcontrol_dispatched_requests_total{…priority_level="spark-vcluster-syncers"…}` line with a count above 0.
+
+**If something's off:** no replacement in dev-lab → dev-lab's control plane is down (`kubectl --context spark-root -n vc-dev-lab get pods`). No `spark-vcluster-syncers` series → `root/16-apf` isn't applied (Chapter 03 §5 Task 2). More in §7.
+
+#### Run it
 
 Everything in §2 applies to vCluster's syncer: it has informers on two API servers, reconciles keys, and writes only differences. Make it reconcile:
 

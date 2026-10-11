@@ -272,6 +272,37 @@ exit $rc
 
 ### 4.1 Detect
 
+#### What this lab does (template `26.1 Drift check`, or script `lab/tools/drift-cycle.sh`)
+
+- **Check mode only:** `26.1-drift-check.yml` runs `spark_facts`, `spark_baseline`, `cx7_fabric`, `container_runtime` and `gpu_telemetry` against the Sparks with `check_mode: true` and `diff: true`. It reports what *would* change and changes nothing. The CUDA smoke test and the CX-7 peer pings are turned off for this run.
+- **Drift = `changed`:** every task that would change counts as one drifted task. The roles also report skipped actions (missing NVIDIA holds, a stale CDI spec, a live MTU that differs) as `changed`, so they show up too.
+- **`drift-cycle.sh` adds the reporting:** it reruns the same playbook with the JSON callback and writes, in `.cache/drift/` (or `$SPARK_LAB_CACHE/drift`), a `check-<time>.json`, a markdown report `.md`, a `.hosts` list of drifted hosts, and `spark_config_drift.prom`.
+- **Metric publish:** the script copies `spark_config_drift.prom` to `/var/lib/prometheus/node-exporter/` on the `monitoring` host (dgx-spark-1). That one file is the only thing it writes on a Spark.
+- **Exit code:** `0` clean, `2` drift, `3` failures or unreachable hosts.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`, and the recap's `changed=` count on dgx-spark-1 is the drift count. On a clean lab it is `changed=0`. Semaphore shows the run as successful even with drift, so read that number.
+2. **Script run:** `drift check exit=0` and a report with zero drifted tasks:
+   ```bash
+   # ▶ MacBook · 01-Ansible/lab (venv active)
+   cat "$(ls -t .cache/drift/check-*.md | head -1)"
+   cat .cache/drift/spark_config_drift.prom
+   ```
+
+   | Line / Field | Healthy value |
+   |---|---|
+   | Report row `dgx-spark-1` | `0` drifted tasks, `0` failures |
+   | Report row `localhost` | may appear with `0` and `0` (play 1 runs there); that is normal |
+   | `spark_config_drift_tasks{host="dgx-spark-1"}` | `0` |
+   | `spark_config_drift_failures{host="dgx-spark-1"}` | `0` |
+3. **No `WARN: could not publish drift metrics` line.** If it appears, the report is fine but Grafana won't see it.
+4. **Grafana:** the "Config drift (tasks)" stat on Spark Lab → Overview (Chapter 12) shows `0` for dgx-spark-1 within a minute or so.
+
+**If something's off:** exit `3` with one Spark → dgx-spark-2 is uncommented in `inventory/hosts.yml` and the run tried .101; comment it out or add `-l dgx-spark-1,localhost` to `BECOME_ARGS`. Exit `3` with a sudo error → `BECOME_ARGS` is missing `-K`. Drift on the same task every run → that task is not idempotent. More in §6.
+
+#### Run it
+
 Two ways to run the same check:
 
 - **Semaphore UI:** template **`26.1 Drift check`** (`26.1-drift-check.yml`, check mode built in, CLI args `--limit dgx-spark-1,localhost` while there's one Spark). Play 1 gets the certificate; the host play changes nothing. The task log shows drift as `changed=N` in the recap, and `--diff` shows the lines. This is what runs every night (§4.4).
@@ -285,6 +316,27 @@ cat .cache/drift/check-*.md | tail -20
 ```
 
 ### 4.2 Create drift on purpose, then watch it
+
+#### What this lab does (exercise: hand-made drift + `tools/drift-cycle.sh`)
+
+- **Two manual changes on one Spark:** sets `vm.swappiness` to `60` live and in `/etc/sysctl.d/90-spark.conf` (the inventory wants `10`), and removes the apt hold from one NVIDIA package.
+- **Then a detect-only run** of `drift-cycle.sh`. Nothing is healed yet.
+- **One Spark:** the commands below target dgx-spark-2 (192.168.0.101). With only dgx-spark-1, run the two `ssh` lines against `dgxadmin@192.168.0.100` instead, keep `BECOME_ARGS="-K -l dgx-spark-1,localhost"`, and expect dgx-spark-1 in the report where the example shows dgx-spark-2.
+
+#### What to look for
+
+1. **Exit code:** `exit=2` (drift), not `3`.
+2. **The report** lists the changed Spark with **2** drifted tasks: `Apply sysctl tuning (persisted to /etc/sysctl.d/90-spark.conf)` and `Report missing holds as drift in check mode`. Any other Spark stays at `0`.
+3. **The `.hosts` file** contains only the drifted Spark. This is the `--limit` the heal step uses next:
+   ```bash
+   # ▶ MacBook · 01-Ansible/lab (venv active)
+   cat "$(ls -t .cache/drift/check-*.hosts | head -1)"; echo
+   ```
+4. **Grafana:** the "Config drift (tasks)" stat for that Spark shows `2` and turns orange.
+
+**If something's off:** only one of the two tasks shows up → the hold step found no held NVIDIA package (`apt-mark showhold` is empty), so nothing was unheld. Exit `3` → see §4.1.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
@@ -308,12 +360,51 @@ The Grafana "Config drift (tasks)" stat on the overview dashboard (Chapter 12) t
 
 ### 4.3 Heal (safe tags only) and confirm
 
+#### What this lab does (script `AUTO_HEAL=1 tools/drift-cycle.sh`)
+
+- **Detect first:** the same check as §4.1. The heal runs only when that check exits `2`.
+- **Heal:** runs `04.3-baseline.yml` and `12.1-telemetry.yml` with `--tags baseline,telemetry_node` and `--limit` set to the drifted hosts. This puts `vm.swappiness` back to `10` and re-applies the NVIDIA hold. Fabric, runtime, driver and Kubernetes settings are never touched by this step.
+- **Re-check:** runs the drift check again and writes `recheck-<time>.md`. The script's exit code is the re-check's.
+- **Log:** the heal run's full output goes to `.cache/drift/heal-<time>.log`.
+
+#### What to look for
+
+1. **Printed lines:** `drift check exit=2`, then `auto-heal: tags=baseline,telemetry_node hosts=<the drifted Spark>`, then `post-heal exit=0`, and `exit=0` at the end.
+2. **The re-check report** shows `0` drifted tasks for every host.
+3. **On the Spark:**
+   ```bash
+   # ▶ dgx-spark-1 (ssh dgx-spark-1)
+   sysctl vm.swappiness                  # vm.swappiness = 10
+   apt-mark showhold | grep nvidia       # the package you unheld is back in the list
+   ```
+4. **Grafana:** the drift stat goes back to `0`.
+
+**If something's off:** `post-heal exit=2` → the remaining drift is in a tag that is not healed on purpose (fabric, runtime); read the re-check report and fix it by hand. A failure inside the heal → `.cache/drift/heal-*.log`. More in §6.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
 AUTO_HEAL=1 tools/drift-cycle.sh; echo "exit=$?"     # → heal on dgx-spark-2 only → recheck → 0
 ```
 
 ### 4.4 Schedule it
+
+#### What this lab does (schedule on template `26.1 Drift check`)
+
+- **Semaphore schedule:** adds a cron entry (for example `30 2 * * *`) to the existing template. Each night it runs the same check-mode playbook as §4.1, as `svc-ansible` with a fresh 15-minute certificate. Nothing on the Sparks changes.
+- **No healing:** the schedule only detects. Healing stays the tag-limited script step (§4.3) or a human click.
+- **Alternatives:** a systemd timer on a Linux admin box that runs `drift-cycle.sh` (with `AUTO_HEAL=1`), or the AWX approval workflow from Chapter 24.
+
+#### What to look for
+
+1. **Template → Schedules** lists your cron entry, and the template's task history gets a new run after the scheduled time.
+2. **Each scheduled run:** `failed=0` and `changed=0` on a clean lab. A scheduled run with `changed=N` is drift: Semaphore still marks it as successful, so read the recap.
+3. **A failed scheduled run** (red) means a task failure or an unreachable Spark, not drift. Your project alert (Chapter 04 §10) should fire for it.
+
+**If something's off:** no run at the expected time → Semaphore evaluates the cron expression in its own time zone (UTC unless you configured one), so `30 2 * * *` may fire at a different local hour. More in §6.
+
+#### Run it
 
 **In Semaphore (this lab):** open the template `26.1 Drift check` → **Schedules** → add a cron expression such as `30 2 * * *` (nightly). It needs no extra permissions: it runs in check mode as `svc-ansible` with a fresh certificate each night. Semaphore marks the run **failed** only on task failures or unreachable hosts, so add a project alert (Chapter 04 §10) and read the recap's `changed=` count for drift. If you want drift itself to page you, keep the metric path: run `tools/drift-cycle.sh` and alert on `spark_config_drift_tasks > 0` (§5). Never schedule `04.3 Baseline` as an "auto-heal" template: healing stays the guarded, tag-limited step below, or a human click.
 

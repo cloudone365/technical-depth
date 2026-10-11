@@ -223,6 +223,21 @@ vLLM prints the real KV figure at start-up (`GPU KV cache size: … tokens`); co
 
 ## 5. Lab
 
+#### What this lab does (preflight and parking)
+
+- **Read-only status:** the catalog, the Deployments and pods in `llm-serving`, and how much of `serving-budget` (90 Gi) is used.
+- **Parking:** the KEDA pause annotation on ScaledObject `vllm` scales the main engine to 0 and keeps it there until you remove the annotation. Side engines are removed with `--stop-side`.
+
+#### What to look for
+
+1. **Before each task:** at most one chat engine with replicas above 0, plus the always-on pods (mock LLM, Qdrant, the 03 apps).
+2. **`serving-budget`:** used `requests.memory` leaves room for the next engine (for example 40 Gi for the AWQ 32B, 56 Gi for the FP8 coder).
+3. **After the pause annotation:** `kubectl --context spark-root -n llm-serving get deploy vllm` shows `0/0`.
+
+**If something's off:** `vllm` comes back after `kubectl scale` → KEDA owns it; use the annotation. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
@@ -242,6 +257,19 @@ kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscali
 
 ### Task 5.1 — Compute your ceilings
 
+#### What this lab does (inline Python)
+
+- **Computes** the decode-speed ceiling per stream for six weight sizes: 273 GB/s ÷ bytes of weights read per token. MacBook CPU only.
+
+#### What to look for
+
+1. **Six lines** of `≤ … tok/s per stream`, from 14.1 for `qwen2.5-32b AWQ` and 16.6 for `qwen3-8b BF16` up to 78.0 for `coder-30b-a3b FP8 (active)`.
+2. **Keep the output:** §6 divides your measured speeds by these numbers.
+
+**If something's off:** nothing to break; a value far from these means an edited row.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · any folder
 python3 - <<'PY'
@@ -256,6 +284,28 @@ PY
 Keep the output; §6 compares it with what you measure.
 
 ### Task 5.2 — A BF16 baseline and a pre-quantized AWQ model
+
+#### What this lab does (`serve-model.sh qwen3-8b`, Job `vllm-bench`, 03 overlay `qwen2.5-32b-awq`)
+
+- **Baseline:** serves Qwen3-8B in BF16 as the main model, then runs the 02 benchmark Job (`vllm bench serve`, 128 prompts at concurrency 1, 8, 32) against `svc/vllm`.
+- **AWQ:** applies 03's overlay `03-DeepSeek/lab/k8s/models/qwen2.5-32b-awq` as the main `deploy/vllm`: Qwen2.5-32B-Instruct-AWQ, util 0.30, 40 Gi, ~19 GB download, on the 02 base image (vLLM 0.10).
+- **Side effect:** 03's overlay also applies 02's placeholder `hf-token` Secret (`replace-me`). Re-sync the real token from Vault afterwards (Chapter 06 Task 5.1).
+
+#### What to look for
+
+1. **Bench Job log:** three `=== max-concurrency` blocks with `Successful requests: 128`, throughput and TPOT. At c = 1, `1000 / TPOT(ms)` is below the Task 5.1 ceiling for `qwen3-8b BF16` (≤ 16.6 tok/s).
+2. **AWQ rollout:** `deployment "vllm" successfully rolled out`.
+3. **AWQ log:**
+
+   | Line | Healthy value |
+   |---|---|
+   | quantization | the checkpoint is detected as AWQ and vLLM uses `awq_marlin` |
+   | weight load | about 18 GiB |
+   | `KV cache size` | a token count; record it |
+
+**If something's off:** a fallback kernel instead of `awq_marlin` → decode will be slower; note the log line. Pod `OOMKilled` while loading → see §7.
+
+#### Run it
 
 First the BF16 baseline from the catalog, measured with the 02 benchmark Job pointed at it:
 
@@ -281,9 +331,24 @@ kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout
 kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -Ei 'quantiz|marlin|Loading weights|KV cache size'
 ```
 
-Expected: a line saying the checkpoint is AWQ and that vLLM uses `awq_marlin`, the weight load at ~18 GiB, and the KV cache size in tokens. If the log names a fallback kernel, note it — decode will be slower. 03's overlay runs on the 02 base image (vLLM 0.10), which is enough for Qwen2.5; it also brings back 02's placeholder `hf-token` Secret, so re-sync the token afterwards (Chapter 06 Task 5.1). Run the benchmark again with `--model qwen2.5-32b-awq` and `value: Qwen/Qwen2.5-32B-Instruct-AWQ` in the two `sed` expressions.
+03's overlay runs on the 02 base image (vLLM 0.10), which is enough for Qwen2.5. Run the benchmark again with `--model qwen2.5-32b-awq` and `value: Qwen/Qwen2.5-32B-Instruct-AWQ` in the two `sed` expressions.
 
 ### Task 5.3 — An FP8 MoE checkpoint, same benchmark
+
+#### What this lab does (`serve-model.sh qwen3-coder-30b-fp8` + Job `vllm-bench`)
+
+- **Serves** Qwen3-Coder-30B-A3B-Instruct-FP8 as the main model (util 0.40, 56 Gi, ~32 GB download on the first run), replacing the AWQ model.
+- **Reads** the startup log for the FP8 and fused-MoE kernel paths, then runs the same benchmark Job.
+
+#### What to look for
+
+1. **`serve-model.sh`:** `[PASS] vllm ready with qwen3-coder-30b-fp8` and `[PASS] answer: 144`.
+2. **Log:** which FP8 path (block-wise, CUTLASS or Triton) and which MoE kernel vLLM picked; record "native" or "fallback".
+3. **Benchmark:** at c = 1 a single stream decodes faster than the dense BF16 8B from Task 5.2, still below the 78 tok/s ceiling; at c = 32 the gap narrows.
+
+**If something's off:** FP8 slower than BF16 → a generic fallback kernel; see §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
@@ -291,9 +356,26 @@ scripts/serve-model.sh qwen3-coder-30b-fp8
 kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -Ei 'fp8|block|cutlass|triton|moe|KV cache size'
 ```
 
-Read which FP8 path vLLM picked for the block-wise weights and which fused-MoE kernel it uses. Then run the benchmark with `--model qwen3-coder-30b-fp8` and `value: Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8` in the two `sed` expressions. Expect this 30B model to decode faster than the dense 8B in BF16 — only ~3.3B parameters are read per token. Under concurrency the gap narrows: different tokens in a batch route to different experts, so a batch reads more of the weights.
+Read which FP8 path vLLM picked for the block-wise weights and which fused-MoE kernel it uses. Then run the benchmark with `--model qwen3-coder-30b-fp8` and `value: Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8` in the two `sed` expressions. Only ~3.3B parameters are read per token. Under concurrency the gap narrows: different tokens in a batch route to different experts, so a batch reads more of the weights.
 
 ### Task 5.4 — Quantize a model yourself with LLM Compressor
+
+#### What this lab does (ConfigMap `qwen-quantize` + Job `qwen-quantize`, then a side engine)
+
+- **Parks** the main `vllm` (pause annotation): the Job needs 24 Gi of `serving-budget`.
+- **Job in `llm-serving`:** on `nvcr.io/nvidia/pytorch:26.08-py3`, installs `llmcompressor==0.14.0`, loads Qwen3-4B-Instruct-2507 in BF16 from `model-cache` (downloads ~8.1 GB if missing), quantizes every Linear layer except `lm_head` to FP8-dynamic and writes `/models/quantized/qwen3-4b-fp8-dynamic` on the `model-cache` PVC. 2 CPU · 24 Gi · 1 slice, request = limit.
+- **Serve:** renders the catalog's `qwen3-4b-instruct` side overlay with the model path and served name swapped, so `deploy/svc vllm-qwen3-4b-instruct` serves `qwen3-4b-fp8`. Then the BF16 original in the same slot, for a clean comparison.
+
+#### What to look for
+
+1. **Job log:** `pip` does not replace the image's `torch`, then `saved /models/quantized/qwen3-4b-fp8-dynamic`.
+2. **The output's `config.json`** has `"quant_method": "compressed-tensors"`.
+3. **Side engine:** `deployment "vllm-qwen3-4b-instruct" successfully rolled out`; the `curl` answer's `content` is `144`.
+4. **Benchmarks:** FP8 and BF16 4B numbers side by side (TPOT at c = 1, throughput at c = 32).
+
+**If something's off:** Job `OOMKilled` → raise memory (request = limit) or quantize a smaller model. `pip` pulled a new torch → pin the `llmcompressor` release that matches the image. More in §7.
+
+#### Run it
 
 You will produce an FP8-dynamic copy of Qwen3-4B-Instruct-2507 (no calibration data needed) and serve it from the model cache next to the catalog's BF16 `qwen3-4b-instruct`. The Job runs in `llm-serving` because its output belongs in `model-cache`; at 24 Gi request = limit it needs the main engine parked.
 
@@ -378,6 +460,29 @@ AWQ calibration keeps the BF16 model plus calibration activations in memory: for
 
 ### Task 5.5 — GGUF with llama.cpp
 
+#### What this lab does (03 Dockerfile `k8s/llamacpp` + manifest `llama-server.yaml`)
+
+- **On dgx-spark-1:** builds `spark-local/llama.cpp:server-sm121` (llama.cpp `b6500`, CUDA for sm_121) with Docker and imports it into the root's containerd (`k8s.io` namespace). One-time, takes a while.
+- **On the cluster:** removes the side engine, parks `vllm`, and applies 03's `llama-server` Deployment and Service in `llm-serving` with `Qwen/Qwen3-8B-GGUF:Q4_K_M` (alias `qwen3-8b-q4`): port 8080, 4 CPU · 12 Gi · 1 slice, `-c 16384`, `--parallel 4`, `--jinja`. The GGUF lands in `/models/gguf` on `model-cache`.
+- **Bench:** `llama-bench` inside the pod on the same file.
+
+#### What to look for
+
+1. **Rollout:** `deployment "llama-server" successfully rolled out`.
+2. **Log:**
+
+   | Line | Healthy value |
+   |---|---|
+   | `file type` | `Q4_K - Medium` |
+   | `offloaded` | `37/37 layers to GPU` (36 blocks plus the output layer) |
+   | CUDA device | the GB10 |
+
+3. **`llama-bench`:** a `pp512` and a `tg128` row in tokens/s. `tg128` stays below the Task 5.1 ceiling for ~5 GB of weights (about 55 tok/s).
+
+**If something's off:** `offloaded 0/37 layers` → the image was built without CUDA or for the wrong architecture. `ErrImageNeverPull` → the `ctr images import` step didn't run on dgx-spark-1. More in §7.
+
+#### Run it
+
 Build the llama.cpp server for sm_121 once on the Spark (03-DeepSeek Chapter 07 explains the Dockerfile) and import it into the node's containerd:
 
 ```bash
@@ -400,7 +505,7 @@ kubectl --context spark-root -n llm-serving rollout status deploy/llama-server -
 kubectl --context spark-root -n llm-serving logs deploy/llama-server | grep -Ei 'model type|file type|offloaded|CUDA|n_ctx'
 ```
 
-Expected: `file type = Q4_K - Medium`, `offloaded 37/37 layers to GPU` (36 blocks plus the output layer), the CUDA device named as the GB10. The `--jinja` flag makes llama-server use the chat template stored in the GGUF, which includes Qwen3's tool-call and thinking markup.
+The `--jinja` flag makes llama-server use the chat template stored in the GGUF, which includes Qwen3's tool-call and thinking markup.
 
 Measure decode speed with llama.cpp's own benchmark, on the same file:
 
@@ -430,6 +535,23 @@ PARAMETER num_ctx 32768
 Current official Qwen GGUFs carry the template already; prefer them.
 
 ### Task 5.6 — Optional: NVFP4 with TensorRT-LLM
+
+#### What this lab does (03 manifest `k8s/trtllm/trtllm-serve.yaml`)
+
+- **Scales** `llama-server` to 0 (vllm stays parked).
+- **Applies** 03's `trtllm` Deployment and Service in `llm-serving` with the model swapped to `nvidia/Qwen3-8B-FP4`: image `nvcr.io/nvidia/tensorrt-llm/release:1.1.0`, PyTorch backend, port 8000, 4 CPU · 58 Gi · 1 slice, KV pool `free_gpu_memory_fraction: 0.30`. Large image pull on the first run.
+- **Cleans up:** scales `trtllm` to 0, removes the pause annotation and brings back the everyday set (`qwen3-8b` + `qwen3-4b-instruct --side`).
+
+#### What to look for
+
+1. **Rollout:** `deployment "trtllm" successfully rolled out` within 45 minutes.
+2. **Log:** an NVFP4 / quantization line, the KV cache size, and `Uvicorn running`.
+3. **Benchmark:** the 02 Job against `http://trtllm:8000` with the served name from `GET /v1/models`; record it in your table.
+4. **Afterwards:** `serve-model.sh qwen3-8b` and `--side qwen3-4b-instruct` both end with `0 failed`.
+
+**If something's off:** pod Pending with `exceeded quota` → 58 Gi doesn't fit next to what still runs; check that `llama-server` and `vllm` are at 0. The image tag may not support sm_121 yet; check NVIDIA's DGX Spark TensorRT-LLM playbook. More in §7.
+
+#### Run it
 
 TensorRT-LLM's PyTorch backend serves a Hugging Face or ModelOpt checkpoint directly — there is no separate `convert_checkpoint` / `trtllm-build` step any more for this path (the engine-build flow still exists for the older TensorRT backend). Use 03's manifest with an NVIDIA NVFP4 Qwen checkpoint:
 

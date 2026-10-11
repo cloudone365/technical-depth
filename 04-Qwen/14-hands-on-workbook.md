@@ -49,6 +49,22 @@ Parts I and the CPU exercises can be done in any order. Part III needs a working
 
 ### 3.1 What "green" means
 
+#### What this lab does (script `lab/tests/run-local-checks.sh`)
+
+- **Venv:** creates `.venv` in `04-Qwen/lab` with PyYAML, yamllint and shellcheck; `kubectl` and `kubeconform` come from your PATH.
+- **Static checks:** YAML lint, overlays in sync with `models.yaml`, every overlay, sandbox overlay, side render and Job through kustomize + kubeconform (Kubernetes 1.32), the pod rules, Python compile and shellcheck.
+- **Guards:** a temporary copy of the catalog with an over-budget set and an undersized pod must be refused.
+- **Tools:** `fc_check.py`, `synth_data.py` and `qwen_agent_demo.py` against the good and flaky mocks on ports 18780/18781, stopped on exit. No GPU, no cluster, nothing outside the temp files changes.
+
+#### What to look for
+
+1. **Last line:** `ALL LOCAL CHECKS PASSED`, exit code 0.
+2. **On the way**, among the `==` sections: `9 overlays checked, 0 drifted, 0 catalog problems`, `pod rules OK (… objects)`, `swift CLI OK`, `catalog guard OK`, `fc_check: 6/6 cases passed (100%)`, `ms-swift dataset format OK (9 SFT rows, 9 DPO pairs)`, `agent audit OK`, `tool sandboxing OK`.
+
+**If something's off:** the script stops at the first failing section and prints its output. `kubeconform: command not found` → install it. `DRIFT …` → `python3 scripts/gen_overlays.py`. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 python3 -m venv .venv && . .venv/bin/activate
@@ -57,7 +73,7 @@ pip install pyyaml yamllint shellcheck-py
 tests/run-local-checks.sh
 ```
 
-The local checks lint the YAML, check that the overlays match `models.yaml` (`gen_overlays.py --check`), render every overlay and Job through kustomize and kubeconform, enforce the pod rules (pinned image, memory request = limit, readinessProbe on serving, Kueue labels and priority on Jobs), refuse an over-budget set and an undersized pod, and run `fc_check.py`, `synth_data.py` and `qwen_agent_demo.py` against the good and flaky `mock_openai.py` — no GPU, no cluster. **Pass:** `ALL LOCAL CHECKS PASSED` and exit code 0.
+The local checks lint the YAML, check that the overlays match `models.yaml` (`gen_overlays.py --check`), render every overlay and Job through kustomize and kubeconform, enforce the pod rules (pinned image, memory request = limit, readinessProbe on serving, Kueue labels and priority on Jobs), refuse an over-budget set and an undersized pod, and run `fc_check.py`, `synth_data.py` and `qwen_agent_demo.py` against the good and flaky `mock_openai.py` — no GPU, no cluster. **Pass:** the last line and exit code above.
 
 ### 3.2 Rubric
 
@@ -81,6 +97,20 @@ Every change to what `qwen` or `agent` serves — a new catalog entry, a quantis
 Write the four numbers for the accepted version into the notebook once; every candidate gets the same four.
 
 ### 3.4 The training window
+
+#### What this lab does (02 overlays `training-window`, `10-tenancy`, `20-scheduling`)
+
+- **Open:** pauses the `vllm` ScaledObject at 0 and applies `training-window`: `serving-budget` 2 CPU · 10 Gi, `batch-budget` and `spark-cq` 8 CPU · 80 Gi (3 slices).
+- **Close:** re-applies the everyday quotas (`serving-budget` 8 CPU · 90 Gi; `batch` 2 CPU · 12 Gi) and removes the pause.
+
+#### What to look for
+
+1. **Open:** `kubectl --context spark-root -n batch describe quota batch-budget` shows 8 CPU and 80Gi hard; `deploy/vllm` at `0/0`.
+2. **Close:** the same command shows 2 CPU and 12Gi; `deploy/vllm` back to `1/1`.
+
+**If something's off:** quotas snap back while open → Argo CD self-heal ([Chapter 07](07-ms-swift-and-sft.md) Task 5.3). `vllm` stays at 0 after closing → the annotation is still set.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
@@ -108,6 +138,22 @@ Nothing here is new infrastructure. The platform comes from [01-Ansible](../01-A
 
 ### Part I — Models (Chapters 01–03)
 
+#### What this lab does (E1–E6)
+
+- **CPU only:** E1, and the arithmetic parts of E2, E3 and E6 (§5.7).
+- **On `spark-root`:** E2 reads a served model's startup log; E3 serves a YaRN variant; E4 serves the Coder model; E5 uses a hybrid Qwen3; E6 serves `qwen3-vl-8b`. Each replaces the main `deploy/vllm` through `serve-model.sh`.
+
+#### What to look for
+
+1. **E2:** your KV token capacity within ~10 % of vLLM's `GPU KV cache size`.
+2. **E3:** wavelength ratio ≈ 93; a 128K request accepted with YaRN, a 400 without.
+3. **E4:** the middle parses and the test passes (`ACCEPT tests passed` in Chapter 02 Task 1).
+4. **E6:** 2,040 predicted image tokens for 1920×1080 on Qwen3-VL; `prompt_tokens` minus the text tokens within a few of it.
+
+**If something's off:** see each chapter's lab block and §7 below.
+
+#### Run it
+
 | # | Goal | Do | Pass when |
 |---|---|---|---|
 | E1 | Mask the loss to assistant tokens | write the ChatML mask function (§5.7) ([Chapter 07](07-ms-swift-and-sft.md)) | mask is 1 exactly on assistant content and its `<|im_end|>` |
@@ -118,6 +164,21 @@ Nothing here is new infrastructure. The platform comes from [01-Ansible](../01-A
 | E6 | Predict image token counts | compute visual tokens for a 1920×1080 image (§5.7), then send it to `qwen3-vl-8b` ([Chapter 03](03-vision-language-models.md)) | `usage.prompt_tokens` minus the text tokens matches your number within a few tokens |
 
 ### Part II — Serving (Chapters 04–06)
+
+#### What this lab does (E7–E12)
+
+- **Serve and measure** on `spark-root`: `serve-model.sh`, the 02 benchmark Job and probes (E7, E8), a quantised variant and llama.cpp (E9, E10), a new catalog entry (E11), and three timed restarts (E12).
+- **E11 changes your repo:** a new `models.yaml` entry and its generated overlay.
+
+#### What to look for
+
+1. **E7/E8:** `[PASS] answer: 144`; `speed-up from prefix cache` clearly above 1×.
+2. **E11:** `tests/run-local-checks.sh` still ends with `ALL LOCAL CHECKS PASSED`; `serve-model.sh <new>` ends with `0 failed`.
+3. **E12:** three times, download ≫ NVMe > page cache.
+
+**If something's off:** [Chapter 04 §7](04-serving-qwen-with-vllm-and-sglang.md), [Chapter 06 §7](06-kubernetes-deployment-and-weight-caching.md).
+
+#### Run it
 
 | # | Goal | Do | Pass when |
 |---|---|---|---|
@@ -130,6 +191,21 @@ Nothing here is new infrastructure. The platform comes from [01-Ansible](../01-A
 
 ### Part III — Fine-tuning (Chapters 07–09), training Jobs in the window
 
+#### What this lab does (E13–E17)
+
+- **Jobs in `batch`** (`swift-sft`, `swift-dpo`, `swift-grpo`), each admitted by Kueue inside the training window (§3.4), one at a time, on PVC `qwen-train`.
+- **E17 on the MacBook:** `synth_data.py` against a served model, plus the CPU verifier.
+
+#### What to look for
+
+1. **Each Job:** Workload `ADMITTED True`; the log's `trainable params` line (E14: compare with your 40.4 M for Qwen2.5-7B, or ~33 M for the Qwen3-4B default).
+2. **E15:** `rewards/margins` rising; **E16:** format reward rising first.
+3. **After every Job:** the window closed (§3.4 close commands).
+
+**If something's off:** Workload not admitted → window not open or vLLM / bge-m3 still holding the pool (§7).
+
+#### Run it
+
 | # | Goal | Do | Pass when |
 |---|---|---|---|
 | E13 | An SFT that changes behaviour | `k8s/jobs/swift-sft.yaml` on a small dataset with a visible format change ([Chapter 07](07-ms-swift-and-sft.md)) | the adapter follows the format, the base doesn't; window closed afterwards |
@@ -140,6 +216,22 @@ Nothing here is new infrastructure. The platform comes from [01-Ansible](../01-A
 
 ### Part IV — Applications (Chapters 10–12)
 
+#### What this lab does (E18–E21)
+
+- **Probes** the served models directly and through LiteLLM (`fc_check.py`, `qwen_agent_demo.py`), ingests and evaluates RAG with `rag_demo.py`, and creates one scoped LiteLLM key (E21).
+- **E20 writes** a new Qdrant collection behind the alias, only if the gate passes.
+
+#### What to look for
+
+1. **E18:** gateway pass count = direct pass count for every model.
+2. **E19:** no state change; `{"error": "unknown model …"}` reported; one audit line per call.
+3. **E20:** `gate passed`; hit@1, hit@5, MRR before and after.
+4. **E21:** `429` first on `qwen`.
+
+**If something's off:** [Chapter 10 §7](10-qwen-agent-and-function-calling.md), [Chapter 11 §7](11-rag-with-qwen-bge-and-qdrant.md), [Chapter 12 §7](12-open-webui-and-litellm.md).
+
+#### Run it
+
 | # | Goal | Do | Pass when |
 |---|---|---|---|
 | E18 | Parser matrix | `fc_check.py run` for `qwen3-8b`, `qwen3-4b-instruct` and (set `coding`) `qwen3-coder-30b-fp8` with its `qwen3_coder` parser, direct and via LiteLLM ([Chapter 10](10-qwen-agent-and-function-calling.md)) | table filled; gateway result = direct |
@@ -149,6 +241,20 @@ Nothing here is new infrastructure. The platform comes from [01-Ansible](../01-A
 
 ### Part V — Operations (Chapter 13)
 
+#### What this lab does (E22–E24)
+
+- **Deliberate failures** on the served model (E22), a watched restart with `uma-watch.sh` on dgx-spark-1 (E23), and 03's alert rules (E24). Restore the catalog overlay with `serve-model.sh` after each.
+
+#### What to look for
+
+1. **E22:** the giveaway named for each: `finish_reason: length` with empty content; tool cases failing in `fc_check.py`; `Pending` or CUDA OOM with its event or log line.
+2. **E23:** peak `pod.mem.current` below `pod.mem.max`.
+3. **E24:** `ReasoningTruncated` (or your Qwen copy of it) shows Firing, then Resolved.
+
+**If something's off:** [Chapter 13 §7](13-telemetry-and-troubleshooting.md).
+
+#### Run it
+
 | # | Goal | Do | Pass when |
 |---|---|---|---|
 | E22 | Diagnose from evidence | have a colleague (or a coin) pick one of: truncated thinking, missing tool parser, over-the-pool engine ([Chapter 13](13-telemetry-and-troubleshooting.md) §5.5); diagnose without looking at what they changed | correct diagnosis in < 10 min each, with the giveaway signal named |
@@ -156,6 +262,29 @@ Nothing here is new infrastructure. The platform comes from [01-Ansible](../01-A
 | E24 | Alerts that work | 03's rules applied; make the truncation alert fire with a Qwen model and resolve it ([Chapter 13](13-telemetry-and-troubleshooting.md)) | Firing, then Resolved |
 
 ### 5.7 Worked CPU exercises (reference solutions)
+
+#### What this lab does (Python snippets, standard library)
+
+- **Runs on the MacBook CPU.** Each snippet reproduces one exercise's arithmetic; nothing touches the cluster.
+
+#### What to look for
+
+| Exercise | Healthy output |
+|---|---|
+| E1 | the `assert` passes silently |
+| E2 | `56`, `144`, `256` KiB/token, then `128.0 GiB` |
+| E3 | ~54,400 and ~5,063,000 tokens (ratio ≈ 93) |
+| E6 | `2691` and `2040` |
+| E14 | `40370176` |
+| E15 | `0.5544…` |
+| E16 | `[1.0, -1.0, -1.0, 1.0]` |
+| E17 | `0.7…` |
+| E20 | B, A, D, C in that order |
+| E21 | four `True`, then four `False` |
+
+**If something's off:** a different number usually means a changed constant; compare with the comment next to the `print`.
+
+#### Run it
 
 Try each before reading the solution. Everything below runs with the Python standard library.
 
@@ -289,6 +418,21 @@ print(admitted)   # [True, True, True, True, False, False, False, False]
 Swap `cost` for the completion tokens you measured with thinking on (Chapter 12 §5.4) and the number of admitted requests per minute drops by the same factor.
 
 ### Capstone (half a day, time-boxed)
+
+#### What this lab does
+
+- **Uses everything:** the `everyday` set and Chapter 12 aliases, `synth_data.py`, one SFT Job in the training window, a new catalog entry for the adapter or merged model, the four gate probes (§3.3), and one E22 fault.
+- **Changes** your catalog (one entry) and, if the gate passes, the alias in `litellm-config`.
+
+#### What to look for
+
+1. **Step 1:** `ALL LOCAL CHECKS PASSED`; LiteLLM, Open WebUI, bge-m3 and Qdrant Ready.
+2. **Step 5:** four gate numbers for the candidate next to the baseline; the alias moves only if all four pass.
+3. **At the end:** everyday quotas back, util sum ≲ 0.72, `serving-budget` within limits.
+
+**If something's off:** §7.
+
+#### Run it
 
 1. **Platform check.** `tests/run-local-checks.sh` green; `kubectl --context spark-root -n llm-serving get pods` shows LiteLLM, Open WebUI, bge-m3, Qdrant Ready.
 2. **Baseline.** Serve the `everyday` set (`qwen3-8b`, then `qwen3-4b-instruct --side`) with the Chapter 12 aliases; record the four gate numbers (§3.3) for `agent`.

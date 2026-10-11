@@ -155,6 +155,22 @@ hit@k tells you whether the answer was retrievable at all; MRR whether it was ne
 
 ### 5.1 Bring up the retrieval half
 
+#### What this lab does (02 StatefulSet `qdrant` + 03 manifest `k8s/apps/bge-m3.yaml`)
+
+- **Checks** that 02's Qdrant StatefulSet runs in `llm-serving` on `spark-root`. It is platform, not part of this module.
+- **Applies** 03's BGE-M3 Deployment and Service: vLLM in embedding mode (`--task=embed`, served name `bge-m3`, util 0.06), 1 CPU · 9 Gi · 1 slice, request = limit, on the 02 base vLLM image. The first start downloads the model into `model-cache`.
+- **Reads** `serving-budget`. Nothing else changes.
+
+#### What to look for
+
+1. **Qdrant:** `qdrant   1/1`.
+2. **BGE-M3:** `deployment "bge-m3" successfully rolled out` within 20 minutes.
+3. **Quota:** `requests.memory` used grows by 9Gi; `requests.nvidia.com/gpu` by 1.
+
+**If something's off:** `statefulsets.apps "qdrant" not found` → apply 02's `root-llms` (below). BGE-M3 Pending → memory, quota or slices; `kubectl --context spark-root -n llm-serving describe pod -l app=bge-m3`. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 kubectl --context spark-root -n llm-serving get statefulset qdrant
@@ -166,6 +182,21 @@ kubectl --context spark-root -n llm-serving describe quota serving-budget | grep
 If Qdrant is missing, apply 02's `root-llms` layer as 02-Kubernetes Chapter 13 describes; it is a platform component, not part of this module.
 
 ### 5.2 Serve a Qwen chat model
+
+#### What this lab does (`serve-model.sh qwen3-4b-instruct` + three port-forwards)
+
+- **Serves** Qwen3-4B-Instruct-2507 as the main model behind `svc/vllm` (util 0.12, 20 Gi, non-thinking). With BGE-M3 the util sum is 0.18.
+- **Port-forwards** to the MacBook: Qdrant on 6333, BGE-M3 on 8001, the chat model on 8000. They run in the background until you stop them.
+
+#### What to look for
+
+1. **Script output:** `[PASS] budget: running 0.06 + qwen3-4b-instruct 0.12 ≤ 0.72` (BGE-M3 counted), `[PASS] vllm ready with qwen3-4b-instruct`, `0 failed`.
+2. **Pods:** one `vllm-…` and one `bge-m3-…` pod, both `1/1 Running`.
+3. **Port-forwards:** three `Forwarding from 127.0.0.1:… -> …` lines.
+
+**If something's off:** `bind: address already in use` → an old port-forward still runs; `pkill -f 'port-forward'` and start again.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
@@ -184,6 +215,22 @@ kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000:8000 &
 
 ### 5.3 Ingest with a quality gate
 
+#### What this lab does (tool `03-DeepSeek/lab/tools/rag_demo.py ingest --gate 0.6`)
+
+- **Chunks** the Markdown of `02-Kubernetes`, `03-DeepSeek` and `04-Qwen` by heading, embeds every chunk with BGE-M3 and writes a new Qdrant collection `technical-depth-<timestamp>`.
+- **Gate:** runs the gold questions (`03-DeepSeek/lab/data/rag_gold.jsonl`) against the new collection first. Only if hit@5 ≥ 0.6 does the alias `technical-depth` move to it; otherwise the new collection is deleted and the alias stays.
+- **Keeps** the live collection and the previous one (for rollback); older ones are pruned.
+
+#### What to look for
+
+1. **Ingest output:** `N files → M chunks`, `collection technical-depth-…: M points, dim 1024`, `gate passed`, `alias technical-depth: … → technical-depth-…`.
+2. **Collection:** `points_count` equal to M, `status` `green`.
+3. **Aliases:** `technical-depth` → the newest `technical-depth-<timestamp>`.
+
+**If something's off:** `GATE FAILED: hit@5 below 0.6` → inspect the misses with `eval` (§5.4); the old index keeps serving. A vector size error → an old collection from another embedding model; ingest always creates a new one. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 python3 ../../03-DeepSeek/lab/tools/rag_demo.py ingest --repo ../.. \
@@ -196,6 +243,21 @@ curl -s localhost:6333/aliases | python3 -m json.tool
 The gate runs the gold set against the new collection before it goes live; if hit@5 is below 0.6 it deletes the new collection and leaves the alias where it was. For a scheduled re-ingest inside the cluster, 03's `k8s/jobs/rag-ingest.yaml` runs the same command as a Job.
 
 ### 5.4 Measure retrieval, then ask
+
+#### What this lab does (`rag_demo.py eval` and `ask`)
+
+- **`eval`:** runs every gold question against the live alias and prints hit@1, hit@5 and MRR, plus a `MISS` line for each question whose expected file isn't the top hit.
+- **`ask`:** embeds the question, takes the top 5 chunks and asks `qwen3-4b-instruct` for an answer with `[n]` citations; `--show-context` prints the chunks first. Read-only.
+
+#### What to look for
+
+1. **`eval`:** `… questions  hit@1 …  hit@5 …  MRR …` with hit@5 at or above the 0.6 gate.
+2. **`ask`:** the printed context, then an answer naming `qwen3_coder`, then `sources:` with `[1]`…`[5]`, score, path and heading. Every `[n]` in the answer matches a chunk that says what the sentence claims.
+3. **Record** hit@1, hit@5 and MRR in the table below.
+
+**If something's off:** `[7]` with 5 sources → the model invents citation numbers. A good context but a wrong answer → too much context, or try thinking off. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
@@ -215,6 +277,20 @@ Record hit@1, hit@5 and MRR. Read the answer against the printed context: every 
 
 ### 5.5 Thinking or not
 
+#### What this lab does (`serve-model.sh qwen3-8b` + two `curl` requests)
+
+- **Switches** the main model to Qwen3-8B (util 0.20, hybrid thinking, `qwen3` reasoning parser). The port-forward on 8000 may drop during the switch.
+- **Asks** the same one-sentence question with `enable_thinking` true and false, timing each with `/usr/bin/time`.
+
+#### What to look for
+
+1. **Two result lines** plus `real …` times: with thinking on, many more completion tokens and seconds than with thinking off.
+2. **`thinking chars`:** above 0 with thinking on, 0 with thinking off.
+
+**If something's off:** `thinking chars 0` in both rows while the completion tokens differ a lot → the image returns the trace as `reasoning`, and the one-liner reads only `reasoning_content`; read both fields. `Connection refused` → restart the port-forward.
+
+#### Run it
+
 Switch to a hybrid-thinking Qwen3 model and ask the same question twice — thinking on (default) and off — and compare latency and answer quality.
 
 ```bash
@@ -232,6 +308,21 @@ done
 (The port-forward to `svc/vllm` reconnects to the new pod; restart it if it dropped during the switch.) For citation-style RAG answers, thinking off is the usual default; keep thinking for questions that need several sources combined.
 
 ### 5.6 Extension: hybrid search and reranking
+
+#### What this lab does (Qdrant collection `td-hybrid`)
+
+- **Creates** a new, empty collection `td-hybrid` with a named dense vector (1024, cosine) and a named sparse vector `lexical`. The live `technical-depth` alias is not touched.
+- **Fills it yourself:** BGE-M3 dense vectors and lexical weights for the same chunks (FlagEmbedding, in a Job on the GB10 or on the MacBook for a small corpus). The query shape fuses both with RRF.
+
+#### What to look for
+
+1. **Create:** `{"result":true,"status":"ok",…}`.
+2. **Query** (after upserting real vectors): up to 8 points, each with an id and a fused score.
+3. **The comparison:** hit@k and MRR for hybrid next to the dense-only row; keep hybrid only if it helps your questions.
+
+**If something's off:** a 400 on the query with the placeholder vectors → expected; the dense query needs 1024 entries.
+
+#### Run it
 
 The lab's collection holds dense vectors only. To try hybrid retrieval, create a collection with a named dense and a named sparse vector, fill the sparse side with BGE-M3 lexical weights (FlagEmbedding in a Job on the GB10, or on the MacBook for a small corpus), and query with fusion:
 

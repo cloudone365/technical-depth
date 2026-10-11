@@ -72,6 +72,37 @@ On a real HGX node, the rule you'd automate is "Fabric Manager version == driver
 
 ### 3.1 Audit
 
+#### What this lab does (template `10.1 Driver audit`)
+
+- **Reads four version numbers** on each Spark: the loaded kernel module (`/proc/driver/nvidia/version`), the module on disk (`modinfo nvidia`, what loads after the next reboot), the userland NVML library (`libnvidia-ml.so.*`), and what `nvidia-smi` reports.
+- **Also reads** the installed NVIDIA/CUDA packages (`package_facts`), the state of `nvidia-persistenced` and the running kernel.
+- **Prints** one `driver_audit` report per Spark and then **asserts** that the four versions are equal and that the module is the open kernel module.
+- **Read-only:** nothing is installed, held, restarted or reconfigured.
+
+#### What to look for
+
+1. **Semaphore run / command exit:** `failed=0` and `changed=0` (it only reads).
+2. **The `Show report` task** prints `driver_audit`. Compare it with the healthy example below:
+   | Field | Healthy value |
+   |---|---|
+   | `module_loaded`, `module_on_disk`, `nvml_userland`, `nvidia_smi` | the same `580.xx.xx` in all four |
+   | `module_flavor` | `open` |
+   | `persistenced` | `active` |
+   | `held` | a number above 0 |
+   | `nvswitch_present` | `false` (GB10 has no NVSwitch, so no Fabric Manager) |
+
+   Trap: `held` counts the installed packages that **match** the hold pattern (`spark_nvidia_hold_regex`); it does not prove they are held. Check the holds themselves:
+   ```bash
+   # ▶ dgx-spark-1 (ssh dgx-spark-1)
+   apt-mark showhold | grep -cE '^(nvidia-driver-|nvidia-dkms-|nvidia-kernel-|libnvidia-|nvidia-firmware-|cuda-drivers)'
+   ```
+   Healthy: the same number as `held`. Fewer means `spark_baseline` hasn't applied the holds (Chapter 04, template `04.3 Baseline`).
+3. **The `Verdict` task** prints `Driver 580.xx.xx (open) consistent`.
+
+**If something's off:** `module_loaded` differs from `module_on_disk` → an upgrade happened and the reboot is still pending. `nvidia_smi` starts with `ERROR:` and mentions a version mismatch → userland was upgraded while the old module is still loaded; reboot. More in §5.
+
+#### Run it
+
 ```yaml
 # lab/playbooks/10.1-driver-audit.yml
 ---
@@ -184,6 +215,26 @@ driver_audit:
 ```
 
 ### 3.2 Rolling upgrade
+
+#### What this lab does (template `10.2 DGX OS upgrade`)
+
+- **Dry run (`-e upgrade_dry_run=true`):** runs `apt-get -s full-upgrade` on each Spark, prints how many packages are pending and which of them are driver/CUDA/kernel packages, and stops. Nothing changes.
+- **Real run, one Spark at a time (`serial: 1`):** drains the node with the `node_drain` role (cordon and drain in Kubernetes context `spark-root`, drain in Slurm, stop GPU containers), releases the NVIDIA apt holds, runs `apt full-upgrade` (up to an hour, polled every 15 s), and reboots. The reboot waits up to 30 min until `nvidia-smi -L` answers.
+- **After the reboot:** re-applies the holds (`spark_baseline` `packages.yml`), refreshes `ansible_local.spark`, regenerates the CDI spec and runs the container smoke test (`container_runtime`), then runs `spark_validate` and uncordons / resumes the node only if validation passes.
+- **Firmware** is off (`upgrade_firmware: false`); Chapter 28 covers it.
+- **With one Spark:** draining dgx-spark-1 stops everything on it, including the LLM pods and both vClusters, for the whole upgrade. There is no canary; skip the `-l dgx-spark-2` and NCCL lines below.
+- **Semaphore:** set the extra variable `vault_ssh_cert_ttl: 1h` on the template, because the reboot reconnects after the 15-minute certificate has expired (Chapter 04 §13).
+
+#### What to look for
+
+1. **Dry run:** `failed=0`, `changed=0`. The `Report` task prints `N packages pending, M driver/CUDA/kernel` and the list of those `Inst …` lines. `0 packages pending` means the Spark is current and a real run would also stop there.
+2. **Real run:** `failed=0`. `max_fail_percentage: 0` stops the rollout at the first failed Spark, so a failure leaves that node drained on purpose.
+3. **After the reboot,** the `container_runtime` smoke test shows the GB10 through both `--gpus` and CDI, as in Chapter 11 §3.1, and `spark_validate` ends with `All N checks passed`.
+4. **Then run the audit (§3.1)** on the upgraded Spark: four equal versions (the new ones), `module_flavor: open`, and `apt-mark showhold` lists the NVIDIA packages again.
+
+**If something's off:** a failure in the drain step on a Spark without the Kubernetes cluster (Chapter 19) or Slurm (Chapter 22) is expected, because dgx-spark-1 is in `k8s_control_plane` and `slurm_compute` in `hosts.yml`; do only the dry run until those chapters are done. A reboot that times out usually means the GPU didn't come back (`nvidia-smi -L` on the console). `Permission denied` after the reboot under Semaphore means the certificate TTL was left at 15 minutes. More in §5.
+
+#### Run it
 
 ```yaml
 # lab/playbooks/10.2-dgxos-upgrade.yml
@@ -307,6 +358,20 @@ ansible-playbook playbooks/10.2-dgxos-upgrade.yml -K -l dgx-spark-1
 **Canary discipline:** upgrade one Spark, run real work on it (a vLLM or NCCL job), then do the other. For NCCL across two Sparks, keep **matching driver and NCCL versions on both nodes**. A mixed state is only acceptable during the rollout window.
 
 ### 3.3 Check what `nvidia-smi` can and can't tell you on a UMA system
+
+#### What this lab does (commands on dgx-spark-1)
+
+- **Asks `nvidia-smi`** for name, driver, compute capability and memory, then asks the kernel (`free`) for memory. Read-only.
+- **The point:** on the GB10, CPU and GPU share one memory pool, so `nvidia-smi` has no GPU memory figures to report; `free` is where GPU memory use shows up.
+
+#### What to look for
+
+1. **The `nvidia-smi` line:** `NVIDIA GB10, 580.xx.xx, 12.1, [N/A], [N/A]`. `[N/A]` for both memory columns is the healthy value here, not an error.
+2. **`free -g`:** a total of about 121 GiB (`free -h` shows `121Gi`), and on an idle Spark about 119 GiB available. A model loaded on the GPU lowers the `available` column.
+
+**If something's off:** `NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver` means the module isn't loaded; run the audit (§3.1). More in §5.
+
+#### Run it
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)

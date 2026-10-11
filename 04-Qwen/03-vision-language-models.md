@@ -132,6 +132,31 @@ For **video**, sample keyframes or short clips, have the VL model write timestam
 
 ### Task 1 · Predict visual tokens before sending anything
 
+#### What this lab does (script `~/qwen-ch03/vl_tokens.py`)
+
+- **Computes** how many visual tokens five image shapes (A4 page at 300 and 150 DPI, a 1080p screenshot, a long receipt, an icon) cost for Qwen2.5-VL and Qwen3-VL, at the default cap of 16,384 tokens and at a cap of 1,280, plus the KV memory each one takes in the 7B/8B language model.
+- **Adds** one video example (60 s at 2 fps, 448 × 448).
+- **Where:** MacBook CPU only. No download, no request to the Spark. Task 2 imports this file.
+
+#### What to look for
+
+1. **Command exit:** two blocks of ten lines and one `video` line.
+2. **Values:**
+
+   | Line | Healthy value |
+   |---|---|
+   | qwen3-vl, cap 16384, A4 @ 300 DPI | `-> 2496x3520`, `8580 tokens`, about 1,207 MiB of KV |
+   | qwen2.5-vl, cap 16384, A4 @ 300 DPI | `11125 tokens` |
+   | qwen3-vl, cap 16384, A4 @ 150 DPI | `2145 tokens` (Task 2's test page) |
+   | either family, cap 1280, A4 pages | `1260 tokens` (30 × 42) |
+   | qwen3-vl icon 64×64 | raised to `256x256`, `64 tokens` |
+   | receipt | aspect ratio kept (`384x2400` for Qwen3-VL) |
+   | `video (qwen2.5-vl)` | `60 frame pairs × 256 = 15360 tokens` |
+
+**If something's off:** different counts usually mean an edited `FAMILY` table; the factors are 28 for Qwen2.5-VL and 32 for Qwen3-VL.
+
+#### Run it
+
 The resize rule below follows the Qwen VL processors (`smart_resize`): $f = 28$ and a 3,136-pixel minimum for Qwen2-VL and Qwen2.5-VL, $f = 32$ and a 65,536-pixel minimum for Qwen3-VL (from each checkpoint's `preprocessor_config.json`).
 
 ```bash
@@ -173,9 +198,33 @@ PY
 python3 ~/qwen-ch03/vl_tokens.py
 ```
 
-Expected with the default cap: the 300-DPI page resizes to 2496 × 3520 and costs 8,580 tokens for Qwen3-VL (~1.2 GiB of KV in the 8B model), 11,125 tokens for Qwen2.5-VL; capped at 1,280 tokens both shrink to 1,260 (30 × 42). The icon is raised to the minimum size (64 tokens for Qwen3-VL). Note how the receipt keeps its 1:6 aspect ratio — no squashing, no padding.
+Note how the receipt keeps its 1:6 aspect ratio: no squashing, no padding. The icon is raised to the minimum size.
 
 ### Task 2 · Serve a VL model and check the prediction
+
+#### What this lab does (script `lab/scripts/serve-model.sh qwen3-vl-8b` + client `~/qwen-ch03/vl_probe.py`)
+
+- **Serve:** replaces the main `deploy/vllm` on `spark-root` with Qwen3-VL-8B-Instruct (util 0.20, 32 Gi, `--max-model-len=16384`, at most 2 images and no video per request). The first run downloads ~17.5 GB into `model-cache`.
+- **Probe:** draws an A4 test page with a 4-row table (`~/qwen-ch03/page.png`), sends it three times (server default cap, then 1,024 and 256 tokens per image) and asks for the table as Markdown.
+- **Optional change:** you add a pixel cap to the catalog entry, regenerate the overlays and serve again. That edits `models.yaml` and `k8s/models/qwen3-vl-8b/` in your working copy.
+
+#### What to look for
+
+1. **`serve-model.sh`:** `[PASS] vllm ready with qwen3-vl-8b`, `[PASS] answer: 144`, `0 failed`.
+2. **The args line:** `--gpu-memory-utilization=0.2`, `--max-model-len=16384`, `--limit-mm-per-prompt={"image":2,"video":0}`.
+3. **`vl_probe.py`**, three blocks:
+
+   | Block | Healthy value |
+   |---|---|
+   | `cap=default` | `prompt_tokens` = 2,145 predicted image tokens + a few dozen text tokens; table complete |
+   | `cap=1024` | about 1,000 + text; table usually still complete |
+   | `cap=256` | about 250 + text; small digits start to fail |
+
+4. **Media limit:** a request with three images returns a 400 naming the image limit.
+
+**If something's off:** all three blocks report the same `prompt_tokens` → the engine ignores per-request `mm_processor_kwargs`; set the cap at serve time as shown below. `No available memory for the cache blocks` at startup → see Troubleshooting in §4.
+
+#### Run it
 
 The catalog entry `qwen3-vl-8b` runs at util 0.20 with `--max-model-len 16384`, `--max-num-seqs 16` and `--limit-mm-per-prompt {"image":2,"video":0}`; it leaves the pixel cap at the checkpoint default (16,384 tokens per image). Serve it and look at the flags:
 
@@ -233,7 +282,7 @@ PY
 python3 ~/qwen-ch03/vl_probe.py
 ```
 
-Expected: `prompt_tokens` = the predicted image tokens plus a few dozen for the template, the vision start/end tokens and the prompt (2,145 + text for the default; about 1,000 and 250 + text for the caps). If the two capped runs report the same count as the default, your engine ignored the per-request kwargs — the cap must then be set at serve time (below). With enough tokens the table comes back intact; at 256 small digits start to fail. That trade-off, measured on your own documents, is how you choose the cap.
+The few dozen extra prompt tokens are the template, the vision start/end tokens and the prompt. That trade-off between cap and accuracy, measured on your own documents, is how you choose the cap.
 
 Make the cap you chose the server default, so no request can send a 16K-token image: add it to the entry's `args` in [`models.yaml`](lab/models.yaml) — for example `'--mm-processor-kwargs={"max_pixels": 1048576}'` (1,024 tokens at 32 × 32 pixels) — then regenerate, check and re-serve:
 
@@ -246,6 +295,21 @@ scripts/serve-model.sh qwen3-vl-8b
 Run the probe again: the default row now matches the cap. Then check the media limit: put three `image_url` parts in one request and read the 400 error — that is `--limit-mm-per-prompt` working.
 
 ### Task 3 · Grounding: draw the boxes back
+
+#### What this lab does (script `~/qwen-ch03/ground.py`)
+
+- **Asks** the served Qwen3-VL model (Task 2, port-forward still open) for bounding boxes of the table and the title on the test page.
+- **Draws** each box twice on a copy of the page, `~/qwen-ch03/page-boxes.png`: red as pixels of the resized image (the Qwen2.5-VL convention), blue as 0–1000 relative coordinates (Qwen2-VL / Qwen3-VL).
+- **Nothing is changed** on the cluster.
+
+#### What to look for
+
+1. **Command exit:** one line per box (`raw [...] -> abs(red) [...] rel(blue) [...]`) and `open ~/qwen-ch03/page-boxes.png`.
+2. **The image:** the blue boxes frame the table and the title; the red ones are off. Record "0–1000 relative" next to the catalog entry.
+
+**If something's off:** `AttributeError: 'NoneType' object has no attribute 'group'` → the model answered without a JSON list; run again or tighten the prompt. Both colours off → `CAP` doesn't match the server's cap.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · any folder
@@ -271,9 +335,28 @@ PY
 CAP=1024 python3 ~/qwen-ch03/ground.py && open ~/qwen-ch03/page-boxes.png
 ```
 
-Set `CAP` to the cap your overlay applies (16384 if you skipped the change in Task 2). Expected: one of the two colours frames the table and the title; the other is off. Blue (0–1000) fits Qwen3-VL; red fits Qwen2.5-VL. Record the convention next to the catalog entry — any downstream code that crops or highlights regions depends on it.
+Set `CAP` to the cap your overlay applies (16384 if you skipped the change in Task 2). Blue (0–1000) fits Qwen3-VL; red fits Qwen2.5-VL. Record the convention next to the catalog entry — any downstream code that crops or highlights regions depends on it.
 
 ### Task 4 · Pages to Markdown to Qdrant
+
+#### What this lab does (scripts `~/qwen-ch03/pages_to_md.py` + `03-DeepSeek/lab/tools/rag_demo.py`)
+
+- **Render:** `pdftoppm` turns up to 10 pages of a PDF of yours into PNGs at 150 DPI in `~/qwen-docs/img/`, on the MacBook.
+- **Parse:** the served Qwen3-VL model transcribes each page to Markdown in `~/qwen-docs/pages/`, with the source image path in each file's header.
+- **Index:** `rag_demo.py ingest` chunks the Markdown, embeds it with BGE-M3 and writes a new Qdrant collection `qwen-docs-<timestamp>` behind the alias `qwen-docs`. Existing collections are not touched.
+- **Ask:** one question, answered with `[n]` citations.
+- **Needs:** Qdrant and BGE-M3 running in `llm-serving` (Chapter 11 §5.1).
+
+#### What to look for
+
+1. **Pods:** `qdrant-0`, a `bge-m3-…` pod and the `vllm-…` pod all `Running` and Ready.
+2. **`pages_to_md.py`:** one line per page, `p-…: … prompt + … completion tokens`, with prompt tokens near the Task 1 prediction for your page size.
+3. **`ingest`:** `N files → M chunks`, `collection qwen-docs-…: M points, dim 1024`, `alias qwen-docs: (none) → qwen-docs-…`.
+4. **`ask`:** an answer with `[n]` markers, then `sources:` listing `pages/p-…md` files. Open the cited page image and check the claim.
+
+**If something's off:** `Connection refused` on 6333 or 8001 → a port-forward died; restart it. Pod Pending for BGE-M3 → `serving-budget` is full; the VL model plus the apps need 32 + 19 Gi. A wrong answer with a correct citation → check that page's Markdown: the parse is the weak point.
+
+#### Run it
 
 This task uses the 03 application stack on the root: Qdrant (02 `root-llms/50-workloads`) and BGE-M3 (`03-DeepSeek/lab/k8s/apps/bge-m3.yaml`, deployed in [Chapter 11](11-rag-with-qwen-bge-and-qdrant.md)). Check both are up and that the VL model plus the apps stay within the budget (the catalog counts the apps as util 0.06 and 19 Gi):
 
@@ -321,9 +404,25 @@ python3 ../../03-DeepSeek/lab/tools/rag_demo.py ask "Which quarter had the most 
   --qdrant http://localhost:6333 --embed-url http://localhost:8001 --chat-url http://localhost:8000 --chat-model qwen3-vl-8b
 ```
 
-Expected: an answer with `[n]` citations pointing at page files; open the cited page image (its path is in the Markdown header) and check the claim. Pages whose tables came out wrong in `pages/*.md` produce wrong answers — the index is only as good as the parse, which is why the parse step keeps the source image path.
+The cited page image's path is in the Markdown header. Pages whose tables came out wrong in `pages/*.md` produce wrong answers — the index is only as good as the parse, which is why the parse step keeps the source image path.
 
 ### Task 5 · Video, deliberately
+
+#### What this lab does (catalog edit + inline Python)
+
+- **Changes** the `qwen3-vl-8b` entry in your working copy for this test only: one video per request, `max_len` 32768, `--max-num-seqs=4`. Regenerating and re-serving restarts `deploy/vllm`.
+- **Sends** one public MP4 by URL; the vLLM pod on the Spark downloads it, so the Spark needs outbound HTTPS.
+- **You put the entry back** afterwards and regenerate.
+
+#### What to look for
+
+1. **`gen_overlays.py --check`:** `0 drifted, 0 catalog problems` after the edit.
+2. **The response:** a `usage` dict whose `prompt_tokens` is in the range the §2.2 video formula gives with $f = 32$, then a description with approximate timestamps.
+3. **After the revert:** `--check` clean again and `--limit-mm-per-prompt={"image":2,"video":0}` back in the served args.
+
+**If something's off:** a 400 for length means `--max-model-len` works; lower fps or resolution. A fetch error means no egress from the pod; see Troubleshooting in §4.
+
+#### Run it
 
 The catalog disables video (`"video":0`): one clip can fill the whole 16K context. To try it, change the entry to `{"image":2,"video":1}`, raise `max_len` to 32768 and lower `--max-num-seqs` to 4 (the KV for one 32K sequence is 4.5 GiB), regenerate and re-serve as in Task 2. Then:
 

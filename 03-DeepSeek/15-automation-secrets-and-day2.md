@@ -274,6 +274,22 @@ Rules that keep the tools from fighting:
 
 ### Task 5.1 · Store the stack's secrets in vault01
 
+#### What this lab does (Vault CLI on vault01)
+
+- **Writes three KV v2 secrets** on vault01: your Hugging Face token at `kv/spark-lab/hf` (field `token`), a new LiteLLM master key at `kv/spark-lab/deepseek/litellm` (`master_key`, `sk-` + 32 hex characters) and an Open WebUI signing key at `kv/spark-lab/deepseek/webui` (`secret_key`, 64 hex characters).
+- **No value on a command line or in a file:** the token is typed without echo, the two keys are generated and piped straight in.
+- **Nothing changes in Kubernetes yet.** The cluster reads these in Task 5.3.
+
+#### What to look for
+
+1. **`vault status`:** `Sealed false`.
+2. **`vault kv list kv/spark-lab`:** `deepseek/`, `hf` and `ngc`.
+3. **The token check** prints `hf_`, and nothing more of the token.
+
+**If something's off:** `Sealed true` → unseal first (01-Ansible Chapter 04 §2). `permission denied` on `kv put` → you are not logged in with the admin token. More in §7.
+
+#### Run it
+
 **Why:** the values must exist before anything reads them, and they must never pass through a command line or a file. `read -rsp` asks without echoing; `field=-` takes the value from the pipe.
 
 ```bash
@@ -292,6 +308,22 @@ vault kv get -field=token kv/spark-lab/hf | cut -c1-3                 # hf_
 
 ### Task 5.2 · Let `vault-sync` log in with its ServiceAccount
 
+#### What this lab does (script `lab/scripts/vault-k8s-auth-setup.sh`)
+
+- **On spark-root:** ServiceAccount `vault-token-reviewer` in `llm-serving`, a long-lived token Secret for it, and a ClusterRoleBinding to `system:auth-delegator`, so vault01 may call TokenReview.
+- **On vault01:** enables the `kubernetes/` auth method (if not already there) with the root's API URL, its CA and the reviewer token; writes the policy `deepseek-serving` (read `kv/data/spark-lab/hf` and `kv/data/spark-lab/deepseek/*`) and the role `deepseek-serving` bound to SA `vault-sync` in `llm-serving`, token TTL 10 min.
+- **Safe to re-run:** every step is an apply or an overwrite.
+
+#### What to look for
+
+1. **The script ends** with `✓ Vault Kubernetes auth ready.` and three example `vault kv put` lines.
+2. **`vault policy read deepseek-serving`:** only the three `path` blocks of the script, nothing broader.
+3. **The role:** `bound_service_account_names [vault-sync]`, `bound_service_account_namespaces [llm-serving]`, `token_policies [deepseek-serving]`, `token_ttl 10m`.
+
+**If something's off:** the script reads the API server from the **current** context; any other context than `spark-root` binds the wrong cluster. `x509` errors from `vault` mean `VAULT_CACERT` points at the wrong file. More in §7.
+
+#### Run it
+
 The setup script uses `vault`, `kubectl` and `jq` on the same machine, so it runs on the MacBook (`brew install hashicorp/tap/vault` if you don't have the CLI). It reads the API server URL and CA from the **current** kubeconfig context, which must be `spark-root`.
 
 ```bash
@@ -309,6 +341,22 @@ unset VAULT_TOKEN
 Expected: the policy lists only the paths of §3.3; the role is bound to `vault-sync` in `llm-serving` with a 10-minute TTL.
 
 ### Task 5.3 · Deploy the sync and run it now
+
+#### What this lab does (manifest `lab/k8s/ops/vault-sync.yaml`, tool `lab/tools/vault_sync.py`)
+
+- **ConfigMap `vault-ca`** in `llm-serving` with vault01's CA, so the sync verifies TLS.
+- **ServiceAccount, Role and RoleBinding `vault-sync`:** `get`/`update` on the three Secrets by name, `create` on Secrets, `patch` on `litellm` and `open-webui` only.
+- **CronJob `vault-sync`** every 15 min, plus a one-off Job `vs-now` from it. It logs in to vault01 with its SA token, writes `hf-token`, `litellm-master-key` and `open-webui-secret`, and rolls LiteLLM and Open WebUI when a Secret changed.
+
+#### What to look for
+
+1. **First line:** `vault login ok: policies=['default', 'deepseek-serving'] ttl=600s`.
+2. **First run:** three `synced` lines and `restart` lines for `deployment/litellm` and `statefulset/open-webui`, ending `3 secret(s) updated`.
+3. **Second run** (`vs-again`): three `unchanged` lines, no `restart`, `0 secret(s) updated`.
+
+**If something's off:** `permission denied` at login → re-run Task 5.2 with context `spark-root`. `x509: certificate signed by unknown authority` → the `vault-ca` ConfigMap holds the wrong CA. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -336,6 +384,22 @@ Run it again (`create job … vs-again`): every line reads `unchanged`, nothing 
 
 ### Task 5.4 · Rotate the LiteLLM master key end to end
 
+#### What this lab does (vault01, CronJob `vault-sync`)
+
+- **On vault01:** writes a new version of `kv/spark-lab/deepseek/litellm` with a fresh key.
+- **On the MacBook:** keeps the old key in `$OLD`, runs the sync as Job `vs-rotate`, waits for LiteLLM to roll, and tests both keys against `api.lab.local`.
+- **Unchanged:** Chapter 12's virtual keys (they live in PostgreSQL) and the other two Secrets.
+
+#### What to look for
+
+1. **`current_version`** one higher than before.
+2. **The sync log:** `synced … litellm-master-key`, `restart deployment/litellm`, `restart statefulset/open-webui`, `1 secret(s) updated`; the other two `unchanged`.
+3. **The two curls:** `old key: 401`, `new key: 200`.
+
+**If something's off:** both keys answering 200 means LiteLLM didn't restart (the env is read at start); check the `restart` line and `rollout status`. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ vault01 (ssh vault01)
 openssl rand -hex 16 | sed 's/^/sk-/' | tr -d '\n' | vault kv put kv/spark-lab/deepseek/litellm master_key=-
@@ -357,6 +421,22 @@ Expected: `old key: 401`, `new key: 200`, LiteLLM and Open WebUI rolled. Virtual
 
 ### Task 5.5 · Prove least privilege, and find the reads in the audit log
 
+#### What this lab does (Vault login attempt, `kubectl auth can-i`, vault01 audit log)
+
+- **Tries a Vault login** with a token for the `default` ServiceAccount instead of `vault-sync`.
+- **Asks Kubernetes** whether `vault-sync` may read `litellm-db` or patch `deploy/vllm`.
+- **Reads vault01's audit log** for the sync's reads. Everything here is read-only.
+
+#### What to look for
+
+1. **The login:** `permission denied` (the role is bound to `vault-sync` only).
+2. **Both `can-i`:** `no`.
+3. **The audit count** is above 0 and grows by one per path after every sync run; the last entry shows the path and `"service_account_name":"vault-sync"`, with values only as `hmac-sha256:…`.
+
+**If something's off:** a successful login with the `default` SA means the role's `bound_service_account_names` is too wide; re-run Task 5.2. A count of 0 means the audit device isn't enabled on vault01 (01-Ansible Chapter 17). More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=~/technical-depth/01-Ansible/lab/.cache/vault-ca.crt
@@ -376,6 +456,23 @@ Expected: reads by `service_account_name: vault-sync`, one per path per run; the
 
 ### Task 5.6 · The playbook from the MacBook: lint, preview, guards
 
+#### What this lab does (playbook `lab/ansible/15.1-deploy-deepseek.yml`)
+
+- **Syntax check and `ansible-lint`:** nothing touches the cluster.
+- **Check mode with `--diff`** for r1-32b-fp8: the playbook reads the cluster (PVC, quota, current model) and shows what it would apply, without applying it. The waits, the verify and the result tasks are skipped.
+- **Two guard runs:** an unknown model and r1-32b (0.70 + 0.06 > 0.72). Both must stop at the first `always`-tagged assert.
+
+#### What to look for
+
+1. **Lint:** `Passed` with profile `production`.
+2. **Check run:** `Show the change` prints `vLLM: <current> → r1-32b-fp8  (rollback: --tags serve -e deepseek_model=<current>)`; the recap shows `failed=0`.
+3. **`r1-70b`:** fails at `Model is in the catalog` with `unknown model 'r1-70b'. Catalog: r1-1.5b, r1-7b, …`.
+4. **`r1-32b`:** fails at `UMA budget allows the chat model next to the embedder` with `util 0.7 + embeddings 0.06 exceeds the LLM pool budget 0.72 …` and the hint to run it alone.
+
+**If something's off:** `couldn't resolve module/action 'kubernetes.core.k8s'` → install the collections in `01-Ansible/lab`. A check run failing at the `serving-budget` assert means the training window is still applied. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
 PB=../../03-DeepSeek/lab/ansible/15.1-deploy-deepseek.yml
@@ -389,6 +486,22 @@ ansible-playbook "$PB" --check -e deepseek_model=r1-32b                  # 0.70 
 Expected: the check run prints `Show the change` with the current model, the new one and the rollback command, and ends `failed=0` with the waits skipped. The two guard runs fail at their first task with a readable message, before any API call.
 
 ### Task 5.7 · Run it from Semaphore, switch and roll back
+
+#### What this lab does (template `15.1 Deploy DeepSeek`)
+
+- **Full run (r1-7b):** asserts, then tool ConfigMaps, a fresh `model-prefetch` Job (downloads the weights on the first run), the `r1-7b` overlay with a wait until vLLM is Ready with the right `model` label, the apps (bge-m3, LiteLLM + PostgreSQL, Open WebUI), the gated RAG ingest, and `scripts/verify.sh`. Everything goes through the Kubernetes API on spark-root; nothing logs in to the Spark over SSH.
+- **No secret values:** the task log shows model and object names only. The apply writes the placeholder Secrets back, so run the sync afterwards.
+- **Switch and rollback:** `--tags serve` changes only the served model.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`; the `Result` task shows the last lines of `verify.sh`, ending `… passed, … warnings, 0 failed`.
+2. **Second full run** with `deepseek_skip_prefetch=true` and `--skip-tags rag`: `changed=0` or 1. Prefetch and RAG, the tasks that change every time, are skipped; a remaining `changed` is usually the apps task writing the placeholder Secrets back over the synced ones, so sync again.
+3. **Switch run:** `Show the change` prints `vLLM: r1-7b → r1-32b-fp8 (rollback: --tags serve -e deepseek_model=r1-7b)`, and `get deploy vllm -L model` shows `r1-32b-fp8`; after the rollback run, `r1-7b`.
+
+**If something's off:** `Invalid kube-config file` → the kubeconfig isn't in sema01's state folder (run `19.1 Kubernetes` first). A run stuck at "Wait for vLLM to become Ready" for long → `describe pod -l app=vllm`; it gives up after 45 min. More in §7.
+
+#### Run it
 
 **Semaphore UI:** in project `spark-lab`, **Task Templates → New Template**, type *Ansible Playbook*, with the fields from §3.2 (name `15.1 Deploy DeepSeek`, playbook `03-DeepSeek/lab/ansible/15.1-deploy-deepseek.yml`, inventory `spark-lab`, repository `technical-depth`, variable group `vault-approle`). Add a survey variable `deepseek_model` (default `r1-7b`). Save, then **Run** with `r1-7b`.
 
@@ -407,6 +520,27 @@ kubectl --context spark-root -n llm-serving get deploy vllm -L model            
 ```
 
 ### Task 5.8 · Day-2 jobs: pin, verify, tamper, back up, drift
+
+#### What this lab does (manifests `lab/k8s/ops/`, tools `catalog_drift.py`, `weights_verify.py`, script `gen_overlays.py`)
+
+- **Five CronJobs** in `llm-serving`: `catalog-drift` (Mondays 06:23 UTC), `litellm-db-backup` (02:51, PVC `litellm-db-backups` 5 Gi), `vault-sync` (every 15 min), `webui-backup` (02:41), `weights-verify` (03:17).
+- **Pin r1-7b:** `catalog_drift.py pin` writes the current upstream sha into `models.yaml` (a change in your working copy); `gen_overlays.py` adds `--revision`/`--tokenizer-revision` to the overlay; `serve-model.sh` prefetches and serves that revision.
+- **Weights manifest:** `weights-verify` hashes every new snapshot under `/models/hf` and records `/models/manifests/<repo>@<sha>.json`; known snapshots are re-checked.
+- **Tamper drill:** a throwaway pod copies the 7B snapshot to its own `/tmp` (~15 GB of node disk), changes one byte of the copy and verifies it. The live snapshot is not touched.
+- **LiteLLM DB restore:** a `pg_dump` backup, LiteLLM scaled to 0, `pg_restore --clean` from the dump, LiteLLM back to 1. Then a drift report in-cluster.
+
+#### What to look for
+
+1. **`get cronjobs`:** the five names above.
+2. **Drift report:** one line per model with `UNPINNED`, `ok` or `MOVED`, `?` with `HTTP 401/403` for gated repos without a token, and `… models, N moved upstream since pinning`.
+3. **Pin:** `pinned r1-7b → <sha>`; `git diff` shows `revision:` in `models.yaml` and the two `--…revision` args in `k8s/models/r1-7b`.
+4. **Prefetch and manifest:** `downloaded deepseek-ai/DeepSeek-R1-Distill-Qwen-7B@<sha> in …s`; `wv-pin` prints `== NEW` with `… files, … GiB hashed` for new snapshots and `✓ weights match manifest` for known ones.
+5. **Tamper:** `CHANGED  config.json`, `✗ 1 problem(s)`, `exit 1`.
+6. **Backup and restore:** `tables in dump:` above 0 and the dump file listed; the restore pod exits cleanly; the deleted virtual key works again. `cd-now` ends like the drift report; any `MOVED` fails it.
+
+**If something's off:** `Revision not found` in the prefetch → a sha typo or a gated repo without a token. `pg_dump: server version mismatch` → use the same major version (16) as the server. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -466,6 +600,24 @@ Record the restore time: it is your recovery time for gateway keys.
 
 ### Task 5.9 · (Optional) GitOps with the eval gate
 
+#### What this lab does (manifests `lab/gitops/applications.yaml`, `lab/k8s/serving`)
+
+- **Points the Applications at your fork** (a `sed` on your working copy) and creates the five `deepseek-*` Argo CD Applications in `argocd`, synced in waves 0–40 with prune and self-heal.
+- **`deepseek-10-serving`** serves the model named in `k8s/serving/kustomization.yaml` (r1-7b) and runs the PostSync Job `eval-gate`: the math and JSON suites against vLLM, compared with ConfigMap `deepseek-eval-baseline` (tolerance 0.05).
+- **Bootstrap:** with no baseline yet, the first gate run only records numbers; you save its last line as `results/baseline-r1-7b.json` and create the ConfigMap from it.
+- **From now on** Argo CD owns these objects: `serve-model.sh` and the playbook's `serve`/`apps` tags get reverted unless you pause the Application.
+
+#### What to look for
+
+1. **Applications:** five `deepseek-*` rows, `Synced` and `Healthy` once the waves finish.
+2. **First `eval-gate` log:** `serving: r1-7b`, `no baseline yet — this run is the bootstrap`, then `---- run (save as the next baseline when you accept it) ----` and one JSON line.
+3. **The saved baseline** passes `json.tool`, and the ConfigMap is created.
+4. **Later syncs:** `GATE PASSED` for an equal model; `GATE FAILED (… suite(s) regressed)` and phase `Failed` for `../models/r1-1.5b`.
+
+**If something's off:** synced Secrets that keep reverting to placeholders → the Secrets weren't removed from what the Applications render (§3.7). An empty baseline file means the `sed` range didn't find the `---- run` line; read the whole log. More in §7.
+
+#### Run it
+
 Needs Argo CD from [02-Kubernetes Chapter 28](../02-Kubernetes/28-production-mlops-and-gitops.md) and a fork of the repository. First deal with the placeholder Secrets (§3.7), then:
 
 ```bash
@@ -489,6 +641,22 @@ kubectl --context spark-root apply -n argocd -f gitops/applications.yaml        
 ```
 
 ### Task 5.10 · Drill D05: a gated model
+
+#### What this lab does (script `lab/scripts/breakfix.sh`, `lab/breakfix/D05-gated-no-token`)
+
+- **Inject:** applies the `llama-3.1-8b` overlay. It carries 02's placeholder `hf-token` Secret, which overwrites the synced token, and Llama 3.1 is a gated repository.
+- **Fix:** accept the licence on huggingface.co, store a token with access in vault01, run the sync (`vs-d05`), then serve the model again.
+- **Reset:** re-applies the `llama-3.1-8b` overlay, so Llama keeps serving. Switch back with `scripts/serve-model.sh r1-7b`, then sync once more (that apply writes the placeholder again).
+
+#### What to look for
+
+1. **After inject:** `Injected D05: Gated model never becomes Ready`; the vLLM pod never gets Ready, and its log shows `401` or `GatedRepoError`.
+2. **The sync:** `synced kv/data/spark-lab/hf → secret/hf-token (token)`.
+3. **`serve-model.sh llama-3.1-8b`:** `[PASS] weights cached`, `[PASS] vLLM ready with llama-3.1-8b`, `0 failed`.
+
+**If something's off:** still `401/403` after the sync → the token's account hasn't accepted the Meta licence, or `serve-model.sh` re-applied the placeholder before the pod started; sync again and restart `deploy/vllm`. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab

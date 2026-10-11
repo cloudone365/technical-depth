@@ -172,6 +172,20 @@ Read both values from `models.yaml` (or `scripts/serve-model.sh list`) before yo
 
 ### Task 5.1 · Serve the tool model and look at a raw call
 
+#### What this lab does (script `lab/scripts/serve-model.sh`, overlay `lab/k8s/models/qwen2.5-7b-tools`)
+
+- **Switches the served model:** `deploy/vllm` in `llm-serving` now runs Qwen2.5-7B-Instruct as `qwen2.5-7b-tools` (util 0.20, 28 Gi pod, `--enable-auto-tool-choice --tool-call-parser=hermes`). The model it served before stops. First run downloads ~15 GB.
+- **One raw request** through a port-forward on `localhost:8000`, offering a `calculator` tool. Nothing runs the tool; you only look at the reply.
+
+#### What to look for
+
+1. **`serve-model.sh`** ends with `[PASS] vLLM ready with qwen2.5-7b-tools`, `[PASS] answer: 144 …`, `0 failed`.
+2. **The reply:** `finish_reason: "tool_calls"`, one call with `name: "calculator"` and an `arguments` **string** containing `0.17 * 121.7` or an equivalent.
+
+**If something's off:** HTTP 400 about `"auto" tool choice`, or the call as text in `content`, means the tool flags are missing (drill D07). More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 export KUBECONFIG=~/technical-depth/01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml
@@ -189,6 +203,25 @@ Expected: `finish_reason: "tool_calls"` and a `calculator` call whose `arguments
 Want to try the loop first without touching the root's serving? In `dev-llms`, serve a tiny tool-capable model in `llm-sandbox` (2 CPU · 4 Gi · 2 slices; [02-Kubernetes Chapter 04](../02-Kubernetes/04-nested-clusters-with-vcluster.md)) and point `--url` at it. The tool-calling quality of a sub-1B model is poor; the protocol is the same.
 
 ### Task 5.2 · Run the agent from the MacBook, with an audit trail
+
+#### What this lab does (tool `lab/tools/agent_tools.py`)
+
+- **Sets your kubectl context** to `spark-root` (the `gpu_slices` tool runs `kubectl get pods -A` there).
+- **Port-forwards** Qdrant (`localhost:6333`) and bge-m3 (`localhost:8001`) for `search_docs`; vLLM stays on `localhost:8000` from Task 5.1.
+- **Runs the agent loop** twice: the model picks tools, the script validates the arguments, runs the tool, and sends the result back, up to 6 steps. Every call is appended to `results/agent-audit.jsonl`.
+- **Read-only:** no tool can change the cluster.
+- **Gateway variant:** the same agent through `api.lab.local` with Chapter 12's `$ALPHA` key, which is expected to fail.
+
+#### What to look for
+
+1. **First question:** `[step N] gpu_slices({}) → {"slices_in_use": …, "by_namespace": {…}}`, a `calculator` step (≈ 20.69), then `ANSWER:`.
+2. **Second question:** a `search_docs` step, then an answer of **900 s**.
+3. **The audit file:** one `{step, tool, args, ms}` line per tool call.
+4. **Gateway:** HTTP **401** with `$ALPHA`; success with a key that allows `agent`.
+
+**If something's off:** `gpu_slices` returning `cluster API unavailable` means the current context isn't `spark-root`. `search_docs` errors mean a port-forward died or the RAG index from Chapter 13 doesn't exist. More in §7.
+
+#### Run it
 
 `gpu_slices` runs `kubectl get pods -A` in the current context, so make that `spark-root`:
 
@@ -217,6 +250,21 @@ python3 tools/agent_tools.py "What is 2**10?" --url http://api.lab.local --model
 
 ### Task 5.3 · Guardrails, demonstrated
 
+#### What this lab does (tool `lab/tools/agent_tools.py`)
+
+- **Calls the guardrails directly** in Python: the argument validator with a wrong type and an unknown key, and the calculator with code instead of arithmetic.
+- **Asks the agent to delete pods** with at most 3 steps. The agent has no tool that can delete anything, so the cluster cannot change.
+
+#### What to look for
+
+1. **Two validation lines:** `invalid arguments: missing=[] unexpected=[] wrong_type=['expression']`, then one with `unexpected=['path']`.
+2. **`calculator refused: …`**: the expression is rejected, never evaluated.
+3. **The delete request:** a refusal in `ANSWER:`, or a read-only `gpu_slices` step. `kubectl -n batch get pods` is unchanged.
+
+**If something's off:** an `ImportError` means you are not in `03-DeepSeek/lab` (the script imports `tools/agent_tools.py`). More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 python3 - <<'PY'
@@ -233,6 +281,23 @@ Expected: two validation errors, the calculator refusal, and for the last questi
 
 ### Task 5.4 · Run it in-cluster with least privilege
 
+#### What this lab does (manifest `lab/k8s/jobs/agent.yaml`)
+
+- **RBAC:** ServiceAccount `agent-readonly` in `llm-serving`, ClusterRole `agent-pod-reader` (`list pods`, nothing else) and its binding.
+- **Job `agent`:** `python:3.12-slim` as UID 65534, read-only root filesystem, no capabilities, 128–256 Mi. It runs `agent_tools.py` from the `deepseek-tools` ConfigMap against `vllm.llm-serving:8000`, max 6 steps, with the audit lines on stdout. Deleted 24 h after it finishes.
+- **The question:** GPU time-slices in use per namespace and their share of the 15.
+- **Three `can-i` checks** as that ServiceAccount.
+
+#### What to look for
+
+1. **Job:** `1/1` completions.
+2. **The log:** `[step N] gpu_slices({}) → …` and audit JSON lines, a `calculator` step for the percentage, then `ANSWER:`.
+3. **`can-i`:** `yes`, `no`, `no`.
+
+**If something's off:** `gpu_slices` returning `cluster API unavailable … 403` means the ClusterRoleBinding is missing. An old answer means the previous Job wasn't deleted first. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root apply -k .                          # tools ConfigMap with agent_tools.py
@@ -247,6 +312,20 @@ kubectl --context spark-root auth can-i get secrets --as=system:serviceaccount:l
 Expected: the Job log shows the tool calls as audit lines and a final answer; the three `can-i` answers are yes, no, no.
 
 ### Task 5.5 · Guaranteed JSON vs hoping for JSON
+
+#### What this lab does (vLLM structured outputs, through `localhost:8000`)
+
+- **40 requests** to `qwen2.5-7b-tools` at temperature 0.8: 20 that ask for JSON in the prompt, 20 with `response_format` set to a JSON schema (`namespace`, `severity` from low/medium/high, `restarts` integer).
+- **Counts** how many replies parse as JSON with the three keys. Read-only.
+
+#### What to look for
+
+1. **The last line:** `free-form parsable: N/20   schema-constrained: 20/20`.
+2. **Free-form** is usually high but may miss a few (code fences, extra prose). Record yours.
+
+**If something's off:** schema-constrained below 20/20 means `response_format` didn't reach the engine (check the JSON with `jq` on one raw reply). Connection errors mean the Task 5.1 port-forward died. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
@@ -270,6 +349,22 @@ Expected: schema-constrained 20/20. Free-form is usually high but not always 20/
 
 ### Task 5.6 · Planner and actor side by side (optional)
 
+#### What this lab does (script `lab/scripts/serve-model.sh`, overlay `lab/k8s/multi/qwen2.5-7b-tools`)
+
+- **Planner:** `deploy/vllm` switches back to r1-7b (util 0.20).
+- **Actor:** a second Deployment `vllm-qwen2-5-7b-tools` with its own Service and ServiceMonitor, util 0.20, 28 Gi. Util sum with bge-m3: 0.20 + 0.20 + 0.06 = 0.46.
+- **The agent** runs against the actor on `localhost:8002`.
+
+#### What to look for
+
+1. **Rollouts:** `serve-model.sh` ends with `0 failed`, and `deploy/vllm-qwen2-5-7b-tools` rolls out.
+2. **Quota:** `describe quota serving-budget` shows memory used below 90Gi and GPU slices below 6.
+3. **The agent:** a `gpu_slices` step and an answer that now counts the extra slice in `llm-serving`.
+
+**If something's off:** the actor Pending with `exceeded quota` means the apps plus two 28 Gi pods don't fit `serving-budget`; park something. Remove the actor afterwards with the `delete -k` line below. More in §7.
+
+#### Run it
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh r1-7b                                     # the planner in svc/vllm
@@ -283,6 +378,21 @@ python3 tools/agent_tools.py "How many GPU slices are in use?" --url http://loca
 Before the apply, add up the two catalog utils and bge-m3's 0.06: the sum must be ≲ 0.72. Remove the actor afterwards with `kubectl --context spark-root delete -k k8s/multi/qwen2.5-7b-tools`.
 
 ### Task 5.7 · Drill D07
+
+#### What this lab does (script `lab/scripts/breakfix.sh`, `lab/breakfix/D07-no-tool-parser`)
+
+- **Inject:** re-applies the `qwen2.5-7b-tools` overlay without `--enable-auto-tool-choice` and `--tool-call-parser=hermes`. vLLM restarts.
+- **Reset:** re-applies the normal `qwen2.5-7b-tools` overlay.
+
+#### What to look for
+
+1. **After inject:** `Injected D07: Agent gets 400 / no tool_calls`. Once vLLM is Ready, the agent fails with HTTP 400 (`"auto" tool choice requires …`) or answers with text that describes a tool call.
+2. **Your diagnosis** matches `answer D07`: the two flags are missing.
+3. **After reset:** the same question gives a `calculator` step and `ANSWER:` 1024.
+
+**If something's off:** the agent still works right after inject because the old pod is still serving; wait for `rollout status deploy/vllm`. The port-forward breaks on the pod change; start it again. More in §7.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab

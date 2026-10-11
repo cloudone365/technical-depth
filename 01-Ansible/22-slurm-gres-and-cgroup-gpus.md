@@ -281,6 +281,37 @@ Design choices:
 
 ## 3. Hands-on
 
+#### What this lab does (template `22.1 Slurm`)
+
+- **Packages:** `slurmctld` on dgx-spark-1 (the controller), `slurmd` on every Spark, plus `munge` and `slurm-client`, from the distro repositories.
+- **MUNGE key:** 1024 random bytes, generated once in the controller's state folder (`munge.key` on sema01's state volume) and copied to `/etc/munge/munge.key` (`0400 munge:munge`) on every node. It is never regenerated.
+- **Config, identical on every node:** `/etc/slurm/slurm.conf` (cluster `spark`, partition `gpu`: default 4 h, max 2 days; each node 20 CPUs, `RealMemory` = MemTotal − 16384 MB, `Gres=gpu:gb10:1`), `gres.conf` (`/dev/nvidia0`) and `cgroup.conf` (cgroup v2; cores, RAM and devices confined).
+- **Health check:** `/usr/local/sbin/spark-slurm-healthcheck.sh`, run by slurmd every 120 s. It drains the node when `nvidia-smi` hangs, a critical Xid appears, or MemAvailable drops below 4 GiB.
+- **Daemons:** `munge`, `slurmctld` (port 6817) and `slurmd` (6818), enabled and started. Nodes that are down only because of the reconfiguration are resumed; nodes drained with a `healthcheck:` or `maint:` reason are not.
+- **Test job:** `srun -p gpu --gres=gpu:1 -t 2 nvidia-smi -L` on the controller. Kubernetes is not touched; remember that both share the one GPU (see the note at the top).
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`. On a first run expect `changed` on the packages, the key, the three config files and the daemon restarts. On a re-run `changed=0` (the key task is skipped because the file exists).
+2. **The last two tasks** print the cluster state and the test job:
+   ```
+   dgx-spark-1 idle gpu:gb10:1 <RealMemory> none
+   GPU 0: NVIDIA GB10 (UUID: GPU-…)
+   ```
+3. **The MUNGE round-trip check is silent:** its task may fail without failing the play, and its result is not printed. Check it yourself on the Spark: `munge -n | unmunge | grep STATUS` prints `STATUS: Success (0)`.
+4. **The node**, with the commands under "Run it":
+
+   | Line/Field | Healthy value |
+   |---|---|
+   | State | `idle` |
+   | Gres | `gpu:gb10:1` |
+   | RealMemory | about 108 000 (MemTotal in MB minus 16384) |
+   | CPUs | `20` |
+
+**If something's off:** node `down*` → `journalctl -u slurmd`. `Munge decode failed` → the keys differ or the clocks are skewed. Node `INVAL` with `Low RealMemory` → raise `slurm_cluster_mem_reserve_mb`. More in §5.
+
+#### Run it
+
 **Semaphore UI:** run the template **`22.1 Slurm`** (break-glass, on the MacBook in `01-Ansible/lab`: `ansible-playbook playbooks/22.1-slurm.yml -l dgx-spark-1,localhost -K`, after copying the munge key as above). Then on the Spark:
 
 ```bash
@@ -290,11 +321,25 @@ ssh dgxadmin@192.168.0.100
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
-sinfo -N -o "%N %T %G %m %c"          # dgx-spark-1 idle gpu:gb10:1 106496 20
+sinfo -N -o "%N %T %G %m %c"          # dgx-spark-1 idle gpu:gb10:1 <about 108000> 20
 scontrol show node dgx-spark-1 | grep -E 'Gres|RealMemory|State'
 ```
 
 ### 3.1 Prove device confinement
+
+#### What this lab does (two `srun` jobs on dgx-spark-1)
+
+- **Two one-minute jobs** in partition `gpu`, both running `nvidia-smi -L`: the first without `--gres`, the second with `--gres=gpu:gb10:1`.
+- **Nothing is changed.** It only shows what `ConstrainDevices=yes` does.
+
+#### What to look for
+
+1. **Without `--gres`:** no GB10 line. `nvidia-smi` reports an error or `No devices were found`, because the job's cgroup doesn't allow `/dev/nvidia0`.
+2. **With `--gres`:** `GPU 0: NVIDIA GB10 (UUID: GPU-…)`.
+
+**If something's off:** the first job also sees the GPU → device confinement isn't active (see the paragraph under "Run it", and §5).
+
+#### Run it
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
@@ -305,6 +350,21 @@ srun -p gpu -t 1 --gres=gpu:gb10:1 nvidia-smi -L   # → GPU 0: NVIDIA GB10
 If the first command still sees the GPU, `ConstrainDevices` isn't active: check `CgroupPlugin=cgroup/v2`, `TaskPlugin=task/cgroup`, and `slurmd -C`/`journalctl -u slurmd`.
 
 ### 3.2 Batch job: PyTorch in a container
+
+#### What this lab does (batch script `~/torch-check.sbatch`)
+
+- **Writes and submits one job:** 1 GPU, 24 GB, 10 minutes. It runs `nvcr.io/nvidia/pytorch:25.11-py3` with Docker (`--memory=24g`) and prints the GPU name and `torch.cuda.mem_get_info()`.
+- **Output** goes to `torch-check-<jobid>.out` in the folder you submitted from (your home folder here).
+- **First run:** if Chapter 11's `11.2 CUDA smoke` already pulled this image, the job starts at once; otherwise the ~20 GB pull takes longer than the `sleep 30`.
+
+#### What to look for
+
+1. **`squeue`** shows the job (state `R`) or nothing once it has finished.
+2. **The `.out` file:** `NVIDIA GB10 (<free bytes>, <total bytes>)`. The total is the whole unified pool, about 1.3e11 bytes (121.7 GiB), not 24 GB: the container runs under dockerd, outside the job's cgroup, and `--memory` doesn't change what CUDA reports.
+
+**If something's off:** the `.out` file is empty or missing → the job is still pulling or running; check `squeue`, wait, and `cat` again. `permission denied` on the Docker socket → the user who submitted the job is not in the `docker` group. More in §5.
+
+#### Run it
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
@@ -326,6 +386,22 @@ sbatch ~/torch-check.sbatch && squeue && sleep 30 && cat torch-check-*.out
 > Launching Docker from a job means **the container runs under dockerd, outside the job's cgroup**, so Slurm's limits don't apply to it (hence the explicit `--memory`). For real multi-user clusters, use **enroot + pyxis** (`srun --container-image=nvcr.io#nvidia/pytorch:25.11-py3 …`), which keeps the container inside the job.
 
 ### 3.3 Two-node NCCL job
+
+#### What this lab does (batch script `~/nccl-2node.sbatch`, two Sparks only)
+
+- **One job on both nodes,** one task and one GPU each, for up to 10 minutes. `mpirun` starts NCCL's `all_gather_perf` from 1 GB to 16 GB on both Sparks.
+- **Networks:** NCCL and MPI bootstrap over the mgmt link `enP7s7`; the data goes over the CX-7 RoCE devices `rocep1s0f1` and `roceP2p1s0f1`.
+- **Needs** the NCCL and nccl-tests builds in `$HOME/nccl` and `$HOME/nccl-tests` from `14.2-nccl-test.yml`.
+- **One Spark:** skip it. The partition has a single node, so Slurm refuses a job that asks for `-N 2`.
+
+#### What to look for
+
+1. **`nccl-2node-<jobid>.out`** contains `NCCL INFO` lines with `via NET/IB`: the data path is RDMA, not TCP sockets.
+2. **The results table** ends with an `Avg bus bandwidth` line. Compare it with your Chapter 14 result; they should be close.
+
+**If something's off:** `NET/Socket` instead of `NET/IB` → check the `NCCL_IB_HCA` names with `ibv_devices` on both Sparks. `all_gather_perf: not found` or missing libraries → run `14.2-nccl-test.yml` first. More in §5.
+
+#### Run it
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
@@ -352,6 +428,24 @@ sbatch ~/nccl-2node.sbatch
 
 ### 3.4 Watch the health check drain a node
 
+#### What this lab does (edit on a node, then template `22.1 Slurm`)
+
+- **Breaks the health check on purpose:** a `sed` changes the UMA threshold in `/usr/local/sbin/spark-slurm-healthcheck.sh` from 4 to 999 GiB, so the next check (within 120 s) drains the node.
+- **Re-runs `22.1 Slurm`:** the role puts the original script back, and on purpose does **not** resume a node drained with a `healthcheck:` reason.
+- **Manual resume:** `scontrol update … State=RESUME`, the step a human does after checking.
+- **One Spark:** run every step on dgx-spark-1 (`ssh dgx-spark-1`, `NodeName=dgx-spark-1`). Running jobs keep going while the node is drained; new ones wait.
+
+#### What to look for
+
+1. **`sinfo -R`** after about two minutes: the node, with REASON `healthcheck: UMA MemAvailable < 4 GiB`.
+2. **The template re-run:** `changed` on "Health check script" (the drift was fixed), and "Resume nodes DOWN/DRAINED by (re)configuration" stays `ok`: the node was kept drained. `sinfo -R` still lists it.
+3. **One Spark:** the template's last task, the `srun` test job, has no free node, so the run waits at "Run a 1-GPU job and capture its output". Resume dgx-spark-1 from your ssh session; the job then runs and the template finishes with `failed=0`.
+4. **After the resume:** `sinfo -N` shows the node `idle` again.
+
+**If something's off:** no drain after 3 minutes → check `HealthCheckProgram` with `scontrol show config | grep -i health` and that the `sed` matched (`grep -- '-lt' /usr/local/sbin/spark-slurm-healthcheck.sh`). More in §5.
+
+#### Run it
+
 ```bash
 # ▶ dgx-spark-2 (ssh dgx-spark-2)
 # TEMPORARILY make the UMA threshold impossible to meet
@@ -370,6 +464,21 @@ sudo scontrol update NodeName=dgx-spark-2 State=RESUME
 ```
 
 ### 3.5 Experiment: does GPU memory count against the job's cgroup on UMA?
+
+#### What this lab does (one `srun` job on dgx-spark-1)
+
+- **One job** with 1 GPU, `--mem=8G` and 5 minutes. A Python script allocates 1 GiB GPU buffers, one every 0.2 s, up to 40 GiB, and prints a counter.
+- **Runs on the host's `python3`, not in a container,** so the allocations happen inside the job's cgroup. That `python3` must be able to `import torch` with CUDA. Docker would put them outside the cgroup again (§3.2).
+- **Memory:** up to 40 GiB comes out of the unified pool. If the LLM stack on the root holds most of it, MemAvailable can fall below 4 GiB and the health check drains the node (§3.4).
+
+#### What to look for
+
+1. **One of two outcomes.** Either the job is killed near `8 GiB allocated`, with an `oom_kill` event reported by `slurmstepd`, or it prints up to `40 GiB allocated` and exits normally.
+2. **Record which one** you saw, with your DGX OS and driver versions. It tells you whether `--mem` protects the node from GPU allocations, which decides how far you trust `RealMemory` and the health check.
+
+**If something's off:** `ModuleNotFoundError: No module named 'torch'` → the host's `python3` has no PyTorch; point the job at a Python environment that has a CUDA-enabled arm64 PyTorch. More in §5.
+
+#### Run it
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)

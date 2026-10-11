@@ -102,6 +102,31 @@ What this does **not** give you, and what to add for real tenants:
 
 ## 3. Hands-on
 
+#### What this lab does (template `21.1 Multus RDMA`)
+
+- **Where:** runs on the controller against the root only (context `spark-root`, pinned with `module_defaults`). Nothing on the Spark is changed by SSH; the DaemonSets write their own files.
+- **Multus:** applies the upstream thick-plugin manifest v4.3.0 (DaemonSet `kube-system/kube-multus-ds`). On the Spark it adds `/etc/cni/net.d/00-multus.conf` in front of Cilium's `05-cilium.conflist` and the `multus-shim` binary in `/opt/cni/bin`. Every new pod's network setup now passes through Multus, which still gives `eth0` to Cilium.
+- **RDMA device plugin:** DaemonSet `kube-system/rdma-shared-dp-ds` (image on `:latest`) advertises `rdma/rdma_shared_cx7` for the CX-7 netdevs `enp1s0f1np1` and `enP2p1s0f1np1`, up to 64 pods per node.
+- **NADs:** `cx7-a` (macvlan on `enp1s0f1np1`, 192.168.100.0/24) and `cx7-b` (`enP2p1s0f1np1`, 192.168.101.0/24), MTU 9000, in `platform-tools` and, once `20.2 vClusters` has created it, `batch`. None in `vc-dev-lab` or `vc-dev-llms`.
+- **Test pods:** `rdma-test-<node>` in `platform-tools` (`ubuntu:24.04`, perftest installed at start), with `net1` at `192.168.100.201` on dgx-spark-1 and `.202` on dgx-spark-2. With one Spark there is a single pod, `rdma-test-dgx-spark-1`. The package install inside the pods makes the first run take a few minutes.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`. On a first run expect `changed` on Multus, the device plugin, the NADs and the test pods.
+2. **The "Result" task** comes from a step that is allowed to fail, so read it by eye. Each entry must show `net1` `UP` with its `192.168.100.20x/24` address, followed by `uverbs…` entries from `/dev/infiniband`. An error text there instead means the pod has no `net1` or no RDMA device.
+3. **Cluster and node**, with the commands under "Run it":
+
+   | Line/Field | Healthy value |
+   |---|---|
+   | `get net-attach-def -A` | `cx7-a` and `cx7-b` in `platform-tools`, and in `batch` once 20.2 has run |
+   | `RDMA` / `GPU` columns | `64` / `15` on every node |
+   | `/etc/cni/net.d` | `00-multus.conf` listed before `05-cilium.conflist` |
+   | `/opt/cni/bin` | `multus-shim`, `macvlan`, `static`, `cilium-cni` |
+
+4. **One Spark:** the playbook's second test-pod entry lands on the same pod and only rewrites its annotation to `.202`. The interface keeps `.201`; trust the pod's `network-status` (§3.1), not its `networks` annotation.
+
+**If something's off:** test pods stuck in `ContainerCreating` with `failed to find plugin "macvlan"` → the reference CNI plugins are missing in `/opt/cni/bin`. No `rdma/rdma_shared_cx7` on the node → `kubectl --context spark-root -n kube-system logs ds/rdma-shared-dp-ds`. No NADs in `batch` → run `20.2 vClusters`, then this template again. More in §5.
+
 ```yaml
 # lab/playbooks/21.1-multus-rdma.yml
 ---
@@ -334,6 +359,10 @@ spec:
         - { name: devs, hostPath: { path: /dev/ } }
 ```
 
+#### Run it
+
+**Semaphore UI:** run the template **`21.1 Multus RDMA`**. Break-glass is the `ansible-playbook` line below, run from the MacBook against its own `.cache/` kubeconfig. Then check from the MacBook:
+
 ```bash
 # ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
@@ -347,6 +376,21 @@ ssh dgxadmin@192.168.0.100 'ls /etc/cni/net.d; ls /opt/cni/bin | grep -E "multus
 Expected on each node: `RDMA` 64, `GPU` 15. In `/etc/cni/net.d`, `00-multus.conf` sorts before `05-cilium.conflist`. The container runtime uses the first config in lexical order, so every pod now goes through Multus, and Multus hands the default network to Cilium. With `cni.exclusive=true` (Cilium's default) the Cilium agent would rename `00-multus.conf` out of the way on its next restart, and `net1` would silently stop appearing.
 
 ### 3.1 Pod-to-pod RDMA across Sparks
+
+#### What this lab does (`kubectl exec` into the test pods)
+
+- **Bandwidth test (two Sparks):** starts an `ib_write_bw` server in `rdma-test-dgx-spark-2` in the background, then runs the client in `rdma-test-dgx-spark-1` against `192.168.100.202`: device `rocep1s0f1`, 4 queue pairs, 10 seconds, result in Gb/s.
+- **One Spark:** there is no `rdma-test-dgx-spark-2` pod (see §3), so skip the bandwidth test and run only the `network-status` command.
+- **Read-only:** nothing is created or changed; the test pods stay for §3.3.
+
+#### What to look for
+
+1. **The client's result line** (`BW average[Gb/sec]`): within a few percent of the host-level perftest you recorded in Chapter 13.
+2. **`network-status`** on `rdma-test-dgx-spark-1` has two entries: `cilium` on `eth0` with a `10.42.x.x` address, and `platform-tools/cx7-a` on `net1` with `192.168.100.201`.
+
+**If something's off:** `Couldn't allocate MR` → the pod lacks `IPC_LOCK` or the locked-memory limit is too low. The client can't connect → the server wasn't up yet; raise the `sleep`. A device-name error → run `ibv_devices` in the pod and use the name it prints. More in §5.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · any folder
@@ -400,6 +444,31 @@ spec:
 Every limit on this pod is checked in a different place. `nvidia.com/gpu: 1` is charged against `batch-budget`'s 3 slices by the root API server. `memory: 6Gi` counts against the 12 Gi `batch` may take from the LLM memory pool it shares with `llm-serving`; with request = limit, the scheduler places the pod only if those 6 GiB are free on the node, so it never squeezes a running model. `rdma/rdma_shared_cx7` is checked by nobody until the kubelet's device plugin, which is the quota gap from §2.3. The pod carries no Kueue queue label, so Kueue leaves it alone; a real training Job goes through the ClusterQueue `spark-cq` (02-Kubernetes Chapter 07).
 
 ### 3.3 Follow the annotation to the NIC
+
+#### What this lab does (manifest `nccl-worker-0.yaml` from §3.2)
+
+- **One pod in the root's `batch` namespace:** `nccl-worker-0` on dgx-spark-1, with 1 GPU slice, 1 `rdma/rdma_shared_cx7`, 6Gi memory (request = limit) and `IPC_LOCK`. Multus gives it `net1` (`cx7-a`, `192.168.100.211`) and `net2` (`cx7-b`, `192.168.101.211`) next to Cilium's `eth0`.
+- **Prerequisites:** `20.2 vClusters` (the `batch` namespace) and then `21.1 Multus RDMA` (the NADs in `batch`, and the `.201` test pod to ping).
+- **A ping over the fabric:** installs `iputils-ping` inside the pod and pings the `platform-tools` test pod on `192.168.100.201` through `net1`. Then the pod is deleted.
+- **The image** `nvcr.io/nvidia/pytorch:25.09-py3` is large; the first pull takes a while. A PodSecurity warning on `apply` is expected (`IPC_LOCK` is above `baseline`).
+
+#### What to look for
+
+1. **The pod:** `Running` on dgx-spark-1 with a `10.42.x.x` IP.
+2. **`network-status`**, three entries:
+
+   | Line/Field | Healthy value |
+   |---|---|
+   | `cilium` | `eth0`, `10.42.x.x` |
+   | `batch/cx7-a` | `net1`, `192.168.100.211` |
+   | `batch/cx7-b` | `net2`, `192.168.101.211` |
+
+3. **Inside the pod:** `ip -br addr` lists `eth0`, `net1`, `net2`, and `/dev/infiniband` holds `uverbs…` entries.
+4. **The ping:** `3 packets transmitted, 3 received, 0% packet loss`. A `batch` pod reaching a `platform-tools` pod is the §2.3 gap: Cilium policies don't cover `net1`.
+
+**If something's off:** `cannot find a network-attachment-definition (cx7-a) in namespace (batch)` → 21.1 ran before 20.2; run `21.1 Multus RDMA` again. The apply is refused with `exceeded quota: batch-budget` → other `batch` pods hold the 3 slices or the 12 Gi. More in §5.
+
+#### Run it
 
 ```bash
 # ▶ MacBook · any folder

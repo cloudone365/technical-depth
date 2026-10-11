@@ -133,6 +133,41 @@ Both paths end when `ssh dgxadmin@192.168.0.100 hostname` prints `dgx-spark-1` w
 
 ### 3.2 Day 1: bootstrap with Ansible
 
+#### What this lab does (playbook `03.1-bootstrap.yml`, from the MacBook)
+
+- **First run** (`-k -K`, on the DHCP address you pass as `bootstrap_current_ip`): sets the hostname to the inventory name (`dgx-spark-1`), writes `127.0.1.1 dgx-spark-1.lab.local dgx-spark-1` into `/etc/hosts`, adds your `~/.ssh/id_ed25519.pub` to `dgxadmin`'s `authorized_keys`, and makes sure sshd is enabled. The network is not touched.
+- **Second run** (`-e bootstrap_static_ip=true`): checks `enP7s7` and decides. If the interface already has 192.168.0.100 as a static address, or as a DHCP lease, it changes nothing and says so. Otherwise it creates the NetworkManager profile `mgmt-static` (192.168.0.100/24, gateway 192.168.0.1, DNS 192.168.0.1 and 1.1.1.1) and switches to it.
+- **Safety net:** before the switch it writes `/root/mgmt-ip-rollback.sh` and arms the transient timer `mgmt-ip-rollback` for 180 s. When Ansible reconnects on the new address within 90 s, it stops the timer and sets the old profile to `autoconnect no` (kept, not deleted). If not, the timer puts the old profile back.
+- **Every step checks first**, so on a Spark that is already set up nothing changes.
+
+#### What to look for
+
+1. **Command exit:** recap `failed=0`. On a fresh DGX OS the first run shows `changed` on the hostname, the `/etc/hosts` line and the key. On an installed Spark, or on a re-run, expect `changed=0`.
+2. **The "Report the decision" task** (second run only) prints one of three lines for `enP7s7`:
+
+   | Message | Meaning |
+   |---|---|
+   | `already static on 192.168.0.100 — nothing to change` | the whole static-IP step is skipped |
+   | `DHCP lease that already gives 192.168.0.100 (router reservation) — left as is …` | fine for the lab while the reservation exists |
+   | `setting 192.168.0.100/24 via NetworkManager (nmcli), with a 180 s dead-man switch` | the change runs; SSH drops for a few seconds |
+
+3. **The last task, "The inventory IP is on the interface"**, prints `enP7s7 has 192.168.0.100`.
+4. **The end state**, from the MacBook and on the Spark:
+   ```bash
+   # ▶ MacBook · any folder
+   ssh dgxadmin@192.168.0.100 hostname                 # dgx-spark-1, no password prompt
+   ```
+   ```bash
+   # ▶ dgx-spark-1 (ssh dgx-spark-1)
+   ip -4 addr show enP7s7 | grep inet                  # 192.168.0.100/24, without "dynamic" after a static switch
+   nmcli connection show --active                      # one profile on enP7s7 (mgmt-static after a switch)
+   systemctl list-timers --all | grep mgmt-ip-rollback # no output: the dead-man timer was disarmed
+   ```
+
+**If something's off:** *Reconnect on the new IP* times out and the Spark answers on its old address 180 s later → the rollback worked; check the gateway and prefix, and make sure you passed `bootstrap_current_ip`, not `-e ansible_host`. *The management interface must exist* fails → set `mgmt_interface` in `group_vars/all.yml`. `-k` asks for `sshpass` → install it on the MacBook. More in §6.
+
+#### Run it
+
 This is one of the few playbooks that runs **from your MacBook**, not from Semaphore: the Spark has no `svc-ansible` account and doesn't trust vault01's CA yet, so Semaphore can't log in. You connect as `dgxadmin` with a password (`-k`), and the play installs your key.
 
 ```yaml
@@ -459,6 +494,31 @@ From now on, plain inventory addressing works and the node belongs to Semaphore:
 
 ### 3.3 Spark already installed? SSH trust only
 
+#### What this lab does (commands from the MacBook)
+
+- **Key trust:** `ssh-copy-id` appends your MacBook's `~/.ssh/id_ed25519.pub` to `dgxadmin`'s `~/.ssh/authorized_keys` on the Spark. It asks for the password once.
+- **Read-only check:** one SSH command prints the hostname, the `/etc/hosts` entry, the management address, the CPU architecture and the DGX OS release.
+- **What it doesn't touch:** hostname, network, packages and sshd settings stay as they are.
+
+#### What to look for
+
+1. **`ssh-copy-id`** ends with `Number of key(s) added: 1`, or says the key already exists. Both are fine.
+2. **The check command** prints, in order:
+
+   | Line | Healthy value |
+   |---|---|
+   | `hostname` | `dgx-spark-1` |
+   | `grep -c` | `1` or more |
+   | `ip -4 addr` | `inet 192.168.0.100/24 …`, with or without `dynamic` (the two cases in §3) |
+   | `uname -m` | `aarch64` |
+   | `/etc/dgx-release` | lines starting with `DGX_` |
+
+3. **No password prompt** on the check command. A prompt means the key didn't land.
+
+**If something's off:** the interface isn't `enP7s7` → `ip -br -4 addr` shows which one holds the address; set `mgmt_interface` in `group_vars/all.yml` to it, because later chapters use it. `/etc/dgx-release` is missing → you're not on DGX OS; the lab still runs, but the version checks in `spark_validate` will warn. A different hostname or address → run `03.1-bootstrap.yml` (§3.2). More in §6.
+
+#### Run it
+
 Skip this on a fresh DGX OS: `03.1-bootstrap.yml` in §3.2 already installed your MacBook key (task *Install control-node SSH key(s)*). For a Spark that is already installed, named `dgx-spark-1`, on 192.168.0.100, with the user `dgxadmin`, copy the key yourself (it asks for `dgxadmin`'s password once):
 
 ```bash
@@ -468,7 +528,7 @@ ssh-copy-id dgxadmin@192.168.0.101                        # second Spark, if any
 ssh dgxadmin@192.168.0.100 'hostname; grep -c "$(hostname)" /etc/hosts; ip -4 addr show enP7s7 | grep inet; uname -m; head -3 /etc/dgx-release'
 ```
 
-Expected: `dgx-spark-1`, a count of 1 or more, `inet 192.168.0.100/24 …` (with or without `dynamic`, see the two cases in §3), `aarch64` and a `DGX_*` release line. If the interface isn't `enP7s7`, `ip -br -4 addr` shows which one holds the address: set `mgmt_interface` in `group_vars/all.yml` to it, because later chapters use it. If `/etc/dgx-release` is missing, you're not on DGX OS. The lab still runs, but the version checks in `spark_validate` will warn.
+The expected values are in the table under *What to look for* above.
 
 This key is **your** key, for the `dgxadmin` admin user. It is what the MacBook uses for the bootstrap and break-glass paths. Semaphore never sees it: it logs in as `svc-ansible` with a certificate, after `04.1-semaphore-target.yml` has made the Spark trust vault01's CA.
 
@@ -512,6 +572,29 @@ DGX OS ships tuned kernel parameters, so don't change them casually. When you mu
 
 ### 3.5 Recovery drill: prove you can rebuild
 
+#### What this lab does (templates `30.1 Validate` and `site`, plus `03.1-bootstrap.yml` and `04.1-semaphore-target.yml` from the MacBook)
+
+- **Before:** `30.1 Validate` writes a golden-value report for the node to `validation/<host>.json` in the state folder (`/opt/spark-lab/cache` on sema01).
+- **The wipe:** a USB re-image erases everything on the node: DGX OS settings, the kubeadm root cluster, the vClusters, Docker images and anything in `/srv/models`.
+- **The rebuild:** the wizard, both bootstrap runs, `04.1-semaphore-target.yml`, then the template `site` (`04.3 Baseline`, containers, telemetry, Kubernetes, GPU Operator, vClusters, Slurm, the two-Spark parts where they apply, and `30.1 Validate` at the end). Expect a long run: the container images are pulled again.
+- **Only one Spark?** The drill is written for dgx-spark-2. On a single Spark you re-image dgx-spark-1, so the whole lab is down until `site` finishes. Use `--limit dgx-spark-1,localhost` and `192.168.0.100` in the commands, and run `tools/fetch-kubeconfig.sh sema01` afterwards (Chapter 04 §8.4). sema01, vault01 and the Semaphore history are not affected.
+
+#### What to look for
+
+1. **Every Semaphore run:** `failed=0`. `site` ends with the `30.1 Validate` verdict `All … checks passed`.
+2. **The comparison.** The second validation run writes the same file name, so copy the first report aside before the rebuild. Leave out the `time` line, which always differs (the state folder is private to the container user, hence `sudo`):
+   ```bash
+   # ▶ sema01 (ssh sema01)
+   sudo cp /opt/spark-lab/cache/validation/dgx-spark-2.json ~/before.json      # before the re-image
+   diff <(sudo grep -v '"time"' ~/before.json) <(sudo grep -v '"time"' /opt/spark-lab/cache/validation/dgx-spark-2.json)   # after site: no output
+   ```
+3. **Any line in that diff** is a setting you made by hand and never automated.
+4. **The clock:** under an hour from USB boot to a passing validation is a good target.
+
+**If something's off:** `Host key verification failed` → the re-image gave the node a new host key; remove the old one in the Semaphore container (step 4 below) and on the MacBook (`ssh-keygen -R <ip>`). `Permission denied (publickey)` for `svc-ansible` → `04.1-semaphore-target.yml` hasn't run on the new install yet. More in §6.
+
+#### Run it
+
 The real test of provisioning automation is to wipe a node and rebuild it:
 
 1. Record the state. **Semaphore UI:** run the template `30.1 Validate` with `--limit dgx-spark-2,localhost` (keep `validation/dgx-spark-2.json` from sema01's state volume, `/opt/spark-lab/cache`).
@@ -527,6 +610,28 @@ Time the whole thing. Under an hour from USB boot to validated is a good target.
 ---
 
 ## 4. Practising Redfish (for DGX/HGX) on the Spark
+
+#### What this lab does (template `03.2 Redfish practice`)
+
+- **On dgx-spark-1** (the first host in `spark`): clones DMTF's Redfish-Mockup-Server into `/opt/redfish-mockup`, installs its Python requirements into `/opt/redfish-mockup/.venv`, and starts it as the transient systemd unit `redfish-mock` on port **8000**. It serves the `public-rackmount1` sample tree, a fake rack server's BMC.
+- **On the controller** (the Semaphore container, or the MacBook): `community.general.redfish_info` asks that fake BMC for its system, PSU, firmware and boot-override inventory and prints the system part.
+- **What it doesn't touch:** nothing else on the Spark changes. The unit is transient, so it is gone after a reboot. The mockup accepts any user name and password, so don't leave it running on a shared network.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`. On a first run expect `changed` on the clone, the venv and *Run it as a transient systemd unit*. On a re-run the unit already exists: that task shows `ok`, because the play accepts the "already exists" error.
+2. **The "Show system inventory" task** prints a non-empty list of systems with fields such as `Manufacturer`, `Model`, `PowerState` and `SerialNumber`. Those values come from the sample tree, not from the Spark.
+3. **The `curl` below** prints `Members` as a list of `{"@odata.id": "/redfish/v1/Systems/…"}` entries.
+4. **On the Spark:**
+   ```bash
+   # ▶ dgx-spark-1 (ssh dgx-spark-1)
+   systemctl is-active redfish-mock     # active
+   ss -ltnp | grep 8000                 # a python process listening on 0.0.0.0:8000
+   ```
+
+**If something's off:** `Connection refused` → the unit died; `systemctl status redfish-mock`, then `systemctl reset-failed redfish-mock` and re-run. *Inventory via Redfish* fails while the `curl` works → read the URL in the error: the mockup speaks plain HTTP on port 8000, and the module must reach it that way. More in §6.
+
+#### Run it
 
 The Spark has no BMC, but the Redfish automation you'll use on DGX B200/GB200 systems (power control, boot override, firmware inventory, sensors) can be practised against DMTF's **Redfish Mockup Server**, which serves a realistic BMC tree from static JSON:
 
