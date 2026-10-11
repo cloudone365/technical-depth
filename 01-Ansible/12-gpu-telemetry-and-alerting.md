@@ -63,6 +63,60 @@ flowchart LR
 
 **Why a textfile collector instead of a custom exporter?** No daemon to crash, no port to secure. The atomic `mktemp` + `mv` means Prometheus never scrapes a half-written file, and a hung `nvidia-smi` shows up as `spark_gpu_up 0` rather than a stuck exporter.
 
+### 2.3 How `12.1-telemetry.yml` and the role fit together
+
+The playbook is short on purpose: it says *which hosts* and *which role*, and the role holds all the work. Ansible finds the role through `roles_path` in the lab's `ansible.cfg` (`01-Ansible/lab/roles`), then loads the folders inside it by name. There are no explicit imports between them; the folder names are the wiring.
+
+```
+playbooks/12.1-telemetry.yml
+├─ play 1: import 00-vault-cert.yml       → SSH certificate from vault01 (Semaphore only)
+└─ play 2: hosts: spark, become: true, roles: [gpu_telemetry]
+      roles/gpu_telemetry/
+      ├─ defaults/main.yml   ← all variables, loaded first (lowest priority, so -e or the inventory can override them)
+      ├─ meta/main.yml       ← role info only, no dependencies
+      ├─ tasks/main.yml      ← entry point Ansible runs automatically
+      │    ├─ import_tasks node.yml                                    (every Spark)
+      │    └─ include_tasks stack.yml when host is in group "monitoring" (dgx-spark-1)
+      ├─ files/              ← copied as they are (copy src: looks here)
+      │    ├─ spark-gpu-metrics.sh    → /usr/local/sbin/
+      │    └─ spark-overview.json     → Grafana dashboard folder
+      ├─ templates/          ← filled with variables first (template src: looks here)
+      │    ├─ compose.yml.j2, prometheus.yml.j2, spark-alerts.yml.j2
+      │    └─ alertmanager.yml.j2, grafana-datasource.yml.j2, grafana-dashboards.yml.j2
+      └─ handlers/main.yml   ← run only when a task "notifies" them
+           ├─ Reload systemd
+           └─ Restart node_exporter
+```
+
+**The order on a run**
+
+**`node.yml`, which runs on every Spark:**
+1. Install `prometheus-node-exporter`.
+2. Write `/etc/default/prometheus-node-exporter`, then **notify** *Restart node_exporter*.
+3. Create the textfile folder, then copy `files/spark-gpu-metrics.sh` from the role.
+4. Write `spark-gpu-metrics.service` and `.timer`, then notify *Reload systemd*.
+5. `flush_handlers` runs the pending handlers right away, so systemd knows the new timer before the next task enables it.
+6. Enable and start the timer. From then on, systemd runs the script every 15 s and Ansible is no longer involved.
+7. Run dcgm-exporter only if `gpu_telemetry_dcgm_enabled: true` (false by default, §4.2).
+
+**`stack.yml`, which runs only on the `monitoring` group:**
+1. Create the folders under `/opt/spark-monitoring`.
+2. Render the six **templates** with the variables from `defaults/main.yml`. For example:
+   - `prometheus.yml.j2` loops over `groups['spark']` in your inventory to build the scrape targets (`192.168.0.100:9100`). Add dgx-spark-2 to the inventory and it's scraped with no code change.
+   - `compose.yml.j2` puts in the image tags, the retention and the Grafana password.
+   - `spark-alerts.yml.j2` holds the seven alert rules.
+3. Copy `files/spark-overview.json` as the dashboard.
+4. **Gate:** if any config changed, check it with `promtool` from the Prometheus image before starting anything. A broken rule fails the play here instead of crashing Prometheus.
+5. `docker compose up` starts Prometheus, Alertmanager and Grafana.
+6. If only the config changed and the containers didn't need restarting, Prometheus hot-reloads through `/-/reload`.
+
+**Changing behaviour without touching the role:** set any variable from `defaults/main.yml` as an extra variable on the Semaphore template, or as `-e` from the MacBook. Examples: `gpu_telemetry_grafana_admin_password`, `gpu_telemetry_dcgm_enabled=true`, `gpu_telemetry_retention=7d`.
+
+**Other playbooks reuse the same pieces:**
+- Chapter 26's `spark_drift_report.py --prom` writes its own `.prom` file into the same textfile folder, and node_exporter serves it.
+- Chapter 27 adds Loki as a second Grafana data source in the same `/opt/spark-monitoring`.
+- Chapter 29's runbooks are the `runbook` links in the alert rules.
+
 ---
 
 ## 3. The code
