@@ -247,12 +247,15 @@ Check the result:
 
 ```bash
 # ▶ MacBook · any folder
-ssh dgxadmin@192.168.0.100 'docker info --format "{{.DefaultRuntime}} {{json .Runtimes}}"; nvidia-ctk cdi list'
-# nvidia {"nvidia":{"path":"nvidia-container-runtime"},"runc":{...}}
-# INFO[0000] Found 2 CDI devices
+ssh dgxadmin@192.168.0.100 'docker info --format "default={{.DefaultRuntime}} runtimes={{range \$k, \$v := .Runtimes}}{{\$k}} {{end}}"; nvidia-ctk cdi list'
+# default=nvidia runtimes=io.containerd.runc.v2 nvidia runc
 # nvidia.com/gpu=0
+# nvidia.com/gpu=GPU-<uuid>
 # nvidia.com/gpu=all
+# level=info msg="Found 3 CDI devices"
 ```
+
+`{{json .Runtimes}}` prints every runtime's full feature list; the `range` form above prints just the names. The CDI spec lists the one GB10 three ways (index, UUID, `all`); a pod or `docker run --device` can use any of them.
 
 ### 3.2 Host CUDA: compile and run natively for sm_121
 
