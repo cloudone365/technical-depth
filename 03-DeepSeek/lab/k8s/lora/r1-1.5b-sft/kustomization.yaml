@@ -1,6 +1,7 @@
-# R1-Distill-Qwen-1.5B plus the LoRA adapter trained by k8s/jobs/sft.yaml (Volume 23).
+# R1-Distill-Qwen-1.5B plus the LoRA adapter trained by k8s/jobs/sft.yaml (Chapter 10).
 # One base model, many adapters: each --lora-modules entry is a served model name.
-#   scripts/publish-adapter.sh sft-lora && kubectl apply -k k8s/lora/r1-1.5b-sft
+#   scripts/publish-adapter.sh sft-lora && kubectl --context spark-root apply -k k8s/lora/r1-1.5b-sft
+# Same budget as k8s/models/r1-1.5b (util 0.10, 14 Gi request = limit): adapters live inside the KV/util budget.
 # Clients ask for "r1-1.5b" (base) or "r1-sft" (base + adapter) on the same server.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

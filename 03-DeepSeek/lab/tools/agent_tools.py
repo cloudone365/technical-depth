@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A minimal, auditable tool-calling agent (Volume 30).
+"""A minimal, auditable tool-calling agent (Chapter 14).
 
 OpenAI "tools" protocol against vLLM/SGLang (start vLLM with
 `--enable-auto-tool-choice --tool-call-parser hermes` for Qwen2.5 models).
@@ -12,7 +12,7 @@ tool's schema (required keys, types, no extras) before anything runs; the loop i
 capped (--max-steps); every call is printed and, with --audit, appended as one
 JSON line (time, step, tool, args, result, ms) — the record you hand to security.
 
-  python3 agent_tools.py "How many GPU slices are in use, and what is 17% of 119.7 GiB?" --model qwen2.5-7b-tools
+  python3 agent_tools.py "How many GPU slices are in use, and what is 17% of 121.7 GiB?" --model qwen2.5-7b-tools
   python3 agent_tools.py "…" --audit /tmp/agent-audit.jsonl
 """
 import argparse

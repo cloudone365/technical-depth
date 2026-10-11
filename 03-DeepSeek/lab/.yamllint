@@ -8,3 +8,4 @@ rules:
   braces: {max-spaces-inside: 1}
   brackets: {max-spaces-inside: 1}
   indentation: {spaces: consistent, indent-sequences: whatever}
+  octal-values: {forbid-implicit-octal: true, forbid-explicit-octal: true}

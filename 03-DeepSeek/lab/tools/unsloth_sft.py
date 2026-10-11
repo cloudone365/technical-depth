@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The Vol 23 LoRA SFT, re-done with Unsloth (Volume 24) — same data, same rank, same steps,
+"""The LoRA SFT of sft_lora.py, re-done with Unsloth (Chapter 10) — same data, same rank, same steps,
 so wall time and peak memory can be compared with sft_lora.py (plain TRL + PEFT).
 
 Unsloth patches the model with fused Triton kernels (RoPE, RMSNorm, cross-entropy, LoRA

@@ -1,6 +1,6 @@
-# GitOps for the 03-DeepSeek lab with Argo CD (production-mlops.md).
+# GitOps for the 03-DeepSeek lab with Argo CD (Chapter 15).
 # Requires the 02 platform (its own gitops/applications.yaml) and Argo CD.
-#   kubectl apply -n argocd -f "03-DeepSeek/lab/gitops/applications.yaml"
+#   kubectl --context spark-root apply -n argocd -f "03-DeepSeek/lab/gitops/applications.yaml"
 # Point repoURL at YOUR fork if you want to push changes.
 ---
 apiVersion: argoproj.io/v1alpha1
@@ -81,7 +81,7 @@ spec:
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: deepseek-30-ops                      # day-2 CronJobs (Vol 33)
+  name: deepseek-30-ops                      # day-2 CronJobs (Chapter 15)
   namespace: argocd
   annotations:
     argocd.argoproj.io/sync-wave: "30"
@@ -107,7 +107,7 @@ spec:
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: deepseek-40-observability                      # alerts + dashboard (Vol 38)
+  name: deepseek-40-observability                      # alerts + dashboard (Chapter 16)
   namespace: argocd
   annotations:
     argocd.argoproj.io/sync-wave: "40"

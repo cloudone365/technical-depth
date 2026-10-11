@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FP8 with fine-grained (block) scaling vs per-tensor scaling (Volumes 04 and 07).
+"""FP8 with fine-grained (block) scaling vs per-tensor scaling (Chapter 02).
 
 DeepSeek-V3 trains and stores weights in FP8 E4M3 with one scale per 128×128
 weight block (activations: per 1×128 tile). This script shows why:

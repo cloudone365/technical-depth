@@ -1,0 +1,223 @@
+---
+# Playbook 15.1 (Chapter 15): the DeepSeek stack on the ROOT cluster in one run.
+# Semaphore on sema01 runs it like the 01-Ansible lab playbooks (task template with
+# playbook 03-DeepSeek/lab/ansible/15.1-deploy-deepseek.yml and extra vars such as
+# {"deepseek_model": "r1-32b-fp8"}). From the MacBook, the same:
+#   cd "03-DeepSeek/lab"
+#   ansible-playbook ansible/15.1-deploy-deepseek.yml -e deepseek_model=r1-32b-fp8
+#   … --tags serve -e deepseek_model=r1-7b          # switch model only (also the rollback path)
+#   … --check --diff                                # what would change, without changing it
+# Kubeconfig: $KUBECONFIG, else $SPARK_LAB_CACHE/kubeconfig-spark-lab.yaml (Semaphore on sema01),
+# else 01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml (MacBook); context spark-root.
+# Layers (tags): preflight → tools → prefetch → serve → apps → rag → verify.
+- name: Deploy the DeepSeek serving stack on the root cluster (context spark-root)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    deepseek_model: r1-7b
+    deepseek_with_apps: true
+    deepseek_with_rag: true
+    deepseek_skip_prefetch: false
+    # The root's LLM memory pool (~90 GiB): Σ vLLM --gpu-memory-utilization of the models
+    # running together ≲ 0.72 (× ~121.7 GiB). Chat model + bge-m3 must stay under it.
+    deepseek_util_budget: 0.72
+    deepseek_embed_util: 0.06
+    # Pod memory (request = limit) that deepseek_with_apps adds to llm-serving next to the
+    # chat model: bge-m3 9 Gi, Open WebUI 4, LiteLLM 2, PostgreSQL 1 (k8s/apps).
+    deepseek_apps_mem_gi: 16
+    kube_context: spark-root
+    ds_lab: "{{ playbook_dir }}/.."
+    k8s_lab: "{{ playbook_dir }}/../../../02-Kubernetes/lab"
+    kubeconfig: >-
+      {{ lookup('ansible.builtin.env', 'KUBECONFIG')
+         | default((lookup('ansible.builtin.env', 'SPARK_LAB_CACHE') ~ '/kubeconfig-spark-lab.yaml')
+                   if lookup('ansible.builtin.env', 'SPARK_LAB_CACHE') | length > 0
+                   else playbook_dir ~ '/../../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml', true) }}
+    catalog: "{{ lookup('ansible.builtin.file', ds_lab ~ '/models.yaml') | from_yaml }}"
+    catalog_names: "{{ catalog.models | map(attribute='name') | list }}"
+    model: "{{ catalog.models | selectattr('name', 'equalto', deepseek_model) | first | default({}) }}"
+  tasks:
+    - name: Model is in the catalog
+      tags: [always]
+      ansible.builtin.assert:
+        that: deepseek_model in catalog_names
+        fail_msg: "unknown model '{{ deepseek_model }}'. Catalog: {{ catalog_names | join(', ') }}"
+        quiet: true
+
+    - name: UMA budget allows the chat model next to the embedder
+      tags: [always]
+      ansible.builtin.assert:
+        that: (model.util | float) + (deepseek_with_apps | ternary(deepseek_embed_util, 0) | float) <= (deepseek_util_budget | float)
+        fail_msg: >-
+          util {{ model.util }} + embeddings {{ deepseek_embed_util }} exceeds the LLM pool budget {{ deepseek_util_budget }}
+          (× ~121.7 GiB). {{ model.name }}{{ ' runs alone (models.yaml alone: true): -e deepseek_with_apps=false and park everything else'
+          if (model.alone | default(false)) else ': pick a smaller model or -e deepseek_with_apps=false' }}.
+        quiet: true
+
+    - name: Platform from 02-Kubernetes is present
+      tags: [preflight]
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        context: "{{ kube_context }}"
+        kind: PersistentVolumeClaim
+        namespace: llm-serving
+        name: model-cache
+      register: ds_pvc
+      failed_when: ds_pvc.resources | length == 0
+
+    - name: Read serving-budget (everyday 90 Gi; 10 Gi while the training window is applied)
+      tags: [preflight, serve]
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        context: "{{ kube_context }}"
+        kind: ResourceQuota
+        namespace: llm-serving
+        name: serving-budget
+      register: ds_quota
+
+    - name: The model's pod memory (request = limit) fits serving-budget
+      tags: [preflight, serve]
+      vars:
+        ds_hard_gi: "{{ ((ds_quota.resources | first | default({})).spec.hard['limits.memory'] | default('0Gi')) | regex_replace('Gi$', '') | int }}"
+        ds_need_gi: "{{ (model.mem | regex_replace('Gi$', '') | int) + (deepseek_with_apps | ternary(deepseek_apps_mem_gi, 0) | int) }}"
+      ansible.builtin.assert:
+        that:
+          - ds_quota.resources | length == 1
+          - ds_need_gi | int <= ds_hard_gi | int
+        fail_msg: >-
+          {{ deepseek_model }} needs {{ model.mem }}{{ deepseek_with_apps | ternary(' + ' ~ deepseek_apps_mem_gi ~ 'Gi for the apps', '') }}
+          but serving-budget allows {{ ds_hard_gi }}Gi in total (02-Kubernetes root-llms/10-tenancy). Training window
+          still applied? End it in 02-Kubernetes/lab: kubectl --context spark-root apply -k manifests/root-llms/10-tenancy
+          and -k manifests/root-llms/20-scheduling.
+        quiet: true
+
+    - name: Record what is serving now (the rollback target)
+      tags: [preflight, serve]
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        context: "{{ kube_context }}"
+        kind: Deployment
+        namespace: llm-serving
+        name: vllm
+      register: ds_before
+
+    - name: Show the change
+      tags: [preflight, serve]
+      ansible.builtin.debug:
+        msg: >-
+          vLLM: {{ (ds_before.resources | first | default({})).metadata.labels.model | default('(none)') }}
+          → {{ deepseek_model }}  (rollback: --tags serve -e deepseek_model={{
+          (ds_before.resources | first | default({})).metadata.labels.model | default('<previous>') }})
+
+    - name: Tool and eval-data ConfigMaps
+      tags: [tools]
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        context: "{{ kube_context }}"
+        definition: "{{ lookup('kubernetes.core.kustomize', dir=ds_lab) }}"
+
+    - name: Remove the previous prefetch Job (Job templates are immutable)
+      tags: [prefetch]
+      when: not deepseek_skip_prefetch
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        context: "{{ kube_context }}"
+        state: absent
+        kind: Job
+        namespace: llm-serving
+        name: model-prefetch
+        delete_options: {propagationPolicy: Foreground}
+        wait: true
+
+    - name: Prefetch {{ model.hf }}
+      tags: [prefetch]
+      when: not deepseek_skip_prefetch
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        context: "{{ kube_context }}"
+        state: present
+        apply: true
+        wait: true
+        wait_condition: {type: Complete, status: "True"}
+        wait_timeout: 3600
+        definition: >-
+          {{ lookup('ansible.builtin.file', k8s_lab ~ '/manifests/root-llms/60-storage/model-prefetch-job.yaml')
+             | replace('value: Qwen/Qwen2.5-0.5B-Instruct', 'value: ' ~ model.hf)
+             | replace('{name: REVISION, value: main}', '{name: REVISION, value: "' ~ (model.revision | default('main')) ~ '"}')
+             | from_yaml }}
+
+    - name: Serve with vLLM {{ deepseek_model }}
+      tags: [serve]
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        context: "{{ kube_context }}"
+        apply: true
+        definition: "{{ lookup('kubernetes.core.kustomize', dir=ds_lab ~ '/k8s/models/' ~ deepseek_model) }}"
+      register: ds_serve
+
+    - name: Wait for vLLM to become Ready
+      tags: [serve]
+      when: not ansible_check_mode
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        context: "{{ kube_context }}"
+        kind: Deployment
+        namespace: llm-serving
+        name: vllm
+      register: ds_vllm
+      until: >-
+        (ds_vllm.resources[0].status.readyReplicas | default(0)) >= 1 and
+        (ds_vllm.resources[0].status.updatedReplicas | default(0)) >= 1 and
+        ds_vllm.resources[0].metadata.labels.model == deepseek_model
+      retries: 90
+      delay: 30
+
+    - name: Embeddings, LiteLLM (+ PostgreSQL) and Open WebUI
+      tags: [apps]
+      when: deepseek_with_apps
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        context: "{{ kube_context }}"
+        apply: true
+        definition: "{{ lookup('kubernetes.core.kustomize', dir=ds_lab ~ '/k8s/apps') }}"
+
+    - name: Remove the previous RAG ingest Job
+      tags: [rag]
+      when: deepseek_with_apps and deepseek_with_rag
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        context: "{{ kube_context }}"
+        state: absent
+        kind: Job
+        namespace: llm-serving
+        name: rag-ingest
+        delete_options: {propagationPolicy: Foreground}
+        wait: true
+
+    - name: Index the repository for RAG (blue/green, quality-gated)
+      tags: [rag]
+      when: deepseek_with_apps and deepseek_with_rag
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        context: "{{ kube_context }}"
+        apply: true
+        wait: true
+        wait_condition: {type: Complete, status: "True"}
+        wait_timeout: 1800
+        src: "{{ ds_lab }}/k8s/jobs/rag-ingest.yaml"
+
+    - name: Verify the stack
+      tags: [verify]
+      when: not ansible_check_mode
+      ansible.builtin.command: "{{ ds_lab }}/scripts/verify.sh"
+      environment: {KUBECONFIG: "{{ kubeconfig }}", ROOT_CTX: "{{ kube_context }}"}
+      register: ds_verify
+      changed_when: false
+      failed_when: ds_verify.rc != 0          # verify.sh exits non-zero on any [FAIL]
+
+    - name: Result
+      tags: [verify]
+      when: not ansible_check_mode
+      ansible.builtin.debug:
+        msg: "{{ ds_verify.stdout_lines[-6:] }}"

@@ -1,4 +1,4 @@
-# Nightly online backup of Open WebUI's SQLite database (Volume 27).
+# Nightly online backup of Open WebUI's SQLite database (Chapter 12).
 # Uses SQLite's backup API (consistent while the app is running) and keeps 14 days.
 # Both PVCs are local-path (hostPath) volumes on the same node, so mounting the
 # StatefulSet's RWO volume from a second pod works on a single Spark.

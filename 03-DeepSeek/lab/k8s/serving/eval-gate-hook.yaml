@@ -2,7 +2,7 @@
 # Asks vLLM which model it serves, evaluates it (math + json), and fails the sync if
 # accuracy regressed beyond the tolerance vs the recorded baseline. No baseline yet →
 # the run is printed so you can record it (bootstrap), and the hook passes.
-#   record a baseline:  kubectl -n llm-serving create configmap deepseek-eval-baseline \
+#   record a baseline:  kubectl --context spark-root -n llm-serving create configmap deepseek-eval-baseline \
 #                         --from-file=baseline.json=results/baseline-r1-7b.json
 apiVersion: batch/v1
 kind: Job

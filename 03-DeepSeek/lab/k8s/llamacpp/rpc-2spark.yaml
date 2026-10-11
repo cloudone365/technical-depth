@@ -1,7 +1,11 @@
 # DeepSeek-R1 671B (dynamic 1.58-bit GGUF, ≈131 GB) across TWO Sparks with
-# llama.cpp RPC (Volume 14). spark-02 runs rpc-server and lends its GB10 +
-# memory; spark-01 runs llama-server and splits layers across both.
-# Needs: the GGUF shards in /srv/models/gguf on spark-01 (see volume), CX-7 up.
+# llama.cpp RPC (Chapter 04). dgx-spark-2 runs rpc-server and lends its GB10 +
+# memory; dgx-spark-1 runs llama-server and splits layers across both.
+# Needs: the GGUF shards in /srv/models/gguf on dgx-spark-1 (see volume), CX-7 up
+# (dgx-spark-2 = 192.168.100.12 on the fabric).
+# Memory: ≈65 GiB of shards per Spark plus compute buffers — each pod holds 88 Gi
+# (request = limit), i.e. the whole LLM pool of its Spark. Park every model
+# server and training job on BOTH Sparks first.
 # Namespace llm-multinode (privileged PSA: hostNetwork) comes from k8s/multinode/namespace.yaml.
 apiVersion: apps/v1
 kind: Deployment
@@ -12,7 +16,7 @@ spec:
   template:
     metadata: {labels: {app: llama-rpc-worker}}
     spec:
-      nodeSelector: {kubernetes.io/hostname: spark-02}
+      nodeSelector: {kubernetes.io/hostname: dgx-spark-2}
       hostNetwork: true
       containers:
         - name: rpc
@@ -22,8 +26,8 @@ spec:
           args: ["--host", "192.168.100.12", "--port", "50052"]
           readinessProbe: {tcpSocket: {port: 50052}, periodSeconds: 10}
           resources:
-            requests: {cpu: "4", memory: 8Gi, nvidia.com/gpu: "1"}
-            limits: {memory: 110Gi, nvidia.com/gpu: "1"}
+            requests: {cpu: "4", memory: 88Gi, nvidia.com/gpu: "1"}   # request = limit
+            limits: {memory: 88Gi, nvidia.com/gpu: "1"}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -35,7 +39,7 @@ spec:
   template:
     metadata: {labels: {app: llama-r1-671b}}
     spec:
-      nodeSelector: {kubernetes.io/hostname: spark-01}
+      nodeSelector: {kubernetes.io/hostname: dgx-spark-1}
       hostNetwork: true
       containers:
         - name: llama
@@ -48,8 +52,8 @@ spec:
           startupProbe: {httpGet: {path: /health, port: 8081}, periodSeconds: 20, failureThreshold: 90}
           readinessProbe: {httpGet: {path: /health, port: 8081}, periodSeconds: 10}
           resources:
-            requests: {cpu: "8", memory: 16Gi, nvidia.com/gpu: "1"}
-            limits: {memory: 110Gi, nvidia.com/gpu: "1"}
+            requests: {cpu: "8", memory: 88Gi, nvidia.com/gpu: "1"}   # request = limit
+            limits: {memory: 88Gi, nvidia.com/gpu: "1"}
           volumeMounts: [{name: gguf, mountPath: /gguf, readOnly: true}]
       volumes:
         - name: gguf

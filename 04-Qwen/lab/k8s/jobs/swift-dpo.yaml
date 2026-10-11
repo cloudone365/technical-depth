@@ -1,0 +1,88 @@
+# ms-swift preference alignment (Chapter 08): LoRA DPO of Qwen3-4B-Instruct-2507 on
+# Intel/orca_dpo_pairs — a Kueue-admitted Job in batch on spark-root, training window
+# only (see swift-sft.yaml for the window commands).
+#   kubectl --context spark-root apply -f k8s/jobs/swift-dpo.yaml
+#   kubectl --context spark-root -n batch logs -f job/swift-dpo
+# Other pairwise methods use the same Job: set RLHF_TYPE to simpo, orpo or cpo
+# (KTO needs a label column instead of pairs). With LoRA the reference model is the
+# base without the adapter: no second copy of the weights.
+# Own pairs (tools/synth_data.py --dpo writes ms-swift's format: messages + rejected_response):
+#   kubectl --context spark-root -n batch create configmap qwen-dpo-data --from-file=train.jsonl=out/dpo.jsonl
+#   and set DATASET to /data/train.jsonl below.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: qwen-train, namespace: batch}
+spec:
+  storageClassName: local-nvme-retain
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 60Gi}}     # shared by swift-sft/dpo/grpo; batch-budget: 200Gi of storage
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: swift-dpo
+  namespace: batch
+  labels: {kueue.x-k8s.io/queue-name: train, kueue.x-k8s.io/priority-class: routine, app: qwen-swift}
+spec:
+  suspend: true
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata: {labels: {app: qwen-swift, job: swift-dpo}}
+    spec:
+      restartPolicy: Never
+      priorityClassName: spark-batch
+      containers:
+        - name: swift
+          image: nvcr.io/nvidia/pytorch:26.08-py3
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              pip install --quiet "ms-swift==4.5.3" "transformers==5.16.1" "trl==0.29.1" "peft==0.20.0" "datasets==4.8.4" "accelerate==1.15.0"
+              swift rlhf \
+                --rlhf_type "$RLHF_TYPE" \
+                --model "$MODEL" \
+                --use_hf true \
+                --tuner_type lora \
+                --dataset "$DATASET" \
+                --split_dataset_ratio 0.02 \
+                --torch_dtype bfloat16 \
+                --num_train_epochs 1 \
+                --per_device_train_batch_size 1 \
+                --gradient_accumulation_steps 16 \
+                --learning_rate 5e-5 \
+                --lora_rank 16 \
+                --lora_alpha 32 \
+                --target_modules all-linear \
+                --max_length 2048 \
+                --rpo_alpha 0.1 \
+                --eval_steps 50 \
+                --save_steps 50 \
+                --save_total_limit 2 \
+                --logging_steps 5 \
+                --warmup_ratio 0.05 \
+                --dataset_num_proc 4 \
+                --report_to tensorboard \
+                --output_dir "/work/output/$RLHF_TYPE"
+          env:
+            - {name: RLHF_TYPE, value: dpo}                       # dpo | simpo | orpo | cpo
+            - {name: MODEL, value: Qwen/Qwen3-4B-Instruct-2507}
+            - {name: DATASET, value: "Intel/orca_dpo_pairs#2000"}  # question / chosen / rejected
+            - {name: HF_HOME, value: /work/hf}
+            - {name: MODELSCOPE_CACHE, value: /work/modelscope}
+            - {name: TOKENIZERS_PARALLELISM, value: "false"}
+            - {name: PYTORCH_CUDA_ALLOC_CONF, value: "expandable_segments:True"}
+            - name: HF_TOKEN
+              valueFrom: {secretKeyRef: {name: hf-token, key: token, optional: true}}
+          resources:            # request = limit, inside the training window (≤ 8 CPU · 80 Gi · 1 slice)
+            requests: {cpu: "6", memory: 48Gi, nvidia.com/gpu: "1"}
+            limits: {cpu: "6", memory: 48Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: work, mountPath: /work}
+            - {name: data, mountPath: /data, readOnly: true}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - {name: work, persistentVolumeClaim: {claimName: qwen-train}}
+        - {name: data, configMap: {name: qwen-dpo-data, optional: true}}
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 4Gi}}

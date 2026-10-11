@@ -1,5 +1,6 @@
-# Embedding server for RAG (Volume 29): vLLM serving BAAI/bge-m3 (1024-dim,
-# multilingual, 8K context) on a small slice of the GB10. Runs next to the chat model.
+# Embedding server for RAG (Chapter 13): vLLM serving BAAI/bge-m3 (1024-dim,
+# multilingual, 8K context) on a small slice of the GB10. Runs next to the chat model:
+# util 0.06 ≈ 7 GiB of the ~90 GiB LLM pool, 9 Gi pod (request = limit).
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: bge-m3, namespace: llm-serving, labels: {app: bge-m3}}
@@ -22,8 +23,8 @@ spec:
           startupProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, failureThreshold: 90}
           readinessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 5}
           resources:
-            requests: {cpu: "1", memory: 4Gi, nvidia.com/gpu: "1"}
-            limits: {memory: 12Gi, nvidia.com/gpu: "1"}
+            requests: {cpu: "1", memory: 9Gi, nvidia.com/gpu: "1"}   # request = limit (shared LLM pool)
+            limits: {memory: 9Gi, nvidia.com/gpu: "1"}
           volumeMounts: [{name: models, mountPath: /models}]
       volumes:
         - {name: models, persistentVolumeClaim: {claimName: model-cache}}

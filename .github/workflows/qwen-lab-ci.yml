@@ -1,0 +1,40 @@
+# CI for "04-Qwen/lab" — static checks and CPU tool tests (Chapter 14).
+# No cluster: the overlays are rendered with kustomize and validated with
+# kubeconform; the tools run against tests/mock_openai.py.
+name: qwen-lab
+
+on:
+  pull_request:
+    paths:
+      - "04-Qwen/lab/**"
+      - "02-Kubernetes/lab/manifests/root-llms/90-serving/vllm/**"   # the base every overlay patches
+      - "02-Kubernetes/lab/scripts/lib.sh"
+      - ".github/workflows/qwen-lab-ci.yml"
+  push:
+    branches: [main]
+    paths: ["04-Qwen/lab/**", "02-Kubernetes/lab/manifests/root-llms/90-serving/vllm/**", ".github/workflows/qwen-lab-ci.yml"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: "04-Qwen/lab"
+
+env:
+  KUBECONFORM: v0.6.7
+
+jobs:
+  checks:
+    name: catalog · overlays · Jobs · tools vs mock (CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with: {python-version: "3.12"}
+      - uses: azure/setup-kubectl@v4
+        with: {version: v1.32.5}
+      - name: Tools
+        run: |
+          pip install yamllint shellcheck-py pyyaml
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM}/kubeconform-linux-amd64.tar.gz" | sudo tar xz -C /usr/local/bin kubeconform
+      - name: All 04 checks
+        run: ../../02-Kubernetes/lab/tests/ci-run.sh tests/run-local-checks.sh

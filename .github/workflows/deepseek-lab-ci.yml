@@ -1,4 +1,10 @@
-# CI for "03-DeepSeek/lab" — see 03-DeepSeek/40-hands-on-exercises-workbook.md §0
+# CI for "03-DeepSeek/lab" — see 03-DeepSeek/19-hands-on-workbook.md
+# The 03 lab runs on the ROOT cluster of the 02 lab (context spark-root: llm-serving,
+# batch, Kueue, KEDA). CI builds that on kind: kind = the root (fake GB10 with 15
+# slices), 02's root layers incl. the LLM stack (scripts/apply-lab.sh root), then
+# every 03 check incl. a server-side dry-run of all manifests and pod templates —
+# serving templates against the everyday quotas, training jobs against the
+# training window (02 manifests/root-llms/training-window).
 name: deepseek-lab
 
 on:
@@ -20,14 +26,14 @@ env:
 
 jobs:
   checks:
-    name: tools · data · manifests · RAG (CPU) · kind dry-run
+    name: tools · data · manifests · budgets · RAG (CPU) · kind dry-run (root)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with: {python-version: "3.12"}
       - uses: azure/setup-kubectl@v4
-        with: {version: v1.32.5}
+        with: {version: v1.34.1}
       - name: Tools
         run: |
           pip install yamllint shellcheck-py pyyaml
@@ -38,48 +44,61 @@ jobs:
             | sudo tar xz -C /usr/local/bin --strip-components=1 "prometheus-${PROMETHEUS}.linux-amd64/promtool"
           curl -sSL "https://github.com/qdrant/qdrant/releases/download/${QDRANT}/qdrant-x86_64-unknown-linux-musl.tar.gz" | tar xz -C /tmp
       - uses: helm/kind-action@v1
-        with: {cluster_name: spark-sim, node_image: "kindest/node:v1.32.2"}
-      - name: Platform from 02 + CRDs the lab expects
+        with: {cluster_name: spark-sim, node_image: "kindest/node:v1.34.0"}
+      - name: The kind cluster plays the root (context spark-root) and the Spark (fake GB10)
+        working-directory: "02-Kubernetes/lab"
+        run: |
+          kubectl config rename-context kind-spark-sim spark-root
+          kubectl config use-context spark-root
+          tests/fake-gpu-node.sh
+          kubectl --context spark-root apply -f addons/local-path-nvme.yaml
+      - name: CRDs/controllers the root's LLM stack expects (Kueue, LWS for real; Prometheus Operator, Gateway API, KEDA, Traefik as CRDs)
         working-directory: "02-Kubernetes/lab"
         run: |
           # surface the failing command and its stderr as an annotation
           exec 2> >(tee /tmp/step.err >&2)
           trap 'echo "::error title=platform step failed::${BASH_COMMAND} :: $(tail -c 1800 /tmp/step.err | tr "\n" " ")"' ERR
-          # The 02 lab now runs the LLM stack on the root (manifests/root-llms). One kind
-          # cluster plays the root; the 'llms' context is kept as an alias for the 03 lab
-          # until 03 is moved to spark-root.
-          kubectl config rename-context kind-spark-sim spark-root
-          kubectl config set-context llms --cluster=kind-spark-sim --user=kind-spark-sim
-          kubectl config use-context llms
-          tests/fake-gpu-node.sh
-          kubectl --context spark-root apply -f addons/local-path-nvme.yaml
-          kubectl --context spark-root apply -k manifests/root/00-platform     # namespace observability (03 alert rules)
           source versions.env
-          kubectl apply --server-side -f "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml"
+          K="kubectl --context spark-root"
+          $K apply --server-side -f "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml"
           # Kueue's webhook also mutates Deployments (incl. LWS's): it must be up first
-          kubectl -n kueue-system rollout status deploy/kueue-controller-manager --timeout=5m
-          kubectl apply --server-side -f "https://github.com/prometheus-operator/prometheus-operator/releases/download/v0.81.0/stripped-down-crds.yaml"
-          kubectl apply --server-side -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
-          kubectl apply --server-side -f "https://github.com/kubernetes-sigs/lws/releases/download/v0.7.0/manifests.yaml"
-          kubectl apply --server-side -f "https://github.com/kedacore/keda/releases/download/${KEDA_VERSION}/keda-${KEDA_VERSION#v}-crds.yaml"
+          $K -n kueue-system rollout status deploy/kueue-controller-manager --timeout=5m
+          $K apply --server-side -f "https://github.com/prometheus-operator/prometheus-operator/releases/download/v0.81.0/stripped-down-crds.yaml"
+          $K apply --server-side -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
+          $K apply --server-side -f "https://github.com/kubernetes-sigs/lws/releases/download/v0.7.0/manifests.yaml"
+          $K apply --server-side -f "https://github.com/kedacore/keda/releases/download/${KEDA_VERSION}/keda-${KEDA_VERSION#v}-crds.yaml"
           for c in traefik.io_middlewares traefik.io_ingressroutes; do
-            kubectl apply --server-side -f "https://raw.githubusercontent.com/traefik/traefik-helm-chart/v${TRAEFIK_CHART_VERSION}/traefik/crds/${c}.yaml"
+            $K apply --server-side -f "https://raw.githubusercontent.com/traefik/traefik-helm-chart/v${TRAEFIK_CHART_VERSION}/traefik/crds/${c}.yaml"
           done
           # webhooks must be serving before apply-lab.sh creates Kueue/LWS objects
-          kubectl -n lws-system rollout status deploy/lws-controller-manager --timeout=5m
-          kubectl apply -k manifests/common/runtimeclass        # RuntimeClass nvidia (the GPU Operator's job on a Spark)
-          for d in 00-platform 10-tenancy 15-admission 60-storage 40-ingress 50-workloads 20-scheduling; do
-            kubectl apply -k "manifests/root-llms/$d"
-          done
-      - name: All 03 checks (incl. RAG on real Qdrant and server-side dry-run)
-        run: QDRANT=/tmp/qdrant API=1 ../../02-Kubernetes/lab/tests/ci-run.sh tests/run-local-checks.sh
-      - name: Ansible one-click playbook — lint, check mode against the kind platform, preflight guards
+          $K -n lws-system rollout status deploy/lws-controller-manager --timeout=5m
+      - name: The root's layers from 02, as on the Spark (incl. root-llms, everyday quotas)
+        working-directory: "02-Kubernetes/lab"
+        # root/05-vclusters is skipped with a warning (no Cilium CRDs, no vClusters needed here)
+        run: ROOT_CTX=spark-root tests/ci-run.sh scripts/apply-lab.sh root
+      - name: All 03 checks (incl. RAG on real Qdrant, budgets, server-side dry-run in two passes)
+        run: QDRANT=/tmp/qdrant API=1 ROOT_CTX=spark-root ../../02-Kubernetes/lab/tests/ci-run.sh tests/run-local-checks.sh
+      - name: The everyday quotas are back after the training-window pass
+        run: |
+          kubectl --context spark-root -n llm-serving get resourcequota serving-budget -o jsonpath='{.spec.hard.limits\.memory}' | grep -qx 90Gi
+          kubectl --context spark-root -n batch get resourcequota batch-budget -o jsonpath='{.spec.hard.limits\.memory}' | grep -qx 12Gi
+      - name: Ansible playbook 15.1 — lint, check mode against the kind root, preflight guards
         run: |
           pip install "ansible-core~=2.18.0" "ansible-lint>=24" "kubernetes>=30.1.0"
           ansible-galaxy collection install "kubernetes.core:>=5.0.0"
           export KUBECONFIG=$HOME/.kube/config
-          ansible-lint ansible/deploy-deepseek.yml
-          ansible-playbook ansible/deploy-deepseek.yml --check -e deepseek_model=r1-7b
-          if ansible-playbook ansible/deploy-deepseek.yml --check -e deepseek_model=r1-32b -e deepseek_util_budget=0.6; then
-            echo "::error::UMA budget guard did not stop an over-budget model"; exit 1
+          ansible-lint ansible/15.1-deploy-deepseek.yml
+          ansible-playbook ansible/15.1-deploy-deepseek.yml --check -e deepseek_model=r1-7b
+          # r1-32b BF16 (util 0.70) runs alone: without the apps it passes both guards
+          ansible-playbook ansible/15.1-deploy-deepseek.yml --check --tags preflight -e deepseek_model=r1-32b -e deepseek_with_apps=false
+          # … next to bge-m3 it breaks the LLM pool rule (0.70 + 0.06 > 0.72)
+          if ansible-playbook ansible/15.1-deploy-deepseek.yml --check -e deepseek_model=r1-32b; then
+            echo "::error::LLM pool guard (util budget 0.72) did not stop r1-32b next to bge-m3"; exit 1
           fi
+          # in the training window serving-budget is 10 Gi: the quota guard must refuse a 28 Gi model
+          kubectl --context spark-root apply -k ../../02-Kubernetes/lab/manifests/root-llms/training-window
+          if ansible-playbook ansible/15.1-deploy-deepseek.yml --check --tags preflight -e deepseek_model=r1-7b; then
+            echo "::error::serving-budget guard did not stop a model during the training window"; exit 1
+          fi
+          kubectl --context spark-root apply -k ../../02-Kubernetes/lab/manifests/root-llms/10-tenancy
+          kubectl --context spark-root apply -k ../../02-Kubernetes/lab/manifests/root-llms/20-scheduling

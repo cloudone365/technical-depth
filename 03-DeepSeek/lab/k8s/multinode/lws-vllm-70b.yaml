@@ -1,7 +1,11 @@
-# Tensor parallelism across TWO Sparks with LeaderWorkerSet + Ray (Volume 14):
+# Tensor parallelism across TWO Sparks with LeaderWorkerSet + Ray (Chapter 04):
 # DeepSeek-R1-Distill-Llama-70B in FP8 (~71 GB) split TP=2, one GB10 per rank,
-# NCCL over the CX-7 link, weights shared over NFS-RDMA. Install LWS first:
-#   kubectl apply --server-side -f https://github.com/kubernetes-sigs/lws/releases/download/v0.7.0/manifests.yaml
+# NCCL over the CX-7 link, weights shared over NFS-RDMA. dgx-spark-1 = 192.168.100.11,
+# dgx-spark-2 = 192.168.100.12 on the fabric. Memory: util 0.60 ≈ 73 GiB per rank
+# (≈35 GiB of weights each + KV); each pod holds 80 Gi (request = limit), most of its
+# Spark's ~90 GiB LLM pool — park the other model servers and batch on both Sparks.
+# Install LWS first:
+#   kubectl --context spark-root apply --server-side -f https://github.com/kubernetes-sigs/lws/releases/download/v0.7.0/manifests.yaml
 apiVersion: leaderworkerset.x-k8s.io/v1
 kind: LeaderWorkerSet
 metadata: {name: vllm-70b, namespace: llm-multinode}
@@ -37,10 +41,10 @@ spec:
             readinessProbe: {httpGet: {path: /health, port: 8000}, periodSeconds: 10, initialDelaySeconds: 120}
             securityContext: {capabilities: {add: [IPC_LOCK]}}
             resources:
-              requests: {cpu: "8", memory: 32Gi, nvidia.com/gpu: "1"}
-              limits: {memory: 100Gi, nvidia.com/gpu: "1"}
+              requests: {cpu: "8", memory: 80Gi, nvidia.com/gpu: "1"}   # request = limit
+              limits: {memory: 80Gi, nvidia.com/gpu: "1"}
             volumeMounts: [{name: models, mountPath: /models}, {name: shm, mountPath: /dev/shm}]
-        volumes:                         # spark-01 exports /srv/models over NFS-RDMA (01-Ansible Vol 15)
+        volumes:                         # dgx-spark-1 exports /srv/models over NFS-RDMA (01-Ansible Chapter 15)
           - {name: models, hostPath: {path: /srv/models, type: Directory}}
           - {name: shm, emptyDir: {medium: Memory, sizeLimit: 16Gi}}
     workerTemplate:
@@ -56,9 +60,9 @@ spec:
             env: *ncclenv
             securityContext: {capabilities: {add: [IPC_LOCK]}}
             resources:
-              requests: {cpu: "8", memory: 32Gi, nvidia.com/gpu: "1"}
-              limits: {memory: 100Gi, nvidia.com/gpu: "1"}
+              requests: {cpu: "8", memory: 80Gi, nvidia.com/gpu: "1"}   # request = limit
+              limits: {memory: 80Gi, nvidia.com/gpu: "1"}
             volumeMounts: [{name: models, mountPath: /models}, {name: shm, mountPath: /dev/shm}]
-        volumes:                         # spark-02 mounts the same export at /mnt/models
+        volumes:                         # dgx-spark-2 mounts the same export at /mnt/models
           - {name: models, hostPath: {path: /mnt/models, type: Directory}}
           - {name: shm, emptyDir: {medium: Memory, sizeLimit: 16Gi}}

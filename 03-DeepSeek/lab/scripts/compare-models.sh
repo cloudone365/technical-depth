@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Head-to-head on ONE Spark (Volumes 34-37, 41): serve each catalog model in turn,
+# Head-to-head on ONE Spark (Chapter 18): serve each catalog model in turn,
 # run the same eval suites through a port-forward, save results/<model>.json,
 # then print one comparison table. One chat model at a time (unified memory).
 #   scripts/compare-models.sh r1-7b r1-llama-8b llama-3.1-8b

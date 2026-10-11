@@ -1,5 +1,5 @@
-# Index this repository into Qdrant (Volume 29). Needs: Qdrant (02 manifests/root-llms/50-workloads),
-# bge-m3 (k8s/apps), tools ConfigMap (kubectl apply -k "03-DeepSeek/lab").
+# Index this repository into Qdrant (Chapter 13). Needs: Qdrant (02 manifests/root-llms/50-workloads),
+# bge-m3 (k8s/apps), tools ConfigMap (kubectl --context spark-root apply -k "03-DeepSeek/lab").
 apiVersion: batch/v1
 kind: Job
 metadata: {name: rag-ingest, namespace: llm-serving}
@@ -21,7 +21,7 @@ spec:
         - name: ingest
           image: python:3.12-slim
           # builds technical-depth-<timestamp>, evaluates it on data/rag_gold.jsonl, and only then
-          # moves the alias technical-depth to it (blue/green with a quality gate, Volume 29)
+          # moves the alias technical-depth to it (blue/green with a quality gate, Chapter 13)
           command: ["python3", "/app/tools/rag_demo.py", "ingest", "--repo", "/work/repo",
                     "--dirs", "01-Ansible", "02-Kubernetes", "03-DeepSeek", "--gate", "0.6"]
           env: [{name: HOME, value: /work}]

@@ -1,0 +1,442 @@
+# Chapter 12 · Open WebUI & the LiteLLM Gateway
+
+> **03-DeepSeek · Part V — Applications · Chapter 12 of 19** · ← [Chapter 11 · Distributed training & RL](11-distributed-training-and-rl.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 13 · RAG with Qdrant & BGE-M3](13-rag-with-qdrant-and-bge.md) →
+
+| | |
+|---|---|
+| **You will build** | One OpenAI-compatible endpoint, `api.lab.local`, in front of every engine on the Spark: LiteLLM with stable aliases (`reasoning`, `reasoning-fast`, `agent`, `embeddings`), virtual keys with model allow-lists, budgets and rate limits in PostgreSQL, retries and fallbacks. Behind `webui.lab.local`, Open WebUI as the team's chat front end: it talks only to LiteLLM, shows R1's thinking as a collapsible block, admits new users only after approval, keeps sessions across restarts, embeds uploads with the lab's bge-m3, and has a nightly backup you restore in a drill |
+| **Hardware** | dgx-spark-1 (the load-balancing pool in Task 5.9 needs dgx-spark-2) |
+| **Time** | 2.5 h |
+| **Risk** | Low. The restore drill replaces the chat database with last night's copy; Task 5.8 takes a fresh backup first |
+| **Clusters** | `spark-root` only: everything runs in `llm-serving` (serving-budget), behind Traefik in `ingress` at 192.168.0.115 |
+| **Lab files** | [`k8s/apps/litellm.yaml`](lab/k8s/apps/litellm.yaml), [`k8s/apps/litellm-db.yaml`](lab/k8s/apps/litellm-db.yaml), [`k8s/apps/open-webui.yaml`](lab/k8s/apps/open-webui.yaml), [`k8s/apps/bge-m3.yaml`](lab/k8s/apps/bge-m3.yaml), [`k8s/ops/webui-backup.yaml`](lab/k8s/ops/webui-backup.yaml), [`k8s/ops/litellm-db-backup.yaml`](lab/k8s/ops/litellm-db-backup.yaml), [`tools/stream_probe.py`](lab/tools/stream_probe.py), [`scripts/breakfix.sh`](lab/scripts/breakfix.sh) (D04, D08) |
+
+Prerequisites: a chat model is serving (Chapter 06, `scripts/serve-model.sh r1-7b`), the Gateway path from [02-Kubernetes Chapter 11](../02-Kubernetes/11-ingress-controllers-and-gateway-api.md) works, and the streaming hops from [Chapter 08](08-kubernetes-deployment-storage-and-streaming.md) are set to 900 s.
+
+---
+
+## 1. Why this matters on a Spark
+
+A Spark serves one or two chat models at a time, and which ones changes often: r1-7b during the day, r1-32b-fp8 for a comparison, qwen2.5-7b-tools for agents. Without a gateway, every client hard-codes `http://vllm.llm-serving:8000` and a served model name; switching the model breaks every client (drill D08), and nothing stops one script from taking the whole GPU. And a chat UI started with defaults is an open sign-up page that forgets its signing key on restart and keeps every chat in one unbacked SQLite file.
+
+The two applications in this chapter solve both problems:
+
+| Concern | Without | With this chapter |
+|---|---|---|
+| Model naming | `r1-32b-fp8` at `vllm:8000` | alias `reasoning` at `api.lab.local`; operators remap it in one ConfigMap |
+| Access control | anyone who reaches the port | a virtual key per tenant: allowed models, expiry |
+| Fair use of one GPU | first come, first served | per-key and per-team RPM/TPM limits and budgets |
+| Resilience | the client sees the error | retries, cooldown of failing deployments, fallbacks to other aliases |
+| Accounting | none | spend per key from token usage × your own cost per token |
+| Who may chat | first user is admin, anyone may sign up | `DEFAULT_USER_ROLE=pending`: an admin approves every account |
+| Sessions | signing key generated at start | `WEBUI_SECRET_KEY` from a Secret (synced from vault01, Chapter 15): logins survive restarts |
+| Long answers | client timeouts of 300 s | 900 s on every hop (Chapter 08) |
+| Data | one SQLite file | `local-nvme-retain` PVC, nightly online backup with integrity check, restore drill |
+| Embeddings for uploads | a CPU model inside the UI pod | bge-m3 on the GB10 through the `embeddings` alias |
+
+The gateway also matters for memory. The util sum of all engines running at the same time must stay ≲ 0.72 (Chapter 05). With aliases, you can move `reasoning` from a 32B to a 7B model to make room for a training window, and no client notices.
+
+---
+
+## 2. Architecture (HLD)
+
+```mermaid
+flowchart LR
+  subgraph CL["Clients"]
+    B["Browser<br/>webui.lab.local"]
+    SDK["OpenAI SDKs · agents<br/>api.lab.local"]
+  end
+  CL --> TR["Traefik · 192.168.0.115<br/>Gateway lab-gateway<br/>HTTPRoutes · 900 s"]
+  subgraph LS["namespace llm-serving (spark-root)"]
+    OW["Open WebUI<br/>StatefulSet · :8080"]
+    WDB[("PVC data-open-webui-0<br/>webui.db · uploads")]
+    LL["LiteLLM proxy :4000<br/>auth → limits → router"]
+    PG[("PostgreSQL litellm-db<br/>keys · teams · spend")]
+    V["vLLM :8000<br/>served model"]
+    SG["SGLang :30000<br/>(replicas 0)"]
+    E["bge-m3 :8000<br/>embeddings"]
+  end
+  TR --> OW
+  TR --> LL
+  OW --- WDB
+  OW -->|"Bearer key"| LL
+  LL <--> PG
+  LL --> V
+  LL -.->|"fallback"| SG
+  LL --> E
+  SEC["Secrets from vault01<br/>(vault-sync, Chapter 15)"] -.-> OW
+  SEC -.-> LL
+  classDef ext fill:#24292f,stroke:#000,color:#fff
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef sec fill:#cf222e,stroke:#82071e,color:#fff
+  class B,SDK ext
+  class TR net
+  class OW,LL ctrl
+  class V,SG,E gpu
+  class WDB,PG store
+  class SEC sec
+```
+
+Two rules shape the design:
+
+1. **Clients talk only to LiteLLM.** Open WebUI has `ENABLE_OLLAMA_API=false` and a single OpenAI connection to `http://litellm.llm-serving:4000/v1`. Agents (Chapter 14) and RAG (Chapter 13) use the same endpoint in production. Nothing outside `llm-serving` addresses vLLM directly.
+2. **Only the engines use the GPU.** LiteLLM, PostgreSQL and Open WebUI are CPU pods; they count against `serving-budget` (8 CPU · 90 Gi) but not against the util sum. bge-m3 is a vLLM engine with `--gpu-memory-utilization=0.06` (≈ 7.3 GiB of the ~121.7 GiB) and one time-slice.
+
+---
+
+## 3. LLD
+
+### 3.1 LiteLLM model list (`litellm-config`)
+
+| Alias | Deployment(s) | Notes |
+|---|---|---|
+| `reasoning` | `hosted_vllm/r1-32b-fp8` at `vllm:8000` | falls back to `reasoning-sglang`, then `reasoning-fast` |
+| `reasoning-fast` | `hosted_vllm/r1-7b` at `vllm:8000` | the everyday model |
+| `reasoning-sglang` | `openai/r1-32b-fp8` at `sglang:30000` | fallback target (Chapter 07) |
+| `agent` | `hosted_vllm/qwen2.5-7b-tools` at `vllm:8000` | tool calling, hermes parser (Chapter 14) |
+| `embeddings` | `hosted_vllm/bge-m3` at `bge-m3:8000` | Open WebUI uploads, RAG (Chapter 13) |
+| `reasoning-pool` | **two** deployments (vLLM, SGLang), `rpm: 60` each, cost per token set | load balancing, Task 5.9 |
+
+`reasoning`, `reasoning-fast` and `agent` all point at the same Service `vllm:8000` with different model names. Only the alias whose model is being served answers; the others get a 404 from vLLM, which is what triggers the fallback in Task 5.5. The `hosted_vllm/` prefix tells LiteLLM the backend is vLLM, so vLLM-specific fields such as `reasoning_content` pass through. `openai/` treats the backend as a generic OpenAI-compatible server.
+
+### 3.2 Router and reliability settings
+
+| Setting | Value | Behaviour |
+|---|---|---|
+| `routing_strategy` | `least-busy` | the deployment with the fewest in-flight requests wins |
+| `num_retries` | 2 | retry transient errors on the same alias |
+| `allowed_fails` / `cooldown_time` | 3 / 60 s | a deployment failing 3 times in a minute is skipped for 60 s |
+| `fallbacks` | `reasoning → [reasoning-sglang, reasoning-fast]` | tried in order once retries are used up |
+| `timeout` / `request_timeout` | 900 s | long reasoning chains; drill D04 lowers it to 30 s |
+| `drop_params` | true | drop OpenAI parameters a backend doesn't support instead of failing |
+| `STORE_MODEL_IN_DB` | `False` | models come from the ConfigMap (Git), not the admin UI |
+
+### 3.3 Keys, teams and limits (in PostgreSQL)
+
+| Object | Created with | Limits you can set |
+|---|---|---|
+| master key | Secret `litellm-master-key` (vault01 → vault-sync) | admin only; never hand it to an application |
+| team | `POST /team/new` | `max_budget`, `budget_duration`, `models`, `rpm_limit`, `tpm_limit` |
+| virtual key | `POST /key/generate` | the same, plus `team_id`, `key_alias`, `duration` (expiry) |
+
+Without the database LiteLLM only knows the master key. The cost per token (`model_info.input_cost_per_token`, `output_cost_per_token`) is yours to set for self-hosted models: take the local $/1M output tokens from Chapter 18's comparison (power plus amortised hardware), divide by 10⁶ and enter it, and spend per key becomes meaningful.
+
+Status codes a client should handle:
+
+| Code | Meaning |
+|---|---|
+| 401 | missing or invalid key, or model not in the key's allow-list ("key not allowed to access model") |
+| 429 | RPM/TPM limit hit: back off and retry |
+| 400 "Budget has been exceeded" | budget used up for the period |
+| 500/502 with fallbacks exhausted | every candidate deployment failed |
+
+### 3.4 Open WebUI environment
+
+| Variable | Value | Purpose |
+|---|---|---|
+| `OPENAI_API_BASE_URLS` / `OPENAI_API_KEYS` | `http://litellm.llm-serving:4000/v1` / a LiteLLM key | the only backend |
+| `ENABLE_OLLAMA_API` | `false` | no direct path that bypasses LiteLLM |
+| `WEBUI_URL` | `http://webui.lab.local` | links and OAuth callbacks |
+| `RAG_EMBEDDING_ENGINE` / `RAG_OPENAI_API_BASE_URL` / `RAG_EMBEDDING_MODEL` | `openai` / LiteLLM / `embeddings` | document embeddings on the GB10 |
+| `DEFAULT_USER_ROLE` | `pending` | approval workflow |
+| `AIOHTTP_CLIENT_TIMEOUT` | `900` | long reasoning streams |
+| `WEBUI_SECRET_KEY` | Secret `open-webui-secret` | stable session signing |
+
+Env values only **seed** a fresh install. After the first start Open WebUI keeps connection settings in its database, so later changes (a new key, a new URL) also go into **Admin Panel → Settings → Connections**.
+
+### 3.5 Why a StatefulSet, and how thinking is shown
+
+Open WebUI runs as a one-replica StatefulSet: a stable pod name (`open-webui-0`) and a `volumeClaimTemplate` whose PVC (`data-open-webui-0`, `local-nvme-retain`) outlives the pod and even the StatefulSet. SQLite doesn't support several writers; more than one replica needs PostgreSQL (`DATABASE_URL`) and Redis for websockets (§8).
+
+vLLM's reasoning parser streams `delta.reasoning_content` before `delta.content` (Chapter 06). LiteLLM passes it through with the `hosted_vllm/` prefix, and Open WebUI renders it as a collapsible **Thought for N seconds** block above the answer. A backend without the parser sends raw `<think>…</think>` in the content; Open WebUI recognises that too, but every other client then sees the thinking as answer text (drill D01).
+
+### 3.6 Backups
+
+| Data | Job (schedule, UTC) | Method | Restore |
+|---|---|---|---|
+| Open WebUI `webui.db` | `webui-backup` (02:41) | SQLite online backup API, source opened `mode=ro`, `PRAGMA integrity_check` on the copy, 14 kept on a Retain PVC | scale to 0, copy the file back (Task 5.8) |
+| LiteLLM PostgreSQL | `litellm-db-backup` (02:51) | `pg_dump -Fc`, 14 kept | `pg_restore --clean` (Chapter 15) |
+
+The online backup API, not `cp`, because a file copy taken while the app writes can capture a half-written page. A backup that hasn't been integrity-checked and restored once isn't a backup.
+
+---
+
+## 4. Integrations
+
+| With | How |
+|---|---|
+| Chapter 06 · vLLM | the served model's `--served-model-name` must match the alias's `hosted_vllm/<name>`; the reasoning parser feeds the thinking block |
+| Chapter 07 · SGLang | `reasoning-sglang` and the second `reasoning-pool` deployment |
+| Chapter 08 · streaming | the HTTPRoutes carry `timeouts.request: 900s`; `stream_probe.py` times each hop |
+| Chapter 13 · RAG | the `embeddings` alias; the shared corpus lives in Qdrant, Open WebUI's own RAG is for ad-hoc uploads |
+| Chapter 14 · agents | the `agent` alias passes `tools` and `tool_calls` through with a scoped key |
+| Chapter 15 · secrets | `litellm-master-key` and `open-webui-secret` come from vault01 via `vault-sync`, which rolls LiteLLM and Open WebUI after a rotation |
+| Chapter 16 · telemetry | spend per key from LiteLLM's API; latency per model from vLLM's metrics |
+| [02-Kubernetes Chapter 11](../02-Kubernetes/11-ingress-controllers-and-gateway-api.md) | Gateway `lab-gateway` in `ingress`; Traefik watches `llm-serving` |
+
+---
+
+## 5. Lab
+
+### Task 5.1 · Deploy the apps
+
+The manifests carry placeholder Secrets (`sk-lab-change-me`, `change-me-…`). That's acceptable for the first start; Chapter 15 replaces them from vault01. If you've done Chapter 15 already, run the sync right after the apply (last line).
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+export KUBECONFIG=~/technical-depth/01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml
+kubectl --context spark-root apply -k k8s/apps                                    # bge-m3, LiteLLM + PostgreSQL, Open WebUI, HTTPRoutes
+kubectl --context spark-root -n llm-serving rollout status sts/litellm-db --timeout=5m
+kubectl --context spark-root -n llm-serving rollout status deploy/litellm --timeout=10m   # DB migrations on first start
+kubectl --context spark-root -n llm-serving rollout status deploy/bge-m3 --timeout=20m    # first start downloads bge-m3
+kubectl --context spark-root -n llm-serving rollout status sts/open-webui --timeout=10m
+kubectl --context spark-root -n llm-serving describe quota serving-budget         # CPU and memory used vs 8 / 90Gi
+kubectl --context spark-root -n llm-serving create job --from=cronjob/vault-sync vs-apps 2>/dev/null || true   # only if Chapter 15 is done
+```
+
+Name resolution on the MacBook, once:
+
+```bash
+# ▶ MacBook · any folder
+echo "192.168.0.115 api.lab.local webui.lab.local" | sudo tee -a /etc/hosts
+curl -s http://webui.lab.local/health                                              # {"status":true}
+```
+
+Check the memory side before you go on: the chat model's util plus bge-m3's 0.06 must stay ≲ 0.72.
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+for d in vllm bge-m3; do
+  echo "$d $(kubectl --context spark-root -n llm-serving get deploy $d -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -o 'gpu-memory-utilization=[0-9.]*')"
+done                                                                               # add the two values: ≲ 0.72
+```
+
+### Task 5.2 · The gateway answers
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+KEY=$(kubectl --context spark-root -n llm-serving get secret litellm-master-key -o jsonpath='{.data.key}' | base64 -d)
+API=http://api.lab.local
+H=(-H "Authorization: Bearer $KEY" -H 'Content-Type: application/json')
+curl -s $API/v1/models "${H[@]}" | jq -r '.data[].id'
+curl -s $API/v1/chat/completions "${H[@]}" \
+  -d '{"model":"reasoning-fast","max_tokens":512,"messages":[{"role":"user","content":"Is 91 prime? One line."}]}' \
+  | jq '{model, answer: .choices[0].message.content, thinking_chars: (.choices[0].message.reasoning_content // "" | length)}'
+```
+
+Expected: the alias list from §3.1, then an answer from r1-7b with a non-zero `thinking_chars`: the reasoning arrived separately.
+
+### Task 5.3 · A team and a scoped key
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+TEAM=$(curl -s $API/team/new "${H[@]}" -d '{"team_alias":"tenant-alpha","max_budget":5,"budget_duration":"30d"}' | jq -r .team_id)
+ALPHA=$(curl -s $API/key/generate "${H[@]}" -d "{\"team_id\":\"$TEAM\",\"key_alias\":\"alpha-dev\",
+  \"models\":[\"reasoning-fast\",\"embeddings\"],\"rpm_limit\":5,\"max_budget\":1,\"duration\":\"30d\"}" | jq -r .key)
+A=(-H "Authorization: Bearer $ALPHA" -H 'Content-Type: application/json')
+curl -s $API/v1/chat/completions "${A[@]}" -d '{"model":"reasoning-fast","max_tokens":512,"messages":[{"role":"user","content":"2+2?"}]}' | jq -r '.choices[0].message.content'
+curl -s -o /dev/null -w '%{http_code}\n' $API/v1/chat/completions "${A[@]}" -d '{"model":"reasoning","messages":[{"role":"user","content":"hi"}]}'
+for i in $(seq 8); do curl -s -o /dev/null -w '%{http_code} ' $API/v1/chat/completions "${A[@]}" \
+  -d '{"model":"reasoning-fast","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}'; done; echo
+```
+
+Expected: an answer; `401` for `reasoning` (not in the allow-list); then something like `200 200 200 200 200 429 429 429` (the first request already used one of the five).
+
+### Task 5.4 · Spend per key
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+curl -s "$API/key/info?key=$ALPHA" "${H[@]}" | jq '.info | {key_alias, spend, max_budget, rpm_limit, models}'
+curl -s "$API/spend/logs?api_key=$ALPHA" "${H[@]}" | jq '.[0] | {model, total_tokens, spend, startTime}'
+```
+
+`spend` stays 0 until the model has a cost per token (§3.3). Set one in `litellm-config`, `kubectl --context spark-root -n llm-serving rollout restart deploy/litellm`, send a request, and read it again.
+
+### Task 5.5 · A fallback rescues a request
+
+Only r1-7b is served, SGLang is at 0 replicas, so `reasoning` (r1-32b-fp8) has no backend:
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+scripts/serve-model.sh r1-7b                                       # no-op if it is already serving
+curl -si $API/v1/chat/completions "${H[@]}" -d '{"model":"reasoning","max_tokens":256,"messages":[{"role":"user","content":"Is 91 prime?"}]}' \
+  | grep -iE '^x-litellm-(model-id|model-api-base|attempted-retries|attempted-fallbacks)|"model"'
+```
+
+Expected: the request succeeds, the headers show attempted fallbacks, and the response `model` is r1-7b. The client never knew. Record how much latency the failed attempts added.
+
+### Task 5.6 · Give Open WebUI its own key, then sign in
+
+The master key in Open WebUI is a shortcut for the first start. Give it a key that can only reach the chat aliases and embeddings:
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+WEBUI=$(curl -s $API/key/generate "${H[@]}" -d '{"key_alias":"open-webui","models":["reasoning","reasoning-fast","embeddings"],"rpm_limit":120}' | jq -r .key)
+kubectl --context spark-root -n llm-serving create secret generic webui-litellm-key --from-literal=key="$WEBUI"
+kubectl --context spark-root -n llm-serving patch sts open-webui --type json \
+  -p '[{"op":"replace","path":"/spec/template/spec/containers/0/env/1/valueFrom/secretKeyRef","value":{"name":"webui-litellm-key","key":"key"}}]'
+kubectl --context spark-root -n llm-serving rollout status sts/open-webui
+```
+
+Then in the browser:
+
+1. Open `http://webui.lab.local` and sign up. The first account becomes **admin**.
+2. **Admin Panel → Settings → Connections**: paste the new key into the LiteLLM connection (env values only seeded the first start).
+3. In a private window, sign up a second user. Expected: an "account activation pending" screen.
+4. As admin: **Admin Panel → Users** → set the new user to *user*.
+5. **Workspace → Models**: hide `embeddings` from chat; restrict `reasoning` to a group if you want to ration the 32B model.
+
+A `kubectl apply -k k8s/apps` later puts the master key back in the StatefulSet; keep the patch in an overlay of your own, or in Git if you run the apps through Argo CD (Chapter 15).
+
+### Task 5.7 · Watch the thinking stream
+
+In Open WebUI pick `reasoning-fast` and ask: *"A training run saves a checkpoint every 7 steps. How many checkpoints exist after 100 steps? Explain briefly."* Expected: a **Thinking…** block that streams, collapses to **Thought for N seconds**, then the answer **14**. Time the same request through the gateway hop by hop with `stream_probe.py` (Chapter 08).
+
+Upload a document: **Workspace → Knowledge → +**, create "DeepSeek lab", upload [Chapter 08](08-kubernetes-deployment-storage-and-streaming.md), then in a new chat type `#`, pick the collection and ask *"What request timeout does the LiteLLM HTTPRoute use?"* Expected: **900 s**, with a citation. Confirm the embeddings ran on the GB10:
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+kubectl --context spark-root -n llm-serving logs deploy/bge-m3 | grep -c 'POST /v1/embeddings'
+```
+
+### Task 5.8 · Back up, then restore
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+kubectl --context spark-root apply -f k8s/ops/webui-backup.yaml
+kubectl --context spark-root -n llm-serving create job --from=cronjob/webui-backup webui-backup-now
+kubectl --context spark-root -n llm-serving logs -f job/webui-backup-now          # webui-<timestamp>.db … integrity: ok
+```
+
+Restore drill: delete a chat in the UI, then roll the database back.
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+B=$(kubectl --context spark-root -n llm-serving logs job/webui-backup-now | awk '/integrity: ok/{print $1}')
+kubectl --context spark-root -n llm-serving scale sts open-webui --replicas=0
+kubectl --context spark-root apply -f - <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata: {name: webui-restore, namespace: llm-serving}
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: restore
+          image: python:3.12-slim
+          command: ["sh", "-c", "cp /data/webui.db /data/webui.db.before-restore && cp /backups/$B /data/webui.db && ls -l /data"]
+          resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 128Mi}}
+          volumeMounts: [{name: data, mountPath: /data}, {name: backups, mountPath: /backups, readOnly: true}]
+      volumes:
+        - {name: data, persistentVolumeClaim: {claimName: data-open-webui-0}}
+        - {name: backups, persistentVolumeClaim: {claimName: webui-backups}}
+EOF
+kubectl --context spark-root -n llm-serving wait --for=condition=complete job/webui-restore --timeout=2m
+kubectl --context spark-root -n llm-serving scale sts open-webui --replicas=1
+```
+
+Expected: after logging in again, the deleted chat is back. The time from `scale … 0` to a working login is your recovery time for the chat service: record it.
+
+Then prove sessions survive a restart: stay logged in, `kubectl --context spark-root -n llm-serving delete pod open-webui-0`, refresh when it's back. You're still logged in, because the signing key comes from the Secret.
+
+### Task 5.9 · (2×) Load balancing a pool
+
+`reasoning-pool` puts vLLM and SGLang, both serving r1-32b-fp8, behind one name. On one Spark this doesn't fit: two 32B FP8 engines need about 2 × 0.40 of util (> 0.72) and two ~56 Gi pods (> 90 Gi `serving-budget`). With dgx-spark-2, run SGLang there (Chapter 07) and change the second deployment's `api_base` to its Service:
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+scripts/serve-model.sh r1-32b-fp8
+kubectl --context spark-root apply -k k8s/sglang/r1-32b-fp8                    # scheduled on dgx-spark-2
+for i in $(seq 20); do curl -si $API/v1/chat/completions "${H[@]}" \
+  -d '{"model":"reasoning-pool","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}' \
+  | grep -i '^x-litellm-model-id' & done; wait | sort | uniq -c
+```
+
+Expected: both `pool-vllm` and `pool-sglang` appear; with concurrent requests least-busy spreads them.
+
+### Task 5.10 · Drills
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+scripts/breakfix.sh inject D04      # LiteLLM timeout lowered to 30 s: long answers cut off
+scripts/breakfix.sh hint D04
+scripts/breakfix.sh reset D04
+scripts/breakfix.sh inject D08      # a client uses the HF repo id instead of the served name
+scripts/breakfix.sh answer D08      # then explain how the aliases prevent it
+```
+
+---
+
+## 6. Verify
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+scripts/verify.sh apps
+```
+
+| Check | Expected |
+|---|---|
+| pods | `litellm-db`, `litellm`, `bge-m3`, `open-webui` Ready; `serving-budget` not exceeded |
+| health | `/health` on `webui.lab.local` → `{"status":true}`; `/v1/models` on `api.lab.local` lists the aliases |
+| limits | 401 for a model outside the allow-list, 429 above the RPM |
+| spend | `key/info` shows non-zero spend once a cost per token is set |
+| fallback | `reasoning` answers while its primary has no backend |
+| sign-up | a second user stays `pending` until approved |
+| thinking | collapsible block, then the answer |
+| uploads | answer cites the uploaded file; bge-m3 log shows embedding calls |
+| backup / restore | `integrity: ok`; the deleted chat is back; recovery time recorded |
+| sessions | still logged in after the pod is deleted |
+
+---
+
+## 7. Troubleshooting
+
+| You see | Cause | Fix |
+|---|---|---|
+| `/key/generate` says a database is required | `DATABASE_URL` unset or `litellm-db` unreachable | `kubectl --context spark-root -n llm-serving get sts litellm-db`; check the env in the pod |
+| LiteLLM CrashLoop with Prisma errors on first start | database not ready yet, or wrong password | the startupProbe allows 5 min; check the `litellm-db` Secret matches what PostgreSQL was initialised with |
+| `reasoning_content` missing through LiteLLM | `openai/` prefix used for a vLLM backend | `hosted_vllm/` for vLLM |
+| 429 although traffic is low | `rpm_limit` on the team **and** the key, or a shared key | read `key/info` and `team/info` |
+| fallback never happens | the error class isn't one LiteLLM falls back on, or retries keep succeeding slowly | check `allowed_fails`/`cooldown_time`; read the LiteLLM log for the exception |
+| spend always 0 | no cost per token for self-hosted models | set `model_info` costs (§3.3) |
+| config change has no effect | ConfigMap is mounted, process not restarted | `kubectl --context spark-root -n llm-serving rollout restart deploy/litellm` |
+| no models in Open WebUI's picker | wrong key in the connection, or LiteLLM down | fix the key in **Settings → Connections**; `kubectl --context spark-root -n llm-serving logs sts/open-webui \| grep -i openai` |
+| answer stops after ~5 min | a hop with a shorter timeout | 900 s on the HTTPRoute, LiteLLM and `AIOHTTP_CLIENT_TIMEOUT` (Chapter 08) |
+| thinking shown as answer text | backend without a reasoning parser | `--reasoning-parser=deepseek_r1` in the catalog entry (drill D01) |
+| everyone logged out after a restart | `WEBUI_SECRET_KEY` unset or rotated | take it from the Secret; rotate only deliberately (Chapter 15) |
+| upload fails with an `embedding` error | `embeddings` alias missing or bge-m3 not Ready | `kubectl --context spark-root -n llm-serving get deploy bge-m3`; check the alias list |
+| bge-m3 Pending or OOM at start | memory: util sum or `serving-budget` full | `describe quota serving-budget`; park a model (Chapter 05) |
+| `database is locked` | two Open WebUI replicas on SQLite | one replica, or PostgreSQL |
+| `curl: Could not resolve host: api.lab.local` | no `/etc/hosts` entry | Task 5.1 |
+
+---
+
+## 8. Scale-out path (2×)
+
+| One Spark | Two Sparks / production |
+|---|---|
+| one LiteLLM, PostgreSQL on local NVMe | 2+ LiteLLM replicas with Redis (shared rate-limit counters and router state), managed or replicated PostgreSQL |
+| `reasoning-pool` doesn't fit | SGLang or a second vLLM on dgx-spark-2 behind the same alias; least-busy across both |
+| static model list in a ConfigMap | the model list in Git (Argo CD, Chapter 15); model access tied to SSO groups |
+| Open WebUI on SQLite + nightly backup | PostgreSQL with PITR, uploads in object storage, Redis for websockets, several replicas |
+| local accounts with approval | SSO via OIDC (`ENABLE_OAUTH_SIGNUP`, `OAUTH_*`) with group mapping from the IdP |
+| least-busy routing | KV-cache- and queue-aware routing under the gateway (Gateway API Inference Extension) |
+
+With a second Spark, the PVCs stay where they were bound (`local-nvme` is node-local): the Open WebUI and PostgreSQL pods, and their backup Jobs, must run on the node that holds their volumes.
+
+---
+
+## 9. Checklist
+
+- [ ] Clients use aliases; I can change the model behind `reasoning` without touching a client.
+- [ ] Each tenant has a scoped key with limits, and I've seen the 401 and the 429.
+- [ ] I can show spend per key.
+- [ ] I watched a fallback rescue a request whose primary had no backend.
+- [ ] New users can't reach the GPU until an admin approves them; Open WebUI uses its own key, not the master key.
+- [ ] Thinking renders separately from the answer; uploads are embedded on the GB10.
+- [ ] I restored the chat database from a backup and know how long it took.

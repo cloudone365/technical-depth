@@ -15,10 +15,10 @@ class H(BaseHTTPRequestHandler):
         tool_msgs = [m for m in req["messages"] if m["role"] == "tool"]
         if not tool_msgs:
             msg = {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function",
-                   "function": {"name": "calculator", "arguments": json.dumps({"expression": "0.17 * 119.7"})}}]}
+                   "function": {"name": "calculator", "arguments": json.dumps({"expression": "0.17 * 121.7"})}}]}
         else:
             val = json.loads(tool_msgs[-1]["content"])["result"]
-            msg = {"role": "assistant", "content": f"17% of 119.7 GiB is {val:.2f} GiB."}
+            msg = {"role": "assistant", "content": f"17% of 121.7 GiB is {val:.2f} GiB."}
         body = json.dumps({"choices": [{"message": msg}]}).encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))

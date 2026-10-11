@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Needle-in-a-haystack long-context check (Volume 08).
+"""Needle-in-a-haystack long-context check (Chapter 04).
 
 Builds a long filler document from varied, original sentences, hides one fact
 (the "needle") at a chosen depth, and asks the served model to retrieve it.
@@ -69,10 +69,10 @@ def main():
     for L in a.lengths:
         for depth in a.depths:
             code = f"{rnd.randint(1000, 9999)}-{rnd.choice(['AMBER', 'COBALT', 'TEAL', 'ONYX'])}"
-            needle = f"The secret maintenance code for spark-01 is {code}."
+            needle = f"The secret maintenance code for dgx-spark-1 is {code}."
             sents = filler(int(L / 1.3), rnd)
             sents.insert(int(len(sents) * depth), needle)
-            prompt = (" ".join(sents) + "\n\nQuestion: What is the secret maintenance code for spark-01? "
+            prompt = (" ".join(sents) + "\n\nQuestion: What is the secret maintenance code for dgx-spark-1? "
                       "Reply with the code only.")
             text, ttft, ptok = ask(a.url, a.model, prompt, a.max_tokens)
             ok = code in text

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Format + correctness check for the <think>/<answer> contract (Volumes 23–25).
+"""Format + correctness check for the <think>/<answer> contract (Chapters 10, 11).
 
 Sends N fresh arithmetic problems (same generator as grpo_tiny.py, different seed
 from training) to any OpenAI-compatible endpoint and scores the replies with the

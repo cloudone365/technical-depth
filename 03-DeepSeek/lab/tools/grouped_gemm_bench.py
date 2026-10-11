@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Why MoE needs grouped GEMMs (Volume 07).
+"""Why MoE needs grouped GEMMs (Chapter 02).
 
 An MoE layer multiplies a different, variable-size slice of tokens by each
 expert's weights. Three ways to do it:

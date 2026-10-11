@@ -1,4 +1,8 @@
-# FSDP2 full fine-tune across two Sparks (Volume 26): one rank per Spark over
+# Needs the TRAINING WINDOW (02-Kubernetes manifests/root-llms/training-window): batch gets
+# 8 CPU · 80 Gi · 3 slices while serving is parked. Each rank: 8 CPU · 80 Gi (request = limit) · 1 slice,
+# one per Spark. Kueue admits the pair only when spark-cq and batch-budget count dgx-spark-2 too
+# (2 × 8 CPU · 80 Gi): raise both for the run (Chapter 11, scale-out).
+# FSDP2 full fine-tune across two Sparks (Chapter 11): one rank per Spark over
 # the CX-7 link (hostNetwork + NCCL/RoCE, like 02's two-spark DDP overlay).
 apiVersion: v1
 kind: Service
@@ -50,8 +54,8 @@ spec:
             - {name: HF_HOME, value: /ckpt/hf}
           securityContext: {capabilities: {add: [IPC_LOCK]}}
           resources:
-            requests: {cpu: "8", memory: 32Gi, nvidia.com/gpu: "1"}
-            limits: {memory: 100Gi, nvidia.com/gpu: "1"}
+            requests: {cpu: "8", memory: 80Gi, nvidia.com/gpu: "1"}   # request = limit
+            limits: {cpu: "8", memory: 80Gi, nvidia.com/gpu: "1"}
           volumeMounts:
             - {name: train, mountPath: /train}
             - {name: ckpt, mountPath: /ckpt}

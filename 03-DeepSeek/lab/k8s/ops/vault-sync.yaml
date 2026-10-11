@@ -1,6 +1,8 @@
-# Vault → Kubernetes Secret sync every 15 min (Volume 32). One-time setup:
+# Vault → Kubernetes Secret sync every 15 min (Chapter 15). One-time setup:
 #   scripts/vault-k8s-auth-setup.sh
-#   kubectl -n llm-serving create configmap vault-ca --from-file=ca.crt="01-Ansible/lab/.cache/spark-lab-ca.crt"
+#   kubectl --context spark-root -n llm-serving create configmap vault-ca --from-file=ca.crt="01-Ansible/lab/.cache/vault-ca.crt"
+# Vault runs on vault01 (192.168.0.211:8200). The Hugging Face token is the lab-wide
+# kv/spark-lab/hf (field token); the DeepSeek app secrets live under kv/spark-lab/deepseek/.
 apiVersion: v1
 kind: ServiceAccount
 metadata: {name: vault-sync, namespace: llm-serving}
@@ -48,12 +50,12 @@ spec:
               image: python:3.12-slim
               command: ["python3", "/tools/vault_sync.py"]
               env:
-                - {name: VAULT_ADDR, value: "https://192.168.0.100:8200"}
+                - {name: VAULT_ADDR, value: "https://192.168.0.211:8200"}
                 - {name: VAULT_CACERT, value: /vault-ca/ca.crt}
                 - {name: VAULT_ROLE, value: deepseek-serving}
                 - name: SYNC_MAP
                   value: >-
-                    [{"vault": "kv/data/spark-lab/deepseek/hf", "secret": "hf-token", "keys": {"token": "token"}},
+                    [{"vault": "kv/data/spark-lab/hf", "secret": "hf-token", "keys": {"token": "token"}},
                      {"vault": "kv/data/spark-lab/deepseek/litellm", "secret": "litellm-master-key", "keys": {"key": "master_key"},
                       "restart": ["deployment/litellm", "statefulset/open-webui"]},
                      {"vault": "kv/data/spark-lab/deepseek/webui", "secret": "open-webui-secret", "keys": {"secret-key": "secret_key"},

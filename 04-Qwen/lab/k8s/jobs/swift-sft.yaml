@@ -1,0 +1,91 @@
+# ms-swift LoRA SFT of Qwen3-4B-Instruct-2507 (Chapter 07) — a Kueue-admitted Job in
+# batch on spark-root. Runs in the TRAINING WINDOW (02-Kubernetes Chapter 07 /
+# root-llms/training-window: batch gets 8 CPU · 80 Gi · 3 slices while serving is parked):
+#   kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite
+#   kubectl --context spark-root apply -k ../../02-Kubernetes/lab/manifests/root-llms/training-window
+#   kubectl --context spark-root apply -f k8s/jobs/swift-sft.yaml
+#   kubectl --context spark-root -n batch logs -f job/swift-sft
+#
+# Weights and datasets: model-cache lives in llm-serving and a PVC can't be mounted
+# across namespaces, so batch jobs share their own PVC qwen-train (HF cache + outputs,
+# defined in each swift-*.yaml; applying it again is a no-op).
+# Own data (e.g. tools/synth_data.py output, ms-swift "messages" JSONL):
+#   kubectl --context spark-root -n batch create configmap qwen-sft-data --from-file=train.jsonl=out/sft.jsonl
+#   and set DATASET to /data/train.jsonl below.
+# After training: the LoRA adapter is in /work/output/sft/v*-*/checkpoint-*; merge with
+#   swift export --adapters <checkpoint> --merge_lora true
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: qwen-train, namespace: batch}
+spec:
+  storageClassName: local-nvme-retain
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 60Gi}}     # batch-budget: 200Gi of storage in total
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: swift-sft
+  namespace: batch
+  labels: {kueue.x-k8s.io/queue-name: train, kueue.x-k8s.io/priority-class: routine, app: qwen-swift}
+spec:
+  suspend: true                  # Kueue un-suspends it once spark-cq has room
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata: {labels: {app: qwen-swift, job: swift-sft}}
+    spec:
+      restartPolicy: Never
+      priorityClassName: spark-batch
+      containers:
+        - name: swift
+          image: nvcr.io/nvidia/pytorch:26.08-py3
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              pip install --quiet "ms-swift==4.5.3" "transformers==5.16.1" "trl==0.29.1" "peft==0.20.0" "datasets==4.8.4" "accelerate==1.15.0"
+              swift sft \
+                --model "$MODEL" \
+                --use_hf true \
+                --tuner_type lora \
+                --dataset "$DATASET" \
+                --split_dataset_ratio 0.02 \
+                --torch_dtype bfloat16 \
+                --num_train_epochs 1 \
+                --per_device_train_batch_size 1 \
+                --gradient_accumulation_steps 16 \
+                --learning_rate 1e-4 \
+                --lora_rank 16 \
+                --lora_alpha 32 \
+                --target_modules all-linear \
+                --max_length 2048 \
+                --eval_steps 50 \
+                --save_steps 50 \
+                --save_total_limit 2 \
+                --logging_steps 5 \
+                --warmup_ratio 0.05 \
+                --dataloader_num_workers 4 \
+                --dataset_num_proc 4 \
+                --report_to tensorboard \
+                --output_dir /work/output/sft
+          env:
+            - {name: MODEL, value: Qwen/Qwen3-4B-Instruct-2507}
+            - {name: DATASET, value: "vicgalle/alpaca-gpt4#2000"}   # Alpaca-GPT4 (English), 2,000 samples
+            - {name: HF_HOME, value: /work/hf}
+            - {name: MODELSCOPE_CACHE, value: /work/modelscope}
+            - {name: TOKENIZERS_PARALLELISM, value: "false"}
+            - {name: PYTORCH_CUDA_ALLOC_CONF, value: "expandable_segments:True"}
+            - name: HF_TOKEN
+              valueFrom: {secretKeyRef: {name: hf-token, key: token, optional: true}}   # Qwen models are not gated
+          resources:            # request = limit, inside the training window (≤ 8 CPU · 80 Gi · 1 slice)
+            requests: {cpu: "6", memory: 48Gi, nvidia.com/gpu: "1"}
+            limits: {cpu: "6", memory: 48Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: work, mountPath: /work}
+            - {name: data, mountPath: /data, readOnly: true}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - {name: work, persistentVolumeClaim: {claimName: qwen-train}}
+        - {name: data, configMap: {name: qwen-sft-data, optional: true}}
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 4Gi}}   # counts against the 48Gi limit

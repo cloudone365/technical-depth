@@ -1,5 +1,5 @@
 # Nightly logical backup of LiteLLM's PostgreSQL (virtual keys, teams, budgets, spend)
-# (Volume 33). Custom-format dumps restore with pg_restore; 14 are kept.
+# (Chapter 15). Custom-format dumps restore with pg_restore; 14 are kept.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata: {name: litellm-db-backups, namespace: llm-serving}

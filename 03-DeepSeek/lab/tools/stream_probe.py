@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Streaming probe for reasoning models, hop by hop (Volume 21).
+"""Streaming probe for reasoning models, hop by hop (Chapter 08).
 
 Sends one streamed chat completion and times every SSE chunk, separating the
 reasoning phase (delta.reasoning_content) from the answer phase (delta.content):
@@ -15,7 +15,7 @@ which is what a misconfigured proxy or middleware does to SSE.
 
   python3 stream_probe.py --url http://localhost:8000 --model r1-7b
   python3 stream_probe.py --url http://api.lab.local --api-key sk-… --model reasoning
-  python3 stream_probe.py --url http://192.168.0.100 --host api.lab.local --api-key sk-… --model reasoning --json
+  python3 stream_probe.py --url http://192.168.0.115 --host api.lab.local --api-key sk-… --model reasoning --json
 Stdlib only.
 """
 import argparse
@@ -111,9 +111,9 @@ def show(r):
           f"ITL p50 {r['itl_p50_ms']:.1f} ms p99 {r['itl_p99_ms']:.1f} ms | ≈{r['tok_per_s']:.0f} chunks/s")
     print(f"  finish_reason={r['finish_reason']}  usage={r['usage']}")
     if r["buffered"]:
-        print("  BUFFERED: every chunk arrived in one burst at the end — a hop is buffering SSE (Vol 21 §7)")
+        print("  BUFFERED: every chunk arrived in one burst at the end — a hop is buffering SSE (Chapter 08 §7)")
     if r["finish_reason"] == "length":
-        print("  TRUNCATED: hit max_tokens inside the chain of thought — raise max_tokens (Vol 05, alert ReasoningTruncated)")
+        print("  TRUNCATED: hit max_tokens inside the chain of thought — raise max_tokens (Chapter 03, alert ReasoningTruncated)")
     if r["reasoning_chunks"] and not r["answer_chunks"]:
         print("  NO ANSWER: only reasoning arrived")
     if not r["reasoning_chunks"] and "</think>" in r["answer"]:

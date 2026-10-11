@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stand-in server for format_check.py (Volume 23): solves the generated problems,
+"""Stand-in server for format_check.py (Chapter 10): solves the generated problems,
 returns the thinking in reasoning_content (like vLLM's parser) and <answer> in content.
 Odd-numbered calls get the answer wrong, so correctness must come out near 50 %."""
 import itertools

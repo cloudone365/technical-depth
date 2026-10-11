@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pin catalog models to exact Hugging Face commits, and detect upstream changes (Volume 33).
+"""Pin catalog models to exact Hugging Face commits, and detect upstream changes (Chapter 15).
 
   report : for every entry in models.yaml, ask the Hub for the current commit of the
            repo's main branch and compare with the pinned `revision` (if any)

@@ -1,4 +1,4 @@
-# promtool unit tests for rules.yaml (Volume 38). run-local-checks.sh extracts the
+# promtool unit tests for rules.yaml (Chapter 16). run-local-checks.sh extracts the
 # PrometheusRule groups to rules.extracted.yaml next to this file and runs
 #   promtool test rules rules.test.yaml
 rule_files: [rules.extracted.yaml]
@@ -42,7 +42,7 @@ tests:
           - exp_labels: {severity: warning, job_name: weights-verify-29312345}
             exp_annotations:
               summary: "weights-verify-29312345 failed"
-              action: "kubectl -n llm-serving logs job/weights-verify-29312345 — Vol 33 runbook (weights mismatch, upstream drift, backup)"
+              action: "kubectl --context spark-root -n llm-serving logs job/weights-verify-29312345 — Chapter 15 runbook (weights mismatch, upstream drift, backup)"
   - name: idle-only throttle bit does not alert
     interval: 1m
     input_series:

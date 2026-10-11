@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LoRA / QLoRA / full fine-tune memory sizing for DGX Spark (Volumes 23, 24, 26).
+"""LoRA / QLoRA / full fine-tune memory sizing for DGX Spark (Chapters 10, 11).
 
 Uses the architecture presets from model_math.py.
   trainable LoRA params = Σ over targeted matrices of r·(d_in + d_out)
@@ -14,7 +14,7 @@ import argparse
 import sys
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
-from model_math import GIB, SPARK_VISIBLE_GIB, params, resolve  # noqa: E402
+from model_math import GIB, SPARK_VISIBLE_GIB, TRAIN_WINDOW_GIB, params, resolve  # noqa: E402
 
 
 def linear_shapes(p):
@@ -59,8 +59,13 @@ def main():
     print(f"  train state      : {trainable*per_trainable/GIB:10.1f} GiB  (weights+grads+Adam+master)")
     print(f"  activations      : {acts/GIB:10.1f} GiB  (seq {a.seq} × batch {a.batch}, grad-ckpt {'on' if a.grad_ckpt else 'off'})")
     print(f"  logits           : {logits/GIB:10.1f} GiB")
-    print(f"  total ≈ {tot/GIB:.1f} GiB of {SPARK_VISIBLE_GIB} GiB unified memory → "
-          f"{'✓ fits one Spark' if tot/GIB < 0.85 * SPARK_VISIBLE_GIB else '✗ needs 2 Sparks (FSDP/ZeRO-3) or a lighter method'}")
+    if tot / GIB <= 0.9 * TRAIN_WINDOW_GIB:      # 10 % headroom for the CUDA context, allocator and dataloader
+        verdict = f"✓ fits one training-window pod ({TRAIN_WINDOW_GIB:.0f} Gi request = limit)"
+    elif tot / GIB < 0.85 * SPARK_VISIBLE_GIB:
+        verdict = "✗ beyond the training window: shrink it (QLoRA, rank, seq, batch) or shard it across 2 Sparks"
+    else:
+        verdict = "✗ needs 2 Sparks (FSDP/ZeRO-3) or a lighter method"
+    print(f"  total ≈ {tot/GIB:.1f} GiB of {SPARK_VISIBLE_GIB} GiB unified memory → {verdict}")
     print(f"  LoRA adapter file: {trainable*2/2**20:.0f} MiB (bf16)" if a.method != "full" else "")
 
 

@@ -1,6 +1,6 @@
-# Nightly integrity check of every cached model snapshot (Volume 33).
+# Nightly integrity check of every cached model snapshot (Chapter 15).
 # Trust on first use: a snapshot without a manifest gets one (record it right
-# after a known-good download: kubectl create job --from=cronjob/weights-verify wv-now);
+# after a known-good download: kubectl --context spark-root create job --from=cronjob/weights-verify wv-now);
 # every later run verifies against it and fails the Job on any change.
 apiVersion: batch/v1
 kind: CronJob

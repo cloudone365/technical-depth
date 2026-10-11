@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Model memory math for DGX Spark (Volumes 01, 02, 11, 12, 13, 14, 23).
+"""Model memory math for DGX Spark (Chapters 01, 04, 05, 10).
 
 Computes, from a model's architecture:
   * total and *active* parameters (dense, GQA, MLA, DeepSeekMoE)
@@ -21,7 +21,9 @@ import json
 import sys
 
 GIB = 2**30
-SPARK_VISIBLE_GIB = 119.7          # what CUDA reports as total on a GB10 (≈128 GB)
+SPARK_VISIBLE_GIB = 121.7          # MemTotal of a GB10 (128 GB LPDDR5x minus firmware/carve-outs); vLLM util is a fraction of it
+LLM_POOL_UTIL = 0.72               # Σ --gpu-memory-utilization of models running together on the root (~90 GiB LLM pool)
+TRAIN_WINDOW_GIB = 80.0            # memory one training pod may hold in the training window (batch-budget / spark-cq)
 GB10_BW_GBS = 273.0          # LPDDR5x bandwidth of one GB10
 BYTES = {"bf16": 2.0, "fp16": 2.0, "fp8": 1.0, "int8": 1.0, "int4": 0.5, "awq": 0.5, "gptq": 0.5,
          "q4_k_m": 4.85 / 8, "q8_0": 8.5 / 8, "iq1_s": 1.58 / 8, "iq2_xxs": 2.06 / 8}

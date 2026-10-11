@@ -1,4 +1,4 @@
-# LiteLLM proxy (Volume 28): one OpenAI-compatible endpoint with virtual model
+# LiteLLM proxy (Chapter 12): one OpenAI-compatible endpoint with virtual model
 # names, per-key budgets/rate limits and fallbacks in front of the lab's engines.
 # Virtual keys and spend logs are stored in PostgreSQL (litellm-db.yaml).
 apiVersion: v1
@@ -13,12 +13,12 @@ data:
         litellm_params: {model: hosted_vllm/r1-7b, api_base: http://vllm.llm-serving:8000/v1, api_key: none}
       - model_name: reasoning-sglang
         litellm_params: {model: openai/r1-32b-fp8, api_base: http://sglang.llm-serving:30000/v1, api_key: none}
-      - model_name: agent                # tool calling (Vol 30): Qwen2.5 with the hermes parser
+      - model_name: agent                # tool calling (Chapter 14): Qwen2.5 with the hermes parser
         litellm_params: {model: hosted_vllm/qwen2.5-7b-tools, api_base: http://vllm.llm-serving:8000/v1, api_key: none}
       - model_name: embeddings
         litellm_params: {model: hosted_vllm/bge-m3, api_base: http://bge-m3.llm-serving:8000/v1, api_key: none}
       # Load balancing: two deployments behind one name. With one Spark both point at
-      # engines on the same GPU; with spark-02 the second api_base moves there.
+      # engines on the same GPU; with dgx-spark-2 the second api_base moves there.
       - model_name: reasoning-pool
         litellm_params: {model: hosted_vllm/r1-32b-fp8, api_base: http://vllm.llm-serving:8000/v1, api_key: none, rpm: 60}
         model_info: {id: pool-vllm, input_cost_per_token: 0.0000001, output_cost_per_token: 0.0000004}
@@ -44,7 +44,7 @@ kind: Secret
 metadata: {name: litellm-master-key, namespace: llm-serving}
 type: Opaque
 stringData:
-  key: "sk-lab-change-me"               # replace from Vault (Volume 32)
+  key: "sk-lab-change-me"               # replace from Vault (Chapter 15)
 ---
 apiVersion: apps/v1
 kind: Deployment

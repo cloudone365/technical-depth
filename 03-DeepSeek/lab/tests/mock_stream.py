@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Streaming reasoning-model stand-in for stream_probe.py tests (Volume 21).
+"""Streaming reasoning-model stand-in for stream_probe.py tests (Chapter 08).
 
 Streams 20 reasoning deltas then 10 answer deltas, `delay` seconds apart.
   python3 tests/mock_stream.py 18770            # well-behaved stream

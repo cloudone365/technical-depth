@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Full-parameter fine-tuning with PyTorch FSDP2 (Volume 26).
+"""Full-parameter fine-tuning with PyTorch FSDP2 (Chapter 11).
 
 Shards parameters, gradients and optimizer state across ranks with
 torch.distributed.fsdp.fully_shard, so a model whose Adam state does not fit one

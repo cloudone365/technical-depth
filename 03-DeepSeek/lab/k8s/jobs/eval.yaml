@@ -1,8 +1,8 @@
-# Run the evaluation harness against the currently served model (Volumes 34-37, 40).
+# Run the evaluation harness against the currently served model (Chapters 18, 19).
 # The code suite executes model-written Python, so it runs here, sandboxed
 # (non-root, no capabilities, read-only root, no service account token).
-#   yq '.spec.template.spec.containers[0].args[3] = "llama-3.1-8b"' k8s/jobs/eval.yaml | kubectl apply -f -
-#   kubectl -n llm-serving logs -f job/eval        (the per-suite lines and the summary are in the log)
+#   yq '.spec.template.spec.containers[0].args[3] = "llama-3.1-8b"' k8s/jobs/eval.yaml | kubectl --context spark-root apply -f -
+#   kubectl --context spark-root -n llm-serving logs -f job/eval        (the per-suite lines and the summary are in the log)
 apiVersion: batch/v1
 kind: Job
 metadata: {name: eval, namespace: llm-serving}

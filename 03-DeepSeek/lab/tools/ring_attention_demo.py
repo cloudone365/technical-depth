@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Context parallelism with ring attention, verified (Volume 08).
+"""Context parallelism with ring attention, verified (Chapter 04).
 
 Splits one long sequence across W ranks. Each rank keeps its own query chunk
 and passes K/V chunks around a ring; partial results are merged with the

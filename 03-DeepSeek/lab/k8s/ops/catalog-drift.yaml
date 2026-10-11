@@ -1,5 +1,5 @@
-# Weekly: has any pinned catalog model moved upstream on Hugging Face? (Volume 33)
-# The Job fails (and the failed-Job alert in Vol 38 fires) when a pinned repo has a newer
+# Weekly: has any pinned catalog model moved upstream on Hugging Face? (Chapter 15)
+# The Job fails (and the failed-Job alert in Chapter 16 fires) when a pinned repo has a newer
 # commit, so a human decides whether to re-pin, re-evaluate and roll out.
 apiVersion: batch/v1
 kind: CronJob

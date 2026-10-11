@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Expert-parallel load balancing, simulated (Volume 09).
+"""Expert-parallel load balancing, simulated (Chapter 04).
 
 Given per-expert token loads (measured or synthetic), compare:
   naive      experts 0..E-1 placed contiguously, E/G per GPU

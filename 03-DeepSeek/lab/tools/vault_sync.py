@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync secrets from HashiCorp Vault (KV v2) into Kubernetes Secrets (Volume 32).
+"""Sync secrets from HashiCorp Vault (KV v2) into Kubernetes Secrets (Chapter 15).
 
 Runs as a CronJob with its own ServiceAccount:
   1. log in to Vault with the Kubernetes auth method (the pod's SA token — no static Vault credentials)
@@ -8,9 +8,9 @@ Runs as a CronJob with its own ServiceAccount:
   4. if the Secret changed, roll the workloads that read it ("restart"), because env vars
      from Secrets are only read at container start
 Stdlib only. Config (env):
-  VAULT_ADDR      https://192.168.0.100:8200          VAULT_CACERT  /vault-ca/ca.crt
+  VAULT_ADDR      https://192.168.0.211:8200          VAULT_CACERT  /vault-ca/ca.crt
   VAULT_ROLE      deepseek-serving                   VAULT_AUTH_PATH kubernetes
-  SYNC_MAP        JSON: [{"vault": "kv/data/spark-lab/deepseek/hf", "secret": "hf-token", "keys": {"token": "token"},
+  SYNC_MAP        JSON: [{"vault": "kv/data/spark-lab/hf", "secret": "hf-token", "keys": {"token": "token"},
                           "restart": ["deployment/vllm"]}]
   K8S_API, SA_DIR  overrides for tests (defaults: in-cluster)
 """
@@ -35,7 +35,7 @@ def req(url, method="GET", body=None, headers=None, ctx=None, ctype="application
 
 
 def main():
-    vault = os.environ.get("VAULT_ADDR", "https://192.168.0.100:8200")
+    vault = os.environ.get("VAULT_ADDR", "https://192.168.0.211:8200")
     vctx = ssl.create_default_context(cafile=os.environ.get("VAULT_CACERT", "/vault-ca/ca.crt")) \
         if vault.startswith("https") else None
     api = os.environ.get("K8S_API", "https://kubernetes.default.svc")

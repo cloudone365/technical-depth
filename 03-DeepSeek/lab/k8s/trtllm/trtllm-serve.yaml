@@ -1,6 +1,10 @@
-# TensorRT-LLM (Volume 18) with its PyTorch backend: no separate engine build
+# TensorRT-LLM (Chapter 07) with its PyTorch backend: no separate engine build
 # step, optimized kernels for Blackwell, OpenAI-compatible server.
 # Confirm the NGC tag that supports DGX Spark (sm_121/arm64) before applying.
+# Budget: FP8 weights ≈ 32 GiB + KV cache. free_gpu_memory_fraction is a share of
+# the memory still FREE after loading, so keep it low on a unified-memory box:
+# 0.30 ≈ 20 GiB of KV → ~52 GiB in total, inside a 58 Gi pod (request = limit) and
+# the ~90 GiB LLM pool. Scale vllm/sglang to 0 first (one 32B engine at a time).
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: trtllm, namespace: llm-serving, labels: {app: trtllm}}
@@ -20,7 +24,7 @@ spec:
             - |
               cat > /tmp/extra.yaml <<'YAML'
               kv_cache_config:
-                free_gpu_memory_fraction: 0.45
+                free_gpu_memory_fraction: 0.30
                 enable_block_reuse: true
               YAML
               trtllm-serve "$MODEL" --host 0.0.0.0 --port 8000 --backend pytorch \
@@ -32,8 +36,8 @@ spec:
           startupProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, failureThreshold: 180}
           readinessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 5}
           resources:
-            requests: {cpu: "4", memory: 16Gi, nvidia.com/gpu: "1"}
-            limits: {memory: 64Gi, nvidia.com/gpu: "1"}
+            requests: {cpu: "4", memory: 58Gi, nvidia.com/gpu: "1"}   # request = limit (shared LLM pool)
+            limits: {memory: 58Gi, nvidia.com/gpu: "1"}
           volumeMounts:
             - {name: models, mountPath: /models}
             - {name: shm, mountPath: /dev/shm}

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """One HTTP server that plays both Vault (KV v2 + Kubernetes auth) and the Kubernetes
-API (Secrets + workload PATCH), for testing vault_sync.py without either (Volume 32).
+API (Secrets + workload PATCH), for testing vault_sync.py without either (Chapter 15).
   python3 tests/mock_vault_k8s.py 18769     # GET /_state shows secrets and restarts
 POST /_rotate changes the Vault value, so the next sync must update + restart."""
 import json

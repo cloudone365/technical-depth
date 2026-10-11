@@ -1,0 +1,135 @@
+# Qwen model catalog for the 04-Qwen lab — every model here fits one DGX Spark (GB10).
+# scripts/gen_overlays.py turns each entry into k8s/models/<name>/ — a kustomize
+# overlay of the 02-Kubernetes vLLM Deployment (root-llms/90-serving/vllm) with
+# this lab's vLLM image (versions.env), the model's engine flags and its memory.
+# scripts/serve-model.sh applies one as the main model (svc/vllm) or next to it
+# (--side, svc/vllm-<name>).
+#
+# util      vLLM --gpu-memory-utilization: a fraction of the ~121.7 GiB the GB10 reports
+#           (the SAME unified memory the OS, Kubernetes and every pod use). 0.20 ≈ 24.3 GiB.
+# mem       pod memory request = limit. Rule (checked by gen_overlays.py):
+#           mem ≥ util × 121.7 GiB + ~3.5 GiB (Python, CUDA context, tokenizer, compile cache).
+#           "Everyday" models stay ≤ 32 Gi so two of them fit serving-budget next to the apps.
+# max_len   --max-model-len; the KV cache must hold at least one sequence of this length
+#           inside util × 121.7 GiB minus the weights (Chapter 01 has the KV math).
+# weights   approximate size on disk (prefetch planning for the model-cache PVC).
+# args      engine flags. Parsers: hermes = Qwen2.5/Qwen3 <tool_call> JSON; qwen3_coder = the
+#           XML-style tool calls of Qwen3-Coder, Qwen3.5 and Qwen3.6; reasoning parser qwen3 for
+#           hybrid-thinking models, deepseek_r1 for the *-Thinking-2507 models (their template
+#           opens <think> itself, as on the model cards).
+# licence   all entries are Apache-2.0 and not gated: hf-token is optional (rate limits only).
+# revision  optional Hugging Face commit SHA (pins weights + tokenizer). Unpinned = main;
+#           pin before you rely on a result (03-DeepSeek tools/catalog_drift.py writes it).
+# sandbox   optional: also generate k8s/models/<name>/sandbox/ for the dev-llms vCluster
+#           (namespace llm-sandbox, 3 Gi quota, weights in an emptyDir).
+#
+# QwQ-32B (AWQ) is not repeated here: 03-DeepSeek/lab/k8s/models/qwq-32b-awq serves it.
+# Embeddings for RAG come from 03's BGE-M3 deployment (03-DeepSeek/lab/k8s/apps/bge-m3.yaml).
+
+budget:                       # 02-Kubernetes root-llms/10-tenancy/quotas.yaml
+  util: 0.72                  # sum of --gpu-memory-utilization over engines running at once
+  memory_gi: 90               # serving-budget limits.memory (llm-serving)
+  apps: {util: 0.06, memory_gi: 19}   # 03 app stack + 02 helpers: BGE-M3 (0.06, 9 Gi), Open WebUI 4,
+                                      # LiteLLM 2 + DB 1, Qdrant 2, mock LLM 0.125
+
+models:
+  - name: qwen3-0.6b
+    hf: Qwen/Qwen3-0.6B
+    util: 0.05
+    max_len: 8192
+    mem: 10Gi
+    weights: 1.5GB
+    licence: Apache-2.0
+    args: [--reasoning-parser=qwen3, --max-num-seqs=16]
+    use: smoke tests, manifest checks and the dev-llms sandbox; speculative-decoding draft for Qwen3-8B
+    sandbox: {util: 0.02, mem: 3Gi, max_len: 2048}
+
+  - name: qwen3-4b-instruct
+    hf: Qwen/Qwen3-4B-Instruct-2507
+    util: 0.12
+    max_len: 32768
+    mem: 20Gi
+    weights: 8.1GB
+    licence: Apache-2.0
+    args: [--enable-auto-tool-choice, --tool-call-parser=hermes, --max-num-seqs=32]
+    use: fast non-thinking model for tool calling, JSON and synthetic data; LiteLLM alias "agent"
+
+  - name: qwen3-4b-thinking
+    hf: Qwen/Qwen3-4B-Thinking-2507
+    util: 0.15
+    max_len: 32768
+    mem: 24Gi
+    weights: 8.1GB
+    licence: Apache-2.0
+    args: [--reasoning-parser=deepseek_r1, --max-num-seqs=32]
+    use: thinking-only 2507 model — long <think> traces at 4B; compare with qwen3-8b thinking on/off
+
+  - name: qwen3-8b
+    hf: Qwen/Qwen3-8B
+    util: 0.20
+    max_len: 32768
+    mem: 32Gi
+    weights: 16.4GB
+    licence: Apache-2.0
+    args: [--reasoning-parser=qwen3, --enable-auto-tool-choice, --tool-call-parser=hermes, --max-num-seqs=32]
+    use: everyday default — hybrid thinking (enable_thinking per request) plus tool calling
+
+  - name: qwen2.5-math-7b
+    hf: Qwen/Qwen2.5-Math-7B-Instruct
+    util: 0.15
+    max_len: 4096
+    mem: 24Gi
+    weights: 15.2GB
+    licence: Apache-2.0
+    args: [--max-num-seqs=32]
+    use: chain-of-thought and tool-integrated math (\boxed{} answers); 4k context by design
+
+  - name: qwen3-vl-8b
+    hf: Qwen/Qwen3-VL-8B-Instruct
+    util: 0.20
+    max_len: 16384
+    mem: 32Gi
+    weights: 17.5GB
+    licence: Apache-2.0
+    args: ['--limit-mm-per-prompt={"image":2,"video":0}', --max-num-seqs=16]
+    use: vision-language — screenshots, scanned pages, charts; document RAG front end
+
+  - name: qwen3-coder-30b-fp8
+    hf: Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8
+    util: 0.40
+    max_len: 65536
+    mem: 56Gi
+    weights: 32GB
+    licence: Apache-2.0
+    args: [--enable-auto-tool-choice, --tool-call-parser=qwen3_coder, --max-num-seqs=16]
+    use: 30B MoE coder (3B active) in FP8 — agentic coding, repository-scale context
+
+  - name: qwen3.6-35b-fp8
+    hf: Qwen/Qwen3.6-35B-A3B-FP8
+    util: 0.45
+    max_len: 65536
+    mem: 64Gi
+    weights: 38GB
+    licence: Apache-2.0
+    args: [--reasoning-parser=qwen3, --enable-auto-tool-choice, --tool-call-parser=qwen3_coder,
+           --max-num-seqs=8, '--limit-mm-per-prompt={"image":2,"video":0}']
+    use: current flagship that fits one Spark — 35B MoE (3B active), hybrid Gated DeltaNet attention, vision; needs vLLM ≥ 0.17
+
+# Sets meant to run at the same time (one main model + --side models). gen_overlays.py
+# checks each: Σ util (+ apps) ≤ budget.util and Σ mem (+ apps) ≤ budget.memory_gi.
+sets:
+  - name: everyday            # chat + agent next to Open WebUI, LiteLLM and RAG
+    models: [qwen3-8b, qwen3-4b-instruct]
+    apps: true
+  - name: multimodal          # text, tools and vision without the app stack
+    models: [qwen3-8b, qwen3-vl-8b, qwen3-4b-instruct]
+    apps: false
+  - name: coding
+    models: [qwen3-coder-30b-fp8]
+    apps: true
+  - name: flagship
+    models: [qwen3.6-35b-fp8]
+    apps: true
+  - name: reasoning-compare   # thinking-only 4B vs hybrid 8B vs the math specialist
+    models: [qwen3-8b, qwen3-4b-thinking, qwen2.5-math-7b]
+    apps: false

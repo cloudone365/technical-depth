@@ -1,4 +1,6 @@
-# FSDP2 on one Spark (Volume 26): world size 1, so nothing is actually sharded —
+# Needs the TRAINING WINDOW (02-Kubernetes manifests/root-llms/training-window): batch gets
+# 8 CPU · 80 Gi · 3 slices while serving is parked. This job: 4 CPU · 64 Gi (request = limit) · 1 slice.
+# FSDP2 on one Spark (Chapter 11): world size 1, so nothing is actually sharded —
 # the baseline that fsdp-2spark.yaml is compared against. 1.5B full FT ≈ 28 GiB.
 apiVersion: batch/v1
 kind: Job
@@ -24,7 +26,7 @@ spec:
           env:
             - {name: HF_HOME, value: /ckpt/hf}
           resources:
-            requests: {cpu: "4", memory: 24Gi, nvidia.com/gpu: "1"}
+            requests: {cpu: "4", memory: 64Gi, nvidia.com/gpu: "1"}   # request = limit
             limits: {cpu: "4", memory: 64Gi, nvidia.com/gpu: "1"}
           volumeMounts:
             - {name: train, mountPath: /train}

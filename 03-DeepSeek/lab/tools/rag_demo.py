@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RAG over this repository, end to end (Volume 29).
+"""RAG over this repository, end to end (Chapter 13).
 
   ingest   : chunk Markdown by heading → embed (OpenAI /v1/embeddings, e.g. vLLM serving BAAI/bge-m3)
              → upsert into a NEW Qdrant collection <name>-<timestamp> → atomically point alias <name>

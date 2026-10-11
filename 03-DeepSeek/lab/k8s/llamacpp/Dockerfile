@@ -1,6 +1,8 @@
-# llama.cpp server built for the GB10 (Volume 17). Build ON the Spark:
+# llama.cpp server built for the GB10 (Chapter 07). Build ON the Spark (arm64 + sm_121),
+# then import it into the kubeadm node's containerd (namespace k8s.io):
 #   docker build -t spark-local/llama.cpp:server-sm121 --build-arg LLAMACPP_REF=b6500 .
-#   docker save spark-local/llama.cpp:server-sm121 | sudo k3s ctr images import -
+#   docker save spark-local/llama.cpp:server-sm121 | sudo ctr -n k8s.io images import -
+# With dgx-spark-2 joined, import it there too (rpc-2spark.yaml runs on both).
 FROM nvcr.io/nvidia/cuda:13.0.1-devel-ubuntu24.04 AS build
 ARG LLAMACPP_REF=b6500
 RUN apt-get update && apt-get install -y --no-install-recommends git cmake build-essential libcurl4-openssl-dev ca-certificates \

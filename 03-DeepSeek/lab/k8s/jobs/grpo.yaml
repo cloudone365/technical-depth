@@ -1,4 +1,6 @@
-# GRPO on verifiable arithmetic (Volume 05, 25) — gang-admitted by Kueue in the batch namespace.
+# Needs the TRAINING WINDOW (02-Kubernetes manifests/root-llms/training-window): batch gets
+# 8 CPU · 80 Gi · 3 slices while serving is parked. This job: 4 CPU · 48 Gi (request = limit) · 1 slice.
+# GRPO on verifiable arithmetic (Chapters 03, 11) — gang-admitted by Kueue in the batch namespace.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -24,7 +26,7 @@ spec:
             - {name: HF_HOME, value: /ckpt/hf}
             - {name: TOKENIZERS_PARALLELISM, value: "false"}
           resources:
-            requests: {cpu: "4", memory: 24Gi, nvidia.com/gpu: "1"}
+            requests: {cpu: "4", memory: 48Gi, nvidia.com/gpu: "1"}   # request = limit
             limits: {cpu: "4", memory: 48Gi, nvidia.com/gpu: "1"}
           volumeMounts:
             - {name: train, mountPath: /train}

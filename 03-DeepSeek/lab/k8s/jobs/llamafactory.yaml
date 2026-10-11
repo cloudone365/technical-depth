@@ -1,4 +1,6 @@
-# The Vol 23 SFT with LLaMA-Factory (Volume 24): no Python, one YAML recipe.
+# Needs the TRAINING WINDOW (02-Kubernetes manifests/root-llms/training-window): batch gets
+# 8 CPU · 80 Gi · 3 slices while serving is parked. This job: 4 CPU · 48 Gi (request = limit) · 1 slice.
+# The LoRA SFT of k8s/jobs/sft.yaml with LLaMA-Factory (Chapter 10): no Python, one YAML recipe.
 # The dataset is exported by sft_lora.py --export (same generator, same 5,000 examples)
 # and registered in dataset_info.json in ShareGPT/OpenAI-messages form.
 # llamafactory 0.9.4 needs datasets<=4.0.0, hence the different pin from the other Jobs.
@@ -67,7 +69,7 @@ spec:
             - {name: TOKENIZERS_PARALLELISM, value: "false"}
             - {name: DISABLE_VERSION_CHECK, value: "1"}
           resources:
-            requests: {cpu: "4", memory: 24Gi, nvidia.com/gpu: "1"}
+            requests: {cpu: "4", memory: 48Gi, nvidia.com/gpu: "1"}   # request = limit
             limits: {cpu: "4", memory: 48Gi, nvidia.com/gpu: "1"}
           volumeMounts:
             - {name: train, mountPath: /train}

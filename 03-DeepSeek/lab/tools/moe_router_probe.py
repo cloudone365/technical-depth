@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Watch a real DeepSeekMoE router make decisions (Volume 02, 09) — runs on the Spark.
+"""Watch a real DeepSeekMoE router make decisions (Chapters 01, 04) — runs on the Spark.
 
 Loads DeepSeek-V2-Lite-Chat (15.7 B total, ~2.4 B active, MLA + 64 routed + 2
 shared experts, top-6) in BF16 (~31 GB of unified memory), hooks every MoE gate,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local model evaluation + economics harness (Volumes 11, 13, 34–37, 40, 41).
+"""Local model evaluation + economics harness (Chapters 05, 18, 19).
 
 Runs three small, original, verifiable suites against any OpenAI-compatible
 endpoint (vLLM, SGLang, KServe, Ollama, LiteLLM, a cloud API):
@@ -159,7 +159,7 @@ def run(a):
 
 
 def gate(results, a):
-    """Release gate (Volumes 33, 40): every suite must stay within --tolerance of the baseline."""
+    """Release gate (Chapters 15, 19): every suite must stay within --tolerance of the baseline."""
     base = json.load(open(a.gate))
     failed = 0
     print(f"\ngate vs {a.gate} (tolerance {a.tolerance:.2f}):")

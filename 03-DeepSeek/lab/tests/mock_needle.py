@@ -16,7 +16,7 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         prompt = req["messages"][-1]["content"]
-        m = re.search(r"code for spark-01 is (\S+)\.", prompt)
+        m = re.search(r"code for dgx-spark-1 is (\S+)\.", prompt)
         events = [{"choices": [{"delta": {"content": m.group(1) if m else "unknown"}}]},
                   {"choices": [], "usage": {"prompt_tokens": int(len(prompt.split()) * 1.3)}}]
         body = b"".join(b"data: " + json.dumps(e).encode() + b"\n\n" for e in events) + b"data: [DONE]\n\n"

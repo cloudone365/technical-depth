@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Speculative decoding / MTP speed-up estimator (Volume 03).
+"""Speculative decoding / MTP speed-up estimator (Chapter 01).
 
 With a draft that proposes k tokens and a per-token acceptance rate α (tokens
 accepted independently), the expected tokens produced per target forward pass is

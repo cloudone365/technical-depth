@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the 'Spark · LLM serving (DeepSeek)' Grafana dashboard (Volume 38).
+"""Generate the 'Spark · LLM serving (DeepSeek)' Grafana dashboard (Chapter 16).
 Per served model (`model_name` label from vLLM): throughput, latency, KV cache,
 preemptions, finish reasons (reasoning truncation), speculative decoding.
   python3 gen_dashboard.py > deepseek-serving-dashboard.json

@@ -1,8 +1,12 @@
-# Disaggregated GRPO across two Sparks (Volume 25): rollout server on spark-02,
-# learner on spark-01, weights pushed learner → server over NCCL on the CX-7 link
+# Needs the TRAINING WINDOW (02-Kubernetes manifests/root-llms/training-window): batch gets
+# 8 CPU · 80 Gi · 3 slices while serving is parked. Rollout server + learner: 2 × (4 CPU · 32 Gi,
+# request = limit · 1 slice) = 8 CPU · 64 Gi. The rollout Deployment is not queued by Kueue, only
+# counted by batch-budget.
+# Disaggregated GRPO across two Sparks (Chapter 11): rollout server on dgx-spark-2,
+# learner on dgx-spark-1, weights pushed learner → server over NCCL on the CX-7 link
 # after every optimiser step (TRL server mode, group port 51216).
-#   kubectl apply -f k8s/rl/grpo-2spark.yaml
-#   kubectl -n batch rollout status deploy/grpo-rollout && kubectl -n batch patch job grpo-learner -p '{"spec":{"suspend":false}}'
+#   kubectl --context spark-root apply -f k8s/rl/grpo-2spark.yaml
+#   kubectl --context spark-root -n batch rollout status deploy/grpo-rollout && kubectl --context spark-root -n batch patch job grpo-learner -p '{"spec":{"suspend":false}}'
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: grpo-rollout, namespace: batch, labels: {app: grpo-rollout}}
@@ -14,7 +18,7 @@ spec:
     metadata: {labels: {app: grpo-rollout}}
     spec:
       priorityClassName: spark-batch
-      nodeSelector: {kubernetes.io/hostname: spark-02}
+      nodeSelector: {kubernetes.io/hostname: dgx-spark-2}
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       containers:
@@ -24,7 +28,7 @@ spec:
           args:
             - >-
               pip install --quiet trl==0.23.0 transformers==4.56.2 &&
-              trl vllm-serve --model Qwen/Qwen2.5-0.5B-Instruct --host 0.0.0.0 --port 8000 --gpu_memory_utilization 0.4
+              trl vllm-serve --model Qwen/Qwen2.5-0.5B-Instruct --host 0.0.0.0 --port 8000 --gpu_memory_utilization 0.2
           env:
             - {name: HF_HOME, value: /cache/hf}
             - {name: NCCL_SOCKET_IFNAME, value: enp1s0f1np1}
@@ -34,8 +38,8 @@ spec:
           readinessProbe: {httpGet: {path: /health/, port: 8000}, periodSeconds: 10, failureThreshold: 60}
           securityContext: {capabilities: {add: [IPC_LOCK]}}
           resources:
-            requests: {cpu: "4", memory: 16Gi, nvidia.com/gpu: "1"}
-            limits: {memory: 64Gi, nvidia.com/gpu: "1"}
+            requests: {cpu: "4", memory: 32Gi, nvidia.com/gpu: "1"}   # request = limit
+            limits: {cpu: "4", memory: 32Gi, nvidia.com/gpu: "1"}
           volumeMounts:
             - {name: cache, mountPath: /cache}
             - {name: shm, mountPath: /dev/shm}
@@ -53,7 +57,7 @@ spec:
     spec:
       restartPolicy: Never
       priorityClassName: spark-batch
-      nodeSelector: {kubernetes.io/hostname: spark-01}
+      nodeSelector: {kubernetes.io/hostname: dgx-spark-1}
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       containers:
@@ -73,8 +77,8 @@ spec:
             - {name: NCCL_IB_GID_INDEX, value: "3"}
           securityContext: {capabilities: {add: [IPC_LOCK]}}
           resources:
-            requests: {cpu: "4", memory: 24Gi, nvidia.com/gpu: "1"}
-            limits: {memory: 64Gi, nvidia.com/gpu: "1"}
+            requests: {cpu: "4", memory: 32Gi, nvidia.com/gpu: "1"}   # request = limit
+            limits: {cpu: "4", memory: 32Gi, nvidia.com/gpu: "1"}
           volumeMounts:
             - {name: train, mountPath: /train}
             - {name: ckpt, mountPath: /ckpt}

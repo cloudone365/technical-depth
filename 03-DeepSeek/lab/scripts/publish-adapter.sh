@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copy a trained LoRA adapter (or merged model) from the batch checkpoint PVC
-# into the serving model cache (Volume 23). PVCs are namespaced, so two short-lived
+# into the serving model cache (Chapter 10). PVCs are namespaced, so two short-lived
 # pods stream a tar from batch/deepseek-ckpt into llm-serving/model-cache — no local disk.
 #   scripts/publish-adapter.sh sft-lora                   # /ckpt/sft-lora → /models/adapters/sft-lora
 #   scripts/publish-adapter.sh grpo-tiny grpo-tiny-v1     # optional new name on the serving side

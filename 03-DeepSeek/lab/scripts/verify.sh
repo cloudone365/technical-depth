@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 03-DeepSeek lab verification (Volume 39, 40). Sections: platform serving apps rag
+# 03-DeepSeek lab verification (Chapters 17, 19). Sections: platform serving apps rag
 source "$(dirname "$0")/lib.sh"
 set +e
 SECTIONS=("$@"); [[ ${#SECTIONS[@]} -eq 0 ]] && SECTIONS=(platform serving apps rag)
@@ -8,7 +8,7 @@ if want platform; then
   echo "── platform (from 02-Kubernetes)"
   k get ns llm-serving batch >/dev/null 2>&1 && ok "namespaces llm-serving + batch" || bad "02 platform not applied (02 scripts/apply-lab.sh)"
   k -n $NS get pvc model-cache >/dev/null 2>&1 && ok "model-cache PVC" || bad "model-cache PVC missing (02 manifests/root-llms/60-storage)"
-  k -n $NS get cm deepseek-tools deepseek-evaldata >/dev/null 2>&1 && ok "tool/eval ConfigMaps" || bad "kubectl apply -k \"03-DeepSeek/lab\""
+  k -n $NS get cm deepseek-tools deepseek-evaldata >/dev/null 2>&1 && ok "tool/eval ConfigMaps" || bad "kubectl --context spark-root apply -k \"03-DeepSeek/lab\""
 fi
 if want serving; then
   echo "── serving"

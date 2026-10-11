@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeepSeekMoE routing, simulated (Volumes 02 and 09).
+"""DeepSeekMoE routing, simulated (Chapters 01, 04).
 
 Implements the DeepSeek-V3 router on synthetic, deliberately skewed token
 streams and shows why auxiliary-loss-free balancing matters:
@@ -10,7 +10,7 @@ streams and shows why auxiliary-loss-free balancing matters:
   after each step: b_i += γ · sign(mean_load − load_i)   ← aux-loss-free balancing
 
 Prints per-step max/mean expert load with and without the bias update, the
-per-"GPU" load when experts are sharded across devices (feeds Vol 09 / EPLB),
+per-"GPU" load when experts are sharded across devices (feeds Chapter 04 / EPLB),
 and the shared-expert share of compute.
 
   python3 moe_router_demo.py                     # V3-like: 256 experts, top-8, 8 groups/4
@@ -81,7 +81,7 @@ def main():
         if balance:
             print(f" bias range after {a.steps} steps: [{bias.min():.3f}, {bias.max():.3f}]")
     print("\nThe slowest GPU sets the step time: max/mean GPU load is the MoE efficiency tax.")
-    print("Bias balancing fixes routing over time; EPLB (Vol 09) fixes placement by replicating hot experts.")
+    print("Bias balancing fixes routing over time; EPLB (Chapter 04) fixes placement by replicating hot experts.")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GRPO in miniature: teach a 0.5B model to reason in a format (Volumes 05 and 25).
+"""GRPO in miniature: teach a 0.5B model to reason in a format (Chapters 03, 11).
 
 Group Relative Policy Optimization (DeepSeekMath / R1): for each prompt, sample
 G completions, score them with *rule-based* rewards, and use each completion's
@@ -13,7 +13,7 @@ Rewards:
   python3 grpo_tiny.py --dry-run                      # dataset + reward self-test, no GPU, no TRL
   python3 grpo_tiny.py --steps 200                    # on the Spark (NGC PyTorch + pip install trl …)
   python3 grpo_tiny.py --vllm                         # rollouts by vLLM in the same process (colocate)
-  python3 grpo_tiny.py --vllm --vllm-mode server --vllm-host 192.168.100.12   # rollouts on spark-02 (Vol 25)
+  python3 grpo_tiny.py --vllm --vllm-mode server --vllm-host 192.168.100.12   # rollouts on dgx-spark-2 (Chapter 11)
 Watch the logged reward/format and reward/correct climb; completions get <think> tags.
 """
 import argparse

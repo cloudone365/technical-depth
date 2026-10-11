@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# Everything CI runs for the 03-DeepSeek lab without a GPU (Volume 40 §0).
+# Everything CI runs for the 03-DeepSeek lab without a GPU (Chapter 19).
 #   tests/run-local-checks.sh            static + tool tests (needs: python3 + torch CPU, pyyaml, kubectl, kubeconform, promtool, shellcheck)
 #   QDRANT=/path/to/qdrant tests/run-local-checks.sh   + RAG against a real Qdrant binary
-#   API=1 tests/run-local-checks.sh      + server-side dry-run of every manifest and pod template
+#   API=1 tests/run-local-checks.sh      + server-side dry-run of every manifest and pod template against the
+#                                          root cluster (context $ROOT_CTX, default spark-root) with 02's
+#                                          root-llms layers applied. Serving templates are checked against the
+#                                          everyday quotas, training jobs against the training window; the
+#                                          everyday quotas are put back at the end.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 KUBECTL=${KUBECTL:-kubectl}
+ROOT_CTX=${ROOT_CTX:-spark-root}
+export ROOT_CTX                      # 02's pod_template_check.py reads it too
 K8S_LAB="../../02-Kubernetes/lab"
 CRD_CATALOG='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
-kc() { kubeconform -strict -kubernetes-version 1.32.0 -schema-location default -schema-location "$CRD_CATALOG" -ignore-missing-schemas "$@"; }
+kc() { kubeconform -strict -kubernetes-version 1.33.0 -schema-location default -schema-location "$CRD_CATALOG" -ignore-missing-schemas "$@"; }
 T=$(mktemp)
 expect() {   # expect <pattern> <command…>: run it, fail loudly unless the output contains <pattern>
   local pat=$1; shift
@@ -19,6 +25,8 @@ pids=(); cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; do
 
 echo "== yamllint";            yamllint -s .
 echo "== overlays in sync";    python3 scripts/gen_overlays.py --check
+echo "== budgets: request = limit, serving-budget, training window, catalog sets"
+python3 tests/budget_check.py | tail -3
 echo "== kustomize + kubeconform"
 for d in . k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/lora/* k8s/multi/* k8s/serving k8s/sglang/* k8s/apps observability breakfix/*; do "$KUBECTL" kustomize "$d" | kc -; done
 for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml k8s/autoscale/*.yaml k8s/kserve/*.yaml k8s/rl/*.yaml gitops/*.yaml; do kc "$f"; done
@@ -74,8 +82,8 @@ grep -q "GATE FAILED" "$T" && echo "eval gate OK"
 expect "hosted model: cost = provider price (\$8.00" python3 tools/eval_harness.py --url http://127.0.0.1:18765 --model api --suites json --hosted --api-price-out 8
 echo "== agent tool loop vs scripted mock"
 python3 tests/mock_tools_server.py 18767 & pids+=($!); sleep 1
-expect "20.35" python3 tools/agent_tools.py "What is 17% of 119.7?" --url http://127.0.0.1:18767 --audit "$T.audit"
-python3 -c "import json,sys; r=json.loads(open(sys.argv[1]).readline()); assert r['tool']=='calculator' and r['result']['result']==20.349, r; print('agent audit OK')" "$T.audit"
+expect "20.69" python3 tools/agent_tools.py "What is 17% of 121.7?" --url http://127.0.0.1:18767 --audit "$T.audit"
+python3 -c "import json,sys; r=json.loads(open(sys.argv[1]).readline()); assert r['tool']=='calculator' and abs(r['result']['result']-20.689)<1e-9, r; print('agent audit OK')" "$T.audit"
 python3 -c "import sys; sys.path.insert(0,'tools'); import agent_tools as a
 assert a.validate('calculator', {}) and a.validate('search_docs', {'query': 'x', 'rm': 1}) and not a.validate('gpu_slices', {})
 print('agent argument validation OK')"
@@ -133,14 +141,28 @@ if [[ -n "${QDRANT:-}" ]]; then
 fi
 
 if [[ "${API:-0}" == 1 ]]; then
-  echo "== server-side dry-run (API=1)"
-  "$KUBECTL" apply -k "$K8S_LAB/manifests/root-llms/00-platform" >/dev/null
-  "$KUBECTL" apply -f k8s/multinode/namespace.yaml >/dev/null
-  "$KUBECTL" apply --dry-run=server -k . >/dev/null
-  for d in k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/lora/* k8s/multi/* k8s/serving k8s/sglang/* k8s/apps observability; do "$KUBECTL" apply --dry-run=server -k "$d" >/dev/null; done
-  for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml k8s/autoscale/*.yaml k8s/rl/*.yaml; do "$KUBECTL" apply --dry-run=server -f "$f" >/dev/null; done
-  echo "== pod templates vs PSA / CEL policies / quotas"
-  python3 "$K8S_LAB/tests/pod_template_check.py" k8s/models/* k8s/lora/* k8s/multi/* k8s/serving k8s/sglang/* k8s/apps k8s/jobs/*.yaml k8s/ops/*.yaml \
-    k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/lws-vllm-70b.yaml k8s/rl/*.yaml
+  KR=("$KUBECTL" --context "$ROOT_CTX")
+  M="$K8S_LAB/manifests/root-llms"
+  # training jobs say so in their header; everything else in k8s/jobs runs in llm-serving
+  mapfile -t TRAIN < <(grep -l "root-llms/training-window" k8s/jobs/*.yaml k8s/rl/*.yaml)
+  mapfile -t SERVE_JOBS < <(grep -L "root-llms/training-window" k8s/jobs/*.yaml)
+  echo "== server-side dry-run (API=1, context $ROOT_CTX)"
+  "${KR[@]}" apply -k "$M/00-platform" >/dev/null
+  "${KR[@]}" apply -f k8s/multinode/namespace.yaml >/dev/null
+  "${KR[@]}" apply --dry-run=server -k . >/dev/null
+  for d in k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/lora/* k8s/multi/* k8s/serving k8s/sglang/* k8s/apps observability; do "${KR[@]}" apply --dry-run=server -k "$d" >/dev/null; done
+  for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml k8s/autoscale/*.yaml k8s/rl/*.yaml; do "${KR[@]}" apply --dry-run=server -f "$f" >/dev/null; done
+  echo "== pod templates vs PSA / CEL policies / quotas: serving, everyday quotas (serving-budget 8 CPU · 90 Gi)"
+  "${KR[@]}" apply -k "$M/10-tenancy" >/dev/null
+  "${KR[@]}" apply -k "$M/20-scheduling" >/dev/null
+  python3 "$K8S_LAB/tests/pod_template_check.py" k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/lora/* k8s/multi/* \
+    k8s/serving k8s/sglang/* k8s/apps k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/lws-vllm-70b.yaml "${SERVE_JOBS[@]}"
+  echo "== pod templates: training jobs, training window (batch-budget / spark-cq 8 CPU · 80 Gi)"
+  "${KR[@]}" apply -k "$M/training-window" >/dev/null
+  rc=0; python3 "$K8S_LAB/tests/pod_template_check.py" "${TRAIN[@]}" || rc=$?
+  echo "== end of the window: everyday quotas back"
+  "${KR[@]}" apply -k "$M/10-tenancy" >/dev/null
+  "${KR[@]}" apply -k "$M/20-scheduling" >/dev/null
+  [[ $rc -eq 0 ]] || exit "$rc"
 fi
 echo "ALL LOCAL CHECKS PASSED"

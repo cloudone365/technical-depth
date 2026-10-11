@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LoRA SFT: teach the <think>…</think><answer>…</answer> format (Volumes 23, 24).
+"""LoRA SFT: teach the <think>…</think><answer>…</answer> format (Chapter 10).
 
 Builds a synthetic chain-of-thought dataset from the same verifiable problem
 generator as grpo_tiny.py (explicit, correct reasoning steps), then fine-tunes
@@ -9,8 +9,8 @@ miniature): SFT for format  →  GRPO (grpo_tiny.py) for correctness.
   python3 sft_lora.py --dry-run                                  # show 2 training examples
   python3 sft_lora.py --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --steps 300 --rank 16
   python3 sft_lora.py --merge                                    # also write merged weights for vLLM
-  python3 sft_lora.py --export /ckpt/data/gpu_math.json          # write the dataset for Unsloth / LLaMA-Factory (Vol 24)
-  torchrun --nproc-per-node 1 sft_lora.py --full --deepspeed zero3-nvme.json --model …-7B   # full FT, ZeRO-3 (Vol 26)
+  python3 sft_lora.py --export /ckpt/data/gpu_math.json          # write the dataset for Unsloth / LLaMA-Factory (Chapter 10)
+  torchrun --nproc-per-node 1 sft_lora.py --full --deepspeed zero3-nvme.json --model …-7B   # full FT, ZeRO-3 (Chapter 11)
 """
 import argparse
 import json

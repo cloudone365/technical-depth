@@ -1,11 +1,11 @@
-# PostgreSQL for LiteLLM (Volume 28): virtual keys, teams, budgets and spend logs
+# PostgreSQL for LiteLLM (Chapter 12): virtual keys, teams, budgets and spend logs
 # live here. Without a database LiteLLM only knows the master key.
 apiVersion: v1
 kind: Secret
 metadata: {name: litellm-db, namespace: llm-serving}
 type: Opaque
 stringData:
-  password: "change-me-db"                 # replace from Vault (Volume 32)
+  password: "change-me-db"                 # replace from Vault (Chapter 15)
 ---
 apiVersion: apps/v1
 kind: StatefulSet

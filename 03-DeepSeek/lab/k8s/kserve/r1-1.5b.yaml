@@ -1,8 +1,9 @@
-# The same R1 distill as an InferenceService (Volume 22). Uses 02's ServingRuntime
+# The same R1 distill as an InferenceService (Chapter 09). Uses 02's ServingRuntime
 # 'vllm-spark' (RawDeployment: plain Deployment + Service + HPA, no Knative/Istio).
 # KServe appends these args to the runtime's. Needs: 02 scripts/install-addons.sh kserve
-#   kubectl apply -f "02-Kubernetes/lab/manifests/root-llms/90-serving/kserve/inferenceservice.yaml"   # runtime
-#   kubectl apply -f k8s/kserve/r1-1.5b.yaml
+#   kubectl --context spark-root apply -k "02-Kubernetes/lab/manifests/root-llms/90-serving/kserve"   # runtime
+#   kubectl --context spark-root apply -f k8s/kserve/r1-1.5b.yaml
+# Same budget as k8s/models/r1-1.5b: util 0.10, 14 Gi request = limit (overrides the runtime's 32 Gi).
 apiVersion: serving.kserve.io/v1beta1
 kind: InferenceService
 metadata:
@@ -20,4 +21,7 @@ spec:
       modelFormat: {name: huggingface}
       runtime: vllm-spark
       storageUri: hf://deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
-      args: ["--reasoning-parser=deepseek_r1", "--max-model-len=16384", "--gpu-memory-utilization=0.15"]
+      args: ["--reasoning-parser=deepseek_r1", "--max-model-len=16384", "--gpu-memory-utilization=0.10"]
+      resources:
+        requests: {cpu: "1", memory: 14Gi, nvidia.com/gpu: "1"}
+        limits: {memory: 14Gi, nvidia.com/gpu: "1"}

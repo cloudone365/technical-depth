@@ -1,5 +1,7 @@
+# Needs the TRAINING WINDOW (02-Kubernetes manifests/root-llms/training-window): batch gets
+# 8 CPU · 80 Gi · 3 slices while serving is parked. This job takes all of it: 8 CPU · 80 Gi (request = limit) · 1 slice.
 # Full fine-tune of a 7B model on ONE Spark with DeepSpeed ZeRO-3 + NVMe optimizer offload
-# (Volume 26). The ~91 GiB of fp32 master weights + Adam moments live on the NVMe
+# (Chapter 11). The ~91 GiB of fp32 master weights + Adam moments live on the NVMe
 # (ZeRO-Infinity); the GB10 keeps bf16 params, grads and activations. Slow, but it fits.
 # Offloading to "cpu" instead would NOT help here: on the GB10 CPU and GPU share the same
 # LPDDR5x, so it moves bytes without adding capacity.
@@ -32,7 +34,7 @@ metadata: {name: ds-swap, namespace: batch}
 spec:
   storageClassName: local-nvme            # Delete: scratch, not worth keeping
   accessModes: [ReadWriteOnce]
-  resources: {requests: {storage: 200Gi}}
+  resources: {requests: {storage: 110Gi}}  # ~91 GiB of optimizer state; + deepseek-ckpt 90 Gi = batch-budget's 200 Gi
 ---
 apiVersion: batch/v1
 kind: Job
@@ -62,8 +64,8 @@ spec:
             - {name: HF_HOME, value: /ckpt/hf}
             - {name: TOKENIZERS_PARALLELISM, value: "false"}
           resources:
-            requests: {cpu: "4", memory: 32Gi, nvidia.com/gpu: "1"}
-            limits: {cpu: "8", memory: 100Gi, nvidia.com/gpu: "1"}
+            requests: {cpu: "8", memory: 80Gi, nvidia.com/gpu: "1"}   # request = limit
+            limits: {cpu: "8", memory: 80Gi, nvidia.com/gpu: "1"}
           volumeMounts:
             - {name: train, mountPath: /train}
             - {name: ds, mountPath: /ds}

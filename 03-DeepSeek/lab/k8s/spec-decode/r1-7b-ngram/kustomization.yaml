@@ -1,4 +1,4 @@
-# Prompt-lookup ("n-gram") speculative decoding (Volume 03): no draft model;
+# Prompt-lookup ("n-gram") speculative decoding (Chapter 01): no draft model;
 # candidate tokens are copied from earlier text in the prompt/output. Free when
 # answers quote their context (RAG, code edits), useless for free-form prose.
 apiVersion: kustomize.config.k8s.io/v1beta1

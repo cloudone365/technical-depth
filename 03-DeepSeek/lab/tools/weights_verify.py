@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pin and verify model weights on disk (Volume 33).
+"""Pin and verify model weights on disk (Chapter 15).
 
   weights_verify.py snapshot <model-dir> [--out manifest.json]   # sha256 of every file + HF revision
   weights_verify.py verify   <model-dir> manifest.json            # exit 1 on any mismatch/missing/extra file

@@ -9,8 +9,8 @@ technical-depth/
 ├── 00-Arch-roadmap-tools/     # Architecture roadmap & tooling notes
 ├── 01-Ansible/                # [01] Ansible, Semaphore & Vault on the DGX Spark (Steps 01–30) + lab/
 ├── 02-Kubernetes/             # [02] Kubernetes root cluster + vClusters & AI infrastructure (Steps 01–28) + lab/
-├── 03-DeepSeek/               # [03] DeepSeek & Frontier AI Architecture Curriculum (41 Volumes) + lab/
-├── 04-Qwen/                   # [04] Alibaba Qwen Ecosystem & ms-swift Mastery (25 Volumes)
+├── 03-DeepSeek/               # [03] DeepSeek on DGX Spark (19 chapters) + lab/
+├── 04-Qwen/                   # [04] Qwen on DGX Spark (14 chapters) + lab/
 ├── 05-NeMo/                   # [05] NVIDIA NeMo & Nemotron Ecosystem Mastery (25 Volumes)
 ├── 06-Gemma/                  # [06] Google Gemma & JAX/XLA MaxText Mastery (25 Volumes)
 ├── 07-Nvidia/                 # [07] NVIDIA Hardware, Silicon Interlinks & Low-Level Systems (30 Volumes)
@@ -92,33 +92,33 @@ The module is indexed in [**02-Kubernetes/README.md**](02-Kubernetes/README.md);
 
 ---
 
-## 🧠 [03] DeepSeek & Frontier AI Architecture Curriculum (41 Volumes)
+## 🧠 [03] DeepSeek on DGX Spark (19 chapters)
 
-The complete 41-volume curriculum is indexed in [**03-DeepSeek/README.md**](03-DeepSeek/README.md).
+Start with [**03-DeepSeek/00-deepseek-step-by-step-guide.md**](03-DeepSeek/00-deepseek-step-by-step-guide.md); the module overview is [03-DeepSeek/README.md](03-DeepSeek/README.md). Runs on the root cluster built by 01-Ansible and 02-Kubernetes.
 
-| # | Master Guide | File | Focus Area |
-| :--- | :--- | :--- | :--- |
-| 01 | **Multi-Head Latent Attention (MLA)** | [01-multi-head-latent-attention-mla.md](03-DeepSeek/01-multi-head-latent-attention-mla.md) | Low-rank joint KV compression, RoPE decoupling, 93% KV cache reduction. |
-| 02 | **DeepSeekMoE Architecture** | [02-deepseek-moe-fine-grained-routing.md](03-DeepSeek/02-deepseek-moe-fine-grained-routing.md) | 256 fine-grained micro-experts, isolated shared experts, auxiliary-loss-free bias balancing. |
-| 05 | **DeepSeek-R1 & GRPO Reasoning** | [05-deepseek-r1-and-grpo-reasoning.md](03-DeepSeek/05-deepseek-r1-and-grpo-reasoning.md) | Group Relative Policy Optimization, zero-critic RL, emergent `<think>` tokens. |
-| 08 | **Context Parallelism & Long-Context Attention** | [08-context-parallelism-and-long-context-attention.md](03-DeepSeek/08-context-parallelism-and-long-context-attention.md) | 5D Parallelism, RingAttention ring shifts, DeepSpeed Ulysses, 1M+ context windows. |
-| 25 | **Distributed RL Rollout Infrastructure** | [25-distributed-rl-rollout-infrastructure.md](03-DeepSeek/25-distributed-rl-rollout-infrastructure.md) | The Actor-Rollout-Learner loop at scale, vLLM rollout engines, code sandboxes, and Ray orchestration. |
-| 41 | **Multi-Ecosystem Local Deployment** | [41-multi-ecosystem-qwen-llama-nemo-deployment.md](03-DeepSeek/41-multi-ecosystem-qwen-llama-nemo-deployment.md) | Complete local runbooks for Alibaba Qwen 2.5 (SWIFT), Meta Llama 3.3, and NVIDIA NeMo on DGX Spark. |
+| Part | Chapters | Focus |
+| :--- | :--- | :--- |
+| I · Architecture | [01](03-DeepSeek/01-deepseek-architecture-mla-moe-mtp.md)–[04](03-DeepSeek/04-scaling-beyond-one-spark.md) | MLA, DeepSeekMoE, MTP, FP8 kernels, R1/GRPO, scaling beyond one Spark |
+| II · Models on a Spark | [05](03-DeepSeek/05-model-catalog-and-memory-math.md) | Model catalog and memory math on GB10 |
+| III · Serving | [06](03-DeepSeek/06-vllm-serving.md)–[09](03-DeepSeek/09-autoscaling-and-queueing.md) | vLLM, SGLang/llama.cpp/TensorRT-LLM, Kubernetes deployment, autoscaling and queueing |
+| IV · Fine-tuning | [10](03-DeepSeek/10-lora-qlora-unsloth-and-llama-factory.md)–[11](03-DeepSeek/11-distributed-training-and-rl.md) | LoRA/QLoRA, Unsloth, LLaMA-Factory, FSDP, ZeRO-3, GRPO |
+| V · Applications | [12](03-DeepSeek/12-open-webui-and-litellm-gateway.md)–[14](03-DeepSeek/14-tool-calling-and-agents.md) | Open WebUI, LiteLLM, RAG with Qdrant and BGE-M3, tool calling |
+| VI · Operations | [15](03-DeepSeek/15-automation-secrets-and-day2.md)–[17](03-DeepSeek/17-troubleshooting-playbook.md) | Ansible + Semaphore, Vault, day-2, telemetry, troubleshooting |
+| VII · Choosing models | [18](03-DeepSeek/18-choosing-models-deepseek-vs-others.md)–[19](03-DeepSeek/19-hands-on-workbook.md) | DeepSeek vs other model families, hands-on workbook |
 
 ---
 
-## 🌐 [04] Alibaba Qwen Ecosystem & ms-swift Mastery (25 Volumes)
+## 🌐 [04] Qwen on DGX Spark (14 chapters)
 
-The complete 25-volume curriculum is indexed in [**04-Qwen/README.md**](04-Qwen/README.md).
+Start with [**04-Qwen/00-qwen-step-by-step-guide.md**](04-Qwen/00-qwen-step-by-step-guide.md); the module overview is [04-Qwen/README.md](04-Qwen/README.md). Reuses the 03 application stack.
 
-| # | Master Guide | File | Focus Area |
-| :--- | :--- | :--- | :--- |
-| 01 | **Qwen Ecosystem Master Specification** | [01-qwen-ecosystem-master-curriculum.md](04-Qwen/01-qwen-ecosystem-master-curriculum.md) | Complete 25-volume blueprint: GQA, RoPE $\theta=1M$, DCA 128k context, ms-swift SFT/DPO/GRPO, and vLLM on DGX Spark. |
-| 01 | **Qwen2.5 Architectural Innovations** | [01-qwen25-architecture-and-model-spectrum.md](04-Qwen/01-qwen25-architecture-and-model-spectrum.md) | Dense & MoE topologies, Dual-Chunk Attention, and extended 128k context mechanics. |
-| 02 | **Advanced RoPE & Dual-Chunk Attention** | [02-attention-engineering-gqa-rope-and-dca.md](04-Qwen/02-attention-engineering-gqa-rope-and-dca.md) | High base frequency $\theta=10^6$, intra-chunk & inter-chunk chunking algorithms. |
-| 03 | **Qwen2.5-Coder: Code Intelligence** | [03-qwen25-coder-deep-dive.md](04-Qwen/03-qwen25-coder-deep-dive.md) | Fill-In-the-Middle (FIM), multi-file context, SWE-bench verified workflows. |
-| 04 | **Qwen2.5-Math: Mathematical Reasoning** | [04-qwen25-math-and-reasoning.md](04-Qwen/04-qwen25-math-and-reasoning.md) | Qwen2.5-Math rule-based data filtering, Chain-of-Thought (CoT), TIR (Tool-Integrated Reasoning). |
-| 05 | **Qwen2-VL: Vision-Language Processing** | [05-qwen2-vl-and-vision-language-processing.md](04-Qwen/05-qwen2-vl-and-vision-language-processing.md) | Dynamic resolution NaViT, 3D M-RoPE, spatial bounding boxes, and video comprehension. |
+| Part | Chapters | Focus |
+| :--- | :--- | :--- |
+| I · Models | [01](04-Qwen/01-qwen-architecture-and-model-family.md)–[03](04-Qwen/03-vision-language-models.md) | Qwen architecture and family, Coder/Math/reasoning, vision-language |
+| II · Serving | [04](04-Qwen/04-serving-qwen-with-vllm-and-sglang.md)–[06](04-Qwen/06-kubernetes-deployment-and-weight-caching.md) | vLLM and SGLang, quantization and local engines, Kubernetes deployment |
+| III · Fine-tuning | [07](04-Qwen/07-ms-swift-and-sft.md)–[09](04-Qwen/09-synthetic-data-and-self-play.md) | ms-swift SFT, PEFT and alignment (DPO, SimPO, GRPO), synthetic data |
+| IV · Applications | [10](04-Qwen/10-qwen-agent-and-function-calling.md)–[12](04-Qwen/12-open-webui-and-litellm.md) | Qwen-Agent and function calling, RAG, Open WebUI and LiteLLM |
+| V · Operations | [13](04-Qwen/13-telemetry-and-troubleshooting.md)–[14](04-Qwen/14-hands-on-workbook.md) | Telemetry and troubleshooting, hands-on workbook |
 
 ---
 

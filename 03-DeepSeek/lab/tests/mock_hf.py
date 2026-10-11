@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hugging Face Hub stand-in for catalog_drift.py (Volume 33): /api/models/<repo>/revision/main
+"""Hugging Face Hub stand-in for catalog_drift.py (Chapter 15): /api/models/<repo>/revision/main
 returns a SHA derived from the repo name; POST /_bump changes every SHA (an upstream push)."""
 import hashlib
 import json

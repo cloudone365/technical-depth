@@ -1,8 +1,9 @@
-# Shared checkpoint volume for the training Jobs in this directory.
+# Shared checkpoint volume for the training Jobs in this directory (HF cache under /ckpt/hf,
+# checkpoints, exported datasets). 90 Gi + zero3-nvme's 110 Gi scratch = batch-budget's 200 Gi of storage.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata: {name: deepseek-ckpt, namespace: batch}
 spec:
   storageClassName: local-nvme-retain
   accessModes: [ReadWriteOnce]
-  resources: {requests: {storage: 100Gi}}
+  resources: {requests: {storage: 90Gi}}

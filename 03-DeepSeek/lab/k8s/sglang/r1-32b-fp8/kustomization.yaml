@@ -1,4 +1,8 @@
-# SGLang serving the FP8 R1-32B distill (Volume 16). Scale vLLM to 0 first.
+# SGLang serving the FP8 R1-32B distill (Chapter 07). Park vLLM first (KEDA would
+# undo a plain scale to 0):
+#   kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite
+# --mem-fraction-static 0.45 ≈ 55 GiB of the ~90 GiB LLM pool (same rule as vLLM's
+# util: Σ over engines ≲ 0.72); pod memory 58 Gi, request = limit.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -22,4 +26,7 @@ patches:
           - --enable-metrics
       - op: replace
         path: /spec/template/spec/containers/0/resources/limits/memory
-        value: 56Gi
+        value: 58Gi
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 58Gi

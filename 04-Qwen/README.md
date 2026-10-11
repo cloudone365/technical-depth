@@ -1,114 +1,101 @@
-# Alibaba Qwen Ecosystem Mastery Curriculum
+# 04-Qwen · Qwen models on a DGX Spark
 
-Welcome to the **Alibaba Qwen Ecosystem Curriculum** engineered for enterprise AI developers and large-scale deployment on the **NVIDIA DGX Spark (Grace Blackwell GB10)**.
+This module takes Alibaba's Qwen model family — Qwen2.5 and Qwen3, dense and MoE, the Coder, Math, reasoning (QwQ / thinking mode) and vision-language models — from architecture to a served, fine-tuned and observed service on the lab platform built in [01-Ansible](../01-Ansible/README.md) and [02-Kubernetes](../02-Kubernetes/README.md): one DGX Spark (`dgx-spark-1`, an optional `dgx-spark-2`), a kubeadm root cluster, and the shared LLM memory pool of ~90 GiB.
 
-Alibaba's **Qwen (Tongyi Qianwen)** represents the world's most widely adopted open-weights foundation model family outside of Llama. Spanning from **0.5B to 72B** dense models, **57B-A14B MoE**, industry-leading specialized models (**Qwen2.5-Coder, Qwen2.5-Math, Qwen2-VL**), and the comprehensive **ms-swift** training framework, Qwen is an essential pillar of modern AI engineering.
+It is a companion to [03-DeepSeek](../03-DeepSeek/README.md), not a copy of it. The serving base (02's vLLM Deployment), the application stack (LiteLLM, Open WebUI, BGE-M3, the RAG tooling) and the dashboards and alerts are 03's and 02's; this module adds a Qwen model catalog, ms-swift training jobs and three Qwen-specific tools, and says in each chapter how to point the shared pieces at a Qwen model.
+
+**Start here:** [Chapter 00 · Qwen Step-by-Step Guide](00-qwen-step-by-step-guide.md) for the reading order and prerequisites, and [`lab/README.md`](lab/README.md) for the lab files.
 
 ---
 
-## 🗺️ Master Curriculum Architecture
+## Parts and chapters
+
+| Part | Chapter | What you do |
+|---|---|---|
+| – | [00 · Qwen Step-by-Step Guide](00-qwen-step-by-step-guide.md) | prerequisites, reading order, the path through the lab |
+| I · Models | [01 · Qwen architecture & model family](01-qwen-architecture-and-model-family.md) | GQA, RoPE/YaRN, DCA; Qwen2.5 → Qwen3, dense and MoE; memory per model on GB10 |
+| | [02 · Coder, Math & reasoning models](02-coder-math-and-reasoning-models.md) | FIM for Coder, tool-integrated reasoning for Math, QwQ and Qwen3 thinking mode |
+| | [03 · Vision-language models](03-vision-language-models.md) | Qwen-VL image and video input, multimodal document pipelines |
+| II · Serving | [04 · Serving Qwen with vLLM & SGLang](04-serving-qwen-with-vllm-and-sglang.md) | the catalog, `serve-model.sh`, parsers, prefix caching, SGLang |
+| | [05 · Quantization & local engines](05-quantization-and-local-engines.md) | AWQ, GPTQ, FP8; TensorRT-LLM; GGUF and llama.cpp |
+| | [06 · Kubernetes deployment & weight caching](06-kubernetes-deployment-and-weight-caching.md) | generated overlays of 02's vLLM base, budgets, `model-cache` |
+| III · Fine-tuning | [07 · ms-swift & supervised fine-tuning](07-ms-swift-and-sft.md) | ms-swift in `batch`, the training window, SFT |
+| | [08 · PEFT & alignment](08-peft-and-alignment.md) | LoRA/QLoRA, DPO, SimPO, GRPO with ms-swift |
+| | [09 · Synthetic data & self-play](09-synthetic-data-and-self-play.md) | rejection sampling with verifiers, judges, filtering, iterated RFT |
+| IV · Applications | [10 · Qwen-Agent & function calling](10-qwen-agent-and-function-calling.md) | tool-call and reasoning parsers, `fc_check.py`, guarded agents, Qwen-Agent |
+| | [11 · RAG with Qwen, BGE & Qdrant](11-rag-with-qwen-bge-and-qdrant.md) | 03's RAG stack with a Qwen chat model; hybrid search, reranking, long context |
+| | [12 · Open WebUI & LiteLLM](12-open-webui-and-litellm.md) | Qwen aliases, thinking on/off, limits, Open WebUI presets |
+| V · Operations | [13 · Telemetry & troubleshooting](13-telemetry-and-troubleshooting.md) | dashboards and alerts for Qwen, the troubleshooting playbook |
+| | [14 · Hands-on workbook](14-hands-on-workbook.md) | 24 exercises, CPU solutions, capstone |
+
+---
+
+## The stack on the current platform
 
 ```mermaid
-graph TD
-    subgraph Part1["Part I: Architecture & Model Spectrum (01-05)"]
-        Q01["01. Qwen2.5 Dense & MoE Architecture"]
-        Q02["02. Attention Mechanics: GQA, RoPE & DCA"]
-        Q03["03. Qwen2.5-Coder Deep Dive"]
-        Q04["04. Qwen2.5-Math & Reasoning"]
-        Q05["05. Qwen2-VL & Vision-Language Processing"]
+flowchart TB
+  subgraph MGMT["management plane (outside the Spark)"]
+    SEMA["sema01 · 192.168.0.210<br/>Semaphore"]
+    VAULT["vault01 · 192.168.0.211<br/>kv/spark-lab/hf · ngc"]
+    MAC["MacBook<br/>kubectl · helm · 04-Qwen/lab"]
+  end
+  subgraph SPARK["dgx-spark-1 · GB10 · ~121.7 GiB unified memory · 15 time-slices"]
+    subgraph ROOT["kubeadm root · context spark-root"]
+      TR["Traefik · ns ingress<br/>192.168.0.115"]
+      subgraph SERV["ns llm-serving · serving-budget 8 CPU · 90 Gi · 6 slices"]
+        LL["LiteLLM + Postgres (03 apps)<br/>qwen · qwen-fast · agent · embeddings"]
+        UI["Open WebUI (03 apps)"]
+        V["vllm · Qwen catalog model<br/>04 overlay of 02's base"]
+        E["bge-m3 (03 apps)"]
+        Q[("Qdrant (02)")]
+      end
+      subgraph BATCH["ns batch · Kueue train → spark-cq"]
+        SW["ms-swift Jobs<br/>SFT · DPO · GRPO (training window)"]
+      end
+      subgraph OBS["ns observability"]
+        P["Prometheus · Grafana<br/>02 platform + 03 serving rules"]
+      end
+      PVC[("model-cache PVC<br/>local-nvme")]
     end
-
-    subgraph Part2["Part II: Training & Alignment Stack: ms-swift (06-10)"]
-        Q06["06. ModelScope ms-swift Framework Core"]
-        Q07["07. Distributed SFT with ms-swift"]
-        Q08["08. Advanced Alignment: DPO, SimPO & GRPO"]
-        Q09["09. Parameter-Efficient Tuning: PEFT & LoRA"]
-        Q10["10. Synthetic Data Generation & Self-Play"]
-    end
-
-    subgraph Part3["Part III: Serving, Quantization & Performance (11-15)"]
-        Q11["11. High-Throughput Serving with vLLM"]
-        Q12["12. SGLang & Radix Attention Deployment"]
-        Q13["13. Quantization Engineering: AWQ, GPTQ & FP8"]
-        Q14["14. TensorRT-LLM Engine Compilation"]
-        Q15["15. Ollama & llama.cpp Local GGUF Deployment"]
-    end
-
-    subgraph Part4["Part IV: Autonomous Agents & Enterprise Applications (16-20)"]
-        Q16["16. Qwen-Agent Framework Core"]
-        Q17["17. Tool Calling & Function Calling APIs"]
-        Q18["18. Enterprise RAG with Qwen, BGE-M3 & Qdrant"]
-        Q19["19. Multimodal Document & Video RAG with Qwen2-VL"]
-        Q20["20. Open-WebUI & LiteLLM Gateway Integration"]
-    end
-
-    subgraph Part5["Part V: Kubernetes Deployment & Production Ops (21-25)"]
-        Q21["21. Kubernetes Production Manifests"]
-        Q22["22. High-Speed Storage & Weight Caching"]
-        Q23["23. DCGM, Prometheus & Grafana Telemetry"]
-        Q24["24. Master Troubleshooting Playbook"]
-        Q25["25. Hands-On Exercises Mastery Workbook"]
-    end
-
-    Part1 --> Part2
-    Part2 --> Part3
-    Part3 --> Part4
-    Part4 --> Part5
+    VC["vCluster dev-llms<br/>llm-sandbox · try manifests first"]
+  end
+  MAC --> ROOT
+  SEMA --> SPARK
+  VAULT -->|"hf-token Secret"| SERV
+  TR --> LL & UI
+  UI --> LL --> V & E
+  E --> Q
+  V & SW --> PVC
+  P -.-> V & E & LL
+  classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
+  classDef store fill:#bf8700,stroke:#7a5600,color:#fff
+  classDef obs fill:#fb8500,stroke:#9a5200,color:#000
+  classDef sec fill:#cf222e,stroke:#82071e,color:#fff
+  classDef host fill:#0e7c86,stroke:#064e54,color:#fff
+  class SEMA,MAC ctrl
+  class VAULT sec
+  class V,E,SW gpu
+  class TR,LL,UI net
+  class Q,PVC store
+  class P obs
+  class VC host
 ```
 
----
+| Layer | What runs | Where it comes from |
+|---|---|---|
+| Host, drivers, GPU telemetry, secrets | DGX OS (headless), GPU Operator with 15 time-slices, textfile collector, vault01 | [01-Ansible](../01-Ansible/README.md) |
+| Cluster, quotas, scheduling, ingress, metrics | kubeadm root, Cilium, MetalLB, Traefik at 192.168.0.115, Kueue, KEDA, KServe, kube-prometheus-stack | [02-Kubernetes](../02-Kubernetes/README.md) |
+| Serving base | vLLM Deployment `vllm`, PVC `model-cache`, Qdrant, KEDA ScaledObject | 02's `manifests/root-llms/` |
+| Applications | LiteLLM, PostgreSQL, Open WebUI, bge-m3, RAG and streaming tools, serving rules and dashboard | [03-DeepSeek lab](../03-DeepSeek/lab/README.md) |
+| Qwen | catalog, generated overlays, ms-swift Jobs, `fc_check.py`, `synth_data.py`, `qwen_agent_demo.py` | [this module's lab](lab/README.md) |
 
-## 📚 Complete 25-Volume Curriculum Index
+## Rules every chapter follows
 
-Every volume adheres to the strict **8-Layer Pedagogical Masterclass Standard**: Target Audience & Scaffolding, Zero-to-One Foundational Intuition, Evolutionary Lineage, First-Principles Mathematics, Comparative Trade-Off Matrices, Concrete Production Labs (with self-contained runnable code), NVIDIA DGX Spark Hardware Grounding (Grace ARM + GB10 128 GB Unified Memory), and Hands-On Exercises with Solutions.
-
-### Part I: Architecture & Model Foundations (Volumes 01–05)
-- [**Volume 01: Qwen2.5 Architecture and Model Spectrum**](01-qwen25-architecture-and-model-spectrum.md) — Dense 0.5B to 72B vs MoE 57B-A14B, 152k vocab, SwiGLU, RMSNorm, and PyTorch block implementations.
-- [**Volume 02: Attention Engineering: GQA, RoPE, and Dual Chunk Attention**](02-attention-engineering-gqa-rope-and-dca.md) — 8:1 GQA compression, RoPE $\theta=10^6$ proof, Dual Chunk Attention (DCA), and 128k context mechanics.
-- [**Volume 03: Qwen2.5-Coder Deep Dive**](03-qwen25-coder-deep-dive.md) — 5.5T code tokens, Fill-in-the-Middle (FIM) PSM/SPM formulation, cross-file AST packing, and syntax verifier labs.
-- [**Volume 04: Qwen2.5-Math and Reasoning Engines**](04-qwen25-math-and-reasoning.md) — Mitigating autoregressive drift, Tool-Integrated Reasoning (TIR) POMDPs, SymPy formal proofs, and sandboxed math execution.
-- [**Volume 05: Qwen2-VL and Vision-Language Processing**](05-qwen2-vl-and-vision-language-processing.md) — NaViT aspect ratio preservation, 3D M-RoPE $[t, h, w]$ coordinate decomposition, and dynamic patching.
-
-### Part II: Training & Alignment Stack: ms-swift (Volumes 06–10)
-- [**Volume 06: ModelScope ms-swift Framework Core**](06-models-scope-ms-swift-framework-core.md) — ms-swift 4-layer architecture, 300+ models, ChatML loss masking, and programmatic training loops.
-- [**Volume 07: Distributed SFT with ms-swift**](07-distributed-sft-with-ms-swift.md) — Overcoming the 16x memory explosion, ZeRO-1/2/3 math, $3\Psi$ communication volume, and DeepSpeed pipelines.
-- [**Volume 08: Advanced Alignment: DPO, SimPO, and GRPO**](08-advanced-alignment-dpo-simpo-and-grpo.md) — Bradley-Terry derivation, DPO loss, SimPO zero-reference margin, and GRPO group advantage normalization.
-- [**Volume 09: Parameter-Efficient Tuning (PEFT)**](09-parameter-efficient-tuning-peft.md) — Intrinsic dimensionality, LoRA $B \cdot A$ rank analysis, QLoRA NF4/DQ, DoRA decomposition, and zero-latency weight merging.
-- [**Volume 10: Synthetic Data Generation and Self-Play**](10-synthetic-data-generation-and-self-play.md) — Rejection Sampling Fine-Tuning (RSFT), Cohen's Kappa evaluation, instruction back-translation, and self-play flywheels.
-
-### Part III: Serving, Quantization & Performance (Volumes 11–15)
-- [**Volume 11: High-Throughput Serving with vLLM**](11-high-throughput-serving-with-vllm.md) — PagedAttention v2 virtual memory, chunked prefill, speculative decoding with Qwen2.5-0.5B draft, and async streaming clients.
-- [**Volume 12: SGLang and Radix Attention Deployment**](12-sglang-and-radix-attention-deployment.md) — Eliminating multi-turn prefix redundancy, Radix Tree Trie KV-cache, LRU cache eviction, and high-concurrency benchmarks.
-- [**Volume 13: Quantization Engineering: AWQ, GPTQ, and FP8**](13-quantization-engineering-awq-gptq-fp8.md) — Activation outlier channels, GPTQ Hessian inverse, AWQ channel scaling, Blackwell FP8 E4M3 vs E5M2, and SNR auditing.
-- [**Volume 14: TensorRT-LLM Engine Compilation**](14-tensorrt-llm-engine-compilation.md) — Kernel launch overhead, monolithic GEMM+Activation kernel fusion, CUTLASS tuning, and Triton In-Flight Batching (IFB).
-- [**Volume 15: Ollama and llama.cpp Local GGUF Deployment**](15-ollama-and-llamacpp-local-gguf.md) — Zero-dependency C++, GGUF v3 binary specification, zero-copy `mmap`, k-quants Q4_K_M super-blocks, and custom Modelfiles.
-
-### Part IV: Autonomous Agents & Enterprise Applications (Volumes 16–20)
-- [**Volume 16: Qwen-Agent Framework Core**](16-qwen-agent-framework.md) — ReAct state transition loops, tool registries, sandboxed code interpreters, and autonomous Kubernetes SRE triage agents.
-- [**Volume 17: Tool Calling and Function Calling APIs**](17-tool-calling-and-function-calling-apis.md) — Grammar-constrained logit masking, Pushdown Automata, ChatML tool protocols, and deterministic parallel function calling.
-- [**Volume 18: Enterprise RAG with Qwen2.5, BGE-M3, and Qdrant**](18-enterprise-rag-qwen-bge-qdrant.md) — BGE-M3 dense/sparse hybrid vectors, Qdrant HNSW storage, Reciprocal Rank Fusion (RRF), and cross-encoder reranking.
-- [**Volume 19: Multimodal Document and Video RAG with Qwen2-VL**](19-multimodal-document-and-video-rag.md) — Processing multi-column PDFs, financial charts, and videos with NaViT and 3D M-RoPE temporal anchoring.
-- [**Volume 20: Open-WebUI and LiteLLM Gateway Integration**](20-open-webui-and-litellm-gateway-integration.md) — Enterprise LLM reverse proxy, leaky token bucket rate limiting, circuit breakers, team quotas, and failover routing.
-
-### Part V: Kubernetes Deployment & Production Ops (Volumes 21–25)
-- [**Volume 21: Kubernetes Production Manifests**](21-kubernetes-production-manifests.md) — Cloud-native deployment, POSIX `/dev/shm` mounts, triple health probes (Startup, Readiness, Liveness), and Queue-Length HPA.
-- [**Volume 22: High-Speed Storage and Weight Caching**](22-high-speed-storage-and-weight-caching.md) — Eliminating cold-start latency, Safetensors zero-copy `mmap`, `hf_transfer` Rust multi-stream, and Linux page cache warming.
-- [**Volume 23: DCGM, Prometheus, and Grafana Telemetry**](23-dcgm-prometheus-and-grafana-telemetry.md) — NVIDIA DCGM FIDs (1004, 1009, 251), vLLM TTFT/ITL metrics, PromQL SLO queries, and real-time Grafana dashboards.
-- [**Volume 24: Master Troubleshooting Playbook**](24-master-troubleshooting-playbook.md) — Systematic root-cause triage for CUDA OOM, NaN loss spikes during SFT, RoPE context boundary corruption, and NCCL deadlocks.
-- [**Volume 25: Hands-On Exercises and Mastery Workbook**](25-hands-on-exercises-mastery-workbook.md) — 25 production capstone challenges with runnable test harnesses, mathematical assertions, and full solutions.
-
----
-
-## 🚀 Key Architectural Highlights of Qwen2.5
-
-1. **Massive Pretraining & Token Diversity**:
-   - Trained on **18 Trillion tokens** of multilingual text, high-quality synthetic data, math proofs, and code repositories across 29+ languages.
-2. **Dense & MoE Flexibility**:
-   - Dense: 0.5B, 1.5B, 3B, 7B, 14B, 32B, and 72B.
-   - MoE: Qwen2-57B-A14B (57B total parameters, 14B active parameters routed across 64 experts).
-3. **Extreme Context Windows**:
-   - Up to **128,000 tokens** native context window via Dual Chunk Attention (DCA) and base frequency $\theta = 1,000,000$ RoPE scaling, capable of generating up to 8,192 tokens per response.
-4. **Grouped Query Attention (GQA)**:
-   - Configured across all parameter scales (e.g., 64 Query heads to 8 Key/Value heads in the 72B model) reducing KV cache footprint by **87.5%** compared to standard Multi-Head Attention (MHA).
-5. **The Alibaba ms-swift Powerhouse**:
-   - The most complete open-source LLM training ecosystem in the industry, supporting 300+ LLMs and 50+ MLLMs out of the box with zero-code CLI or Python APIs.
+- **Memory.** The LLM pool on the root is ~90 GiB, shared by `llm-serving` and `batch`. The sum of vLLM `--gpu-memory-utilization` over all models running at the same time stays ≲ 0.72 (util × ~121.7 GiB; 0.20 ≈ 24 GiB). Every GPU container sets memory request = limit. A 32B BF16 model (util 0.70) runs alone with everything else parked.
+- **Training** runs in `batch` through Kueue (`train` → `spark-cq`) inside the training window (02-Kubernetes Chapter 14): vLLM parked, `spark-cq` raised to 8 CPU · 80 Gi · 3 slices; each pod ≤ 8 CPU · ≤ 80 Gi · 1 slice, request = limit.
+- **Admission** on the root: pinned image tags (see `lab/versions.env`), a readinessProbe on serving Deployments, no `NVIDIA_VISIBLE_DEVICES` env.
+- **Secrets** come from vault01 (`kv/spark-lab/hf` for the Hugging Face token, synced to Secret `hf-token` in `llm-serving`), never from files in the repo.
+- **Contexts.** `spark-root` runs the models; `dev-llms` (namespace `llm-sandbox`, 2 CPU · 4 Gi · 2 slices) is where you try a manifest or `qwen3-0.6b` first (`scripts/serve-model.sh qwen3-0.6b --sandbox`).
+- **Versions.** Qwen generations, vLLM parsers and image tags change often: the lab pins what it tested in `lab/versions.env` and `lab/models.yaml`; for anything newer, check the current release and the model card.

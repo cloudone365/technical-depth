@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Multi-head Latent Attention, from scratch, verified (Volume 01).
+"""Multi-head Latent Attention, from scratch, verified (Chapter 01).
 
 Builds one attention layer three ways and checks they agree:
   1. MHA  — every head caches its own K and V

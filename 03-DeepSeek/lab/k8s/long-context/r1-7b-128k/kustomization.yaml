@@ -1,6 +1,8 @@
-# R1-Distill-Qwen-7B with its full 131,072-token window (Volume 08).
-# KV for one full-length sequence: 131072 × 56 KiB ≈ 7 GiB — fits the 0.30
-# budget; chunked prefill keeps the 128K prompt from stalling other requests.
+# R1-Distill-Qwen-7B with its full 131,072-token window (Chapter 04).
+# KV for one full-length sequence: 131072 × 56 KiB ≈ 7 GiB — fits the ~10 GiB of
+# KV cache that util 0.20 (≈24 GiB) leaves after the BF16 weights; same pod size
+# as r1-7b (28 Gi, request = limit). Chunked prefill keeps the 128K prompt from
+# stalling other requests.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources: [../../models/r1-7b]
