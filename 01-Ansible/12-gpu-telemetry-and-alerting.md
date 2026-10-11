@@ -359,6 +359,50 @@ groups:
 
 ## 4. Hands-on
 
+#### What this lab does (template `12.1 Telemetry`)
+
+**Part 1: the metrics collector (every Spark).**
+- **node_exporter:** installs `prometheus-node-exporter`, the standard Linux host-metrics agent (CPU, disk, network) on port **9100**, and points it at the textfile folder `/var/lib/prometheus/node-exporter`.
+- **`spark-gpu-metrics.sh`:** a systemd timer runs it every **15 s**. It writes `spark_gpu.prom` into that folder with:
+  - whether `nvidia-smi` answers (`spark_gpu_up`)
+  - GPU temperature, power, utilization, SM clock and throttle reasons
+  - **unified memory available** (`spark_uma_available_bytes`). The GPU and the OS share one pool, and `nvidia-smi` shows `[N/A]` for memory, so this is the real memory signal.
+  - kernel Xid (GPU error) events in the last 24 h
+  - each ConnectX-7 port's negotiated link speed
+
+**Part 2: the monitoring stack (hosts in the `monitoring` group, i.e. dgx-spark-1).**
+- **Containers:** Docker Compose in `/opt/spark-monitoring` starts **Prometheus** (:9090, 30 days of history), **Alertmanager** (:9093) and **Grafana** (:3000).
+- **Pre-provisioned Grafana:** the data source and the "Spark Lab → Overview" dashboard are already there.
+- **Alert rules:** seven of them (§3), checked with `promtool` before anything starts. A bad rule fails the play instead of breaking Prometheus.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`. On a first run, expect `changed` on node_exporter, the collector, the timer, the compose files and the container start.
+2. **Node side**, on the Spark:
+   ```bash
+   # ▶ dgx-spark-1 (ssh dgx-spark-1)
+   systemctl is-active prometheus-node-exporter        # active
+   systemctl list-timers | grep spark-gpu-metrics      # next run within 15 s
+   cat /var/lib/prometheus/node-exporter/spark_gpu.prom
+   ```
+   In `spark_gpu.prom`, look for:
+
+   | Line | Healthy value |
+   |---|---|
+   | `spark_gpu_up` | `1` |
+   | `spark_gpu_temperature_celsius`, `spark_gpu_power_watts` | real numbers, not `NaN` |
+   | `spark_uma_available_bytes` | about 119 GiB (≈ 1.28e11) on an idle Spark |
+   | `spark_gpu_xid_events_24h` | `0` |
+   | `spark_cx7_link_speed_mbps` | `200000` on a cabled port; `-1` or absent on an unused port is fine with one Spark |
+
+3. **Prometheus:** the commands below list targets (`dgx-spark-1 up`) and the seven alert rule names.
+4. **Grafana:** open http://192.168.0.100:3000. Log in as `admin` with `gpu_telemetry_grafana_admin_password`; that is `change-me-via-vault` unless you set it as an extra variable on the template, so change it. Then open Spark Lab → Overview. Run `11.2 CUDA smoke` or load a model: the unified-memory panel should dip while it runs and recover after.
+5. **Alerts:** trigger and clear at least `SparkNodeDown` and `SparkGPUMetricsStale` (§4.1). They should show as *firing* on http://192.168.0.100:9090/alerts, then go back to inactive.
+
+**If something's off:** no `spark_*` metrics → `journalctl -u spark-gpu-metrics -n 20`, then run `sudo /usr/local/sbin/spark-gpu-metrics.sh` by hand. Empty Grafana panels → pick "Prometheus" in the dashboard's data-source dropdown. More in §6.
+
+#### Run it
+
 **Semaphore UI:** run the template **`12.1 Telemetry`** (break-glass: `ansible-playbook playbooks/12.1-telemetry.yml -l dgx-spark-1,localhost -K`), then check from the MacBook:
 
 ```bash
@@ -383,7 +427,7 @@ curl -s http://192.168.0.100:9090/api/v1/rules | jq -r '.data.groups[].rules[].n
 |---|---|
 | `SparkUnifiedMemoryLow` | In a PyTorch container, allocate until `MemAvailable` < 8 GiB: `x=[torch.empty(2**30, dtype=torch.uint8, device='cuda') for _ in range(110)]` (adjust the count), then free it |
 | `SparkCX7Degraded` | Unplug the QSFP cable (speed drops to −1/absent) or force 100G: `sudo ethtool -s enp1s0f1np1 speed 100000 autoneg off` (revert afterwards) |
-| `SparkNodeDown` | `sudo systemctl stop prometheus-node-exporter` on dgx-spark-2 for 90 s |
+| `SparkNodeDown` | `sudo systemctl stop prometheus-node-exporter` for 90 s (on dgx-spark-1 if it's your only Spark), then start it again |
 | `SparkGPUUnresponsive` | Temporarily break PATH for the collector: `sudo systemctl edit spark-gpu-metrics.service` → `Environment=PATH=/nonexistent` |
 | `SparkGPUMetricsStale` | `sudo systemctl stop spark-gpu-metrics.timer` for 4 min (the `.prom` file stops updating while node_exporter keeps serving it) |
 

@@ -224,6 +224,30 @@ Design choices:
 
 ### 3.1 Converge the runtime
 
+#### What this lab does (template `11.1 Containers`)
+
+- **Packages:** makes sure Docker (`docker-ce`, `containerd.io`, the compose plugin) and the **NVIDIA Container Toolkit** are installed. DGX OS ships them, so this is usually `ok`.
+- **`/etc/docker/daemon.json`:** *merges* the lab's settings into the existing file (a backup `daemon.json.*~` is kept). It makes `nvidia` the default runtime, turns on CDI, and caps container logs at 3 × 100 MB. Docker restarts only if the file changed.
+- **CDI spec:** writes `/etc/cdi/nvidia.yaml`, the file that tells Docker and containerd which device nodes and driver libraries make up "the GPU". It is regenerated only when it is missing or stale, which happens after a driver upgrade.
+- **NGC login:** logs in to `nvcr.io` as `$oauthtoken` with your key from vault01 (`kv/spark-lab/ngc`). The key is never printed.
+- **Smoke tests:** runs `nvidia-smi` in a small CUDA container twice, once with `--gpus all` (the classic path) and once with `--device nvidia.com/gpu=all` (the CDI path).
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`. On a first run expect `changed` on `daemon.json` and the CDI spec; on a re-run expect `changed=0`.
+2. **The "Report container GPU visibility" task** prints two lines, and both must show the GB10:
+   ```
+   --gpus : NVIDIA GB10, 580.xx.xx
+   CDI    : GPU 0: NVIDIA GB10 (UUID: GPU-…) (rc=0)
+   ```
+   `rc=0` on the CDI line matters: that test is allowed to fail without failing the play, so check it by eye.
+3. **The NGC login task** shows `ok` or `changed`, never `skipping`. `skipping` means no key reached the play: check `vault_lab_secrets_enabled: true` in the variable group (Chapter 04 §7).
+4. **Runtime and CDI**, with the command below: `default=nvidia`, a runtime list containing `nvidia`, and `Found 3 CDI devices`.
+
+**If something's off:** see §5. The two most common causes are a stale CDI spec after a driver change (re-run the template) and an NGC key with a trailing newline (re-store it as in Chapter 04 §7).
+
+#### Run it
+
 Your NGC key (a personal key from ngc.nvidia.com → Setup, Chapter 04 §7 Task 7.0) lives in **vault01** at `kv/spark-lab/ngc` ([Chapter 04 §7](04-dgx-spark-as-semaphore-target.md): `17.1-vault.yml` from the MacBook, then the NGC key stored on vault01 with `vault kv put kv/spark-lab/ngc api_key=-`, Task 7.3). The playbook never sees it in the repository or on a command line:
 
 - **Semaphore UI (normal):** run the template **`11.1 Containers`**. With `vault_lab_secrets_enabled: true` in the variable group, play 1 (`00-vault-cert.yml`) reads `kv/spark-lab/ngc` with its AppRole token (policy `spark-lab-read`) into `hostvars['localhost'].vault_lab_secrets`, and `11.1-containers.yml` passes it to `container_runtime_ngc_api_key` under `no_log`. The task log shows the NGC login task, never the key.
@@ -258,6 +282,25 @@ ssh dgxadmin@192.168.0.100 'docker info --format "default={{.DefaultRuntime}} ru
 `{{json .Runtimes}}` prints every runtime's full feature list; the `range` form above prints just the names. The CDI spec lists the one GB10 three ways (index, UUID, `all`); a pod or `docker run --device` can use any of them.
 
 ### 3.2 Host CUDA: compile and run natively for sm_121
+
+#### What this lab does (template `11.2 CUDA smoke`)
+
+- **Host level:** copies `uma_probe.cu` to `/opt/spark-lab/cuda-smoke/`, compiles it with the host's `nvcc` for the GB10's architecture (`sm_121`), checks that the binary really contains `sm_121` code, and runs it. The probe prints the GPU's properties, how much unified memory CUDA sees, and the memory bandwidth of a simple kernel (saxpy over 2 × 1 GiB arrays).
+- **Container level:** starts `nvcr.io/nvidia/pytorch:25.11-py3` with `--gpus=all`, multiplies two 8192 × 8192 bf16 matrices 20 times, and prints the achieved TFLOPS.
+- **What it proves:** the host CUDA toolkit, the driver, the container runtime, CDI and the NGC image all work together. Nothing on the Spark is reconfigured; only the work directory and the binary are created. The first run pulls a ~20 GB PyTorch image, so it takes a while.
+
+#### What to look for
+
+1. **Semaphore run:** `failed=0`. Only the first run shows `changed` (directory, source, compile).
+2. **The "Results" task** at the end prints three parts. Compare them with the table below:
+   ```
+   SASS     : sm_121
+   device=NVIDIA GB10 cc=12.1 sms=48 integrated=1 concurrentManaged=1 pageableAccess=1
+   cudaMemGetInfo free=…GiB total=121.7GiB (on UMA this tracks host memory)
+   saxpy n=268435456 time=…ms effective_bw=…GB/s check=PASS
+   torch=2.x cuda=13.x dev=NVIDIA GB10 cc=12.1 bf16_tflops=…
+   ```
+3. **Record your baselines**: the saxpy bandwidth and the bf16 TFLOPS. They are the numbers to compare after every driver or DGX OS upgrade (Chapter 10). On this lab's Spark they were about **235 GB/s** and **46.6 TFLOPS**; anything within roughly 10 % is normal run-to-run variation.
 
 ```cpp
 # lab/playbooks/files/uma_probe.cu
@@ -394,6 +437,8 @@ int main() {
           - "{{ cuda_smoke_torch.stdout | default('pytorch test skipped') }}"
 ```
 
+#### Run it
+
 **Semaphore UI:** run the template `11.2 CUDA smoke`, or break-glass from the MacBook:
 
 ```bash
@@ -401,7 +446,7 @@ int main() {
 ansible-playbook playbooks/11.2-cuda-smoke.yml -l dgx-spark-1,localhost -K
 ```
 
-What to look for in the output:
+What each field of the probe output means:
 
 | Field | Expected on GB10 | Meaning |
 |---|---|---|
