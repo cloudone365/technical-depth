@@ -33,7 +33,7 @@ spec:
             - {name: STEPS, value: "400"}
             - {name: CKPT_EVERY, value: "50"}
           resources:
-            requests: {cpu: "1", memory: 6Gi, nvidia.com/gpu: "1"}
+            requests: {cpu: "1", memory: 12Gi, nvidia.com/gpu: "1"}   # request = limit: Kueue and the scheduler count the real size
             limits: {memory: 12Gi, nvidia.com/gpu: "1"}
           volumeMounts:
             - {name: app, mountPath: /app}

@@ -10,6 +10,6 @@ spec:
     - type: Container
       default: {memory: 512Mi}
       defaultRequest: {cpu: 50m, memory: 128Mi}
-      max: {memory: 6Gi}
+      max: {memory: 3Gi}
     - type: PersistentVolumeClaim
       max: {storage: 100Gi}

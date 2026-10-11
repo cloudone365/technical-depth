@@ -1,7 +1,8 @@
 # Disaggregated prefill/decode (Chapter 23) — ADVANCED / EXPERIMENTAL.
-# On the ROOT (--context spark-root). Prefill + decode take 2 slices and 40 Gi of limits. serving-budget
-# is 68 Gi, so park vLLM (32 Gi) first: pause its KEDA ScaledObject and scale it to 0 (Chapter 20 §9).
-# Their util 0.15 + 0.15 stays well under the ~0.55 the root's LLM share can hold (Chapter 20 §2).
+# On the ROOT (--context spark-root). Prefill + decode take 2 slices and 40 Gi (request = limit): they
+# fit next to vLLM (32 Gi) in serving-budget (90 Gi), and util 0.15 + 0.15 + vLLM's 0.20 stays under the
+# ~0.72 the LLM memory pool holds (Chapter 20 §2). Park vLLM (pause its KEDA ScaledObject, Chapter 20 §9)
+# only if a bigger model runs.
 # One Spark: both roles share the GB10 via time-slicing (2 slices), so this
 # demonstrates the *mechanics* (KV handoff over NIXL/UCX, routing, metrics),
 # not a speed-up. On two Sparks, pin prefill to dgx-spark-1 and decode to
@@ -36,7 +37,7 @@ spec:
           startupProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, failureThreshold: 180}
           readinessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 5}
           resources:
-            requests: {cpu: 750m, memory: 8Gi, nvidia.com/gpu: "1"}
+            requests: {cpu: 750m, memory: 20Gi, nvidia.com/gpu: "1"}   # request = limit
             limits: {memory: 20Gi, nvidia.com/gpu: "1"}
           volumeMounts: [{name: models, mountPath: /models}, {name: shm, mountPath: /dev/shm}]
       volumes:
@@ -72,7 +73,7 @@ spec:
           startupProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, failureThreshold: 180}
           readinessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 5}
           resources:
-            requests: {cpu: 750m, memory: 8Gi, nvidia.com/gpu: "1"}
+            requests: {cpu: 750m, memory: 20Gi, nvidia.com/gpu: "1"}   # request = limit
             limits: {memory: 20Gi, nvidia.com/gpu: "1"}
           volumeMounts: [{name: models, mountPath: /models}, {name: shm, mountPath: /dev/shm}]
       volumes:

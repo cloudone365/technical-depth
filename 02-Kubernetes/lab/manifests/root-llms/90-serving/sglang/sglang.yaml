@@ -30,7 +30,7 @@ spec:
           startupProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, failureThreshold: 180}
           readinessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 5}
           resources:
-            requests: {cpu: 1500m, memory: 12Gi, nvidia.com/gpu: "1"}
+            requests: {cpu: 1500m, memory: 32Gi, nvidia.com/gpu: "1"}   # request = limit (shared LLM memory pool)
             limits: {memory: 32Gi, nvidia.com/gpu: "1"}
           volumeMounts:
             - {name: models, mountPath: /models}

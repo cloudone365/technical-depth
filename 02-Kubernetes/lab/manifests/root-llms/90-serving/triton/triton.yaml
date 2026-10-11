@@ -42,7 +42,7 @@ spec:
           readinessProbe: {httpGet: {path: /v2/health/ready, port: http}, periodSeconds: 5}
           livenessProbe: {httpGet: {path: /v2/health/live, port: http}, periodSeconds: 15}
           resources:
-            requests: {cpu: "1", memory: 4Gi, nvidia.com/gpu: "1"}
+            requests: {cpu: "1", memory: 12Gi, nvidia.com/gpu: "1"}   # request = limit (shared LLM memory pool)
             limits: {memory: 12Gi, nvidia.com/gpu: "1"}
           volumeMounts:
             - {name: repo, mountPath: /repo}

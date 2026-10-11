@@ -1,5 +1,5 @@
-# KServe in RawDeployment mode on the ROOT (Chapters 22, 04). Its 32 Gi limit fits next to vLLM's 32 Gi
-# in serving-budget (68 Gi), util 0.20 + 0.20 ≤ 0.55; park anything else first. No Knative, no Istio — KServe
+# KServe in RawDeployment mode on the ROOT (Chapters 22, 04). Its 32 Gi fits next to vLLM's 32 Gi in
+# serving-budget (90 Gi), util 0.20 + 0.20 ≤ 0.72. No Knative, no Istio — KServe
 # creates a plain Deployment + Service + HPA. Requires cert-manager and the
 # KServe controller (scripts/install-addons.sh kserve).
 apiVersion: serving.kserve.io/v1alpha1
@@ -20,7 +20,7 @@ spec:
       startupProbe: {httpGet: {path: /health, port: 8080}, periodSeconds: 10, failureThreshold: 60}
       readinessProbe: {httpGet: {path: /health, port: 8080}, periodSeconds: 5}
       resources:
-        requests: {cpu: 1500m, memory: 12Gi, nvidia.com/gpu: "1"}
+        requests: {cpu: 1500m, memory: 32Gi, nvidia.com/gpu: "1"}   # request = limit (shared LLM memory pool)
         limits: {memory: 32Gi, nvidia.com/gpu: "1"}
 ---
 apiVersion: serving.kserve.io/v1beta1

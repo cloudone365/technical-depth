@@ -10,8 +10,12 @@ Reads the files that define the split and fails if they disagree:
   * MetalLB pool           01-Ansible roles/metallb/defaults/main.yml
   * vCluster API/gateway IPs   vclusters/*.yaml, addons/traefik-values.yaml
   * tenant quotas inside the vClusters (must fit their vCluster)
-The root keeps what the vClusters don't take; serving + batch + the platform's
-floor must fit in it exactly (no overlap: nothing else caps their sum on the root).
+The root keeps what the vClusters don't take. CPU and GPU slices are split
+exactly (platform + serving + batch); memory is one LLM pool shared by serving
+and batch, so serving's ceiling + the platform's floor must fit what the root
+keeps, and batch's ceiling must fit inside the pool. The scheduler is what
+stops serving + batch from overcommitting the pool, which only works if every
+GPU container in the LLM stack sets memory request = limit — checked too.
 Prints the table the docs quote. No cluster needed.
 """
 import ipaddress
@@ -91,11 +95,36 @@ for d in load_all(os.path.join(LAB, "manifests", "root-llms", "20-scheduling", "
         b = llm.get("batch", {})
         check(cpu(res["cpu"]) == b.get("cpu") and gi(res["memory"]) == b.get("memory_gi") and int(res["nvidia.com/gpu"]) == b.get("gpu"),
               f"Kueue spark-cq {res} must equal the batch namespace quota {b}")
-PLATFORM = {k: ROOT[k] - sum(q[k] for q in llm.values()) for k in ("cpu", "memory_gi", "gpu")}
+serving, batch = llm.get("llm-serving", {}), llm.get("batch", {})
+PLATFORM = {"cpu": ROOT["cpu"] - serving.get("cpu", 0) - batch.get("cpu", 0),
+            "gpu": ROOT["gpu"] - serving.get("gpu", 0) - batch.get("gpu", 0),
+            "memory_gi": ROOT["memory_gi"] - serving.get("memory_gi", 0)}      # batch memory shares the pool
 for key in ("cpu", "memory_gi", "gpu"):
     check(PLATFORM[key] >= ROOT_PLATFORM[key] - 1e-6,
-          f"root keeps {ROOT[key]:.1f} {key}, llm-serving + batch take {sum(q[key] for q in llm.values())}: "
-          f"the platform is left {PLATFORM[key]:.1f}, it needs {ROOT_PLATFORM[key]}")
+          f"root keeps {ROOT[key]:.1f} {key}; after the LLM quotas the platform is left {PLATFORM[key]:.1f}, it needs {ROOT_PLATFORM[key]}")
+check(batch.get("memory_gi", 0) <= serving.get("memory_gi", 0),
+      "batch memory must fit inside the LLM pool (serving's memory ceiling)")
+for d in load_all(os.path.join(LAB, "manifests", "root-llms", "10-tenancy", "quotas.yaml")):
+    h = d["spec"]["hard"]
+    check(h.get("requests.memory") == h.get("limits.memory"),
+          f"{d['metadata']['namespace']}: requests.memory must equal limits.memory")
+
+# ---- every GPU container in the LLM stack: memory request = limit (the scheduler is the pool's guard)
+for root_dir, _dirs, files in os.walk(os.path.join(LAB, "manifests", "root-llms")):
+    for fn in files:
+        if not fn.endswith(".yaml") or fn == "kustomization.yaml":
+            continue
+        path = os.path.join(root_dir, fn)
+        for d in load_all(path):
+            spec = d.get("spec") or {}
+            pod = (spec.get("template") or {}).get("spec") or spec.get("predictor") or spec
+            for c in (pod.get("containers") or []) + ([pod["model"]] if isinstance(pod.get("model"), dict) else []):
+                r = c.get("resources") or {}
+                if "nvidia.com/gpu" not in (r.get("limits") or {}):
+                    continue
+                req, lim = (r.get("requests") or {}).get("memory"), (r.get("limits") or {}).get("memory")
+                check(req is not None and lim is not None and gi(req) == gi(lim),
+                      f"{os.path.relpath(path, LAB)} {c.get('name', '?')}: GPU container needs memory request = limit (got {req} / {lim})")
 
 # ---- IPs: vCluster APIs and the LLM gateway (Traefik on the root) inside the MetalLB pool, all distinct
 ips = {}
@@ -147,11 +176,13 @@ rows.append(("  platform", PLATFORM["cpu"], PLATFORM["memory_gi"], PLATFORM["gpu
 for ns in ("llm-serving", "batch"):
     q = llm.get(ns, {"cpu": 0, "memory_gi": 0, "gpu": 0})
     rows.append((f"  {ns}", q["cpu"], q["memory_gi"], q["gpu"]))
+pool_note = "  (llm-serving and batch share one memory pool; batch's memory is part of serving's)"
 print(f"{'':14} {'CPU':>6} {'mem GiB':>8} {'slices':>7}")
 for name, c, m, g in rows:
     print(f"{name:14} {c:6.1f} {m:8.1f} {g:7d}")
+print(pool_note)
 model_gi = llm.get("llm-serving", {}).get("memory_gi", 0)
-print(f"model memory in llm-serving: {model_gi:.0f} GiB = {model_gi / SPARK['memory_gi']:.2f} of the GPU → keep the sum of --gpu-memory-utilization ≲ 0.55 (headroom)")
+print(f"model memory in llm-serving: {model_gi:.0f} GiB = {model_gi / SPARK['memory_gi']:.2f} of the GPU → keep the sum of --gpu-memory-utilization ≲ 0.72 (headroom)")
 print("LoadBalancer IPs:", ", ".join(f"{k} {v}" for k, v in ips.items()), f"(pool {lo}-{hi})")
 if errors:
     print("\n".join("FAIL: " + e for e in errors))

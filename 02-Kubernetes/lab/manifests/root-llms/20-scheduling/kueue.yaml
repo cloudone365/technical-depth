@@ -7,8 +7,10 @@
 #   LocalQueue      batch/train   "where tenants submit" (namespace-scoped)
 #
 # Kueue admits a Job (on requests); then the batch namespace's ResourceQuota
-# batch-budget (same numbers, on limits) admits its pods. spark-cq + serving-budget
-# + the platform add up to exactly what the root keeps (root-llms/10-tenancy/quotas.yaml).
+# batch-budget (same numbers) admits its pods. CPU and slices are batch's own;
+# its 12 Gi come out of the LLM memory pool it shares with serving
+# (root-llms/10-tenancy/quotas.yaml), so an admitted job can still wait Pending
+# while models fill the pool. Training waits for serving, never the reverse.
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: ResourceFlavor
 metadata:

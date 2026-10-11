@@ -14,5 +14,11 @@ spark_baseline_admin_pubkeys: "{{ spark_admin_pubkeys | default([]) }}"
 spark_baseline_ssh_disable_passwords: false
 
 spark_baseline_journald_max_use: 4G
+
+# Headless: boot to text mode (multi-user.target), no GNOME desktop or login
+# screen. The Spark is managed over SSH; the desktop only costs unified memory
+# (CPU RAM = GPU memory), which the models need. Undo: set it false, or
+# sudo systemctl set-default graphical.target && sudo reboot.
+spark_baseline_headless: true
 spark_baseline_hold_nvidia: "{{ spark_hold_nvidia_packages | default(true) }}"
 spark_baseline_hold_regex: "{{ spark_nvidia_hold_regex | default('^(nvidia-driver-|libnvidia-)') }}"

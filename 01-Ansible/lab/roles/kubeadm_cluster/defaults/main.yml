@@ -28,7 +28,7 @@ kubeadm_cluster_service_cidr: 10.43.0.0/16
 kubeadm_cluster_dns_domain: cluster.local
 
 # kubelet: protect DGX OS + Dashboard on a unified-memory box.
-kubeadm_cluster_system_reserved: { cpu: "2", memory: 8Gi }
+kubeadm_cluster_system_reserved: { cpu: "2", memory: 6Gi }   # 6 Gi: DGX OS runs headless (no desktop; spark_baseline)
 kubeadm_cluster_kube_reserved: { cpu: "1", memory: 2Gi }
 kubeadm_cluster_eviction_hard:
   memory.available: 4Gi

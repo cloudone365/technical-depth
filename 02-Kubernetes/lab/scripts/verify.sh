@@ -26,14 +26,14 @@ fi
 
 if want vclusters; then
   echo "── vclusters"
-  # the two vClusters are identical sandboxes: 2 CPU · 8 Gi · 2 slices each
+  # the two vClusters are identical sandboxes: 2 CPU · 4 Gi · 2 slices each
   for v in "$DEV_CTX" "$DEVLLM_CTX"; do
     kr -n "vc-$v" get statefulset "$v" -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -q '^1' \
       && ok "$v control plane Running in vc-$v" || bad "$v control plane not ready (kubectl --context $ROOT_CTX -n vc-$v get pods)"
     kc "$v" get --raw /readyz >/dev/null 2>&1 && ok "$v API answers ($(kc "$v" config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null))" \
       || bad "context $v unreachable"
     q=$(kr -n "vc-$v" get resourcequota vcluster-budget -o jsonpath='{.spec.hard.requests\.cpu} {.spec.hard.limits\.memory} {.spec.hard.requests\.nvidia\.com/gpu}' 2>/dev/null)
-    [[ "$q" == "2 8Gi 2" ]] && ok "$v root budget: $q (CPU · memory · GPU slices)" || bad "$v root budget is '$q'"
+    [[ "$q" == "2 4Gi 2" ]] && ok "$v root budget: $q (CPU · memory · GPU slices)" || bad "$v root budget is '$q'"
     n=$(kc "$v" get nodes --no-headers 2>/dev/null | wc -l)
     [[ $n -ge 1 ]] && ok "$v sees $n real node(s) (sync.fromHost.nodes)" || bad "$v sees no nodes"
     kc "$v" get runtimeclass nvidia >/dev/null 2>&1 && ok "$v RuntimeClass nvidia" || bad "$v RuntimeClass nvidia missing (apply $v/00-platform)"
@@ -44,7 +44,7 @@ fi
 if want llm-budget; then
   echo "── llm-budget (the LLM stack on the root, context $ROOT_CTX)"
   q=$(kr -n llm-serving get resourcequota serving-budget -o jsonpath='{.spec.hard.requests\.cpu} {.spec.hard.limits\.memory} {.spec.hard.requests\.nvidia\.com/gpu}' 2>/dev/null)
-  [[ "$q" == "8 68Gi 6" ]] && ok "llm-serving serving-budget: $q (CPU · memory · GPU slices)" || bad "llm-serving serving-budget is '$q' (apply root-llms/10-tenancy)"
+  [[ "$q" == "8 90Gi 6" ]] && ok "llm-serving serving-budget: $q (CPU · memory · GPU slices)" || bad "llm-serving serving-budget is '$q' (apply root-llms/10-tenancy)"
   q=$(kr -n batch get resourcequota batch-budget -o jsonpath='{.spec.hard.requests\.cpu} {.spec.hard.limits\.memory} {.spec.hard.requests\.nvidia\.com/gpu}' 2>/dev/null)
   [[ "$q" == "2 12Gi 3" ]] && ok "batch batch-budget: $q" || bad "batch batch-budget is '$q' (apply root-llms/10-tenancy)"
   if kr get crd clusterqueues.kueue.x-k8s.io >/dev/null 2>&1; then

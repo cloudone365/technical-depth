@@ -5,9 +5,10 @@
 #   1. vLLM's own: --gpu-memory-utilization is a fraction of the ~119.7 GiB the
 #      GPU reports — i.e. of the SAME memory the OS, Kubernetes and every other
 #      pod use. 0.20 ≈ 24 GiB (weights + KV cache).
-#   2. The namespace's: serving-budget allows 68 Gi of memory limits for ALL
-#      model servers in llm-serving (root-llms/10-tenancy/quotas.yaml). The
-#      32 Gi limit below leaves room for one more engine of the same size.
+#   2. The namespace's: serving-budget allows 90 Gi for ALL model servers in
+#      llm-serving (root-llms/10-tenancy/quotas.yaml), shared with batch. The
+#      request equals the limit (32 Gi), so the scheduler counts what the engine
+#      really holds; two more engines of this size still fit.
 #      Whether CUDA memory
 #      is charged to this limit is measured in Chapter 14 §5.5 — size as if it is.
 apiVersion: v1
@@ -70,7 +71,7 @@ spec:
             preStop:                   # leave the EndpointSlice before SIGTERM → no cut streams
               exec: {command: ["sleep", "15"]}
           resources:
-            requests: {cpu: 1500m, memory: 12Gi, nvidia.com/gpu: "1"}
+            requests: {cpu: 1500m, memory: 32Gi, nvidia.com/gpu: "1"}   # request = limit: the scheduler counts the real size
             limits: {memory: 32Gi, nvidia.com/gpu: "1"}
           volumeMounts:
             - {name: models, mountPath: /models}

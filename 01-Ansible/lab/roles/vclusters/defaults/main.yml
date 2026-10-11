@@ -27,5 +27,5 @@ vclusters_root_manifests:
   - root-llms/10-tenancy
 
 vclusters_list:
-  - { name: dev-lab, namespace: vc-dev-lab }   # vCluster #1 — 2 CPU · 8 Gi · 2 GPU slices
-  - { name: dev-llms, namespace: vc-dev-llms } # vCluster #2 — 2 CPU · 8 Gi · 2 GPU slices (LLM sandbox)
+  - { name: dev-lab, namespace: vc-dev-lab }   # vCluster #1 — 2 CPU · 4 Gi · 2 GPU slices
+  - { name: dev-llms, namespace: vc-dev-llms } # vCluster #2 — 2 CPU · 4 Gi · 2 GPU slices (LLM sandbox)
