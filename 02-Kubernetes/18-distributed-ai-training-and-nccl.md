@@ -105,6 +105,8 @@ flowchart LR
 
 Add the rows you plan to run together before you start. CPU and slices are batch's own; memory is not. The `ddp` gang takes all of batch's 2 CPU and 12 Gi, so `resilient-train` waits for it. Next to one `vllm` (32 Gi) the gang fits easily: 32 + 12 = 44 of ~90 GiB. With models holding more than ~78 GiB of the pool, the ranks are created but wait Pending with `Insufficient memory` until serving shrinks. Read it live with `kubectl --context spark-root -n batch describe resourcequota batch-budget` and `kubectl --context spark-root describe node dgx-spark-1 | grep -A8 'Allocated resources'`.
 
+Jobs bigger than batch's everyday share (fine-tuning a 7–8B model, ZeRO-3) run in the **training window**: park the model servers, `kubectl --context spark-root apply -k manifests/root-llms/training-window` (batch 8 CPU · 80 Gi, serving 2 CPU · 10 Gi), and re-apply `root-llms/10-tenancy` and `root-llms/20-scheduling` afterwards ([Chapter 07 §3.2](07-kube-scheduler-and-ai-batch-scheduling.md)).
+
 ### 3.3 NCCL environment (two-spark overlay)
 
 | Variable | Value | Why |

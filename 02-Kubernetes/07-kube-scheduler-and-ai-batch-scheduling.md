@@ -120,6 +120,8 @@ Why these numbers? `spark-cq` is the `batch` namespace's ResourceQuota `batch-bu
 
 Memory is different: it is **shared on purpose**. Serving may use the whole ~90 GiB LLM pool while nothing trains; a training job takes up to 12 Gi of the same pool. Kueue counts only its own queue — it doesn't see that vLLM already holds 32 Gi — so admission doesn't promise the pods fit. What keeps serving and batch from overcommitting unified memory is the scheduler: every GPU container in the LLM stack sets memory request = limit, so a pod that doesn't fit waits `Pending` instead of squeezing a running model, and `spark-batch` pods never preempt. A new serving pod, on the other hand, may preempt a running training pod. Training waits for serving, never the reverse.
 
+**The training window.** 2 CPU · 12 Gi is enough for the lab's gangs and DDP, not for fine-tuning a 7–8B model (24–80 Gi). For that the lab has an overlay that moves CPU and memory from serving to batch while the model servers are parked: [`root-llms/training-window`](lab/manifests/root-llms/training-window/kustomization.yaml) sets `serving-budget` to 2 CPU · 10 Gi and `batch-budget` = `spark-cq` to **8 CPU · 80 Gi** (slices unchanged). Park vLLM first (`kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite`), apply the window, run the job, then re-apply `root-llms/10-tenancy` and `root-llms/20-scheduling` and remove the annotation. `tests/budget_check.py` checks that the window moves resources without creating any. The fine-tuning chapters of 03-DeepSeek and 04-Qwen use it.
+
 ### 3.3 Scheduler messages you must recognise
 
 | Message | Where you see it | Meaning |

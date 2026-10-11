@@ -119,7 +119,7 @@
 
     - name: Remove the previous prefetch Job (Job templates are immutable)
       tags: [prefetch]
-      when: not deepseek_skip_prefetch
+      when: not (deepseek_skip_prefetch | bool)
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         context: "{{ kube_context }}"
@@ -132,7 +132,7 @@
 
     - name: Prefetch {{ model.hf }}
       tags: [prefetch]
-      when: not deepseek_skip_prefetch
+      when: not (deepseek_skip_prefetch | bool)
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         context: "{{ kube_context }}"
