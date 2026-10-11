@@ -113,7 +113,7 @@ nfs_rdma_tcp_fallback: true
       ansible.builtin.copy:
         dest: /etc/exports.d/spark-models.exports
         content: |
-          # {{ ansible_managed }}
+          # Managed by Ansible — local changes are overwritten
           {{ nfs_rdma_export_path }} {% for c in nfs_rdma_export_cidrs %}{{ c }}(rw,async,no_subtree_check,no_root_squash) {% endfor %}
 
         owner: root

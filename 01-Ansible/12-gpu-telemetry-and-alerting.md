@@ -159,7 +159,7 @@ trap - EXIT
   ansible.builtin.copy:
     dest: /etc/default/prometheus-node-exporter
     content: |
-      # {{ ansible_managed }}
+      # Managed by Ansible — local changes are overwritten
       ARGS="--collector.textfile.directory={{ gpu_telemetry_textfile_dir }} --collector.systemd --collector.processes"
     owner: root
     group: root

@@ -28,6 +28,12 @@ echo "== syntax-check";  for p in playbooks/*.yml; do
                              exit 1
                            fi
                          done
+# ansible_managed exists only inside the template module on newer ansible-core
+# (Semaphore's); in copy content it fails with "'ansible_managed' is undefined".
+echo "== ansible_managed only in .j2"
+                         if grep -rn --include='*.yml' 'ansible_managed' playbooks roles; then
+                           echo "Use a literal '# Managed by Ansible' line in copy content (keep {{ ansible_managed }} for .j2 templates)" >&2; exit 1
+                         fi
 echo "== ansible-lint";  ansible-lint </dev/null
 echo "== jinja katas";   kata=$(ansible-playbook playbooks/07.1-jinja-lab.yml); grep -q '7/7 Jinja katas passed' <<<"$kata"
 echo "== mdns plugin";   out=$(ANSIBLE_INVENTORY_ENABLED=spark_mdns ansible-inventory -i tests/fixtures/spark.mdns.yml --list)

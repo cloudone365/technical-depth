@@ -70,7 +70,7 @@
       ansible.builtin.copy:
         dest: /etc/ssh/sshd_config.d/10-vault-ca.conf
         content: |
-          # {{ ansible_managed | default('Managed by Ansible') }} — 04.1-semaphore-target.yml
+          # Managed by Ansible — 04.1-semaphore-target.yml
           TrustedUserCAKeys /etc/ssh/trusted-user-ca-keys.pem
           Match User {{ vault_ssh_principal }}
               PasswordAuthentication no

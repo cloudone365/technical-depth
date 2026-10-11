@@ -34,7 +34,7 @@
   ansible.builtin.copy:
     dest: /etc/modules-load.d/kubernetes.conf
     content: |
-      # {{ ansible_managed }}
+      # Managed by Ansible — local changes are overwritten
       overlay
       br_netfilter
     owner: root

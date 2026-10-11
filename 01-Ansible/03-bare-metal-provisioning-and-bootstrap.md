@@ -353,7 +353,7 @@ This is one of the few playbooks that runs **from your MacBook**, not from Semap
             dest: "{{ bootstrap_netplan }}"
             mode: "0600"
             content: |
-              # {{ ansible_managed }}
+              # Managed by Ansible — local changes are overwritten
               network:
                 version: 2
                 ethernets:
@@ -490,7 +490,7 @@ DGX OS ships tuned kernel parameters, so don't change them casually. When you mu
       ansible.builtin.copy:
         dest: /etc/default/grub.d/90-spark-lab.cfg
         content: |
-          # {{ ansible_managed }}
+          # Managed by Ansible — local changes are overwritten
           GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT {{ spark_kernel_args | join(' ') }}"
         mode: "0644"
       register: grub_dropin

@@ -269,7 +269,7 @@ compactor:
         dest: /opt/spark-monitoring/grafana/provisioning/datasources/loki.yml
         mode: "0644"
         content: |
-          # {{ ansible_managed }}
+          # Managed by Ansible — local changes are overwritten
           apiVersion: 1
           datasources:
             - name: Loki
