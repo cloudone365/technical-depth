@@ -21,5 +21,5 @@ if command -v kubectl >/dev/null; then
 else
   echo "kubectl is not installed on this machine; the kubeconfig is in place." >&2
   echo "macOS: brew install kubectl helm   (Chapter 04 §8.4)" >&2
-  grep -E '^- context:|^  name: ' "$DEST" | sed -n 's/^  name: /context: /p'
+  grep -oE 'name: (spark-root|dev-lab|dev-llms)$' "$DEST" | sort -u
 fi
