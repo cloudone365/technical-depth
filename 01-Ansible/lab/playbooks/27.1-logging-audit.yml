@@ -77,7 +77,7 @@
       ansible.builtin.uri:
         url: http://127.0.0.1:3100/ready
       register: logging_loki_ready
-      until: logging_loki_ready.status == 200
+      until: logging_loki_ready.status | default(0) == 200
       retries: 30
       delay: 3
 

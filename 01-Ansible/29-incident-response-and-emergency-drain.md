@@ -211,7 +211,7 @@ node_drain_bundle_dir: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') 
       ansible.builtin.command: sinfo -h -n {{ inventory_hostname }} -o %T
       delegate_to: "{{ groups['slurm_controller'][0] }}"
       register: node_drain_sinfo
-      until: node_drain_sinfo.stdout in ['idle', 'mixed', 'allocated']
+      until: node_drain_sinfo.stdout | default('') in ['idle', 'mixed', 'allocated']
       retries: 12
       delay: 5
       changed_when: false

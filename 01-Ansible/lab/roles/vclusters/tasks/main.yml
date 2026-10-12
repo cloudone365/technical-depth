@@ -92,7 +92,7 @@
     namespace: "{{ item.namespace }}"
     name: "vc-{{ item.name }}"
   register: vclusters_secrets
-  until: vclusters_secrets.resources | length > 0
+  until: vclusters_secrets.resources | default([]) | length > 0
   retries: 30
   delay: 10
   loop: "{{ vclusters_list }}"
@@ -142,7 +142,7 @@
     kind: Namespace
     name: default
   register: vclusters_ping
-  until: vclusters_ping.resources | length == 1
+  until: vclusters_ping.resources | default([]) | length == 1   # a refused connection has no 'resources' yet: keep retrying
   retries: 18
   delay: 10
   loop: "{{ vclusters_list }}"

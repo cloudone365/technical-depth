@@ -214,7 +214,7 @@ Use the **same cage number** on both Sparks. It keeps the config symmetric, and 
 - name: Wait for CX-7 links to come up
   ansible.builtin.command: "cat /sys/class/net/{{ item.name }}/operstate"
   register: cx7_fabric_oper
-  until: cx7_fabric_oper.stdout == 'up'
+  until: cx7_fabric_oper.stdout | default('') == 'up'
   retries: 15
   delay: 2
   changed_when: false
