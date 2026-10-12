@@ -770,7 +770,7 @@ The host copy carries `requests` and `limits` that you never wrote. They come fr
 
 #### Run it
 
-kubeadm upgrades go one minor at a time: control plane first, then kubelets. The full procedure is in 02-Kubernetes Chapter 01 §8.1. The `ssh` and `kubectl` steps below run from your MacBook (as `dgxadmin`, with the fetched kubeconfig); the converge step is the `19.1 Kubernetes` template. What matters for Ansible is **order**. Don't bump `kubeadm_cluster_version` and re-run `19.1-kubernetes.yml` first. `packages.yml` would install the new **kubelet** on a control plane that still runs the old API server, and a kubelet newer than its API server is outside Kubernetes' version-skew policy.
+`X` stands for a **newer** patch release than the one you run (the role's default, `kubeadm_cluster_version` in `roles/kubeadm_cluster/defaults/main.yml`, is 1.36.5). Passing the version you already run changes nothing; list what the repository offers first with `apt-cache madison kubeadm` on the Spark, and only do this lab when a newer `1.36.X-1.1` is there. kubeadm upgrades go one minor at a time: control plane first, then kubelets. The full procedure is in 02-Kubernetes Chapter 01 §8.1. The `ssh` and `kubectl` steps below run from your MacBook (as `dgxadmin`, with the fetched kubeconfig); the converge step is the `19.1 Kubernetes` template. What matters for Ansible is **order**. Don't bump `kubeadm_cluster_version` and re-run `19.1-kubernetes.yml` first. `packages.yml` would install the new **kubelet** on a control plane that still runs the old API server, and a kubelet newer than its API server is outside Kubernetes' version-skew policy.
 
 ```bash
 # ▶ MacBook · any folder
@@ -811,9 +811,9 @@ For a **new minor** (1.36 → 1.37) the packages live in a new repo. Add it befo
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
-ansible k8s_control_plane:k8s_workers -b -m ansible.builtin.get_url \
+ansible k8s_control_plane:k8s_workers -b -K -m ansible.builtin.get_url \
   -a "url=https://pkgs.k8s.io/core:/stable:/v1.37/deb/Release.key dest=/etc/apt/keyrings/kubernetes-v1.37.asc mode=0644"
-ansible k8s_control_plane:k8s_workers -b -m ansible.builtin.apt_repository \
+ansible k8s_control_plane:k8s_workers -b -K -m ansible.builtin.apt_repository \
   -a "repo='deb [signed-by=/etc/apt/keyrings/kubernetes-v1.37.asc] https://pkgs.k8s.io/core:/stable:/v1.37/deb/ /' filename=kubernetes"
 ```
 
