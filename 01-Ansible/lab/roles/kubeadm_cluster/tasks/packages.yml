@@ -19,11 +19,38 @@
     filename: kubernetes
     state: present
 
+- name: Refresh the package index (the repository was just added on a first run)
+  ansible.builtin.apt:
+    update_cache: true
+  changed_when: false
+
+- name: Versions of kubeadm the repository offers
+  ansible.builtin.command: apt-cache madison kubeadm
+  register: kubeadm_cluster_madison
+  changed_when: false
+  check_mode: false        # read-only probe: must also run under --check (drift detection)
+
+- name: The pinned version exists in the repository
+  ansible.builtin.assert:
+    that: (kubeadm_cluster_version ~ kubeadm_cluster_package_suffix) in kubeadm_cluster_madison.stdout
+    fail_msg: >-
+      kubeadm {{ kubeadm_cluster_version }}{{ kubeadm_cluster_package_suffix }} is not in
+      {{ kubeadm_cluster_apt_repo }}. Available:
+      {{ kubeadm_cluster_madison.stdout_lines | map('split', '|') | map(attribute=1) | map('trim') | list }}.
+      Set kubeadm_cluster_version (roles/kubeadm_cluster/defaults/main.yml or an extra variable).
+    quiet: true
+
+- name: Which Kubernetes packages are installed already?
+  ansible.builtin.package_facts:
+    manager: apt
+
+# dpkg_selections fails on a package that isn't installed, so on a first run
+# there is nothing to release and this task skips.
 - name: Release the hold so a version change can apply
   ansible.builtin.dpkg_selections:
     name: "{{ item }}"
     selection: install
-  loop: [kubelet, kubeadm, kubectl]
+  loop: "{{ ['kubelet', 'kubeadm', 'kubectl'] | select('in', ansible_facts.packages) | list }}"
   changed_when: false
 
 - name: Install kubelet, kubeadm, kubectl (exact version)
