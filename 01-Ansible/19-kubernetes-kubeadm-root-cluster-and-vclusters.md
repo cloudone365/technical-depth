@@ -407,7 +407,7 @@ The task list is three steps: `helm upgrade --install` with `wait`; wait until *
 
 ### 3.3 `metallb`: LoadBalancer IPs on the mgmt LAN
 
-kubeadm has no built-in load balancer: a `type: LoadBalancer` Service stays `<pending>` forever. The role creates `metallb-system` with privileged PSA (the speaker uses hostNetwork and raw sockets for ARP), installs chart 0.16.0, then applies the pool. That last step is retried until MetalLB's webhook accepts it, instead of sleeping:
+kubeadm has no built-in load balancer: a `type: LoadBalancer` Service stays `<pending>` forever. The role creates `metallb-system` with privileged PSA (the speaker uses hostNetwork and raw sockets for ARP), installs chart 0.16.0 with `frrk8s.enabled: false`, then applies the pool. (Chart 0.16 turns on the FRR-K8s BGP backend by default, and its bundled values break that subchart's templates with `nil pointer evaluating … serviceMonitor`. The lab only needs Layer 2, which the native speaker does.) That last step is retried until MetalLB's webhook accepts it, instead of sleeping:
 
 ```yaml
 # lab/roles/metallb/tasks/main.yml (CRs)

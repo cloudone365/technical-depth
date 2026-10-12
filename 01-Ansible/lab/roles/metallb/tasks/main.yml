@@ -27,6 +27,7 @@
     chart_ref: metallb/metallb
     chart_version: "{{ metallb_chart_version }}"
     release_namespace: "{{ metallb_namespace }}"
+    values: "{{ metallb_values }}"
     wait: true
     wait_timeout: 5m
 
