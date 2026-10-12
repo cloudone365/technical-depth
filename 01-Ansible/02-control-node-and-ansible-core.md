@@ -122,7 +122,7 @@ First, once, type this line by hand (not pasted as part of a block): it makes ma
 
 `setopt interactivecomments; echo 'setopt interactivecomments' >> ~/.zshrc`
 
-The lab has two controllers that run the same repository. **Semaphore** on `sema01` runs every playbook once [Chapter 04](04-dgx-spark-as-semaphore-target.md) is done; its container image (kubectl, helm, Python libraries, collections) comes from [`lab/semaphore/`](lab/semaphore/) and is built in [Chapter 04 §4](04-dgx-spark-as-semaphore-target.md). Your **MacBook** needs its own toolchain for the bootstrap playbooks (`03.1-bootstrap.yml`, `04.1-semaphore-target.yml`), `17.1-vault.yml`, and break-glass runs:
+The lab has two controllers that run the same repository. **Semaphore** on `sema01` runs every playbook once [Chapter 04](04-dgx-spark-as-semaphore-target.md) is done; its container image (kubectl, helm, Python libraries, collections) comes from [`lab/semaphore/`](lab/semaphore/) and is built in [Chapter 04 §4](04-dgx-spark-as-semaphore-target.md). Your **MacBook** needs its own toolchain for the bootstrap playbooks (`03.1-bootstrap.yml`, `04.1-semaphore-target.yml`), `17.1-vault.yml`, and break-glass runs (from Chapter 19 on it also needs `kubectl` and `helm`: `brew install kubectl helm`, Chapter 04 §8.4):
 
 ```bash
 # ▶ MacBook · any folder

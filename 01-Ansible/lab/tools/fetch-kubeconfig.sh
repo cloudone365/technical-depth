@@ -16,4 +16,10 @@ ssh "$SEMA" 'cd ~/semaphore && docker compose exec -T semaphore cat /var/lib/spa
 grep -q 'name: spark-root' "$DEST.tmp" || { rm -f "$DEST.tmp"; echo "no spark-root context in the file from $SEMA" >&2; exit 1; }
 mv "$DEST.tmp" "$DEST"
 echo "wrote $DEST"
-KUBECONFIG="$DEST" kubectl config get-contexts -o name
+if command -v kubectl >/dev/null; then
+  KUBECONFIG="$DEST" kubectl config get-contexts -o name
+else
+  echo "kubectl is not installed on this machine; the kubeconfig is in place." >&2
+  echo "macOS: brew install kubectl helm   (Chapter 04 §8.4)" >&2
+  grep -E '^- context:|^  name: ' "$DEST" | sed -n 's/^  name: /context: /p'
+fi

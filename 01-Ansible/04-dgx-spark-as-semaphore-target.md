@@ -1104,7 +1104,18 @@ Never schedule it.
 
 ### 8.4 Your kubeconfig on the MacBook
 
-`19.1 Kubernetes` and `20.2 vClusters` write `kubeconfig-spark-lab.yaml` (contexts `spark-root`, `dev-lab`, `dev-llms`) to sema01's state volume. The 02-Kubernetes labs run `kubectl` from your MacBook and expect it at `01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml`. Copy it there after each of those two tasks:
+`19.1 Kubernetes` and `20.2 vClusters` write `kubeconfig-spark-lab.yaml` (contexts `spark-root`, `dev-lab`, `dev-llms`) to sema01's state volume. The 02-Kubernetes labs run `kubectl` from your MacBook and expect it at `01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml`. Copy it there after each of those two tasks.
+
+**Once:** the MacBook needs `kubectl` (and `helm`, for the 02-Kubernetes add-ons). Keep `kubectl` within one minor version of the cluster (v1.36); Homebrew installs the current release:
+
+```bash
+# ▶ MacBook · any folder
+brew install kubectl helm
+kubectl version --client          # Client Version: v1.36.x or v1.37.x
+helm version --short              # v3.x
+```
+
+Then, after each `19.1` or `20.2` run:
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
