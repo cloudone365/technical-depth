@@ -605,8 +605,13 @@ It prints the GB10, but Kubernetes has no idea a GPU was used: no `nvidia.com/gp
 # ▶ MacBook · any folder
 kubectl --context spark-root -n kube-system exec ds/cilium -- cilium-dbg status --brief    # OK
 kubectl --context spark-root -n kube-system exec ds/cilium -- cilium-dbg status | grep -E 'KubeProxyReplacement|Routing|IPAM'
-ssh dgxadmin@192.168.0.100 'ip -d link show cilium_vxlan | grep -o "vxlan.*dstport [0-9]*"; ls /etc/cni/net.d'
 kubectl --context spark-root -n metallb-system get ipaddresspool,l2advertisement
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+ip -d link show cilium_vxlan | grep -o "vxlan.*dstport [0-9]*"   # vxlan external … dstport 8472
+sudo ls -l /etc/cni/net.d                                        # 05-cilium.conflist (the folder is root-only, 0700)
 ```
 
 Expected: `KubeProxyReplacement: False`, tunnel `vxlan`, IPAM `kubernetes`; `/etc/cni/net.d` has `05-cilium.conflist`. Hubble UI is at `http://192.168.0.100:31235`.
@@ -841,7 +846,7 @@ Then set `kubeadm_cluster_version` in `roles/kubeadm_cluster/defaults/main.yml` 
 | preflight: `swap is enabled` / `bridge-nf-call-iptables does not exist` | `swapon --show`; `lsmod \| grep br_netfilter` | Prereqs didn't run or were undone (a zram swap unit?). Re-run; disable the unit |
 | kubelet crash-loops **before** `init` | `journalctl -u kubelet -n 50` | Normal: kubelet waits for `/var/lib/kubelet/config.yaml`, which `kubeadm init` writes |
 | Pods start, then restart at random; kubelet logs cgroup errors | `grep SystemdCgroup /etc/containerd/config.toml` | Must be `true` (kubelet uses systemd). Fix, `systemctl restart containerd kubelet` |
-| Node `NotReady`, `NetworkPluginNotReady` | `ls /etc/cni/net.d`; `kubectl --context spark-root -n kube-system get pods -l k8s-app=cilium` | Cilium not installed or not ready (play 2 of 05). `cilium-dbg status` in the agent pod |
+| Node `NotReady`, `NetworkPluginNotReady` | `sudo ls /etc/cni/net.d`; `kubectl --context spark-root -n kube-system get pods -l k8s-app=cilium` | Cilium not installed or not ready (play 2 of 05). `cilium-dbg status` in the agent pod |
 | CoreDNS `Pending` | `kubectl --context spark-root -n kube-system describe pod -l k8s-app=kube-dns` | No CNI yet, or the node is tainted. `taints: []` only applies at `init`; remove a taint added later with `kubectl --context spark-root taint node dgx-spark-1 node-role.kubernetes.io/control-plane-` |
 | Worker join fails (token rejected, or `couldn't validate the identity of the API Server`) | `journalctl -u kubelet` on the worker; `controlPlaneEndpoint` in the config | Token expired (30 min) or the CA/endpoint changed since. Re-run 19.1: each run on an unjoined worker creates a fresh token and hash |
 | LoadBalancer Service stays `<pending>` | `kubectl --context spark-root -n metallb-system get ipaddresspool`; quota `services.loadbalancers` in `vc-*` | Pool missing (play 2 failed on the webhook: re-run), pool exhausted, or the vCluster's root quota is spent |
@@ -879,7 +884,7 @@ Then set `kubeadm_cluster_version` in `roles/kubeadm_cluster/defaults/main.yml` 
    # ▶ dgx-spark-1 (ssh dgx-spark-1)
    sudo iptables-save | grep -c 'KUBE-\|CILIUM'      # 0
    ip link show cilium_vxlan                         # Device "cilium_vxlan" does not exist.
-   ls /etc/cni/net.d                                 # No such file or directory
+   sudo ls /etc/cni/net.d                            # No such file or directory
    apt-mark showhold | grep kube                     # kubeadm kubectl kubelet (still held)
    docker ps                                         # Docker still answers
    ```

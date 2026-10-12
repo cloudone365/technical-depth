@@ -370,7 +370,12 @@ export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
 ansible-playbook playbooks/21.1-multus-rdma.yml
 kubectl --context spark-root get net-attach-def -A                  # cx7-a, cx7-b in platform-tools (and batch after 20.2)
 kubectl --context spark-root get nodes -o custom-columns=NAME:.metadata.name,RDMA:.status.allocatable.rdma/rdma_shared_cx7,GPU:.status.allocatable.nvidia\\.com/gpu
-ssh dgxadmin@192.168.0.100 'ls /etc/cni/net.d; ls /opt/cni/bin | grep -E "multus|macvlan|static|cilium"'
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+sudo ls /etc/cni/net.d                                   # root-only folder (0700)
+ls /opt/cni/bin | grep -E "multus|macvlan|static|cilium"
 ```
 
 Expected on each node: `RDMA` 64, `GPU` 15. In `/etc/cni/net.d`, `00-multus.conf` sorts before `05-cilium.conflist`. The container runtime uses the first config in lexical order, so every pod now goes through Multus, and Multus hands the default network to Cilium. With `cni.exclusive=true` (Cilium's default) the Cilium agent would rename `00-multus.conf` out of the way on its next restart, and `net1` would silently stop appearing.
@@ -505,7 +510,7 @@ The ping shows the §2.3 gap. A pod in `batch` reaches a `platform-tools` pod on
 | Symptom | Diagnose | Fix |
 |---|---|---|
 | Pod stuck `ContainerCreating`: `failed to find plugin "macvlan"` | `ls /opt/cni/bin` on the node | Reference plugins missing: `sudo apt-get install kubernetes-cni` (from pkgs.k8s.io; keep it at the version kubeadm pulled in) |
-| Multus DS ready, but pods have no `net1` | `kubectl --context spark-root describe pod …` events; `ls /etc/cni/net.d` | `00-multus.conf` gone: Cilium renamed it (`cni.exclusive` not `false`; re-run 19.1). Or an annotation typo |
+| Multus DS ready, but pods have no `net1` | `kubectl --context spark-root describe pod …` events; `sudo ls /etc/cni/net.d` | `00-multus.conf` gone: Cilium renamed it (`cni.exclusive` not `false`; re-run 19.1). Or an annotation typo |
 | `batch` pod: `cannot find a network-attachment-definition (cx7-a) in namespace (batch)` | `kubectl --context spark-root -n batch get net-attach-def` | Playbook 21.1 ran before 20.2 (no `batch` namespace yet). Run it again |
 | vCluster pod: same error, namespace `vc-dev-llms` or `vc-dev-lab` | `kubectl --context spark-root -n vc-dev-llms get net-attach-def` | By design: the lab gives the vClusters no fabric. Add the `vc-*` namespace to `multus_nad_namespaces` if one needs it |
 | All pods stuck `ContainerCreating` after installing Multus | `kubectl --context spark-root -n kube-system logs ds/kube-multus-ds` | The daemon can't reach the API server or read `05-cilium.conflist`. Fix and restart the DS. Every pod's CNI ADD now passes through it |
