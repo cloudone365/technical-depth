@@ -66,6 +66,18 @@
   delay: 10
   until: kubeadm_cluster_apt is succeeded
 
+# crictl (the CRI command line: crictl ps/images/logs) is not pulled in by the
+# kubeadm package on every release, so install it explicitly. It comes from the
+# same pkgs.k8s.io repository, so it matches the cluster's minor version.
+- name: Install crictl (cri-tools)
+  ansible.builtin.apt:
+    name: cri-tools
+    state: present
+  register: kubeadm_cluster_critools
+  retries: 3
+  delay: 10
+  until: kubeadm_cluster_critools is succeeded
+
 # A routine 'apt upgrade' must never move the cluster version (same idea as the
 # NVIDIA package holds in spark_baseline). Upgrades go through 'kubeadm upgrade'.
 - name: Hold Kubernetes packages

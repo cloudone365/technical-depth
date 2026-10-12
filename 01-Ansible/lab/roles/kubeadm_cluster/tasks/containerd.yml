@@ -91,6 +91,6 @@
   check_mode: false        # read-only probe: must also run under --check (drift detection)
   failed_when: false
 
-- name: Report CRI status (crictl arrives with the kube packages on a first run)
+- name: Report CRI status (crictl is installed by packages.yml, so a first run can't check yet)
   ansible.builtin.debug:
-    msg: "CRI {{ 'reachable' if kubeadm_cluster_crictl.rc == 0 else 'not checked yet (crictl missing on first run)' }}"
+    msg: "CRI {{ 'reachable' if kubeadm_cluster_crictl.rc == 0 else 'not checked yet (crictl not installed yet)' }}"
