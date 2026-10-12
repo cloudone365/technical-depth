@@ -99,10 +99,14 @@
     group: "{{ spark_admin_user | default('dgxadmin') }}"
     mode: "0700"
 
+# Read-only, so it also runs under --check; skipped only when a dry run meets a
+# node that kubeadm hasn't initialised yet (no admin.conf to read).
 - name: Read admin.conf
   ansible.builtin.slurp:
     src: /etc/kubernetes/admin.conf
   register: kubeadm_cluster_admin_slurp
+  no_log: true             # the content is the cluster-admin key
+  when: not ansible_check_mode or kubeadm_cluster_admin_conf.stat.exists
 
 # Same context name as on the control node, so lab scripts that pass
 # '--context spark-root' (etcd-drill.sh, verify.sh …) also work on the Spark.
@@ -115,21 +119,18 @@
     owner: "{{ spark_admin_user | default('dgxadmin') }}"
     group: "{{ spark_admin_user | default('dgxadmin') }}"
     mode: "0600"
+  when: kubeadm_cluster_admin_slurp is not skipped
 
 # ---- kubeconfig on the control node: context 'spark-root', merged with any vCluster contexts
-- name: Fetch admin.conf to the control node
-  ansible.builtin.fetch:
-    src: /etc/kubernetes/admin.conf
-    dest: "{{ kubeadm_cluster_kubeconfig_local }}.admin-raw"
-    flat: true
-
+# Built from the admin.conf read above, so no raw copy of the cluster-admin key is
+# ever written on the controller, and a --check run shows the diff instead of failing.
 - name: Merge the root context into the lab kubeconfig
   ansible.builtin.copy:
     dest: "{{ kubeadm_cluster_kubeconfig_local }}"
     mode: "0600"
     content: "{{ kubeadm_cluster_merged | to_nice_yaml(indent=2) }}"
   vars:
-    kubeadm_cluster_raw: "{{ lookup('ansible.builtin.file', kubeadm_cluster_kubeconfig_local ~ '.admin-raw') | from_yaml }}"
+    kubeadm_cluster_raw: "{{ kubeadm_cluster_admin_slurp.content | b64decode | from_yaml }}"
     kubeadm_cluster_existing: >-
       {{ (lookup('ansible.builtin.file', kubeadm_cluster_kubeconfig_local, errors='ignore') | default('', true) | from_yaml)
          or {'clusters': [], 'users': [], 'contexts': []} }}
@@ -149,13 +150,7 @@
   delegate_to: localhost
   become: false
   no_log: true
-
-- name: Remove the raw copy (it holds the cluster-admin key)
-  ansible.builtin.file:
-    path: "{{ kubeadm_cluster_kubeconfig_local }}.admin-raw"
-    state: absent
-  delegate_to: localhost
-  become: false
+  when: kubeadm_cluster_admin_slurp is not skipped
 
 # ---- etcd tooling matching the etcd version kubeadm deployed
 - name: Read the etcd image kubeadm chose

@@ -147,7 +147,7 @@ flowchart TD
     CP -->|yes| T4["control_plane.yml"]
     CP -->|"no (dgx-spark-2)"| T5["workers.yml<br/>token + CA hash from dgx-spark-1<br/>templates/kubeadm-join.yaml.j2 → kubeadm join"]
     T4 --> T4a["files/audit-policy.yaml<br/>templates/encryption-config.yaml.j2 (first run)<br/>templates/kubeadm-init.yaml.j2 → kubeadm init"]
-    T4a --> T4b["admin.conf → ~dgxadmin/.kube/config<br/>fetch to controller → merge as context spark-root<br/>into lab_cache_dir/kubeconfig-spark-lab.yaml"]
+    T4a --> T4b["admin.conf read → ~dgxadmin/.kube/config<br/>and merged on the controller as context spark-root<br/>into lab_cache_dir/kubeconfig-spark-lab.yaml"]
     T4b --> T4c["etcdctl download<br/>templates/etcd-snapshot.sh.j2 · .service.j2 · .timer.j2"]
     T4c -.->|notify| H2["handlers/main.yml<br/>Reload systemd"]
     T4c --> REG["tasks/main.yml (last task)<br/>node registered with the API server"]
@@ -476,7 +476,7 @@ CPU and slices are split exactly; memory is not. `llm-serving` and `batch` share
 
 - **Probe, then act.** Every irreversible step (`kubeadm init`, `join`, the encryption key, the containerd regeneration) is guarded by a `stat` or a content check. A second run of `19.1-kubernetes.yml` changes nothing.
 - **kubeadm doesn't reconcile.** Ansible can re-render the config, but only `kubeadm init phase …` or `kubeadm upgrade` apply it to a running control plane. The role says so instead of pretending.
-- **Secrets never touch the log or the controller's disk longer than needed.** Join token and encryption key are `no_log`. `admin.conf` is fetched to `*.admin-raw`, merged under `no_log`, then deleted.
+- **Secrets never touch the log or the controller's disk longer than needed.** Join token and encryption key are `no_log`. `admin.conf` is read into memory (`slurp`, `no_log`) and merged straight into the lab kubeconfig, so no raw copy of the key is written on the controller. Because the read is read-only, a dry run (`--check`) shows the kubeconfig diff instead of failing.
 - **Holds protect the version.** A routine `apt upgrade` can't move kubelet. Upgrades go through `kubeadm upgrade` (§4.6), the same idea as the NVIDIA package holds in `spark_baseline`.
 
 ---
@@ -497,7 +497,7 @@ CPU and slices are split exactly; memory is not. `llm-serving` and `batch` share
 
 #### What to look for
 
-1. **Semaphore run:** `failed=0` on `dgx-spark-1` and `localhost`. On a first run expect `changed` on the containerd config, the packages, `Kubeadm init` and the two Helm installs. On a re-run `Pre-pull` and `Kubeadm init` are `skipping` and the Helm installs `ok`. A few bookkeeping tasks still show `changed` on every run (re-holding the three packages, fetching and then deleting the raw `admin.conf` copy); that is normal.
+1. **Semaphore run:** `failed=0` on `dgx-spark-1` and `localhost`. On a first run expect `changed` on the containerd config, the packages, `Kubeadm init` and the two Helm installs. On a re-run `Pre-pull` and `Kubeadm init` are `skipping` and the Helm installs `ok`. A few bookkeeping tasks still show `changed` on every run (re-holding the three packages); that is normal.
 2. **The "Report CRI status" task** prints `CRI reachable`. On the very first run it prints `not checked yet (crictl not installed yet)`, because `packages.yml` installs `crictl` (package `cri-tools`) after this check. The probe is allowed to fail, so on a re-run check by eye that it says `reachable`.
 3. **The node**, with the first commands under "Run it":
 
