@@ -125,6 +125,46 @@ Two networks, two jobs. The **pod network** (Cilium VXLAN) and the API run on th
 
 `serial` equal to the number of control planes (1) plus `order: sorted` makes dgx-spark-1 a batch of its own. dgx-spark-2 starts only after `kubeadm init` has finished. The ordering comes from the names: if you add a worker whose name sorts before the control plane's, list the groups explicitly or give the control plane its own play.
 
+#### File-by-file flow
+
+What runs, in order, when you start `19.1 Kubernetes`. Ansible reads `ansible.cfg` first (`roles_path = ./roles`, `inventory = ./inventory`), then the inventory and its `group_vars` (`lab_cache_dir`, the state folder that holds the kubeconfig). Each role loads its own `defaults/main.yml` before its tasks. Handlers run when notified, at the end of each task file's `flush_handlers` or at the end of the play.
+
+```mermaid
+flowchart TD
+  CFG["ansible.cfg · inventory/hosts.yml<br/>group_vars/all.yml (lab_cache_dir) · group_vars/spark.yml"] --> P0
+  subgraph P0["Play 0 · 00-vault-cert.yml · localhost"]
+    V1["Semaphore only: AppRole login to vault01<br/>→ 15-min SSH certificate (+ kv/spark-lab/* when enabled)"]
+  end
+  P0 --> P1
+  subgraph P1["Play 1 · roles/kubeadm_cluster · dgx-spark-1 (serial: control plane first)"]
+    direction TB
+    D1["defaults/main.yml"] --> M1["tasks/main.yml<br/>set kubeadm_cluster_role"]
+    M1 --> T1["prereqs.yml<br/>no k3s · nvidia-container-runtime present · swap off<br/>/etc/modules-load.d/kubernetes.conf · sysctls"]
+    T1 --> T2["containerd.yml<br/>CRI on · SystemdCgroup · nvidia runtime default · /etc/crictl.yaml"]
+    T2 -.->|notify| H1["handlers/main.yml<br/>Restart containerd"]
+    T2 --> T3["packages.yml<br/>pkgs.k8s.io repo · kubelet/kubeadm/kubectl pinned + held"]
+    T3 --> CP{"control plane?"}
+    CP -->|yes| T4["control_plane.yml"]
+    CP -->|"no (dgx-spark-2)"| T5["workers.yml<br/>token + CA hash from dgx-spark-1<br/>templates/kubeadm-join.yaml.j2 → kubeadm join"]
+    T4 --> T4a["files/audit-policy.yaml<br/>templates/encryption-config.yaml.j2 (first run)<br/>templates/kubeadm-init.yaml.j2 → kubeadm init"]
+    T4a --> T4b["admin.conf → ~dgxadmin/.kube/config<br/>fetch to controller → merge as context spark-root<br/>into lab_cache_dir/kubeconfig-spark-lab.yaml"]
+    T4b --> T4c["etcdctl download<br/>templates/etcd-snapshot.sh.j2 · .service.j2 · .timer.j2"]
+    T4c -.->|notify| H2["handlers/main.yml<br/>Reload systemd"]
+    T4c --> REG["tasks/main.yml (last task)<br/>node registered with the API server"]
+    T5 --> REG
+  end
+  P1 --> P2
+  subgraph P2["Play 2 · localhost (controller) · talks to the root API with the merged kubeconfig"]
+    C1["roles/cilium<br/>defaults/main.yml (chart version, Hubble UI NodePort 31235)<br/>tasks/main.yml: Helm repo → helm install cilium<br/>→ wait nodes Ready → CoreDNS rolled out"]
+    C1 --> M2["roles/metallb<br/>defaults/main.yml (pool 192.168.0.110-119)<br/>tasks/main.yml: namespace (privileged PSA) → Helm repo<br/>→ helm install metallb → IPAddressPool + L2Advertisement"]
+  end
+  M2 --> DONE["Root cluster up: context spark-root, nodes Ready,<br/>LoadBalancer IPs available → next: 20.1 GPU Operator"]
+  classDef opt fill:#fff3e6,stroke:#fb8500,color:#000
+  class V1,T5 opt
+```
+
+Orange boxes run only in some cases: play 0 only under Semaphore, `workers.yml` only on a worker (dgx-spark-2). With one Spark, dgx-spark-1 takes the `control_plane.yml` branch and play 1 runs once.
+
 ### 2.3 Inventory
 
 ```yaml
