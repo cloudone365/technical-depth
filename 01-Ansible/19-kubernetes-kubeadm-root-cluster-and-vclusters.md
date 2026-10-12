@@ -407,7 +407,7 @@ The task list is three steps: `helm upgrade --install` with `wait`; wait until *
 
 ### 3.3 `metallb`: LoadBalancer IPs on the mgmt LAN
 
-kubeadm has no built-in load balancer: a `type: LoadBalancer` Service stays `<pending>` forever. The role creates `metallb-system` with privileged PSA (the speaker uses hostNetwork and raw sockets for ARP), installs chart 0.16.0 with `frrk8s.enabled: false`, then applies the pool. (Chart 0.16 turns on the FRR-K8s BGP backend by default, and its bundled values break that subchart's templates with `nil pointer evaluating … serviceMonitor`. The lab only needs Layer 2, which the native speaker does.) That last step is retried until MetalLB's webhook accepts it, instead of sleeping:
+kubeadm has no built-in load balancer: a `type: LoadBalancer` Service stays `<pending>` forever. The role creates `metallb-system` with privileged PSA (the speaker uses hostNetwork and raw sockets for ARP), installs chart 0.16.0 with `frrk8s.enabled: false` and `speaker.ignoreExcludeLB: true`, then applies the pool. (kubeadm labels control-plane nodes `node.kubernetes.io/exclude-from-external-load-balancers`, and MetalLB's speaker skips such nodes. On a single Spark the control plane is the only node, so without this setting no LoadBalancer IP is ever announced and clients get `Host is unreachable`.) (Chart 0.16 turns on the FRR-K8s BGP backend by default, and its bundled values break that subchart's templates with `nil pointer evaluating … serviceMonitor`. The lab only needs Layer 2, which the native speaker does.) That last step is retried until MetalLB's webhook accepts it, instead of sleeping:
 
 ```yaml
 # lab/roles/metallb/tasks/main.yml (CRs)
@@ -597,7 +597,7 @@ It prints the GB10, but Kubernetes has no idea a GPU was used: no `nvidia.com/gp
 3. **Hubble UI** opens at http://192.168.0.100:31235.
 4. **iperf3 (two Sparks):** a little under 10 Gb/s, because the pod network runs VXLAN over the mgmt link.
 
-**If something's off:** EXTERNAL-IP stays `<pending>` → the pool is missing (MetalLB's webhook wasn't ready when play 2 ran: re-run `19.1 Kubernetes`) or exhausted. `cilium-dbg status` not `OK` → `kubectl --context spark-root -n kube-system logs ds/cilium`. More in §6.
+**If something's off:** EXTERNAL-IP stays `<pending>` → the pool is missing (MetalLB's webhook wasn't ready when play 2 ran: re-run `19.1 Kubernetes`) or exhausted. An IP is assigned but `curl`/`ping` from another machine says `Host is unreachable` → MetalLB isn't answering ARP: check `kubectl --context spark-root -n metallb-system logs ds/metallb-speaker | grep -i exclude` and that the L2Advertisement interface exists on the Spark (`ip -br link`). `cilium-dbg status` not `OK` → `kubectl --context spark-root -n kube-system logs ds/cilium`. More in §6.
 
 #### Run it
 

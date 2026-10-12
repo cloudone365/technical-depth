@@ -7,9 +7,16 @@ metallb_chart_version: "0.16.0"              # pin; check `helm search repo meta
 # bundled values leave frr-k8s.prometheus empty, which breaks the subchart's
 # templates ("nil pointer evaluating … serviceMonitor"). The lab has no BGP
 # router, so the native speaker is all it needs.
+#
+# kubeadm labels every control-plane node node.kubernetes.io/exclude-from-external-load-balancers,
+# and MetalLB's speaker honours that label: it would never answer ARP from
+# dgx-spark-1, so every LoadBalancer IP (.111, .112, .115) is "Host is unreachable".
+# Here the control plane IS the worker, so the speaker ignores the label.
 metallb_values:
   frrk8s:
     enabled: false
+  speaker:
+    ignoreExcludeLB: true
 metallb_namespace: metallb-system
 metallb_kubeconfig: "{{ lab_cache_dir | default(playbook_dir ~ '/../.cache') }}/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
 metallb_context: spark-root
