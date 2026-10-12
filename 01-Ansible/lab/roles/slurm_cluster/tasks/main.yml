@@ -31,6 +31,7 @@
     owner: munge
     group: munge
     mode: "0400"
+  diff: false              # never print the key with --diff
   notify: Restart munge
 
 - name: Directories

@@ -119,6 +119,7 @@
     owner: "{{ spark_admin_user | default('dgxadmin') }}"
     group: "{{ spark_admin_user | default('dgxadmin') }}"
     mode: "0600"
+  no_log: true             # holds the cluster-admin key: no content, no --diff in any log
   when: kubeadm_cluster_admin_slurp is not skipped
 
 # ---- kubeconfig on the control node: context 'spark-root', merged with any vCluster contexts

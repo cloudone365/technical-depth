@@ -30,7 +30,20 @@
   retries: 40
   delay: 10
 
+# A drained (cordoned) cluster can't run CoreDNS, e.g. during the Chapter 19 §4.6
+# upgrade, where 19.1 runs between 'kubectl drain' and 'kubectl uncordon'.
+- name: Schedulable nodes (not cordoned)
+  ansible.builtin.set_fact:
+    cilium_schedulable: "{{ cilium_nodes.resources | rejectattr('spec.unschedulable', 'defined') | list | length
+                           + cilium_nodes.resources | selectattr('spec.unschedulable', 'defined') | rejectattr('spec.unschedulable') | list | length }}"
+
+- name: Every node is cordoned — CoreDNS check skipped until 'kubectl uncordon'
+  ansible.builtin.debug:
+    msg: "All nodes are SchedulingDisabled (drained), so CoreDNS can't run yet. Uncordon, then CoreDNS comes back by itself."
+  when: cilium_schedulable | int == 0
+
 - name: CoreDNS rolled out on the new pod network
+  when: cilium_schedulable | int > 0
   kubernetes.core.k8s_info:
     kubeconfig: "{{ cilium_kubeconfig }}"
     context: "{{ cilium_context }}"
