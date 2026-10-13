@@ -12,7 +12,7 @@ KC=(kubeconform -strict -kubernetes-version "$KVER" -schema-location default -sc
 
 echo "== yamllint";   yamllint -s .
 echo "== kustomize build + kubeconform"
-for k in $(find manifests -name kustomization.yaml -printf '%h\n' | sort); do
+for k in $(find manifests -name kustomization.yaml -exec dirname {} \; | sort); do
   "$KUBECTL" kustomize "$k" | "${KC[@]}" -summary -output text - | sed "s|^|  $k: |" | grep -v ' 0 errors' || true
   "$KUBECTL" kustomize "$k" | "${KC[@]}" - >/dev/null
 done

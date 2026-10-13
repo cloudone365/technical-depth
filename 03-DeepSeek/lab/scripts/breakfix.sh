@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # DeepSeek serving drills (Chapters 17, 19). Same workflow as 02's breakfix.sh.
 #   scripts/breakfix.sh list | inject D01 | hint D01 | answer D01 | reset D01
+if (( BASH_VERSINFO[0] < 4 )); then
+  echo "$0 needs bash >= 4 (this is bash $BASH_VERSION). macOS ships 3.2: brew install bash, then open a new terminal." >&2
+  exit 1
+fi
 source "$(dirname "$0")/lib.sh"
 declare -A TITLE BASE HINT ANSWER
 TITLE[D01]="Chain of thought leaks into the answer";   BASE[D01]=r1-7b

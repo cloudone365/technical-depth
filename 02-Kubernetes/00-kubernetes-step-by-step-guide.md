@@ -34,8 +34,10 @@ Your MacBook is a `kubectl` client and nothing more. Install the tools, fetch th
 
 ```bash
 cd "technical-depth/02-Kubernetes/lab"
+source ~/.venvs/spark-ansible/bin/activate              # the 01-Ansible venv: keeps pip packages out of the Mac's global Python
 pip install yamllint shellcheck-py pyyaml
-# kubectl, helm, kubeconform, promtool, mikefarah yq: versions in versions.env / the CI workflow
+brew install kubectl helm kubeconform yq prometheus bash  # prometheus = promtool; bash 5 (macOS has 3.2; breakfix.sh needs ≥ 4)
+# versions: versions.env / the CI workflow
 "../../01-Ansible/lab/tools/fetch-kubeconfig.sh" sema01    # kubeconfig from sema01's state volume → 01-Ansible/lab/.cache/ (re-run after 19.1/20.2)
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 kubectl config get-contexts -o name

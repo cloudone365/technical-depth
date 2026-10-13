@@ -7,6 +7,10 @@
 #   scripts/breakfix.sh hint 06 | answer 06
 #   scripts/breakfix.sh reset 06     # undo the injection (the "fix" if you gave up)
 #   scripts/breakfix.sh reset all
+if (( BASH_VERSINFO[0] < 4 )); then
+  echo "$0 needs bash >= 4 (this is bash $BASH_VERSION). macOS ships 3.2: brew install bash, then open a new terminal." >&2
+  exit 1
+fi
 source "$(dirname "$0")/lib.sh"
 BF="$LAB_DIR/breakfix"
 node() { kr get nodes -o jsonpath='{.items[0].metadata.name}'; }
