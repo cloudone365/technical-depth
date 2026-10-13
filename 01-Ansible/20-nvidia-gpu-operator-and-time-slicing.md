@@ -280,7 +280,7 @@ Expected: allocatable `"15"`, `nvidia.com/gpu.replicas: "15"` and a `nvidia.com/
 
 ### 4.2 Fifteen slices, five budgets
 
-#### What this lab does (manifests `ts-demo.yaml` and `ts-sbx`, below)
+#### What this lab does (manifests `lab/manifests/20-gpu/ts-demo.yaml` and `ts-sbx.yaml`)
 
 - **On the root:** Deployment `ts-demo` in `llm-serving`, 6 replicas. Each pod takes 1 GPU slice and 4Gi of memory (request = limit) and runs a PyTorch matrix-multiply loop. Then you ask for a 7th replica, and delete it all. The image `nvcr.io/nvidia/pytorch:25.09-py3` is large, so the first pull takes a while.
 - **In the vCluster `dev-llms`:** Deployment `ts-sbx` in its `default` namespace, 3 replicas, each holding 1 slice and 256Mi while it sleeps. Deleted at the end.
@@ -299,40 +299,20 @@ Expected: allocatable `"15"`, `nvidia.com/gpu.replicas: "15"` and a `nvidia.com/
 
 Build the vClusters and the root's LLM budgets if you haven't (**Semaphore UI:** template `20.2 vClusters`, then `tools/fetch-kubeconfig.sh sema01` on the MacBook for the `dev-lab` and `dev-llms` contexts). Start on the root, where the models run. A ResourceQuota on a root namespace is checked by the root's own API server:
 
-```yaml
-# ts-demo.yaml (apply with --context spark-root)
-apiVersion: apps/v1
-kind: Deployment
-metadata: { name: ts-demo, namespace: llm-serving }
-spec:
-  replicas: 6
-  selector: { matchLabels: { app: ts-demo } }
-  template:
-    metadata: { labels: { app: ts-demo } }
-    spec:
-      containers:
-        - name: burn
-          image: nvcr.io/nvidia/pytorch:25.09-py3
-          command: [python, -c, "import torch\na=torch.randn(4096,4096,device='cuda')\nwhile True:\n    a=a@a; a=a/a.norm(); torch.cuda.synchronize()"]
-          readinessProbe: { exec: { command: ["true"] } }    # llm-serving admits only Deployments with a readinessProbe
-          resources:
-            requests: { cpu: 100m, memory: 4Gi }
-            limits: { nvidia.com/gpu: 1, memory: 4Gi }     # request = limit, like every GPU container in the LLM stack
-```
+The two manifests are in the lab folder: [`lab/manifests/20-gpu/ts-demo.yaml`](lab/manifests/20-gpu/ts-demo.yaml) (root, `llm-serving`, 6 replicas × 1 slice × 4Gi, a PyTorch matmul loop) and [`lab/manifests/20-gpu/ts-sbx.yaml`](lab/manifests/20-gpu/ts-sbx.yaml) (vCluster `dev-llms`, 3 replicas × 1 slice, sleeping).
 
 If the 02 lab's model servers already run in `llm-serving`, they hold some of the 6 slices: scale them to 0 first, or expect fewer `ts-demo` pods.
 
 ```bash
-# ▶ MacBook · any folder
-# in the folder where you saved ts-demo.yaml
-kubectl --context spark-root apply -f ts-demo.yaml
+# ▶ MacBook · 01-Ansible/lab (venv active)
+kubectl --context spark-root apply -f manifests/20-gpu/ts-demo.yaml
 kubectl --context spark-root -n llm-serving get pods -l app=ts-demo -o wide        # 6 Running on dgx-spark-1
 kubectl --context spark-root -n llm-serving scale deploy ts-demo --replicas=7
 kubectl --context spark-root -n llm-serving get pods -l app=ts-demo | wc -l         # still 6 pods (+ header): the 7th was never created
 kubectl --context spark-root -n llm-serving describe rs -l app=ts-demo | sed -n '/Events/,$p'
 kubectl --context spark-root -n llm-serving describe resourcequota serving-budget | grep nvidia   # requests.nvidia.com/gpu  6  6
 ssh dgxadmin@192.168.0.100 nvidia-smi                                   # 6 python processes on one GB10
-kubectl --context spark-root delete -f ts-demo.yaml
+kubectl --context spark-root delete -f manifests/20-gpu/ts-demo.yaml
 ```
 
 The 7th pod doesn't exist at all. The ReplicaSet controller asked the root API server to create it, and the quota admission refused: the ReplicaSet's events show `FailedCreate … exceeded quota: serving-budget, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=6, limited: requests.nvidia.com/gpu=6`. Slices are still free on the node, yet `llm-serving` can't have them: they belong to `batch`, the vClusters and the platform.
@@ -348,29 +328,12 @@ kubectl --context spark-root -n vc-dev-llms describe resourcequota vcluster-budg
 The node says 15; the root's quota on `vc-dev-llms` says 2. The tenant can see more than it may use, and that gap is the most common source of "why is my pod Pending when the node has free GPUs?". Spend the budget with three small pods (a slice is a ticket, so a sleeping pod holds one as well as a busy one):
 
 ```bash
-# ▶ MacBook · any folder
-kubectl --context dev-llms apply -f - <<'YAML'
-apiVersion: apps/v1
-kind: Deployment
-metadata: { name: ts-sbx, namespace: default }
-spec:
-  replicas: 3
-  selector: { matchLabels: { app: ts-sbx } }
-  template:
-    metadata: { labels: { app: ts-sbx } }
-    spec:
-      containers:
-        - name: hold
-          image: nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04
-          command: [sleep, infinity]
-          resources:
-            requests: { cpu: 50m, memory: 256Mi }
-            limits: { nvidia.com/gpu: 1, memory: 256Mi }
-YAML
+# ▶ MacBook · 01-Ansible/lab (venv active)
+kubectl --context dev-llms apply -f manifests/20-gpu/ts-sbx.yaml
 kubectl --context dev-llms get pods -l app=ts-sbx                     # 2 Running, 1 Pending
 kubectl --context dev-llms describe pod "$(kubectl --context dev-llms get pods -l app=ts-sbx --field-selector=status.phase=Pending -o name | head -1)" | sed -n '/Events/,$p'
 kubectl --context spark-root -n vc-dev-llms get pods | grep ts-sbx    # only 2 host copies: ts-sbx-…-x-default-x-dev-llms
-kubectl --context dev-llms delete deploy ts-sbx
+kubectl --context dev-llms delete -f manifests/20-gpu/ts-sbx.yaml
 ```
 
 The 3rd pod is `Pending` **inside** `dev-llms`, but no scheduler ever looked at it. The vCluster's own API server accepted it (its `default` namespace has no quota), and the syncer's attempt to create the host copy in `vc-dev-llms` was refused by the root quota. The events show the syncer's error, quoting `exceeded quota: vcluster-budget` and `requests.nvidia.com/gpu`, and there are no `FailedScheduling` events. `dev-lab` behaves the same way (2 slices). And on the root, `platform-tools` or `default` can still start 2 GPU pods, because the platform namespaces have no slice quota and take what the five budgets don't hold.

@@ -1,0 +1,19 @@
+---
+# Chapter 20 §4.2 · three pods in vCluster dev-llms against its 2-slice vcluster-budget: 2 Running, 1 Pending.
+#   kubectl --context dev-llms apply -f manifests/20-gpu/ts-sbx.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: ts-sbx, namespace: default}
+spec:
+  replicas: 3
+  selector: {matchLabels: {app: ts-sbx}}
+  template:
+    metadata: {labels: {app: ts-sbx}}
+    spec:
+      containers:
+        - name: hold
+          image: nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04
+          command: [sleep, infinity]
+          resources:
+            requests: {cpu: 50m, memory: 256Mi}
+            limits: {nvidia.com/gpu: 1, memory: 256Mi}

@@ -1,0 +1,29 @@
+---
+# Chapter 20 §4.2 · six GPU slices fill the root's serving-budget; a 7th is refused.
+#   kubectl --context spark-root apply -f manifests/20-gpu/ts-demo.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: ts-demo, namespace: llm-serving}
+spec:
+  replicas: 6
+  selector: {matchLabels: {app: ts-demo}}
+  template:
+    metadata: {labels: {app: ts-demo}}
+    spec:
+      containers:
+        - name: burn
+          image: nvcr.io/nvidia/pytorch:25.09-py3      # same tag as 02-Kubernetes/lab/versions.env
+          command:
+            - python
+            - -c
+            - |
+              import torch
+              a = torch.randn(4096, 4096, device='cuda')
+              while True:
+                  a = a @ a
+                  a = a / a.norm()
+                  torch.cuda.synchronize()
+          readinessProbe: {exec: {command: ["true"]}}  # llm-serving admits only Deployments with a readinessProbe
+          resources:
+            requests: {cpu: 100m, memory: 4Gi}
+            limits: {nvidia.com/gpu: 1, memory: 4Gi}   # request = limit, like every GPU container in the LLM stack
