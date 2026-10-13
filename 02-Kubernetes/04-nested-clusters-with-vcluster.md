@@ -149,6 +149,79 @@ The two dashed boxes are **ordinary root namespaces**. Everything a vCluster run
 
 All three contexts live in one file, `01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml`, which every lab script uses. Reserve `192.168.0.110–119` in your router's DHCP settings.
 
+#### What a context is, and what runs under it
+
+```mermaid
+flowchart TB
+  subgraph MAC["MacBook · kubectl reads kubeconfig-spark-lab.yaml"]
+    direction LR
+    C2["context dev-lab"]
+    C1["context spark-root"]
+    C3["context dev-llms"]
+  end
+
+  subgraph ROOT["ROOT CLUSTER (kubeadm) · API https://192.168.0.100:6443"]
+    subgraph NODE["NODE dgx-spark-1 · kubelet + containerd"]
+      direction LR
+      subgraph NS3["namespace vc-dev-lab"]
+        VAPI2["Pod dev-lab-0<br/>vCluster dev-lab API<br/>LB 192.168.0.111"]
+      end
+      subgraph NS2["namespace vc-dev-llms"]
+        VAPI["Pod dev-llms-0<br/>vCluster dev-llms API<br/>LB 192.168.0.112"]
+        VP["Pod ts-sbx-…-x-default-x-dev-llms<br/>synced copy of a dev-llms pod"]
+        VAPI -. "syncer creates" .-> VP
+      end
+      subgraph NS1["namespace llm-serving"]
+        subgraph PODA["POD ts-demo-…a · 1 slice · 4Gi"]
+          subgraph CTA["CONTAINER burn"]
+            PRA["PROCESS python"]
+          end
+        end
+        subgraph PODB["POD ts-demo-…b … ×6"]
+          subgraph CTB["CONTAINER burn"]
+            PRB["PROCESS python"]
+          end
+        end
+      end
+      GPU[("GB10 GPU · 15 slices<br/>nvidia-smi lists the processes")]
+      PRA --> GPU
+      PRB --> GPU
+    end
+  end
+
+  C1 -->|"--context spark-root"| ROOT
+  C2 -->|"--context dev-lab"| VAPI2
+  C3 -->|"--context dev-llms"| VAPI
+
+  classDef ctx fill:#24292f,stroke:#000,color:#fff
+  classDef vc fill:#fbefff,stroke:#8250df,color:#000
+  classDef pod fill:#eaeef2,stroke:#57606a,color:#000
+  classDef proc fill:#fff8c5,stroke:#9a6700,color:#000
+  classDef gpu fill:#76b900,stroke:#3d6000,color:#000
+  class C1,C2,C3 ctx
+  class VAPI,VAPI2 vc
+  class VP pod
+  class PRA,PRB proc
+  class GPU gpu
+  style ROOT fill:#e6f4f5,stroke:#0e7c86,stroke-width:2px
+  style NODE fill:#ffffff,stroke:#0e7c86
+  style PODA fill:#eaeef2,stroke:#57606a
+  style PODB fill:#eaeef2,stroke:#57606a
+  style CTA fill:#ddf4ff,stroke:#0969da
+  style CTB fill:#ddf4ff,stroke:#0969da
+```
+
+Reading the picture from the outside in:
+
+- **Context (black, on the MacBook)** is client-side only: a named bundle of *which API server*, *which credentials* and optionally *which default namespace*, stored in `kubeconfig-spark-lab.yaml`. Creating or deleting one changes nothing on any cluster. It works like saved sessions in an SSH client: you pick a name instead of typing the address, user and key each time.
+- **Cluster → node:** one kubeadm cluster with one node, dgx-spark-1. Everything below runs on that machine.
+- **Namespace (yellow):** a folder inside the root cluster. Each vCluster lives in its own namespace, and its API server is just a pod there (purple).
+- **Pod → container → process:** Kubernetes schedules the **pod** (the unit quotas count), containerd starts its **container**, and the container runs the **process**, the actual program. `kubectl get pods` shows pods; `sudo crictl ps` on the Spark shows containers; `nvidia-smi` and `ps` show processes.
+- **vCluster pods:** a pod you create with `--context dev-llms` first exists only in the vCluster's API. Its syncer creates the real copy in the root's `vc-dev-llms` namespace (`<name>-x-<namespace>-x-dev-llms`), and that copy is what runs on the node.
+- **GPU slices are a budget, not a partition:** every pod's process shares the same GB10. The 15 slices are what Kubernetes counts against quotas.
+
+**Why every command names its context.** `kubectl` is only a client: each command is an API call to one API server. The three API servers have their own addresses and credentials, and all three have a `default` namespace, nodes and pods, so a bare `kubectl get pods` means something different in each. Naming `--context` on every command makes the target visible in the command itself (a `delete` against the wrong default cluster is the classic mistake) and keeps copied commands pointing where the chapter meant. How the file is built is in 01-Ansible [Chapter 19 §2.5](../01-Ansible/19-kubernetes-kubeadm-root-cluster-and-vclusters.md).
+
 ### 3.2 Budgets
 
 | | CPU (requests) | Memory (requests = limits) | GPU time-slices | Storage |
