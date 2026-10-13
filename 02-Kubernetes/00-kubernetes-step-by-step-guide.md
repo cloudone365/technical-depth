@@ -46,6 +46,17 @@ tests/run-local-checks.sh
 
 ✅ **Done when** `kubectl config get-contexts` lists `spark-root`, `dev-lab` and `dev-llms`, and `tests/run-local-checks.sh` prints `ALL LOCAL CHECKS PASSED` (including `budget check OK`: the vCluster and LLM budgets fit the Spark).
 
+**If a step fails on the MacBook:**
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| VS Code: "You may have installed Python packages into your global environment" | `pip install` ran in a terminal without the venv | dismiss it; `source ~/.venvs/spark-ansible/bin/activate`, `pip install` again. Optionally `deactivate` and `python3 -m pip uninstall -y yamllint shellcheck-py pyyaml`. In VS Code, **Python: Select Interpreter** → `~/.venvs/spark-ansible/bin/python` |
+| `fetch-kubeconfig.sh: … kubeconfig-spark-lab.yaml.tmp: Operation not permitted` | macOS blocks the write: a leftover `.tmp` you can't overwrite, or the terminal's app (often VS Code) has no access to `~/Documents` | `ls -ldO ../../01-Ansible/lab/.cache ../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml*`: owner must be you, flags `-`. A stale `.tmp` → `rm -f` it (`sudo` if root owns it). Otherwise System Settings → Privacy & Security → Files and Folders → allow your terminal app (Visual Studio Code, or Terminal) the **Documents Folder**, restart it, fetch again. The old kubeconfig keeps working meanwhile |
+| `kubeconform: No such file or directory`, `promtool: command not found`, `yq: command not found` | tool not installed | `brew install kubeconform yq prometheus` (prometheus provides promtool) |
+| `… needs bash >= 4 (this is bash 3.2…)` | macOS ships bash 3.2; `breakfix.sh` and 03's checks need ≥ 4 | `brew install bash`, open a new terminal, `bash --version` shows 5.x |
+| `find: -printf: unknown primary or operator` | an older copy of `tests/run-local-checks.sh` (GNU-only `find`) | `git pull` |
+| `context "spark-root" does not exist` | `KUBECONFIG` not set in this terminal | the `export KUBECONFIG=…` line above, or put it in `~/.zshrc` with the full path |
+
 ---
 
 ## Progress
