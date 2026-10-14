@@ -16,7 +16,7 @@ refuse() {   # refuse <pattern> <command…>: the command must FAIL and print <p
   if "$@" >"$T" 2>&1; then cat "$T"; echo "expected a failure"; return 1; fi
   grep -qF -- "$pat" "$T" || { cat "$T"; echo "expected output to contain: $pat"; return 1; }
 }
-pids=(); cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done; rm -f "$T"; }; trap cleanup EXIT
+pids=(); cleanup() { for p in ${pids[@]+"${pids[@]}"}; do kill "$p" 2>/dev/null || true; done; rm -f "$T"; }; trap cleanup EXIT
 
 echo "== yamllint"
 yamllint -s -d '{extends: default, rules: {line-length: {max: 200, level: warning}, document-start: disable,

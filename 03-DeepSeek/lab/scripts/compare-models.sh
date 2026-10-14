@@ -17,9 +17,9 @@ for name in "$@"; do
   # shellcheck disable=SC2086  # SUITES is a word list on purpose
   python3 "$DS_DIR/tools/eval_harness.py" --url "http://127.0.0.1:$PORT" --model "$name" --suites $SUITES \
     --limit "$LIMIT" --concurrency "${CONCURRENCY:-8}" --max-tokens "${MAX_TOKENS:-8192}" \
-    --power-w "${POWER_W:-200}" "${extra[@]}" --out "$DS_DIR/results/$name.json" | tail -4
+    --power-w "${POWER_W:-200}" ${extra[@]+"${extra[@]}"} --out "$DS_DIR/results/$name.json" | tail -4
   kill "$pf" 2>/dev/null; wait "$pf" 2>/dev/null
   outs+=("$DS_DIR/results/$name.json")
 done
 echo
-python3 "$DS_DIR/tools/eval_harness.py" --report "${outs[@]}"
+python3 "$DS_DIR/tools/eval_harness.py" --report ${outs[@]+"${outs[@]}"}

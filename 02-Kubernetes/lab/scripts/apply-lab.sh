@@ -7,6 +7,7 @@
 # Directories whose CRDs are not installed yet are skipped with a warning.
 source "$(dirname "$0")/lib.sh"
 extra=(); only=()
+# ${arr[@]+"${arr[@]}"}: an empty array under set -u aborts macOS bash 3.2 ("unbound variable")
 for a in "$@"; do
   case $a in
     --dry-run) extra=(--dry-run=server) ;;
@@ -22,7 +23,7 @@ apply_dir() {   # apply_dir <context> <dir under manifests/> [required-crd]
   if [[ -n "$crd" ]] && ! kc "$ctx" get crd "$crd" >/dev/null 2>&1; then
     warn "skip $d: CRD $crd not installed in $ctx (see scripts/install-addons.sh)"; return 0
   fi
-  info "apply $d → $ctx"; kc "$ctx" apply "${extra[@]}" -k "$M/$d" >/dev/null && ok "$d ($ctx)"
+  info "apply $d → $ctx"; kc "$ctx" apply ${extra[@]+"${extra[@]}"} -k "$M/$d" >/dev/null && ok "$d ($ctx)"
 }
 reachable() {
   kc "$1" get --raw /readyz >/dev/null 2>&1 && return 0
