@@ -652,9 +652,9 @@ The lesson from fault 3 is why the lab ships a **staleness** alert, `SparkGPUMet
 
 #### What to look for
 
-1. **`site`, first run:** `failed=0`. **Second run:** `changed=0` on every host. Any `changed` task on the second run is an idempotence bug to fix before you go on.
+1. **`site`, first run:** `failed=0`. **Second run:** `changed=0` on every Spark, except the three items of `Hold Kubernetes packages` in `19.1` (re-applied on every run, Chapter 19 §4.1); `localhost` shows play 1's new certificate. Any other `changed` task on the second run is an idempotence bug to fix before you go on.
 2. **`30.1 Validate`:** the "Verdict" task prints `All N checks passed`. N is 13 with two Sparks (the CX-7 link check is included) and 12 with one. Checks for services that aren't installed yet are named after `skipped:`; after the full rebuild there should be none.
-3. **Drift:** `tools/drift-cycle.sh; echo "drift exit=$?"` on the MacBook prints `drift exit=0`.
+3. **Drift:** `BECOME_ARGS="-K -l dgx-spark-1,localhost" tools/drift-cycle.sh; echo "drift exit=$?"` on the MacBook (in `01-Ansible/lab`) prints `drift exit=0`. With two Sparks, `BECOME_ARGS=-K`.
 4. **After the Kubernetes rebuild:**
    ```bash
    # ▶ MacBook · 01-Ansible/lab (venv active)
@@ -672,7 +672,7 @@ The lesson from fault 3 is why the lab ships a **staleness** alert, `SparkGPUMet
 **Semaphore UI:** one template after the other, each ending in `failed=0`:
 
 1. `site` (everything, idempotently), then `site` again: `changed=0` across the board.
-2. `30.1 Validate`, and on the MacBook `tools/drift-cycle.sh; echo "drift exit=$?"` → 0.
+2. `30.1 Validate`, and on the MacBook `BECOME_ARGS="-K -l dgx-spark-1,localhost" tools/drift-cycle.sh; echo "drift exit=$?"` → 0 (Chapter 26 §4.1).
 3. Kubernetes from zero: `19.2 Reset Kubernetes` (extra variable `reset_confirm: RESET`), then `19.1 Kubernetes` → `20.1 GPU Operator` → `20.2 vClusters` bring back `spark-root` (with the LLM namespaces and budgets), `dev-lab` and `dev-llms`; `tools/fetch-kubeconfig.sh sema01` on the MacBook.
 4. `28.1 Firmware inventory`.
 5. The scorecard on sema01 (§1.3): target 10/10.

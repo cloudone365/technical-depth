@@ -312,7 +312,7 @@ Expected: NCCL warns about the missing HCA or uses only one device, and large-me
 3. **The job:** rank 1 `Pending` with the event `1 node(s) had untolerated taint {spark.lab/fabric: degraded}`.
 4. **After cleanup:** `kubectl --context spark-root describe node dgx-spark-2 | grep -i taint` shows `<none>`.
 
-**If something's off:** the script fails with `ethtool: command not found` → install `ethtool` on the Spark. The taint does not appear in dev-lab → node sync lag; wait a few seconds. More in §7.
+**If something's off:** the script fails with `ethtool: command not found` → install `ethtool` on the Spark. `error counters=N` on a link that is up → the counters are totals since the driver loaded, and the §5.4 down/up may have added a `link_down_events_phy`; read them twice, 60 s apart, and treat only an increase as a fault. The taint does not appear in dev-lab → node sync lag; wait a few seconds. More in §7.
 
 #### Run it
 

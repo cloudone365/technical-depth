@@ -290,6 +290,7 @@ Write 6–10 seed instructions that look like what your team asks, one per line,
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
+mkdir -p out
 cat > out/seeds.txt <<'EOF'
 Explain why a vLLM pod on a DGX Spark sets its memory request equal to its limit.
 Write a kubectl command that shows which pods in llm-serving use a GPU slice.
@@ -372,11 +373,14 @@ Serve `qwen3-8b` and generate with `--no-think` from the same seeds (`--seed` fi
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 scripts/serve-model.sh qwen3-8b
+pkill -f 'port-forward svc/vllm 8000' || true      # the old forward was bound to the replaced pod
+kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000:8000 >/dev/null 2>&1 &
+sleep 2
 python3 tools/synth_data.py --url http://127.0.0.1:8000 --model qwen3-8b --no-think \
   --seeds out/seeds.txt --rounds 6 --per-round 10 --judge --out out/sft-8b.jsonl
 ```
 
-(Restart the port-forward if it dropped while the model switched.)
+The port-forward is restarted because the old one was bound to the replaced pod.
 
 ### 5.6 A verifier instead of a judge (CPU)
 

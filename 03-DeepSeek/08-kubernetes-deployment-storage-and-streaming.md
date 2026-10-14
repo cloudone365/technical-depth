@@ -135,6 +135,7 @@ sequenceDiagram
   T->>L: forward, route timer 900 s
   L->>L: check key, map alias to served model
   L->>V: POST, own timer 900 s
+  Note over C,V: every delta below travels back V → LiteLLM → Traefik → client, chunk by chunk
   V-->>C: delta role assistant
   loop thinking, can be minutes
     V-->>C: delta reasoning_content
@@ -192,7 +193,7 @@ Each generated overlay carries this budget as a comment, and `gen_overlays.py` r
 | `llm-serving` | baseline | engines, apps, eval, rag-ingest, vault-sync, weights-verify | eval runs model-written code: non-root, no SA token, read-only root FS, all caps dropped |
 | `batch` | privileged (warn baseline) | sft, unsloth, llamafactory, grpo, fsdp, zero3 | fsdp needs `hostNetwork` + `IPC_LOCK` for RoCE |
 | `llm-multinode` | privileged | LWS 70B, llama.cpp RPC | two Sparks only (Chapter 04) |
-| `ingress` | — | Traefik | watches only `llm-serving` and `ingress` |
+| `ingress` | baseline | Traefik | watches only `llm-serving` and `ingress` |
 | `observability` | — | PrometheusRule, dashboard ConfigMap | label `release: kps` |
 
 ### 3.4 Three layers of validation
@@ -268,7 +269,7 @@ Keep a working set, not the catalog: the reasoning group plus the two or three c
 | Traefik entrypoint `web` | `readTimeout` / `writeTimeout` / `idleTimeout` | 0 / 0 / 600 s | [`traefik-values.yaml`](../02-Kubernetes/lab/addons/traefik-values.yaml) |
 | HTTPRoute `litellm`, `open-webui` | `rules[].timeouts.request` | 900 s | `k8s/apps/*.yaml` |
 | LiteLLM | `router_settings.timeout`, `litellm_settings.request_timeout` | 900 s | ConfigMap `litellm-config` |
-| Open WebUI → LiteLLM | `AIOHTTP_CLIENT_TIMEOUT` | image default; raise it if long chats cut off | env |
+| Open WebUI → LiteLLM | `AIOHTTP_CLIENT_TIMEOUT` | 900 s | env in `k8s/apps/open-webui.yaml` |
 | vLLM | none on the server; bounded by `max_tokens` × inter-token latency | — | — |
 | vLLM shutdown | `preStop sleep 15` + grace 120 s | — | 02 base Deployment |
 
@@ -331,7 +332,7 @@ kubectl --context spark-root get ns llm-serving batch ingress observability
 #### What to look for
 
 1. **Root kustomization:** `ConfigMap/deepseek-tools`, `ConfigMap/deepseek-evaldata`, `ConfigMap/deepseek-catalog` and `ConfigMap/deepseek-train`.
-2. **Per overlay:** `4 objects` (Secret `hf-token`, Deployment, Service, ServiceMonitor) for every `k8s/models/*`.
+2. **Per overlay:** `3 objects` (Secret `hf-token`, Deployment, Service) for every `k8s/models/*`. The ServiceMonitor `llm-workloads` that scrapes vLLM is not in the overlay: it lives in `observability` (02 `root/95-observability`).
 3. **The diff** touches only args, the `MODEL`/`SERVED_NAME` env values, memory request and limit (`28Gi` vs `58Gi`) and the `model` labels.
 4. **Overlay check:** `14 overlays checked, 0 drifted`.
 
@@ -347,7 +348,7 @@ diff <(kubectl kustomize k8s/models/r1-7b) <(kubectl kustomize k8s/models/r1-32b
 python3 scripts/gen_overlays.py --check
 ```
 
-Expected: four ConfigMaps from the root kustomization (three in `llm-serving`, `deepseek-train` in `batch`); four objects per model overlay (Secret `hf-token`, Deployment, Service, ServiceMonitor from the base). The diff shows only args, env values, memory request and limit, and `model` labels. Anything else means somebody edited a generated file, and `--check` reports it.
+Expected: four ConfigMaps from the root kustomization (three in `llm-serving`, `deepseek-train` in `batch`); three objects per model overlay (Secret `hf-token`, Deployment, Service from the base). The diff shows only args, env values, memory request and limit, and `model` labels. Anything else means somebody edited a generated file, and `--check` reports it.
 
 ### Task 5.2 · The three validation layers, and a failure only the third one catches
 
@@ -390,7 +391,7 @@ Now add `hostNetwork: true` to the pod spec in `k8s/jobs/eval.yaml` and run the 
 
 - **Applies the ConfigMaps** (`deepseek-tools`, `deepseek-evaldata`, `deepseek-catalog` in `llm-serving`; `deepseek-train` in `batch`).
 - **Serves `r1-7b`:** prefetch into `model-cache`, apply the overlay (util 0.20, **28 Gi** request = limit, one GPU slice), wait, smoke test.
-- **Inspects** the Deployment, Service, ServiceMonitor and PVC, the pod's args, priority, QoS and resources, and the quota; then the cache directory and free space on the Spark. All read-only.
+- **Inspects** the Deployment, Service and PVC, the ServiceMonitor `llm-workloads` in `observability` that scrapes them, the pod's args, priority, QoS and resources, and the quota; then the cache directory and free space on the Spark. All read-only.
 
 #### What to look for
 
@@ -415,7 +416,8 @@ Now add `hostNetwork: true` to the pod spec in `k8s/jobs/eval.yaml` and run the 
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root apply -k .                              # ConfigMaps
 scripts/serve-model.sh r1-7b                                         # prefetch → apply overlay → wait → smoke test
-kubectl --context spark-root -n llm-serving get deploy,svc,servicemonitor,pvc -o wide
+kubectl --context spark-root -n llm-serving get deploy,svc,pvc -o wide
+kubectl --context spark-root -n observability get servicemonitor llm-workloads
 kubectl --context spark-root -n llm-serving get pod -l app=vllm -o jsonpath='{.items[0].spec.containers[0].args}' | tr ',' '\n'
 kubectl --context spark-root -n llm-serving describe pod -l app=vllm | grep -E 'Priority|QoS|Limits|Requests' -A2
 kubectl --context spark-root -n llm-serving describe resourcequota serving-budget | grep -E 'memory|gpu'
@@ -440,7 +442,7 @@ df -h /data
 
 #### What to look for
 
-1. **fio:** a `[weights-seqread-1m]` section with a `READ:` bandwidth line; record it for §3.6's formula.
+1. **fio:** a `weights-seqread-1m: (groupid=…)` block and its `READ:` bandwidth line; record it for §3.6's formula.
 2. **Restart timings:**
 
    | Row | Healthy value |
@@ -457,7 +459,7 @@ df -h /data
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -f manifests/root/60-storage/fio-job.yaml
-kubectl --context spark-root -n platform-tools logs -f job/fio-ai | grep -E '^\[|READ:|WRITE:'
+kubectl --context spark-root -n platform-tools logs -f job/fio-ai | grep -E '^\S+:|READ:|WRITE:'
 ```
 
 Record the `weights-seqread-1m` bandwidth: it is the denominator of the cold-load estimate in §3.6.
@@ -517,7 +519,7 @@ None of those 15 GB appeared in any quota or pod request. That is the gap betwee
 
 #### What to look for
 
-1. **First run:** one `== NEW  <repo>@<commit>` line per cached snapshot, each with `N files, X GiB hashed in …s`.
+1. **First run:** one `== NEW  <org>--<repo>@<commit>` line per cached snapshot, each with `N files, X GiB hashed in …s`.
 2. **A second run** (`create job --from=cronjob/weights-verify wv-2`): `== CHECK … ` with `✓ weights match manifest` for each snapshot.
 3. **Job status:** `wv-now` `Complete`.
 
@@ -532,7 +534,7 @@ kubectl --context spark-root -n llm-serving create job --from=cronjob/weights-ve
 kubectl --context spark-root -n llm-serving logs -f job/wv-now
 ```
 
-Expected: `== NEW  deepseek-ai_DeepSeek-R1-Distill-Qwen-7B@<commit>` for each snapshot on the first run, `== CHECK … OK` later. Chapter 15 runs it nightly.
+Expected: `== NEW  deepseek-ai--DeepSeek-R1-Distill-Qwen-7B@<commit>` for each snapshot on the first run, `== CHECK …` followed by `✓ weights match manifest` later. Chapter 15 runs it nightly.
 
 ### Task 5.7 · Stream through every hop
 
@@ -661,7 +663,8 @@ Expected: the probe prints `BUFFERED` and `first answer ≈ total`; users see no
 
 - **Needs dgx-spark-2** and 01-Ansible `15.1-nfs-rdma.yml` already run. With only dgx-spark-1, skip it.
 - **On dgx-spark-1:** lists the NFS exports.
-- **On dgx-spark-2:** checks the mount options and reads one weight blob of `r1-7b` over the share with `dd` to measure throughput. Nothing is written.
+- **On dgx-spark-2:** checks the mount options and reads one large weight blob over the share with `dd` to measure throughput. Nothing is written.
+- **What the share holds:** `/srv/models` on dgx-spark-1 is its own directory, not the `model-cache` PVC (`/data/k8s/retain/llm-serving/model-cache`). It holds what the two-Spark workloads put there, such as the 70B of [Chapter 04](04-scaling-beyond-one-spark.md) Task 8 in `/srv/models/hf`.
 
 #### What to look for
 
@@ -671,7 +674,7 @@ Expected: the probe prints `BUFFERED` and `first answer ≈ total`; users see no
 | `mount \| grep /mnt/models` | `proto=rdma,port=20049` |
 | `dd` | a GB/s figure; compare it with Task 5.4's local seq read |
 
-**If something's off:** `proto=tcp` → `rpcrdma` isn't loaded or the port is wrong. `ls` finds no `models--deepseek-ai--DeepSeek-R1-Distill-Qwen-7B` → the share exports another directory than the model cache. More in §7.
+**If something's off:** `proto=tcp` → `rpcrdma` isn't loaded or the port is wrong. `find` prints nothing → no weights are on the share yet; download one model into `/srv/models/hf` on dgx-spark-1 (Chapter 04 Task 8). More in §7.
 
 #### Run it
 
@@ -685,8 +688,8 @@ showmount -e localhost                             # /srv/models 192.168.100.0/2
 ```bash
 # ▶ dgx-spark-2 (ssh dgx-spark-2)
 mount | grep /mnt/models                           # proto=rdma,port=20049
-f=$(ls /mnt/models/hf/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-7B/blobs | head -1)
-dd if="/mnt/models/hf/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-7B/blobs/$f" of=/dev/null bs=16M status=progress
+f=$(find /mnt/models/hf -path '*/blobs/*' -size +1G | head -1); echo "$f"
+dd if="$f" of=/dev/null bs=16M status=progress
 ```
 
 Compare with the local NVMe read from Task 5.4 (**record yours**).

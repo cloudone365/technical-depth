@@ -61,6 +61,30 @@ Nothing here is Qwen-specific except the last hop, and that is the point: the re
 
 **Blue/green index.** `rag_demo.py ingest` writes to a new physical collection `technical-depth-<timestamp>`, checks retrieval quality on the gold set (`--gate`), and only then moves the alias `technical-depth` to it. Readers always query the alias, so they never see a half-built index, and `rollback` moves the alias back.
 
+### 2.1 One cited answer, step by step
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant CLI as rag_demo.py ask<br/>(MacBook, port-forwards)
+  participant E as bge-m3<br/>(llm-serving, :8001)
+  participant Q as Qdrant<br/>alias technical-depth (:6333)
+  participant V as vllm<br/>qwen3-4b-instruct (:8000)
+  CLI->>E: POST /v1/embeddings (model bge-m3, the question)
+  E-->>CLI: one 1024-dim dense vector
+  CLI->>Q: POST /collections/technical-depth/points/search (limit k = 5)
+  Q->>Q: alias → technical-depth-TIMESTAMP
+  Q-->>CLI: 5 chunks: path · heading · text · score
+  CLI->>V: POST /v1/chat/completions<br/>"Answer only from the numbered sources"<br/>Sources [1]…[5] + question
+  V-->>CLI: content with [n] markers
+  CLI->>CLI: print the answer, then sources: [n] score path § heading
+```
+
+- **Steps 1–2** are the embeddings check in §6 (`1024`); the vector comes from the dense output only (§3.1).
+- **Steps 3–5** are what `eval` scores (hit@k, MRR) and what `--show-context` prints in §5.4; the alias in step 4 is why a re-ingest never shows a half-built index (§5.3).
+- **Steps 6–7** go to whichever catalog model `--chat-model` names; with a thinking model the reasoning field is dropped and only `content` is printed (§3.4, §5.5).
+- **Step 8** is the `sources:` block you check every `[n]` against (§5.4).
+
 ---
 
 ## 3. LLD
@@ -108,7 +132,7 @@ Bi-encoders (BGE-M3) embed query and document separately: fast, pre-computable, 
 | Detail | Choice | Why |
 |---|---|---|
 | Thinking | off for routine questions (`enable_thinking: false`, or a non-thinking catalog model) | thinking roughly multiplies output tokens; for "find and quote" it adds latency, not accuracy |
-| Thinking on reasoning models | `rag_demo.py` drops `reasoning_content` from the answer it prints | citations are checked against `content` only |
+| Thinking on reasoning models | `rag_demo.py` prints only `content` (the reasoning field, `reasoning` or `reasoning_content`, is dropped) | citations are checked against `content` only |
 | Context budget | k × chunk size well under `--max-model-len` | the catalog's 4B and 8B run at 32K, which leaves room; prefix caching reuses the instruction part |
 | Language | answer in the question's language | Qwen follows this reliably when the instruction says so |
 
@@ -116,7 +140,7 @@ Faithfulness is checked, not assumed: every `[n]` must refer to a source that wa
 
 ### 3.5 Long context or retrieval?
 
-Qwen2.5/Qwen3 support 32K natively; with YaRN (`--rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' --max-model-len 131072`) up to 128K. YaRN in vLLM is static: it applies to every request, including short ones, and can lower quality on short texts, so enable it only on a deployment that needs long inputs (Chapter 01).
+Qwen2.5/Qwen3 support 32K natively; with YaRN up to 128K (on the pinned image `--hf-overrides '{"rope_parameters": {"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 32768, "rope_theta": 1000000}}' --max-model-len 131072`; `--rope-scaling` was the form before vLLM 0.12). YaRN in vLLM is static: it applies to every request, including short ones, and can lower quality on short texts, so enable it only on a deployment that needs long inputs (Chapter 01 §2.6, Chapter 04 Task 4).
 
 The cost is the KV cache. Per token, per sequence: $2 \times \text{layers} \times \text{kv\_heads} \times \text{head\_dim} \times 2$ bytes (BF16).
 
@@ -246,7 +270,7 @@ The gate runs the gold set against the new collection before it goes live; if hi
 
 #### What this lab does (`rag_demo.py eval` and `ask`)
 
-- **`eval`:** runs every gold question against the live alias and prints hit@1, hit@5 and MRR, plus a `MISS` line for each question whose expected file isn't the top hit.
+- **`eval`:** runs every gold question against the live alias and prints hit@1, hit@5 and MRR, plus a `MISS` line for each question whose expected file isn't in the top k.
 - **`ask`:** embeds the question, takes the top 5 chunks and asks `qwen3-4b-instruct` for an answer with `[n]` citations; `--show-context` prints the chunks first. Read-only.
 
 #### What to look for
@@ -279,7 +303,7 @@ Record hit@1, hit@5 and MRR. Read the answer against the printed context: every 
 
 #### What this lab does (`serve-model.sh qwen3-8b` + two `curl` requests)
 
-- **Switches** the main model to Qwen3-8B (util 0.20, hybrid thinking, `qwen3` reasoning parser). The port-forward on 8000 may drop during the switch.
+- **Switches** the main model to Qwen3-8B (util 0.20, hybrid thinking, `qwen3` reasoning parser) and restarts the port-forward on 8000, which was bound to the replaced pod.
 - **Asks** the same one-sentence question with `enable_thinking` true and false, timing each with `/usr/bin/time`.
 
 #### What to look for
@@ -287,7 +311,7 @@ Record hit@1, hit@5 and MRR. Read the answer against the printed context: every 
 1. **Two result lines** plus `real …` times: with thinking on, many more completion tokens and seconds than with thinking off.
 2. **`thinking chars`:** above 0 with thinking on, 0 with thinking off.
 
-**If something's off:** `thinking chars 0` in both rows while the completion tokens differ a lot → the image returns the trace as `reasoning`, and the one-liner reads only `reasoning_content`; read both fields. `Connection refused` → restart the port-forward.
+**If something's off:** `thinking chars 0` in both rows while the completion tokens differ a lot → the trace is in a field the one-liner doesn't read; it reads `reasoning` and `reasoning_content`, check the raw JSON. `Connection refused` → restart the port-forward.
 
 #### Run it
 
@@ -296,16 +320,19 @@ Switch to a hybrid-thinking Qwen3 model and ask the same question twice — thin
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 scripts/serve-model.sh qwen3-8b
+pkill -f 'port-forward svc/vllm 8000' || true
+kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000:8000 >/dev/null 2>&1 &
+sleep 2
 for think in true false; do
   /usr/bin/time -p curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d "{
     \"model\": \"qwen3-8b\", \"max_tokens\": 4096,
     \"chat_template_kwargs\": {\"enable_thinking\": $think},
     \"messages\": [{\"role\": \"user\", \"content\": \"In one sentence: what does --gpu-memory-utilization 0.20 mean on a DGX Spark?\"}]
-  }" | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d["choices"][0]["message"]; print("thinking chars", len(m.get("reasoning_content") or ""), "| completion tokens", d["usage"]["completion_tokens"])'
+  }" | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d["choices"][0]["message"]; print("thinking chars", len(m.get("reasoning") or m.get("reasoning_content") or ""), "| completion tokens", d["usage"]["completion_tokens"])'
 done
 ```
 
-(The port-forward to `svc/vllm` reconnects to the new pod; restart it if it dropped during the switch.) For citation-style RAG answers, thinking off is the usual default; keep thinking for questions that need several sources combined.
+For citation-style RAG answers, thinking off is the usual default; keep thinking for questions that need several sources combined.
 
 ### 5.6 Extension: hybrid search and reranking
 

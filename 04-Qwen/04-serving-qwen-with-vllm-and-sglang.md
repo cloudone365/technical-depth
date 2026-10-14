@@ -28,12 +28,12 @@
 
 ```mermaid
 flowchart LR
-  CL["clients · LiteLLM · Open WebUI<br/>qwen.lab.local → 192.168.0.115"] --> TR
+  CL["clients (curl, SDKs)<br/>qwen.lab.local → 192.168.0.115"] --> TR
   subgraph ROOT["spark-root · namespace llm-serving · serving-budget 8 CPU · 90 Gi · 6 slices"]
     direction LR
     TR["Traefik · ns ingress"] --> S1["svc/vllm<br/>main model"]
     TR -.-> S2["svc/vllm-&lt;name&gt;<br/>side model"]
-    TR -.-> S3["svc/sglang<br/>(comparison)"]
+    S3["svc/sglang<br/>(comparison, port-forward only)"]
     S1 --> P1["vLLM pod<br/>qwen3-8b · util 0.20 · 32 Gi"]
     S2 --> P2["vLLM pod<br/>qwen3-4b-instruct · 0.12 · 20 Gi"]
     S3 --> P3["SGLang pod<br/>RadixAttention · 0.20"]
@@ -57,7 +57,7 @@ flowchart LR
   style ROOT fill:#e6f4f5,stroke:#0e7c86
 ```
 
-Everything runs on the root under its real names: the main model is always `deploy/vllm` + `svc/vllm` (so the 02 KEDA ScaledObject, ServiceMonitor and every client keep working when you switch models), side models are `deploy/vllm-<name>` + `svc/vllm-<name>`, and SGLang reuses the 02 `sglang` Deployment. Weights come from the shared `model-cache` PVC (`local-nvme-retain`), filled by the 02 prefetch Job before each start. Try a changed overlay in the `dev-llms` sandbox first: `scripts/serve-model.sh qwen3-0.6b --sandbox` runs the smoke model in `llm-sandbox` at util 0.02.
+LiteLLM and Open WebUI (Chapter 12) reach the same Services inside the cluster, not through Traefik; SGLang has no route and is reached with `kubectl port-forward` in Task 6. Everything runs on the root under its real names: the main model is always `deploy/vllm` + `svc/vllm` (so the 02 KEDA ScaledObject, ServiceMonitor and every client keep working when you switch models), side models are `deploy/vllm-<name>` + `svc/vllm-<name>`, and SGLang reuses the 02 `sglang` Deployment. Weights come from the shared `model-cache` PVC (`local-nvme-retain`), filled by the 02 prefetch Job before each start. Try a changed overlay in the `dev-llms` sandbox first: `scripts/serve-model.sh qwen3-0.6b --sandbox` runs the smoke model in `llm-sandbox` at util 0.02.
 
 ---
 
@@ -180,7 +180,7 @@ target-model tokens for one target pass plus $k$ cheap proposals. On a bandwidth
 | `qwen3-8b` (main) | 0.20 | 32 Gi | yes |
 | + `qwen3-4b-instruct --side` + apps (`everyday`) | 0.38 | 71 Gi | yes |
 | `qwen3-8b` + SGLang `qwen3-8b` (Task 6) | 0.40 | 64 Gi | yes — but park vLLM while you measure, so each engine has the GB10 alone |
-| `qwen3-8b-128k` (Task 4, util 0.30, 40 Gi) + apps | 0.36 | 59 Gi | yes |
+| `qwen3-8b-128k` (Task 4, util 0.30, 41 Gi) + apps | 0.36 | 60 Gi | yes |
 | `qwen3.6-35b-fp8` + `qwen3-8b` + apps | 0.71 | 115 Gi | **no** — memory quota; park one |
 | `qwen3-coder-30b-fp8` + `qwen3.6-35b-fp8` | 0.85 | 120 Gi | **no** — util and quota |
 
@@ -206,7 +206,7 @@ Metric names move between releases; `curl -s localhost:8000/metrics | grep -E '^
 - **02 vLLM base** ([`vllm.yaml`](../02-Kubernetes/lab/manifests/root-llms/90-serving/vllm/vllm.yaml)): every overlay keeps its probes (startup 30 min for first downloads, readiness required by the `llm-serving` admission policy), `preStop` drain, `Recreate`, `spark-serving` priority, 8 Gi `/dev/shm` and the `model-cache` mount. Changes to probes or lifecycle belong in the base, not in the catalog.
 - **Traefik** (root, namespace `ingress`, `192.168.0.115`): Task 3 adds an Ingress for `qwen.lab.local` that reuses 02's `llm-ratelimit` middleware (not `llm-body-limit`, which buffers streams: 02 Chapter 11 §5.5). 02's own `llm.lab.local` keeps pointing at `mock-llm`.
 - **KEDA** ([`autoscaling.yaml`](../02-Kubernetes/lab/manifests/root-llms/90-serving/autoscaling.yaml)): the ScaledObject `vllm` owns the main Deployment's replica count. Park it with `kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite`, bring it back by removing the annotation. Side engines have no ScaledObject.
-- **Prometheus**: the root ServiceMonitor `llm-workloads` keeps Services named `vllm`, `sglang` (and the 02 P/D and KServe names), so the main model and SGLang are scraped with `vcluster="root"`, `vnamespace="llm-serving"`. Side engines (`vllm-<name>`) are not matched by that list: to scrape them, widen the `keep` regex in 02's [`vcluster-workloads.yaml`](../02-Kubernetes/lab/manifests/root/95-observability/vcluster-workloads.yaml) to `vllm(-.*)?|vllm-prefill|…` (telemetry in Chapter 13).
+- **Prometheus**: the root ServiceMonitor `llm-workloads` keeps Services named `vllm`, `sglang` (and the 02 P/D and KServe names), so the main model and SGLang are scraped with `vcluster="root"`, `vnamespace="llm-serving"`. Side engines (`vllm-<name>`) are not matched by that list: to scrape them, widen the `keep` regex of the `llm-workloads` ServiceMonitor in 02's [`vcluster-workloads.yaml`](../02-Kubernetes/lab/manifests/root/95-observability/vcluster-workloads.yaml) to `vllm(-.*)?|vllm-prefill|…` (telemetry in Chapter 13).
 - **Applications**: LiteLLM, Open WebUI and the RAG tools come from 03-DeepSeek's lab; they address models by served name (`qwen3-8b`) at `http://vllm.llm-serving:8000` or `http://vllm-<name>.llm-serving:8000` — Chapter 12 adds the LiteLLM aliases.
 - **Weights and secrets** (Chapter 06): the prefetch Job and the Hugging Face token from Vault; pin `revision` in the catalog before you compare results across days.
 
@@ -328,7 +328,7 @@ Chapter 10 tests tool calling systematically with `tools/fc_check.py`.
 3. **Second host:** `/v1/models` on `agent.qwen.lab.local` lists `qwen3-4b-instruct`.
 4. **Quota:** `describe resourcequota serving-budget` shows `requests.memory` used ≥ 52Gi (32 + 20) out of 90Gi.
 
-**If something's off:** `404 page not found` from Traefik → the Host header doesn't match; check the `/etc/hosts` line. Side pod Pending with `exceeded quota` → park something (§3.6). More in §7.
+**If something's off:** `404 page not found` from Traefik → the Host header doesn't match; check the `/etc/hosts` line. No side pod and a `FailedCreate … exceeded quota` event (`kubectl --context spark-root -n llm-serving get events`) → park something (§3.6). More in §7.
 
 #### Run it
 
@@ -380,7 +380,7 @@ Check the quota now holds both engines: `kubectl --context spark-root -n llm-ser
 
 #### What this lab does (catalog entry `qwen3-8b-128k` + `serve-model.sh`)
 
-- **Catalog:** you add `qwen3-8b-128k` to `models.yaml` (same weights as `qwen3-8b`, util 0.30, 40 Gi, `--max-model-len=131072`, YaRN factor 4 via `--hf-overrides`, `--max-num-seqs=4`) and generate its overlay `k8s/models/qwen3-8b-128k/`.
+- **Catalog:** you add `qwen3-8b-128k` to `models.yaml` (same weights as `qwen3-8b`, util 0.30, 41 Gi, `--max-model-len=131072`, YaRN factor 4 via `--hf-overrides`, `--max-num-seqs=4`) and generate its overlay `k8s/models/qwen3-8b-128k/`.
 - **Serve:** stops the side model from Task 3, then replaces the main `deploy/vllm` with the YaRN variant. No new download: the weights are already in `model-cache`.
 - **Needle test:** a Python client sends a ~100K-token prompt with one hidden sentence and asks for it.
 
@@ -396,14 +396,14 @@ Check the quota now holds both engines: `kubectl --context spark-root -n llm-ser
 
 #### Run it
 
-Add a catalog entry next to `qwen3-8b` (KV for one 128K sequence of Qwen3-8B is 18 GiB, so util rises to 0.30 and the memory rule asks for at least 40 GiB):
+Add a catalog entry next to `qwen3-8b` (KV for one 128K sequence of Qwen3-8B is 18 GiB, so util rises to 0.30 and the memory rule asks for more than 40 GiB: 0.30 × 121.7 + 3.5 = 40.01, so `40Gi` fails `--check`):
 
 ```yaml
   - name: qwen3-8b-128k
     hf: Qwen/Qwen3-8B
     util: 0.30
     max_len: 131072
-    mem: 40Gi
+    mem: 41Gi
     weights: 16.4GB
     licence: Apache-2.0
     args: [--reasoning-parser=qwen3, --max-num-seqs=4,
@@ -417,6 +417,9 @@ python3 scripts/gen_overlays.py && python3 scripts/gen_overlays.py --check
 scripts/serve-model.sh --stop-side qwen3-4b-instruct
 scripts/serve-model.sh qwen3-8b-128k
 kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -E 'rope|yarn|max_model_len|GPU KV cache size'
+pkill -f 'port-forward svc/vllm 8000' || true          # the old one was bound to the replaced pod
+kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null 2>&1 &
+sleep 2
 python3 - <<'PY'
 import json, urllib.request
 needle = "The rack key is under the blue fan tray."
@@ -430,7 +433,7 @@ print(r["usage"]["prompt_tokens"], "prompt tokens ->", r["choices"][0]["message"
 PY
 ```
 
-Restart the port-forward after the switch (it was bound to the old pod). Send the same request to plain `qwen3-8b` and read the 400 (`maximum context length is 32768`). Put `qwen3-8b` back as the main model when done and decide whether to keep the entry — a YaRN instance should serve only long-document traffic.
+The block restarts the port-forward after the switch (the old one was bound to the replaced pod). Send the same request to plain `qwen3-8b` and read the 400 (`maximum context length is 32768`). Put `qwen3-8b` back as the main model when done and decide whether to keep the entry — a YaRN instance should serve only long-document traffic.
 
 ### Task 5 · FP8 KV cache and speculative decoding
 
@@ -467,7 +470,7 @@ python3 ../../02-Kubernetes/lab/scripts/ttft_probe.py --url http://localhost:800
 curl -s localhost:8000/metrics | grep -E '^vllm:spec_decode_num_(accepted|draft)_tokens'
 ```
 
-Speculative decoding changes the per-stream token rate (the probe's timings). For `qwen3.6-35b-fp8`, try `'--speculative-config={"method": "mtp", "num_speculative_tokens": 1}'` instead — no draft model needed.
+Speculative decoding changes the per-stream token rate, which the probe does not measure (it records TTFT only): compare TPOT at c = 1 with the Task 7 benchmark. For `qwen3.6-35b-fp8`, try `'--speculative-config={"method": "mtp", "num_speculative_tokens": 1}'` instead — no draft model needed.
 
 ### Task 6 · The same model in SGLang
 
@@ -608,7 +611,7 @@ Compare the c = 1 rows with the bandwidth ceilings from Chapter 01 §2.7: the Mo
 | catalog consistent | `python3 scripts/gen_overlays.py --check` | no problems |
 | main model up | `kubectl --context spark-root -n llm-serving get deploy vllm -o jsonpath='{.metadata.labels.model}'` | `qwen3-8b` |
 | image overridden | same, `{.spec.template.spec.containers[0].image}` | `VLLM_IMAGE` from `versions.env` |
-| smoke | `scripts/serve-model.sh qwen3-8b` | `PASS answer: 144` with reasoning chars > 0 |
+| smoke | `scripts/serve-model.sh qwen3-8b` | `[PASS] answer: 144` with reasoning chars > 0 |
 | reasoning parser | Task 2 | `content` without `<think>`, reasoning in its own field |
 | tool parser | Task 2 | `finish_reason: tool_calls`, arguments valid JSON |
 | route | `curl -s http://qwen.lab.local/v1/models` | `qwen3-8b` |
@@ -624,8 +627,8 @@ Compare the c = 1 rows with the bandwidth ceilings from Chapter 01 §2.7: the Mo
 
 | You see | Cause | Fix |
 |---|---|---|
-| `FAIL budget: running … > 0.72` | other engines (or BGE-M3) already hold the pool | `--stop-side`, park the main model (KEDA annotation), or choose a smaller set |
-| Pod Pending, `exceeded quota: serving-budget` | Σ `mem` of engines + apps > 90 Gi | park an engine; check §3.6 |
+| `[FAIL] budget: running … > 0.72` | other engines (or BGE-M3) already hold the pool | `--stop-side`, park the main model (KEDA annotation), or choose a smaller set |
+| No new pod, rollout waits; `kubectl get events` shows `FailedCreate … exceeded quota: serving-budget` | Σ `mem` of engines + apps > 90 Gi | park an engine; check §3.6 |
 | Pod Pending, `Insufficient memory` | a batch job or training window holds the pool | `kubectl --context spark-root -n batch get pods`; wait or end the window |
 | `ValueError: … architecture … not supported` / `Qwen3_5…` unknown | the pod runs the 02 base image | regenerate overlays (`gen_overlays.py`), check `.spec…image` = `VLLM_IMAGE` |
 | `No available memory for the cache blocks` | weights + activations fill the util share | raise util in the catalog (and `mem` by the rule), lower `max_len`, or use the FP8 checkpoint |

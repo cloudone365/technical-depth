@@ -85,6 +85,48 @@ A slice is a **ticket to the scheduler**, not a fraction of the GPU. The number 
 
 The quotas live in the 02-Kubernetes lab ([`root/05-vclusters/quotas.yaml`](../02-Kubernetes/lab/manifests/root/05-vclusters/quotas.yaml) and [`root-llms/10-tenancy/quotas.yaml`](../02-Kubernetes/lab/manifests/root-llms/10-tenancy/quotas.yaml)), and its `tests/budget_check.py` checks that they add up to `gpu_operator_timeslice_replicas`. Change the replica count here and you must change the quotas there, or one side lies.
 
+### 2.2 One slice request, step by step
+
+A pod that asks for `nvidia.com/gpu: 1` meets a quota first and the scheduler second. Where the quota sits depends on which API server created the pod. §4.2 runs both paths: `ts-demo` on the root, `ts-sbx` in `dev-llms`.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant K as kubectl on the MacBook
+  participant VC as dev-llms-0<br/>(vCluster API + syncer,<br/>ns vc-dev-llms, 192.168.0.112)
+  participant API as root kube-apiserver<br/>192.168.0.100:6443<br/>(ResourceQuota admission)
+  participant CM as root controller-manager<br/>(ReplicaSet controller)
+  participant SCH as root kube-scheduler
+  participant KL as kubelet on dgx-spark-1
+  participant DP as nvidia-device-plugin<br/>(ns gpu-operator,<br/>time-slicing 15 replicas)
+  participant CTD as containerd<br/>(default runtime nvidia)
+  alt root pod: ts-demo in llm-serving (context spark-root)
+    K->>API: apply Deployment ts-demo, 6 replicas
+    CM->>API: create pod ts-demo-…
+    API->>API: serving-budget: requests.nvidia.com/gpu used + 1 ≤ 6?
+    API-->>CM: 7th pod: FailedCreate … exceeded quota: serving-budget
+  else vCluster pod: ts-sbx in dev-llms (context dev-llms)
+    K->>VC: apply Deployment ts-sbx, 3 replicas
+    VC->>VC: tenant API stores the pods<br/>(its default namespace has no quota)
+    VC->>API: syncer creates ts-sbx-…-x-default-x-dev-llms in vc-dev-llms
+    API->>API: vcluster-budget: requests.nvidia.com/gpu used + 1 ≤ 2?
+    API-->>VC: 3rd copy: exceeded quota: vcluster-budget
+    Note over VC: tenant pod stays Pending,<br/>no FailedScheduling event
+  end
+  SCH->>API: watch: admitted pod with no node
+  SCH->>SCH: dgx-spark-1 allocatable nvidia.com/gpu 15<br/>minus slices already allocated
+  SCH->>API: bind pod to dgx-spark-1
+  KL->>DP: Allocate 1 nvidia.com/gpu (one of 15 replicas of the same GB10)
+  DP-->>KL: NVIDIA_VISIBLE_DEVICES = the GB10's UUID
+  KL->>CTD: create the container
+  CTD->>CTD: nvidia runtime hook mounts the GB10<br/>(the whole GPU, shared with every other slice)
+```
+
+- **Steps 1–4 are the root path.** The 7th `ts-demo` pod never exists: the quota refusal lands on the ReplicaSet as `FailedCreate` (§4.2, `describe rs -l app=ts-demo`).
+- **Steps 5–9 are the vCluster path.** The tenant API server accepts all three pods; the root refuses the 3rd host copy at steps 8–9. That's why the Pending pod in `dev-llms` has the syncer's quota error and no scheduler event (§4.2, `describe pod` in `dev-llms`).
+- **Step 11 is where the 15 counts.** The device plugin advertises 15 because of `time-slicing-config`; `kubectl --context spark-root describe node dgx-spark-1 | grep -A8 'Allocated resources'` shows how many are taken (§6, `Insufficient nvidia.com/gpu`).
+- **Steps 13–16 give no isolation.** Every slice gets the same GPU; memory and compute are shared. On the Spark, `nvidia-smi` lists one process per `ts-demo` pod on one GB10 (§4.2).
+
 ---
 
 ## 3. The role
@@ -390,7 +432,7 @@ In `llm-serving` the Secret exists once, in the root's etcd, where Chapter 19's 
 | Symptom | Diagnose | Fix |
 |---|---|---|
 | Validator stuck `Init` | `kubectl --context spark-root -n gpu-operator logs <validator> -c driver-validation` | Host driver not found: make sure `driver.enabled=false` (operator expects the host driver) and `nvidia-smi` works on the host |
-| `toolkit-validation` fails | Container logs; `grep default_runtime_name /etc/containerd/config.toml` on the node | containerd has no `nvidia` runtime (DGX OS update replaced `config.toml`?). Re-run the template `19.1 Kubernetes`; its `nvidia-ctk runtime configure` task restores it |
+| `toolkit-validation` fails | Container logs; `sudo grep -rn --include='*.toml' default_runtime_name /etc/containerd` on the node (`config.toml` or `conf.d/99-nvidia.toml`) | containerd has no `nvidia` runtime (DGX OS update replaced `config.toml`?). Re-run the template `19.1 Kubernetes`; its `nvidia-ctk runtime configure` task restores it |
 | Template fails: `Could not find … kubeconfig-spark-lab.yaml` | the state volume has no kubeconfig (`SPARK_LAB_CACHE` unset, or 19.1 ran from the MacBook) | Chapter 04 §4 Verify; run `19.1 Kubernetes` from Semaphore first |
 | Allocatable `nvidia.com/gpu` = 1, not 15 | `kubectl --context spark-root -n gpu-operator get cm time-slicing-config -o yaml`; device-plugin logs | ConfigMap name/key must match `devicePlugin.config.name/default`; restart the device-plugin DS |
 | Root pod `Pending: Insufficient nvidia.com/gpu` | `kubectl --context spark-root describe node dgx-spark-1 \| grep -A8 'Allocated resources'` | All 15 slices in use (count the `vc-*`, `llm-serving` and `batch` pods too), or `failRequestsGreaterThanOne` rejected a request for > 1 |

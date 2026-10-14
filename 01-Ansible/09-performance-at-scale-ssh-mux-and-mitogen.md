@@ -221,7 +221,7 @@ The benchmark workload (facts plus ten `copy` tasks, a typical baseline shape):
 #### What this lab does (playbook `09.2-fleet-bench.yml`)
 
 - **Workload:** on every fake node, gathers facts, writes ten small files `/etc/bench-0.conf` … `/etc/bench-9.conf` (with `become`), and runs `dpkg -s python3`. The files live inside the containers; the Spark itself is not changed.
-- **The `bench` function** runs that playbook once per setting, with only one thing changed per row: forks, SSH multiplexing, pipelining, strategy, fact gathering. It deletes the mux sockets in `~/.ansible/cp/` before each run so every row starts cold.
+- **The `bench` function** runs that playbook once per setting, with only one thing changed per row: forks, SSH multiplexing, pipelining, strategy, fact gathering. It deletes the mux sockets (`~/.ansible/cp`) before each run so every row starts cold.
 - **Output:** one line `<label>,<seconds>` per row, appended to `.cache/bench.csv` on the MacBook. The seconds come from the `ansible.posix.timer` callback's `Playbook run took …` line.
 - **Load:** the `f64` rows run 64 parallel SSH sessions from the MacBook and push the fake nodes to their 0.25-CPU caps on the Spark.
 
@@ -247,7 +247,7 @@ Keep everything identical except one variable per run. `ANSIBLE_CALLBACKS_ENABLE
 # ▶ MacBook · 01-Ansible/lab (venv active)
 bench() {  # usage: bench <label> [env...]
   label=$1; shift
-  rm -rf ~/.ansible/cp/*   # cold mux sockets each run
+  rm -rf ~/.ansible/cp     # cold mux sockets each run (Ansible recreates the folder; a cp/* glob would stop zsh with 'no matches found' when it is empty)
   t=$( env "$@" ANSIBLE_CALLBACKS_ENABLED=ansible.posix.timer \
        ansible-playbook -i .cache/fleet.ini playbooks/09.2-fleet-bench.yml 2>&1 \
        | awk '/Playbook run took/{print $(NF-3)*60+$(NF-1)}' )
@@ -278,7 +278,7 @@ Watch the saturation point live while `f64` runs:
 ```bash
 # ▶ MacBook · any folder
 # the controller
-top -o %CPU     # ansible-playbook workers
+top -o cpu      # ansible-playbook workers (macOS top; Linux: top -o %CPU)
 ```
 
 ```bash
@@ -305,7 +305,7 @@ Pipelining requires that sudo does not demand a TTY (Ubuntu's default is fine). 
 
 ```
 # /etc/sudoers.d/ansible
-Defaults:nvidia !requiretty
+Defaults:svc-ansible !requiretty
 ```
 
 ### 4.2 Facts: gather less, cache more
@@ -389,7 +389,7 @@ The same `ansible.cfg` runs inside the Semaphore container (`ANSIBLE_CONFIG="01-
 | AWX job templates (Chapter 24) | `forks` per template; container groups scale horizontally |
 | Drift checks every 30 min (Chapter 26) | fact cache + `gather_subset` keep them cheap |
 | Emergency drain (Chapter 29) | `serial: 1` makes speed deliberately irrelevant; correctness first |
-| NCCL build (`14.2-nccl-test.yml`) | `async` + `strategy: free` on 2+ nodes |
+| NCCL build (`14.2-nccl-test.yml`) | `async` (`poll: 30`) so the long `make` survives SSH timeouts; both nodes build in parallel under the default linear strategy |
 
 ## 6. Troubleshooting & diagnostics
 

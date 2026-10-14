@@ -82,6 +82,9 @@ flowchart LR
 #   ECN        : marked by the switch, reacted to by the NIC (DCQCN)
 #
 #   ansible-playbook playbooks/14.1-roce-qos.yml -K [-e roce_qos_pfc=false]   # ECN-only ("lossy RoCE")
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: RoCEv2 QoS on CX-7 ports
   hosts: spark
   become: true
@@ -250,6 +253,9 @@ Expect a results table with `0` in the `#wrong` columns and `Out of bounds value
 # Builds NCCL + nccl-tests for Blackwell (sm_121) on every Spark, then runs
 # all_gather_perf across the CX-7 link from the first node. Mirrors NVIDIA's
 # "NCCL for Multiple Sparks" playbook, but idempotent and inventory-driven.
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: Build NCCL and nccl-tests
   hosts: spark
   become: true
@@ -401,8 +407,8 @@ The same variables go into vLLM or TRT-LLM multi-node launches. NVIDIA's vLLM Sp
 | Symptom | Diagnose | Fix |
 |---|---|---|
 | NCCL busbw far below perftest | NCCL log transport line; `nvidia-smi` clocks during the run | Socket fallback, or only one logical port in `NCCL_IB_HCA` |
-| `mpirun` hangs before NCCL starts | `mpirun -np 2 -H ip1:1,ip2:1 hostname` | Passwordless SSH both ways, same username, same paths on both nodes |
-| `libnccl.so: cannot open shared object` on node 2 | `-x LD_LIBRARY_PATH` missing / different home dirs | Same build path on both (the playbook builds in `~nvidia` on each) |
+| `mpirun` hangs before NCCL starts | `mpirun -np 2 -H ip1:1,ip2:1 hostname` | Passwordless SSH both ways, same username, same paths on both nodes. No lab playbook sets this up: `mpirun` runs as the login user (`svc-ansible` under Semaphore, `dgxadmin` from the MacBook), so that user on dgx-spark-1 needs a key that the other Spark accepts |
+| `libnccl.so: cannot open shared object` on node 2 | `-x LD_LIBRARY_PATH` missing / different home dirs | Same build path on both (the playbook builds in `/home/dgxadmin` on each) |
 | Different results each run, occasional `NCCL WARN NET/IB : Got completion ... error 12` | `ethtool -S` for drops/pauses | Retry-exceeded → loss: MTU mismatch, or QoS mismatch on a switch |
 | After enabling PFC, the whole port stalls | Switch/host priority mismatch → pause storms | Remove PFC (`-e roce_qos_pfc=false`), keep ECN; fix the switch config to match |
 | `mlnx_qos: command not found` | — | Not all DGX OS images ship MLNX tools; the play skips cleanly. Use the switch-side QoS + ECN sysfs only |

@@ -47,7 +47,7 @@ Three kubectl contexts live in one kubeconfig, `01-Ansible/lab/.cache/kubeconfig
 | Context | What it is | In this module |
 |---|---|---|
 | `spark-root` | the kubeadm root cluster | **runs the models**: `llm-serving` (engines, apps), `batch` (ms-swift Jobs, Kueue LocalQueue `train` → ClusterQueue `spark-cq`), `ingress` (Traefik), `observability` |
-| `dev-llms` | vCluster, namespace `llm-sandbox`, 2 CPU · 4 Gi · 2 slices | try an overlay or a parser flag on `qwen3-0.6b` first (`serve-model.sh qwen3-0.6b --sandbox`) |
+| `dev-llms` | vCluster (2 CPU · 4 Gi · 2 slices on the root); namespace `llm-sandbox` inside it, quota 1500m · 3 Gi · 2 slices | try an overlay or a parser flag on `qwen3-0.6b` first (`serve-model.sh qwen3-0.6b --sandbox`) |
 | `dev-lab` | vCluster for tenants | not used here |
 
 The lab scripts source 02's `scripts/lib.sh`, so inside them `k` means `kubectl --context spark-root` and `kdl` means `kubectl --context dev-llms`. Anything that rebuilds the platform is a **Semaphore template** on sema01 (01-Ansible); nothing in this module needs one. Secrets come from vault01 (`kv/spark-lab/hf` for the Hugging Face token, `kv/spark-lab/ngc` for NGC), never from files in the repo.
@@ -139,7 +139,7 @@ Times are rough working times on one Spark, not counting reading.
 | 02 | [Coder, Math & reasoning models](02-coder-math-and-reasoning-models.md) | FIM gate, tool-integrated math, thinking cost | 90 min | Thinking on/off measured |
 | 03 | [Vision-language models](03-vision-language-models.md) | Visual-token calculator, grounding, pages → Qdrant | 90 min | Cited answer from page images |
 | **Part II** | **Serving** | | | |
-| 04 | [Serving Qwen with vLLM & SGLang](04-serving-qwen-with-vllm-and-sglang.md) | Everyday set, parsers, Traefik, YaRN, SGLang, benchmark | 120 min | `PASS answer: 144`; benchmark table |
+| 04 | [Serving Qwen with vLLM & SGLang](04-serving-qwen-with-vllm-and-sglang.md) | Everyday set, parsers, Traefik, YaRN, SGLang, benchmark | 120 min | `[PASS] answer: 144`; benchmark table |
 | 05 | [Quantization & local engines](05-quantization-and-local-engines.md) | BF16, AWQ, FP8, own FP8, GGUF, optional NVFP4 | 2–3 h | Per-format table |
 | 06 | [Kubernetes deployment & weight caching](06-kubernetes-deployment-and-weight-caching.md) | Token from Vault, overlay, pinned prefetch, start times | 90 min | Three start times; streamed answer via Traefik |
 | **Part III** | **Fine-tuning** | | | |
@@ -270,7 +270,7 @@ grep -q ' qwen.lab.local' /etc/hosts || echo "192.168.0.115 qwen.lab.local agent
 
 Then the parser checks (Task 2), YaRN (Task 4), FP8 KV and speculative decoding (Task 5), SGLang with vLLM parked (Task 6) and the benchmark Job (Task 7).
 
-✅ **Done when** `serve-model.sh qwen3-8b` prints `PASS answer: 144`, reasoning arrives in its own field and a tool call comes back with `finish_reason: tool_calls`, `curl -s http://qwen.lab.local/v1/models` lists `qwen3-8b`, `serving-budget` shows the Σ `mem` of the running engines, and you have a benchmark table (c = 1/8/32) for at least two catalog models.
+✅ **Done when** `serve-model.sh qwen3-8b` prints `[PASS] answer: 144`, reasoning arrives in its own field and a tool call comes back with `finish_reason: tool_calls`, `curl -s http://qwen.lab.local/v1/models` lists `qwen3-8b`, `serving-budget` shows the Σ `mem` of the running engines, and you have a benchmark table (c = 1/8/32) for at least two catalog models.
 
 ## Chapter 05 · Quantization & local engines → [document](05-quantization-and-local-engines.md)
 
@@ -279,7 +279,7 @@ GPTQ, AWQ, FP8, NVFP4 and GGUF k-quants worked through, the decode ceiling from 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 scripts/serve-model.sh qwen3-8b                                        # Task 5.2: BF16 baseline (vllm-bench Job)
-kubectl --context spark-root apply -k ../../03-DeepSeek/lab/k8s/models/qwen2.5-32b-awq
+kubectl --context spark-root apply -k ../../03-DeepSeek/lab/k8s/models/qwen2.5-32b-awq   # also re-applies the placeholder hf-token: re-sync it (Chapter 06 Task 5.1)
 kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=45m
 scripts/serve-model.sh qwen3-coder-30b-fp8                             # Task 5.3: FP8 MoE
 ```
@@ -325,10 +325,9 @@ vault kv get -field=token kv/spark-lab/hf \
       --dry-run=client -o yaml | kubectl --context spark-root apply -f -
 kubectl --context spark-root apply -k k8s/models/qwen3-8b --dry-run=server
 DROP_CACHES=1 scripts/serve-model.sh qwen3-8b
-curl -s -H 'Host: llm.lab.local' http://192.168.0.115/v1/models | jq -r '.data[].id'
 ```
 
-The pinned prefetch (Task 5.3), the start-time measurements (Task 5.5), the Ingress patch (Task 5.6) and cleaning old revisions (Task 5.7) follow in the chapter.
+The pinned prefetch (Task 5.3), the start-time measurements (Task 5.5), the Ingress patch (Task 5.6: until then `llm.lab.local` still answers from `mock-llm`) and cleaning old revisions (Task 5.7) follow in the chapter.
 
 ✅ **Done when** `hf-token` came from `kv/spark-lab/hf` and no token sits in any repo file, the server-side dry run is accepted, `snapshots/<sha>` exists on the PVC, three start times are recorded, and a streamed answer arrives through 192.168.0.115 with the ScaledObject `vllm` Ready.
 
@@ -348,7 +347,7 @@ kubectl --context spark-root -n llm-serving scale deploy bge-m3 --replicas=0
 kubectl --context spark-root apply -k ../../02-Kubernetes/lab/manifests/root-llms/training-window
 kubectl --context spark-root apply -f k8s/jobs/swift-sft.yaml
 kubectl --context spark-root -n batch get workloads
-kubectl --context spark-root -n batch logs -f job/swift-sft | grep -E "trainable params|'loss'|eval_loss|train_runtime|checkpoint"
+kubectl --context spark-root -n batch logs -f job/swift-sft | grep -E "model_parameter_info|'loss'|eval_loss|train_runtime|checkpoint"
 ```
 
 Merge with the `swift-export` Job (Task 5.5), then close the window and serve the adapter (Task 5.6):

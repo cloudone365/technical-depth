@@ -60,7 +60,7 @@ Ansible is **agentless**. Nothing runs on the Spark between plays. Each task is 
 |---|---|---|
 | Managed-node user | `svc-ansible` with a 15-minute vault01 certificate under Semaphore; `dgxadmin` (same on every Spark, your own key) for bootstrap and break-glass | `group_vars/spark.yml` switches on `vault_role_id` (§3.2). NVIDIA's multi-Spark playbooks and MPI assume identical usernames, which both accounts are |
 | Privilege | `become: true` via `sudo` (group_vars/spark.yml); NOPASSWD for `svc-ansible`, `-K` for `dgxadmin` | Everything we configure is root-owned |
-| Python on target | `/usr/bin/python3` pinned in `ansible.cfg` | Avoids interpreter discovery warnings; DGX OS ships 3.12 |
+| Python on target | `/usr/bin/python3` pinned in `ansible.cfg` and `group_vars/spark.yml` | Avoids interpreter discovery warnings; DGX OS ships 3.12 |
 | Mgmt network | `enP7s7` 10GbE, `192.168.0.0/24` | Ansible/SSH traffic never rides the CX-7 fabric |
 | Fabric | CX-7 `enp1s0f1np1` / `enP2p1s0f1np1`, `192.168.100/101.0/24` | Workload traffic only (NCCL, NFS/RDMA, Multus `net1` for RDMA pods); the Kubernetes API and Cilium VXLAN stay on mgmt |
 | Fact cache | `jsonfile` in the state folder `facts/`, 2 h | Ad-hoc runs and drift reports reuse facts |
@@ -74,7 +74,7 @@ flowchart TB
   all --> spark
   all --> control & k8s_control_plane & k8s_workers & slurm_controller & slurm_compute & monitoring & nfs_server & nfs_client
   control --> lh[localhost]
-  spark --> s1[dgx-spark-1] & s2[dgx-spark-2]
+  spark --> s1[dgx-spark-1] & s2["dgx-spark-2<br/>(commented out until it joins)"]
   k8s_control_plane --> s1
   k8s_workers --> s2
   slurm_compute --> spark
@@ -331,6 +331,9 @@ all:
 # These are the "golden values" the validate + drift playbooks enforce.
 # ------------------------------------------------------------------------
 ansible_become: true
+# Same as interpreter_python in ansible.cfg, here too so a run never falls back to
+# interpreter discovery (and its warning) on the Sparks.
+ansible_python_interpreter: /usr/bin/python3
 
 # ------------------------------------------------------------------------
 # How the controller logs in (Chapter 04 §1).
@@ -390,6 +393,11 @@ spark_sysctls:
   net.ipv4.tcp_wmem: "4096 65536 268435456"
   net.core.netdev_max_backlog: 250000
   net.ipv4.tcp_mtu_probing: 1
+
+# Driver security floor (Chapter 28 §3.2). Set it from the NVIDIA GPU Display Driver
+# security bulletin for your branch; 28.1 then fails a Spark whose driver is older.
+# Empty = check skipped.
+spark_driver_min_secure: ""
 ```
 
 ```yaml

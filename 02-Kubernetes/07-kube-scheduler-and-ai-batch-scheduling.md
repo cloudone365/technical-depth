@@ -85,6 +85,39 @@ For a GPU pod in the root's `batch` namespace that's three gates, each with its 
 
 A pod from dev-lab or dev-llms meets a different middle gate: the root's `vcluster-budget` on its host namespace, which refuses it with a sync error inside the vCluster and **no scheduler events** (§5.4, break/fix 02).
 
+### 2.1 One gang job, step by step
+
+§5.5 submits `gang-a` and `gang-b` to the root's `batch` namespace. This is `gang-a`'s path:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as kubectl --context spark-root
+  participant API as root API server
+  participant JC as Job controller<br/>(root controller-manager)
+  participant KQ as Kueue<br/>(kueue-system)
+  participant SCH as kube-scheduler
+  participant KL as kubelet dgx-spark-1
+  U->>API: create Job batch/gang-a (suspend true, queue-name train, priority-class routine)
+  API-->>JC: watch: Job is suspended, create no pods
+  API-->>KQ: watch: new Job with a queue-name
+  KQ->>API: create Workload job-gang-a-… (3 × 500m · 2Gi · 1 slice, priority 100)
+  KQ->>KQ: LocalQueue train → ClusterQueue spark-cq: does 1500m · 6Gi · 3 fit in 2 · 12Gi · 3?
+  KQ->>API: Workload Admitted (flavor gb10) · Job suspend false + nodeSelector spark.lab/gpu=gb10
+  API-->>JC: watch: Job unsuspended
+  JC->>API: create pods gang-a-0, gang-a-1, gang-a-2
+  API->>API: admission: PSA privileged · LimitRange · quota batch-budget
+  SCH->>API: Filter (nvidia.com/gpu, memory, nodeSelector) → Score → bind dgx-spark-1
+  KL->>API: status Running (rank=0..2, nvidia-smi -L, sleep 120)
+  JC->>API: Job gang-a Complete
+  KQ->>KQ: release 3 slices in spark-cq, admit gang-b whole
+```
+
+- **Steps 4–6** are the `get workloads` columns `RESERVED IN spark-cq` and `ADMITTED True`, and `flavorsUsage` (`nvidia.com/gpu` 3, `cpu` 1500m, `memory` 6Gi). `gang-b` stops at step 5: its Workload isn't admitted and its Job has no pods at all.
+- **Step 9** is the `batch-budget` backstop: only a Job that skipped steps 3–6 is refused here, with `FailedCreate … exceeded quota: batch-budget`.
+- **Step 10** is where Kueue's promise can still fail: if the models in `llm-serving` hold the memory pool, the pods wait with `Insufficient memory` (§5.5 exercise). `spark-batch` pods never preempt, so step 10 never evicts a model. The preemption you see in §5.3 happens in this same step, in the scheduler's PostFilter.
+- **Steps 12–13** are why `gang-b` starts about 2 minutes later, whole, and why `gang-c` (priority 1000) overtakes it when it is queued too.
+
 ---
 
 ## 3. LLD
@@ -132,7 +165,7 @@ Memory is different: it is **shared on purpose**. Serving may use the whole ~90 
 | `1 node(s) didn't match Pod's node affinity/selector` | pod events | label mismatch (GFD label missing? Kueue flavor nodeLabels?) |
 | `preemption: 0/1 nodes are available: 1 No preemption victims found` | pod events | nothing of lower priority to evict |
 | `Preempted by pod … on node dgx-spark-1` | event on the **victim** | preemption happened |
-| `exceeded quota: vcluster-budget, requested: requests.nvidia.com/gpu=1, used: 2, limited: 2` | sync error event on the pod **inside the vCluster** | not a scheduler message at all: the root refused the pod (break/fix 02) |
+| `exceeded quota: vcluster-budget, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=2, limited: requests.nvidia.com/gpu=2` | sync error event on the pod **inside the vCluster** | not a scheduler message at all: the root refused the pod (break/fix 02) |
 | *(no events)* + Job `suspend: true` | root `batch` | Kueue hasn't admitted it |
 
 ---
@@ -223,7 +256,7 @@ The root's node view counts every pod on the Spark, the model servers in `llm-se
 - **Filler:** Deployment `platform-tools/filler` on the root at `spark-preemptible` (1000, never preempts): `sleep` pods with 1 GPU slice, 10m CPU and 64Mi each. You scale it to every free slice, so the node is full.
 - **Urgent:** pod `platform-tools/urgent` at `spark-serving` (50000) asks for one more slice. The scheduler evicts one filler pod to make room.
 - **Across clusters:** after deleting `urgent`, the same kind of pod is created in **dev-llms** (`llm-sandbox/urgent-from-dev-llms`). The root scheduler evicts another filler for it.
-- **Cleanup** deletes the dev-llms pod and every object in the demo file. `yq` (mikefarah) is installed to `/usr/local/bin` first if missing.
+- **Cleanup** deletes the dev-llms pod and every object in the demo file. `yq` (mikefarah) is installed with Homebrew first if missing.
 
 #### What to look for
 
@@ -263,7 +296,7 @@ Expected:
 Normal  Preempted  pod/filler-7c9…-k2x  Preempted by pod … on node dgx-spark-1
 ```
 
-The filler Deployment immediately recreates its lost pod, which now sits `Pending` with `Insufficient nvidia.com/gpu`. Low priority waits, high priority runs. (`yq` is mikefarah yq, version `YQ_VERSION` in `versions.env`; `scripts/preflight.sh` checks for it.)
+The filler Deployment immediately recreates its lost pod, which now sits `Pending` with `Insufficient nvidia.com/gpu`. Low priority waits, high priority runs. (`yq` is mikefarah yq, version `YQ_VERSION` in `versions.env`; check it on the MacBook with `yq --version`, which must mention `mikefarah`. `scripts/preflight.sh` reports it only on the machine it runs on, usually the Spark.)
 
 **Across the cluster boundary.** Keep the node full (the filler is still there), delete `urgent`, and send the serving pod from the **dev-llms** sandbox instead:
 

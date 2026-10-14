@@ -202,7 +202,7 @@ Each task starts with `scripts/serve-model.sh <name>`: it checks the util budget
 2. **`/v1/models`:** `['qwen3-coder-30b-fp8']`.
 3. **`fim_gate.py`:** a short loop as the middle (`a, b = 0, 1` … `for _ in range(…)`), then `ACCEPT tests passed`. Note the token count and seconds in the `--- middle (…) ---` header.
 
-**If something's off:** pod Pending with `exceeded quota: serving-budget` → a side model plus the apps leave less than 56 Gi; stop the side model. `REJECT: does not parse` with fences or a repeated suffix → wrong prompt form, see Troubleshooting in §4.
+**If something's off:** rollout waits with no new pod and a `FailedCreate … exceeded quota: serving-budget` event → a side model plus the apps leave less than 56 Gi; stop the side model. `REJECT: does not parse` with fences or a repeated suffix → wrong prompt form, see Troubleshooting in §4.
 
 #### Run it
 
@@ -292,7 +292,7 @@ Run it again with `MODE=raw`: the same FIM string sent to `/v1/completions` with
 The prompt uses the Qwen2.5-Coder repository format (§2.3) on the raw endpoint; what you measure here — prefill time and prefix-cache reuse — is the same for any model and prompt form.
 
 ```bash
-# ▶ MacBook · any folder
+# ▶ MacBook · 04-Qwen/lab
 cat > ~/qwen-ch02/repo_prompt.py <<'PY'
 import json, os, pathlib, sys, time, urllib.request
 BASE, MODEL = os.environ.get("BASE", "http://localhost:8000/v1"), os.environ.get("MODEL", "qwen3-coder-30b-fp8")
@@ -342,6 +342,7 @@ The first call's time grows with the prompt (prefill); the second is faster beca
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 scripts/serve-model.sh qwen2.5-math-7b
+pkill -f 'port-forward svc/vllm 8000' || true       # the Task 1 forward was bound to the replaced pod
 kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null 2>&1 &
 ```
 
@@ -448,6 +449,7 @@ The gold answer comes from a brute-force count — check it yourself before trus
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 scripts/serve-model.sh qwen3-8b
+pkill -f 'port-forward svc/vllm 8000' || true       # bound to the replaced pod
 kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null 2>&1 &
 ```
 

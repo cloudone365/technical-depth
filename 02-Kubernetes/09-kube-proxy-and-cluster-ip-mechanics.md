@@ -70,6 +70,38 @@ The probabilities cascade: with N endpoints, rule *i* matches with probability 1
 
 There are **two EndpointSlice controllers** in the picture. dev-lab's controller-manager builds slices from the tenant's pods (they feed dev-lab's DNS, e.g. the headless Service in §5.4). The root's controller builds slices for the synced Service from the real pods in `vc-dev-lab`. kube-proxy only ever reads the root's.
 
+### 2.1 One new connection to a ClusterIP, step by step
+
+`curl echo` from `netshoot` in dev-lab (§5.2). The ClusterIP and pod IPs are the ones of the HLD.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant KP as root kube-proxy<br/>mode iptables
+  participant C as netshoot pod<br/>dev-lab lab-tools
+  participant DNS as dev-lab CoreDNS
+  participant NAT as root netfilter nat<br/>KUBE-SERVICES · KUBE-SVC · KUBE-SEP
+  participant CT as conntrack<br/>one table per kernel
+  participant E as echo pod<br/>10.42.0.22:8080
+  KP->>NAT: from the root Service echo-x-lab-tools-x-dev-lab<br/>and its EndpointSlice: one KUBE-SEP per ready pod
+  C->>DNS: A? echo.lab-tools.svc.cluster.local
+  DNS-->>C: 10.43.87.12
+  C->>NAT: SYN to 10.43.87.12:80<br/>leaves the pod's lxc into the host stack
+  NAT->>NAT: KUBE-SERVICES matches 10.43.87.12:80<br/>KUBE-SVC picks a KUBE-SEP (p 1/3, then 1/2, then the rest)
+  NAT->>CT: new entry, original dst 10.43.87.12:80<br/>reply src 10.42.0.22:8080
+  NAT->>E: DNAT to 10.42.0.22:8080<br/>routed via cilium_host, Cilium delivers to the lxc
+  E-->>C: SYN-ACK, conntrack rewrites the source back to 10.43.87.12:80
+  loop every later packet of this connection
+    C->>E: conntrack sends it to the same pod, no rule walk
+  end
+```
+
+- **Step 1** is what `svc-trace.sh` prints in §5.1: one `KUBE-SVC-…` chain with the probabilities and one `KUBE-SEP-…` per endpoint. §5.3 changes the endpoint list and watches step 1 rerun.
+- **Steps 2–3** go to dev-lab's own DNS (Chapter 10). The answer is a root ClusterIP, the same on both sides.
+- **Step 5** runs once per connection. 300 new connections spread ≈ 100/100/100 in §5.2.
+- **Steps 6 and 9** are why 30 requests over one keep-alive connection all land on one pod (§5.2), and what `conntrack -L` shows in §5.5.
+- **Through the LoadBalancer IP** (§5.7) the first match is `KUBE-EXT-…`, which marks the packet for masquerade before the same kind of `KUBE-SVC-…` pick.
+
 ---
 
 ## 3. LLD
@@ -315,9 +347,9 @@ Expected: one ClusterIP for `echo`, three pod IPs for `echo-headless`. The answe
 
 ### 5.5 Conntrack
 
-#### What this lab does (commands on the Spark)
+#### What this lab does (commands on the Spark, one loop from the MacBook)
 
-- Reads the conntrack table size and fill, lists entries for the `echo` ClusterIP, sends 2000 short requests from `netshoot`, and counts entries again.
+- Reads the conntrack table size and fill, lists entries for the `echo` ClusterIP, sends 2000 short requests from `netshoot` (from the MacBook, which has the `dev-lab` context), and counts entries again.
 - **Read-only:** no sysctl is changed. Needs `conntrack` on the Spark, or use `netshoot-host` as shown at the start of §5.
 
 #### What to look for
@@ -330,13 +362,24 @@ Expected: one ClusterIP for `echo`, three pod IPs for `echo-headless`. The answe
 
 #### Run it
 
+The `kubectl` lines on the Spark use the root's name for the Service, because `~/.kube/config` there only has `spark-root`; the ClusterIP is the same as in dev-lab.
+
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo sysctl net.netfilter.nf_conntrack_max net.netfilter.nf_conntrack_count
-ECHO_CIP=$(kubectl --context dev-lab -n lab-tools get svc echo -o jsonpath='{.spec.clusterIP}')
+ECHO_CIP=$(kubectl --context spark-root -n vc-dev-lab get svc echo-x-lab-tools-x-dev-lab -o jsonpath='{.spec.clusterIP}')
 sudo conntrack -L -d "$ECHO_CIP" 2>/dev/null | head -3
-kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- sh -c 'for i in $(seq 2000); do curl -s -o /dev/null echo; done'
 sudo conntrack -C
+```
+
+```bash
+# ▶ MacBook · any folder
+kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- sh -c 'for i in $(seq 2000); do curl -s -o /dev/null echo; done'
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+sudo conntrack -C                    # compare with the count before the loop
 ```
 
 `nf_conntrack_max` should be ≥ 1,310,720, set by kube-proxy from `conntrack.maxPerCore`. The entries show the original destination (the ClusterIP) and the reply source (the pod IP) — the DNAT kube-proxy chose, remembered for the life of the connection. Each finished curl leaves a `TIME_WAIT` entry for ~120 s.
@@ -363,7 +406,7 @@ The mock LLM streams 20 tokens/s. Start a long stream inside `llm-serving` on th
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root-llms/40-ingress
-kubectl --context spark-root -n llm-serving exec deploy/mock-llm-canary -- python3 - <<'PY' &
+kubectl --context spark-root -n llm-serving exec -i deploy/mock-llm-canary -- python3 - <<'PY' &
 import json, urllib.request
 req = urllib.request.Request("http://mock-llm:8000/v1/chat/completions", data=json.dumps({"stream": True, "max_tokens": 400}).encode())
 n = 0

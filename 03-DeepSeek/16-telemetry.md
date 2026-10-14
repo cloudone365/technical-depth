@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **You will build** | Observability for everything this module deploys on the root: vLLM's serving metrics (throughput, TTFT, inter-token latency, reasoning length, KV pressure, finish reasons), GB10 health and power from DCGM or the 01-Ansible textfile collector, unified-memory headroom, gateway traffic and the day-2 CronJobs. You get a 27-panel Grafana dashboard generated from code, nine alerts with promtool unit tests, and a load test that moves every panel |
+| **You will build** | Observability for everything this module deploys on the root: vLLM's serving metrics (throughput, TTFT, inter-token latency, reasoning length, KV pressure, finish reasons), GB10 health and power from DCGM or the 01-Ansible textfile collector, unified-memory headroom, gateway traffic and the day-2 CronJobs. You get a Grafana dashboard (21 panels in 6 rows) generated from code, nine alerts with promtool unit tests, and a load test that moves every panel |
 | **Hardware** | dgx-spark-1 |
 | **Time** | 90 min |
 | **Risk** | Low. Rules and a dashboard ConfigMap in `observability`; nothing touches the model servers |
@@ -69,7 +69,33 @@ flowchart LR
   style SRC fill:#f6f8fa,stroke:#57606a
 ```
 
-Everything runs on the root cluster. The model servers live in `llm-serving`, so the platform team's ServiceMonitor `llm-workloads` (02's [`vcluster-workloads.yaml`](../02-Kubernetes/lab/manifests/root/95-observability/vcluster-workloads.yaml)) scrapes every Service port named `http` there and in `ingress`, and adds `vcluster="root"` and `vnamespace="llm-serving"` labels. A model you try in the `dev-llms` sandbox shows up in the same queries with `vcluster="dev-llms"`, so one dashboard covers both.
+Everything runs on the root cluster. The model servers live in `llm-serving`, so the platform team's ServiceMonitor `llm-workloads` (02's [`vcluster-workloads.yaml`](../02-Kubernetes/lab/manifests/root/95-observability/vcluster-workloads.yaml)) scrapes the port named `http` of the Services `vllm`, `vllm-prefill`, `vllm-decode`, `sglang` and `qwen-small-predictor` there, and the port named `metrics` of `traefik-lab-metrics` in `ingress`. It keeps only those names, so `bge-m3`, Chapter 14's `vllm-qwen2-5-7b-tools` and Chapter 09's KServe `r1-1-5b-predictor` are not scraped. It adds `vcluster="root"` and `vnamespace="llm-serving"` labels. A model you try in the `dev-llms` sandbox shows up in the same queries with `vcluster="dev-llms"`, so one dashboard covers both.
+
+### 2.1 One truncated request to a firing alert, step by step
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as eval_harness.py<br/>(port-forward :8000)
+  participant V as vllm :8000<br/>(llm-serving)
+  participant P as kps-prometheus :9090<br/>(observability)
+  participant AM as kps-alertmanager :9093
+  participant G as Grafana :32000
+  C->>V: POST /v1/chat/completions max_tokens 256
+  V-->>C: finish_reason length
+  V->>V: vllm:request_success_total finished_reason length +1
+  P->>V: GET /metrics every 15 s (ServiceMonitor llm-workloads, port http)
+  Note over P: adds vcluster root, vnamespace llm-serving
+  P->>P: ReasoningTruncated: length share over 15 m above 0.2
+  Note over P: Pending, then Firing after for 15m
+  P->>AM: alert ReasoningTruncated, severity warning
+  G->>P: finish reasons panel query
+```
+
+- **Steps 1–3** are Task 5.5's traffic: each cut-off answer adds one to the `length` series.
+- **Step 4** only happens for Service names the `keep` regex of `llm-workloads` lists; a model under another Service name never reaches step 5.
+- **Steps 5–6** are what `http://localhost:9090/alerts` shows: Pending for 15 minutes of sustained truncation, then Firing, and Alertmanager receives it. A silence (Task 5.7) stops the notification at step 6, not the rule.
+- **Step 7** is the dashboard: Grafana reads the same series, so the **finish reasons** panel moves before the alert fires. KEDA's ScaledObject `vllm` queries the same Prometheus for `vllm:num_requests_*` (Chapter 09).
 
 ---
 
@@ -134,7 +160,7 @@ MemTotal ≈ 121.7 GiB = DGX OS + kubelet/etcd/control planes + platform pods (~
 
 **The training window and `VLLMDown`.** During a training window you park vLLM on purpose (`autoscaling.keda.sh/paused-replicas=0`, [Chapter 09](09-autoscaling-and-queueing.md)). `VLLMDown` then fires after five minutes. Add an Alertmanager silence for `alertname=VLLMDown` for the length of the window (Task 5.7) instead of weakening the rule.
 
-### 3.4 Dashboard rows (27 panels)
+### 3.4 Dashboard rows (21 panels in 6 rows)
 
 | Row | Panels |
 |---|---|
@@ -182,7 +208,7 @@ The power metric is the GPU's share only, so tokens/J is an upper bound for the 
 1. **`dashboard in sync`**.
 2. **Groups:** `spark-reasoning spark-gb10 spark-day2`.
 3. **Label:** `{"grafana_dashboard":"1"}`.
-4. **Grafana** at `http://192.168.0.100:32000` lists **Spark · LLM serving (DeepSeek)** with 27 panels.
+4. **Grafana** at `http://192.168.0.100:32000` lists **Spark · LLM serving (DeepSeek)** with 21 panels in 6 rows (the JSON holds 27 entries: the 6 rows count as panels).
 
 **If something's off:** a `diff` message instead of `dashboard in sync` means someone edited the JSON by hand; regenerate it. The dashboard missing in Grafana means the label didn't arrive or the sidecar watches another namespace. More in §7.
 
@@ -404,7 +430,7 @@ Expected: a silence ID. Delete it from the Alertmanager UI if the window ends ea
 | Check | Expected |
 |---|---|
 | rules loaded | PrometheusRule `spark-reasoning`: three groups, nine rules |
-| dashboard | 27 panels; generated JSON matches the committed file (CI) |
+| dashboard | 21 panels in 6 rows; generated JSON matches the committed file (CI) |
 | sources | vLLM, GPU (DCGM or textfile), UMA, kube-state-metrics and Traefik all return series |
 | memory truth | dashboard UMA available ≈ `MemAvailable` on dgx-spark-1 |
 | alert tests | `promtool test rules` SUCCESS |
@@ -416,7 +442,7 @@ Expected: a silence ID. Delete it from the Alertmanager UI if the window ends ea
 
 | You see | Cause | Fix |
 |---|---|---|
-| no vLLM series | Service port not named `http`, or the ServiceMonitor `llm-workloads` not applied | the base Deployment's Service uses `http`; `kubectl --context spark-root -n observability get servicemonitor llm-workloads` |
+| no vLLM series | Service port not named `http`, a Service name outside the `keep` regex of `llm-workloads`, or that ServiceMonitor not applied | the base Deployment's Service uses `http`; `kubectl --context spark-root -n observability get servicemonitor llm-workloads` |
 | some panels empty, others fine | metric renamed in your vLLM image | `kubectl --context spark-root -n llm-serving exec deploy/vllm -- curl -s localhost:8000/metrics \| grep vllm:` and adjust `gen_dashboard.py` |
 | GPU panels empty | DCGM off and textfile collector not installed | run the 01-Ansible GPU telemetry playbook from Semaphore; check `spark_gpu_up` |
 | GPU memory panel shows N/A or 0 | unified memory: there is no framebuffer metric | use the UMA row (`spark_uma_available_bytes`) |

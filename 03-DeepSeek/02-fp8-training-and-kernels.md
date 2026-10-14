@@ -311,6 +311,8 @@ Expected shape:
 decode step, batch 8, 8192 cached tokens, latent cache … MiB/layer
   naive (rebuild K/V each step):   … ms/layer
   absorbed (attend on latent)  :   … ms/layer   → …× faster
+weight 2048x2048 ~ N(0, 0.02) with 32 outliers; …   (the Task 1 sweep, larger)
+…
 NVIDIA GB10  cc=(12, 1)  n=8192
   BF16 GEMM :   …  TFLOPS
   FP8  GEMM :   …  TFLOPS
@@ -434,7 +436,7 @@ kill %1
    | Value | Healthy result |
    |---|---|
    | accuracy (math / code / json) | within a few points between BF16 and FP8 |
-   | `Loading weights took … GiB` | FP8 about half of BF16 |
+   | `Model loading took … GiB` | FP8 about half of BF16 |
    | aggregate tok/s | FP8 higher |
    | `free -g` used on the Spark | clearly lower with FP8 |
 4. **Afterwards:** with `r1-32b-fp8` serving, the parked apps can be scaled back.
@@ -450,13 +452,13 @@ kill %1
 scripts/serve-model.sh r1-32b
 kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
 python3 tools/eval_harness.py --url http://localhost:8000 --model r1-32b --out results/r1-32b-bf16.json
-kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -E 'Loading weights took|KV cache size'
+kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -E 'Model loading took|KV cache size'
 kill %1
 
 scripts/serve-model.sh r1-32b-fp8
 kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
 python3 tools/eval_harness.py --url http://localhost:8000 --model r1-32b-fp8 --out results/r1-32b-fp8.json
-kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -E 'Loading weights took|KV cache size'
+kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -E 'Model loading took|KV cache size'
 kill %1
 python3 tools/eval_harness.py --report results/r1-32b-*.json
 ```
@@ -559,7 +561,7 @@ FP8 *training* at DeepSeek's scale needs Hopper or datacenter Blackwell kernels 
 | GPU probe | FP8 dense TFLOPS > BF16 dense TFLOPS; grouped (if available) beats the loop |
 | vLLM log | an MLA backend named (Triton on sm_121); a forced `FLASHMLA` fails cleanly at startup |
 | concurrency sweep | aggregate tok/s rises with concurrency, then flattens |
-| BF16 vs FP8 eval | accuracy within a few points; FP8 weights about half; `Loading weights took …` about half |
+| BF16 vs FP8 eval | accuracy within a few points; FP8 weights about half; `Model loading took … GiB` about half |
 | FP8 KV | logged KV token count roughly doubles |
 
 ---
@@ -571,7 +573,7 @@ FP8 *training* at DeepSeek's scale needs Hopper or datacenter Blackwell kernels 
 | `_scaled_mm … not supported on this device` | PyTorch build without sm_121 FP8 kernels | the NGC PyTorch image pinned in `lab/versions.env` or newer |
 | vLLM: `quantization method … not supported for capability 121` | the quantisation backend isn't compiled for this Blackwell variant | a newer vLLM image; try another checkpoint format (FP8-dynamic vs AWQ) |
 | FP8 model much worse on code or maths | aggressive activation quantisation or a poor static calibration | prefer dynamic per-token FP8; keep the KV cache in BF16; compare checkpoints with the harness |
-| No memory saving from FP8 | weights dequantised at load (fallback path) | `Loading weights took … GiB` should be about half of BF16 |
+| No memory saving from FP8 | weights dequantised at load (fallback path) | `Model loading took … GiB` should be about half of BF16 |
 | `FlashMLA is only supported on … SM90/SM100` | GB10 is sm_121 | leave the backend on automatic (Triton MLA) |
 | Very low decode speed for V2-Lite | a non-MLA path that expands K/V | check the backend line; use a vLLM release with MLA support for sm_121 |
 | `pip install deep_gemm` builds but fails at runtime | DeepGEMM supports SM90/SM100 only | expected; use the engine's built-in kernels |

@@ -77,6 +77,36 @@ flowchart LR
   style LLMS fill:#f6f8fa,stroke:#57606a
 ```
 
+### 2.1 A WaitForFirstConsumer claim, step by step
+
+`model-cache` in `llm-serving` (§5.1–5.2): the claim is created first, the prefetch Job's pod makes it real.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as kubectl on the MacBook
+  participant API as root API server
+  participant S as root scheduler
+  participant P as local-path-provisioner<br/>ns local-path-storage
+  participant H as helper pod<br/>on dgx-spark-1
+  participant K as kubelet<br/>dgx-spark-1
+  U->>API: PVC model-cache, local-nvme-retain, 300Gi
+  API-->>U: admitted by serving-budget, phase Pending<br/>event WaitForFirstConsumer
+  U->>API: Job model-prefetch, its pod mounts model-cache
+  S->>API: node chosen: annotation volume.kubernetes.io/selected-node dgx-spark-1 on the PVC
+  P->>H: create a helper pod on that node
+  H->>H: mkdir /data/k8s/retain/llm-serving/model-cache
+  P->>API: PV pvc-… with hostPath, nodeAffinity dgx-spark-1, reclaim Retain
+  API->>API: PV controller binds PVC and PV, phase Bound
+  S->>API: bind the pod to dgx-spark-1
+  K->>K: mount the hostPath into the pod at /models
+```
+
+- **Steps 1–2** are the healthy `Pending` of §5.1. A claim that doesn't fit `serving-budget` is refused at step 2 with `exceeded quota`.
+- **Step 4** is the annotation you read with `jsonpath` in §5.2. Only the root's scheduler sets it, also for a claim that came from a vCluster.
+- **Steps 5–7** create the directory and the PV whose path, reclaim policy and node you print in §5.2.
+- **A claim from dev-lab** (§5.3) adds one step before step 1: the syncer creates the root copy `vc-dev-lab/throwaway-x-lab-tools-x-dev-lab`, and the root's `vcluster-budget` can refuse it there. The directory then uses the root names (`/data/k8s/vc-dev-lab/…`).
+
 ---
 
 ## 3. LLD
@@ -265,7 +295,7 @@ Expected: `model-cache  Pending  …  local-nvme-retain`, with event `WaitForFir
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving create secret generic hf-token --from-literal=token="$HF_TOKEN" 2>/dev/null || true
 kubectl --context spark-root apply -f manifests/root-llms/60-storage/model-prefetch-job.yaml
-kubectl --context spark-root -n llm-serving logs -f job/model-prefetch
+kubectl --context spark-root -n llm-serving logs -f job/model-prefetch --pod-running-timeout=3m   # waits for the PVC to bind and the image to pull
 kubectl --context spark-root -n llm-serving get pvc model-cache
 ```
 

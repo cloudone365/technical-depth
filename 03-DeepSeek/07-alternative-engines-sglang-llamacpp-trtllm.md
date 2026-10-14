@@ -38,7 +38,7 @@ The Spark-specific question is always the same: **how much of the 121.7 GiB pool
 
 ```mermaid
 flowchart LR
-  LL["LiteLLM aliases<br/>reasoning · reasoning-sglang · local-small"]
+  LL["LiteLLM aliases (Chapter 12)<br/>reasoning · reasoning-sglang<br/>local-small: optional, §4"]
   subgraph NS["ns llm-serving on spark-root · one 32B slot ≈ 0.45 of the pool"]
     direction TB
     V["vllm<br/>util 0.45<br/>parked: KEDA paused-replicas=0"]
@@ -69,7 +69,7 @@ flowchart LR
   class PVC store
 ```
 
-All four engines read weights from the same `model-cache` PVC, so switching engines costs a load, not a download. Every engine container sets memory request = limit and runs at `priorityClassName: spark-serving`, like vLLM.
+LiteLLM arrives in [Chapter 12](12-open-webui-and-litellm-gateway.md); the tasks here reach each engine with `kubectl port-forward`. All four engines read weights from the same `model-cache` PVC, so switching engines costs a load, not a download. Every engine container sets memory request = limit and runs at `priorityClassName: spark-serving`, like vLLM.
 
 ### 2.2 RadixAttention
 
@@ -114,6 +114,39 @@ flowchart LR
   class LS,GG,TS,EX,GPU gpu
   class HF,KV store
 ```
+
+### 2.4 Swapping engines, step by step
+
+Every task in this chapter repeats the same swap: park vLLM, start the other engine in the freed slot, test it, scale it back to 0, resume vLLM. Here with SGLang (Tasks 5.2–5.3):
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant M as MacBook<br/>park_vllm, kubectl
+  participant API as root API server<br/>(spark-root)
+  participant K as KEDA<br/>ScaledObject vllm
+  participant V as Deployment vllm
+  participant S as Deployment sglang
+  participant C as PVC model-cache
+  M->>API: annotate scaledobject vllm paused-replicas=0
+  K->>V: scale to 0 replicas
+  V->>V: preStop sleep 15, pod ends, its 58 Gi leave serving-budget
+  M->>API: get pod -l app=vllm until none is left
+  M->>API: apply -k k8s/sglang/r1-32b-fp8 (replicas 1, 58 Gi request = limit)
+  API->>S: pod admitted by serving-budget, scheduled on dgx-spark-1
+  S->>C: FP8 32B weights (HF_HOME=/models/hf)
+  S-->>M: rollout status: /health on :30000 Ready
+  M->>S: port-forward svc/sglang 30000, ttft_probe.py, eval_harness.py
+  M->>API: scale deploy sglang --replicas=0
+  M->>API: annotate scaledobject vllm paused-replicas-
+  K->>V: back to minReplicaCount 1
+```
+
+- **Steps 1–3** are why the lab never uses `kubectl scale` on `vllm`: KEDA owns its replicas and would bring it back next to SGLang (§7, last row).
+- **Step 4** is the `while` loop in `park_vllm`. It ends only when the vLLM pod is gone, so step 6 finds its memory free.
+- **Step 6** fails with `exceeded quota: serving-budget` or `Pending` / `Insufficient memory` if another engine still holds its share (§7).
+- **Step 8** can take long on the first start: the image pull plus the load. The task waits up to 45 min.
+- **Step 9** gives the TTFT lines and `sglang:cache_hit_rate` of Task 5.2. TensorRT-LLM (Task 5.8) and llama.cpp (Task 5.6) use the same steps with their own Deployments; Task 5.9 is steps 10–12.
 
 ---
 

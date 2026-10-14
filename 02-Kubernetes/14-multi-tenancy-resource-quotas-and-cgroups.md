@@ -85,6 +85,47 @@ flowchart TB
 
 Everything inside `kubepods.slice` is a sibling at runtime: a tenant pod, a model server in `llm-serving` and the root's own kube-apiserver all sit next to each other in the same cgroup tree, grouped only by QoS class. The boxes exist in the API servers, not in the kernel.
 
+### 2.1 One tenant pod through the layers, step by step
+
+A pod created in dev-lab `tenant-alpha`, from `kubectl` to its cgroup. Each `alt` is one of the refusals the lab provokes.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant T as kubectl<br/>context dev-lab
+  participant V as dev-lab API server<br/>LimitRange defaults · tenant-budget
+  participant SY as dev-lab syncer
+  participant R as root API server<br/>vcluster-defaults · vcluster-budget
+  participant S as root scheduler
+  participant K as kubelet and kernel<br/>dgx-spark-1 · cgroup v2
+  T->>V: create pod in tenant-alpha
+  V->>V: LimitRange fills missing requests and limits<br/>then quota tenant-budget
+  alt over tenant-budget
+    V-->>T: exceeded quota: tenant-budget<br/>the pod never exists (drill 01)
+  end
+  V-->>SY: new pod (watch)
+  SY->>R: create the host pod in vc-dev-lab
+  R->>R: LimitRange vcluster-defaults, quota vcluster-budget
+  alt over vcluster-budget
+    R-->>SY: exceeded quota: vcluster-budget
+    SY-->>V: event on the virtual pod, it stays Pending<br/>no scheduler events (drill 02)
+  end
+  S->>R: fits allocatable CPU, memory, nvidia.com/gpu?
+  alt does not fit
+    S-->>R: Pending, Insufficient memory (a scheduler event)
+  end
+  S->>R: bind to dgx-spark-1
+  R-->>K: kubelet starts the pod
+  K->>K: pod slice under kubepods.slice by QoS class<br/>cpu.max, cpu.weight, memory.max from the resources
+  K-->>SY: status Running, or OOMKilled exit 137<br/>copied back into dev-lab
+```
+
+- **Steps 1–3** are layer 1 in §5.1 (`breakfix 01`): the event is on the ReplicaSet in dev-lab, nothing reaches the root.
+- **Steps 5–8** are layer 2 (`breakfix 02`): the pod exists in dev-lab, the root refuses its copy, and there are no scheduler events.
+- **A pod in `llm-serving` or `batch`** starts at step 6 with its own quota (`serving-budget`, `batch-budget`) and no syncer. If it fits the quota but not the shared memory pool, it stops at step 10.
+- **Step 13** is what `cgroup-inspect.sh` reads in §5.2–5.4. Throttling and OOM kills happen here, long after every quota said yes.
+- **Node pressure** (§5.6) is not in this sequence: the kubelet evicts running pods from any of the three clusters when `memory.available` drops below 4 Gi.
+
 ---
 
 ## 3. LLD
@@ -234,6 +275,8 @@ Blocks marked `dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/
 4. **`budget_check.py`:** the table below, then `budget check OK`. Without `kubectl` on the PATH it also prints `training window not checked`, which is harmless.
    ```text
                      CPU  mem GiB  slices
+   Spark total      20.0    121.7      15
+   kubelet resv.     3.0     12.0       0
    allocatable      17.0    109.7      15
    vc-dev-lab        2.0      4.0       2
    vc-dev-llms       2.0      4.0       2
@@ -346,7 +389,7 @@ kubectl --context spark-root apply -f manifests/root/12-cgroups/qos-trio.yaml
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
-for p in guaranteed burstable besteffort; do scripts/cgroup-inspect.sh platform-tools qos-$p | sed -n '1,8p'; echo; done
+for p in guaranteed burstable besteffort; do scripts/cgroup-inspect.sh platform-tools qos-$p | sed -n '1,8p;/oom_score_adj=/p'; echo; done
 ```
 
 Expected (key lines):
@@ -483,7 +526,7 @@ Expected: `"reason":"OOMKilled","exitCode":137`, and `oom_kill` > 0 in `memory.e
 3. **`uma-watch.sh`:** `MemAvailable` drops by about 16 GiB while the allocation is held, whichever outcome you get.
 4. **Record** the outcome with the driver version (580.x on this lab's Spark).
 
-**If something's off:** a pod stuck `Pending` with `Insufficient nvidia.com/gpu` means all 15 slices are in use. `ContainerCreating` for minutes is the image pull. More in §7.
+**If something's off:** a pod stuck `Pending` with `Insufficient nvidia.com/gpu` means all 15 slices are in use. `ContainerCreating` for minutes is the image pull; `logs -f` then exits with `is waiting to start`, so run it again once the pod is Running. More in §7.
 
 #### Run it
 

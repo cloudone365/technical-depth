@@ -55,7 +55,7 @@ flowchart LR
 | Destinations | the root (`in-cluster`) and two vClusters registered as clusters | `scripts/argocd-register-vclusters.sh` |
 | Ordering | sync waves (-10 → 10): root platform → vCluster budgets → LLM stack / in-vCluster platform → policy → workloads. CRD-dependent layers last | annotations |
 | Drift | `selfHeal: true`: a manual `kubectl edit` in any of the three clusters is reverted within minutes | Argo CD |
-| Safety | `prune: false` on namespaces, budgets and storage layers; the vClusters themselves (Helm releases) are **not** Argo CD apps | `applications.yaml` |
+| Safety | `prune: false` on the namespace layers (`*-00-platform`), the vCluster budgets (`spark-root-05-vclusters`) and storage (`spark-root-llms-60-storage`); the vClusters themselves (Helm releases) are **not** Argo CD apps | `applications.yaml` |
 | Secrets | never in Git. Vault (01-Ansible Chapter 18) → Kubernetes Secrets (Vault Agent / External Secrets) | `hf-token`, `llm-api-users`, TLS |
 | Versions | one file | `versions.env` |
 | Progressive delivery | HTTPRoute weights (90/10 → 50/50 → 0/100) on Traefik in the root's `ingress` | Chapter 11 §5.7 |
@@ -83,6 +83,34 @@ Argo CD runs in the root's `argocd` namespace. For dev-lab and dev-llms it's an 
 
 - Argo CD's watches and applies load the **vCluster's** API server (in its budget, behind its APF), not the root's. What reaches the root is the syncer's traffic, in the `spark-vcluster-syncers` APF lane.
 - Objects Argo CD creates in a vCluster carry its tracking annotation *inside* the vCluster. Their synced copies on the root are owned by the syncer, so the root-side `spark-root-*` apps never fight over them.
+
+### 1.3 A drift revert in dev-lab, step by step
+
+§2.3 edits a quota inside dev-lab by hand and watches Argo CD put it back. All of it happens between the root's `argocd` namespace and dev-lab's API server:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as kubectl on the MacBook<br/>(context dev-lab)
+  participant VA as dev-lab API server<br/>(192.168.0.111:443)
+  participant AC as argocd-application-controller<br/>(root, ns argocd)
+  participant RS as argocd-repo-server
+  participant GH as your fork on GitHub<br/>(main)
+  RS->>GH: fetch 02-Kubernetes/lab/manifests/dev-lab/10-tenancy
+  RS-->>AC: rendered objects (kustomize build)
+  U->>VA: patch tenant-alpha/tenant-budget<br/>limits.cpu 4
+  VA-->>AC: watch event (cluster cache for dev-lab)
+  AC->>AC: diff live vs Git: 4 vs 500m<br/>spark-dev-lab-10-tenancy OutOfSync
+  AC->>VA: selfHeal: apply tenant-budget from Git
+  VA-->>AC: live = Git, app Synced
+  Note over VA: the root's vc-dev-lab/vcluster-budget<br/>caps dev-lab at 2 CPU the whole time
+```
+
+- **Steps 1–2** run on every refresh. A fork that Argo CD can't read stops here with `ComparisonError` (§2.2).
+- **Step 3** is the `patch` command in §2.3.
+- **Steps 4–5** are the `OutOfSync` you may catch with the `get application` command. The watch comes through dev-lab's API on `.111`, so this load lands on dev-lab's API server, not the root's.
+- **Steps 6–7** put `500m` back: the last command in §2.3.
+- **The note** is why the patch never gave tenant-alpha 4 CPU: the root quota on `vc-dev-lab` is the real ceiling.
 
 ---
 
@@ -132,7 +160,7 @@ The `SERVER` column is base64; `echo <value> | base64 -d` shows `https://192.168
 
 - **Edits** `applications.yaml` locally so every `repoURL` points at your fork.
 - **Creates 23 Applications** in `argocd`: one per `manifests/<cluster>/<layer>`, with destination `in-cluster` (root platform, vCluster budgets, LLM stack) or `https://192.168.0.111:443` / `https://192.168.0.112:443` (the vClusters). Table in §1.1.
-- **Auto-sync with `selfHeal: true`.** Namespace, budget and storage layers have `prune: false`; the other layers prune.
+- **Auto-sync with `selfHeal: true`.** The `*-00-platform` layers, `spark-root-05-vclusters` and `spark-root-llms-60-storage` have `prune: false`; the other layers prune, the `10-tenancy` layers included.
 - **Optional app-of-apps:** a parent Application `spark-app-of-apps` that syncs the `gitops` folder itself, so the children are applied wave by wave.
 - **Not touched:** the vCluster Helm releases, the add-ons, and the hand-run labs (`root/12-cgroups`, `root-llms/80-distributed`, `root-llms/90-serving`).
 
@@ -155,7 +183,7 @@ The `SERVER` column is base64; `echo <value> | base64 -d` shows `https://192.168
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
-sed -i 's|github.com/cloudone365/technical-depth.git|github.com/<you>/technical-depth.git|' gitops/applications.yaml   # your fork
+sed -i.bak 's|github.com/cloudone365/technical-depth.git|github.com/<you>/technical-depth.git|' gitops/applications.yaml && rm gitops/applications.yaml.bak   # your fork (BSD and GNU sed)
 kubectl --context spark-root apply -n argocd -f gitops/applications.yaml
 kubectl --context spark-root -n argocd get applications \
   -o custom-columns=APP:.metadata.name,DEST:.spec.destination.server,WAVE:.metadata.annotations.argocd\\.argoproj\\.io/sync-wave,SYNC:.status.sync.status,HEALTH:.status.health.status

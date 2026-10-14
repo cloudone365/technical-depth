@@ -87,6 +87,37 @@ The order matters, because quotas don't evict:
 
 A window quota set below what is already in use doesn't evict anything; it only refuses new pods. That is why serving is parked first, and why a pod in `llm-serving` that restarts during the window may be refused until you close it.
 
+### 2.1 One SFT Job through Kueue, step by step
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant MAC as kubectl<br/>(MacBook)
+  participant API as root API server<br/>(spark-root)
+  participant KQ as Kueue<br/>LocalQueue train → spark-cq
+  participant RQ as ResourceQuota<br/>batch-budget
+  participant SCH as kube-scheduler
+  participant POD as pod swift-sft<br/>(ns batch)
+  participant PVC as PVC qwen-train<br/>(/work)
+  MAC->>API: apply -f k8s/jobs/swift-sft.yaml<br/>(suspend: true, queue-name train)
+  API->>KQ: Job created suspended → Workload
+  KQ->>KQ: 6 CPU · 48 Gi · 1 slice fits spark-cq ?<br/>(window: 8 CPU · 80 Gi · 3 slices)
+  KQ->>API: admit the Workload, set suspend false
+  API->>RQ: pod create checked against batch-budget
+  API->>SCH: new pod, priority spark-batch
+  SCH->>SCH: 48 Gi allocatable and a free slice on dgx-spark-1 ?
+  SCH->>POD: bind, start nvcr.io/nvidia/pytorch:26.08-py3
+  POD->>POD: pip install the PIP_SWIFT pins, then swift sft
+  POD->>PVC: base model into /work/hf, checkpoints into /work/output/sft
+  POD-->>MAC: logs: model_parameter_info · loss · eval_loss · train_runtime
+```
+
+- **Step 3** fails while the window is closed (`spark-cq` 2 CPU · 12 Gi): the Workload stays `Pending` with `insufficient quota` (Task 5.4, §7).
+- **Step 4** is `ADMITTED  True` in `kubectl -n batch get workloads`.
+- **Step 5** refuses the pod with `exceeded quota: batch-budget` if another training Job still runs: one Job at a time.
+- **Step 7** leaves the pod `Pending: Insufficient memory` when a model server still holds the pool; that is why Task 5.3 parks serving first.
+- **Steps 9–11** are Task 5.4's log landmarks and the checkpoint path; the cgroup peak you read there belongs to this pod.
+
 ---
 
 ## 3. LLD
@@ -370,7 +401,7 @@ If Argo CD manages the tenancy apps (02-Kubernetes Chapter 28), disable self-hea
 
    | Line | Healthy value |
    |---|---|
-   | `trainable params` | about 33 M, about 0.8 % |
+   | `model_parameter_info` | `… M Params (33.0… M Trainable [0.8…%])` |
    | `'loss'` (every 5 steps) | falls from its first value, then flattens |
    | `eval_loss` (every 50 steps) | recorded; does not climb steadily |
    | `train_runtime` and last checkpoint | `/work/output/sft/v0-<timestamp>/checkpoint-<step>`; note the path |
@@ -394,7 +425,7 @@ The Workload shows `ADMITTED  True` once `spark-cq` has room; Kueue then un-susp
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
-kubectl --context spark-root -n batch logs -f job/swift-sft | grep -E "trainable params|'loss'|eval_loss|train_runtime|checkpoint"
+kubectl --context spark-root -n batch logs -f job/swift-sft | grep -E "model_parameter_info|'loss'|eval_loss|train_runtime|checkpoint"
 ```
 
 While it runs, measure the real memory peak from the pod's cgroup and the training speed:
@@ -429,6 +460,7 @@ Record: peak memory, seconds per step (from the log's progress bar), `train_runt
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
+source versions.env                                               # PYTORCH_IMAGE and PIP_SWIFT for the Job below
 CKPT=/work/output/sft/v0-XXXXXXXX-XXXXXX/checkpoint-NNN          # the path from the Task 5.4 log
 kubectl --context spark-root apply -f - <<YAML
 apiVersion: batch/v1

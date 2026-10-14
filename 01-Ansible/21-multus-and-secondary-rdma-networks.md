@@ -31,7 +31,7 @@ None of this is in the pod network, so none of it is governed by Cilium. That ha
 
 ```mermaid
 flowchart TB
-  subgraph NODE["spark-0N (root cluster node)"]
+  subgraph NODE["dgx-spark-1 (and dgx-spark-2): root cluster node"]
     KUBELET["kubelet → containerd"] -->|"CNI ADD"| SHIM["multus-shim<br/>/etc/cni/net.d/00-multus.conf"]
     SHIM --> MD["multus daemon<br/>DaemonSet kube-multus-ds"]
     MD -->|"default network<br/>(delegates 05-cilium.conflist)"| CIL["Cilium → eth0 10.42.x.x"]
@@ -98,6 +98,44 @@ What this does **not** give you, and what to add for real tenants:
 | `rdma/rdma_shared_cx7` isn't in any budget | `batch-budget` and `vcluster-budget` list CPU, memory, GPU, storage | Add `requests.rdma/rdma_shared_cx7` to `batch-budget` |
 | Static IPs collide across namespaces silently | `static` IPAM has no shared state | A convention (here: `.201–.209` platform, `.211–.229` batch) or whereabouts |
 
+### 2.4 One pod gets `eth0` and `net1`, step by step
+
+What happens on the node when the `21.1` test pod `rdma-test-dgx-spark-1` starts:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant API as root kube-apiserver<br/>(context spark-root)
+  participant KL as kubelet on dgx-spark-1
+  participant DP as rdma-shared-dp-ds<br/>(kube-system)
+  participant CTD as containerd
+  participant SHIM as multus-shim<br/>(00-multus.conf)
+  participant MD as kube-multus-ds<br/>(multus daemon)
+  participant CIL as cilium-cni<br/>(05-cilium.conflist)
+  participant MV as macvlan + static IPAM<br/>(NAD platform-tools/cx7-a)
+  KL->>API: watch: pod rdma-test-dgx-spark-1, nodeName dgx-spark-1
+  KL->>DP: Allocate rdma/rdma_shared_cx7: 1
+  DP-->>KL: /dev/infiniband devices of enp1s0f1np1, enP2p1s0f1np1
+  KL->>CTD: RunPodSandbox
+  CTD->>SHIM: CNI ADD (first file in /etc/cni/net.d)
+  SHIM->>MD: forward the request to the node's daemon
+  MD->>API: GET the pod: annotation k8s.v1.cni.cncf.io/networks
+  MD->>CIL: delegate the default network
+  CIL-->>MD: eth0 10.42.x.x
+  MD->>API: GET NetworkAttachmentDefinition cx7-a in the pod's namespace
+  MD->>MV: ADD master enp1s0f1np1, mode bridge, mtu 9000,<br/>ips 192.168.100.201/24
+  MV-->>MD: net1 192.168.100.201
+  MD->>API: PATCH the pod: annotation network-status
+  MD-->>CTD: result (through the shim)
+  KL->>CTD: start container t with IPC_LOCK and the RDMA devices
+```
+
+- **Steps 2–3** need the node to advertise the resource (`RDMA` column `64`, §3). No quota counts it (§2.3).
+- **Step 5** reaches Multus only because `00-multus.conf` sorts before `05-cilium.conflist` and Cilium runs with `cni.exclusive=false` (§3, `/etc/cni/net.d`).
+- **Step 10** is the namespaced lookup. A `batch` pod before `20.2`, or any vCluster pod, fails here with `cannot find a network-attachment-definition` (§2.3, §5).
+- **Steps 11–12** happen outside Cilium, so no Cilium policy covers `net1`; the §3.3 ping shows it.
+- **Step 13** writes what you read with the `network-status` jsonpath in §3.1 and §3.3.
+
 ---
 
 ## 3. Hands-on
@@ -141,7 +179,7 @@ What this does **not** give you, and what to add for real tenants:
   connection: local
   gather_facts: false
   vars:
-    kubeconfig: "{{ playbook_dir }}/../.cache/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
+    kubeconfig: "{{ lab_cache_dir }}/kubeconfig-{{ lab_name | default('spark-lab') }}.yaml"
     kube_context: spark-root
     multus_version: v4.3.0                   # check https://github.com/k8snetworkplumbingwg/multus-cni/releases
     multus_rdma_resource: rdma_shared_cx7
@@ -164,12 +202,12 @@ What this does **not** give you, and what to add for real tenants:
     - name: Download the Multus thick-plugin manifest
       ansible.builtin.get_url:
         url: "https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/{{ multus_version }}/deployments/multus-daemonset-thick.yml"
-        dest: "{{ playbook_dir }}/../.cache/multus-{{ multus_version }}.yml"
+        dest: "{{ lab_cache_dir }}/multus-{{ multus_version }}.yml"
         mode: "0644"
 
     - name: Multus DaemonSet (standard kubeadm paths /etc/cni/net.d and /opt/cni/bin)
       kubernetes.core.k8s:
-        src: "{{ playbook_dir }}/../.cache/multus-{{ multus_version }}.yml"
+        src: "{{ lab_cache_dir }}/multus-{{ multus_version }}.yml"
         state: present
 
     - name: Wait for Multus DaemonSet
@@ -302,7 +340,7 @@ Things worth noticing:
 - **`module_defaults` pins the cluster.** Every `kubernetes.core` task gets `context: spark-root` from the action group, so none of them can land in a vCluster even though the lab kubeconfig's other contexts are one typo away.
 - **The NAD namespaces are discovered, not assumed.** Run 21.1 before 20.2 and you get NADs in `platform-tools` only. Run it again after 20.2 and `batch` gets its pair. `product()` builds the namespace × fabric matrix in one loop.
 - **The test pods live in `platform-tools`** (privileged PSA). It is the root namespace for the platform team's node-level tools, and it holds no tenant workloads.
-- **Pin what you download.** The playbook pins the *manifest* to the `v4.3.0` tag, but check the image tag inside `.cache/multus-v4.3.0.yml` (`grep image:`). Upstream manifests have pointed at a moving `snapshot` tag before; replace it with the release tag if so. The RDMA device plugin is on `:latest` until you pin it.
+- **Pin what you download.** The playbook pins the *manifest* to the `v4.3.0` tag, but check the image tag inside `multus-v4.3.0.yml` in the state folder (`lab_cache_dir`; `.cache/` after a MacBook run) with `grep image:`. Upstream manifests have pointed at a moving `snapshot` tag before; replace it with the release tag if so. The RDMA device plugin is on `:latest` until you pin it.
 
 ```yaml
 # lab/playbooks/templates/rdma-shared-dp.yaml.j2
@@ -361,13 +399,14 @@ spec:
 
 #### Run it
 
-**Semaphore UI:** run the template **`21.1 Multus RDMA`**. Break-glass is the `ansible-playbook` line below, run from the MacBook against its own `.cache/` kubeconfig. Then check from the MacBook:
+**Semaphore UI:** run the template **`21.1 Multus RDMA`**. Then check from the MacBook:
 
 ```bash
 # ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
+tools/fetch-kubeconfig.sh sema01                                     # the contexts Semaphore keeps on sema01
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
-ansible-playbook playbooks/21.1-multus-rdma.yml
+# break-glass instead of the template (MacBook's own .cache/ kubeconfig): ansible-playbook playbooks/21.1-multus-rdma.yml
 kubectl --context spark-root get net-attach-def -A                  # cx7-a, cx7-b in platform-tools (and batch after 20.2)
 kubectl --context spark-root get nodes -o custom-columns=NAME:.metadata.name,RDMA:.status.allocatable.rdma/rdma_shared_cx7,GPU:.status.allocatable.nvidia\\.com/gpu
 ```

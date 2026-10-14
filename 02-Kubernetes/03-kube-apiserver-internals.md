@@ -23,12 +23,12 @@ A single Spark shared by several teams is a multi-tenant platform. Every guardra
 
 ```mermaid
 flowchart LR
-  REQ(["HTTPS request<br/>:6443 root · :443 vCluster"]) --> APF{"API Priority<br/>& Fairness"}
-  APF -->|"429 when the<br/>queue is full"| R429(["429"])
-  APF --> AUTHN["Authentication<br/>x509 · SA token · OIDC"]
+  REQ(["HTTPS request<br/>:6443 root · :443 vCluster"]) --> AUTHN["Authentication<br/>x509 · SA token · OIDC"]
   AUTHN -->|401| R401(["401"])
-  AUTHN --> AUDIT1[/"audit: RequestReceived"/]
-  AUDIT1 --> AUTHZ["Authorization<br/>Node · RBAC"]
+  AUTHN --> AUDIT1[/"audit: RequestReceived<br/>(omitted by the lab policy)"/]
+  AUDIT1 --> APF{"API Priority<br/>& Fairness<br/>(FlowSchema by user/group/SA)"}
+  APF -->|"429 when the<br/>queue is full"| R429(["429"])
+  APF --> AUTHZ["Authorization<br/>Node · RBAC"]
   AUTHZ -->|403| R403(["403"])
   AUTHZ --> MUT["Mutating admission<br/>LimitRanger defaults · SA · webhooks"]
   MUT --> SCHEMA["Schema validation<br/>+ defaulting"]
@@ -69,13 +69,50 @@ flowchart LR
 
 | Stage | Question it answers | Typical failure text |
 |---|---|---|
-| APF | "Is there capacity for *this kind* of caller right now?" | `429 Too Many Requests`, header `X-Kubernetes-PF-FlowSchema-UID` |
 | AuthN | "Who are you?" (user + groups) | `401 Unauthorized` / `You must be logged in` |
+| APF | "Is there capacity for *this kind* of caller right now?" It runs after AuthN, because FlowSchemas match users, groups and ServiceAccounts | `429 Too Many Requests`, header `X-Kubernetes-PF-FlowSchema-UID` |
 | AuthZ | "May *who* do *verb* on *resource* in *namespace*?" | `forbidden: User "alice" cannot create resource "pods"… in the namespace "tenant-beta"` |
 | Mutating admission | "Fill in or rewrite fields" | usually silent (LimitRanger adds defaults) |
 | Validating admission | "Is the final object acceptable?" | `ValidatingAdmissionPolicy 'x' … denied request: …`, `violates PodSecurity "restricted:latest"`, `exceeded quota` |
 
 When the **root** pipeline rejects a synced pod, the tenant doesn't get an error from `kubectl` — its request already succeeded in the vCluster. The rejection shows up as a sync error event on the pod inside the vCluster, and the pod stays `Pending` (Chapter 04 §4, break/fix 02).
+
+### 2.1 One tenant pod create, step by step
+
+The pod is Task 7's `tenant-alpha/audit-demo`, created by Alice.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as kubectl as alice<br/>(.cache/alice.kubeconfig)
+  participant V as dev-lab API server<br/>192.168.0.111:443
+  participant SQL as dev-lab SQLite<br/>(PVC data-dev-lab-0)
+  participant SY as dev-lab syncer<br/>SA vc-dev-lab/vc-dev-lab
+  participant R as root kube-apiserver<br/>192.168.0.100:6443
+  participant E as root etcd
+  participant AL as root audit.log
+  U->>V: POST /api/v1/namespaces/tenant-alpha/pods (client cert CN=alice O=team-alpha)
+  V->>V: AuthN: dev-lab CA → user alice, group team-alpha
+  V->>V: APF: FlowSchema spark-tenants (ByUser)
+  V->>V: RBAC: RoleBinding alpha-developers → spark-tenant-developer
+  V->>V: admission: LimitRange defaults → PSA restricted → CEL spark-* policies → quota tenant-budget
+  V->>SQL: store tenant-alpha/audit-demo
+  V-->>U: 201 Created (Pending)
+  SY->>V: watch event: new pod
+  SY->>R: POST /api/v1/namespaces/vc-dev-lab/pods audit-demo-x-tenant-alpha-x-dev-lab (SA token)
+  R->>R: AuthN: system:serviceaccount:vc-dev-lab:vc-dev-lab
+  R->>R: APF: FlowSchema spark-vcluster-syncers (ByNamespace)
+  R->>R: RBAC: the chart's Role in vc-dev-lab
+  R->>R: admission: LimitRange vcluster-defaults → PSA baseline → quota vcluster-budget
+  R->>E: write /registry/pods/vc-dev-lab/audit-demo-x-tenant-alpha-x-dev-lab
+  R->>AL: RequestResponse event, user = syncer, code 201
+  R-->>SY: 201 Created
+```
+
+- **Steps 1–2** are Task 3: `kubectl auth whoami` shows what step 2 extracted from the certificate. The same certificate against the root fails at step 10's AuthN with a 401.
+- **Step 4** is Task 4 (`auth can-i`); **step 5** is Task 5. A server-side dry run runs steps 2–5 and stops: nothing reaches SQLite, so steps 8–16 never happen.
+- **Steps 3 and 11** are Task 6. Alice's LIST loops stop at dev-lab (they are answered from step 6's store), so the root lane at step 11 stays quiet.
+- **Steps 14–15** are Task 7: the root audit log names the syncer, never Alice. If step 13 refuses the pod (root quota spent), steps 14–16 are replaced by an error to the syncer, which records a sync error event on the pod in dev-lab; the pod stays `Pending` (break/fix 02).
 
 ---
 
@@ -111,7 +148,7 @@ The same four policies ([`common/15-admission`](lab/manifests/common/15-admissio
 |---|---|---|---|
 | `spark-no-latest-tag` | tenants, llm-sandbox, llm-serving, batch | image must have a tag or digest, and not `:latest` | reproducible rollbacks. Also avoids re-pulling a 10 GB NGC image |
 | `spark-gpu-slice-limits` | `spark.lab/tenant=true` (tenants, `llm-sandbox`) | `nvidia.com/gpu` ≤ 1 per container | each vCluster has 2 slices in total. One pod must not take both |
-| `spark-no-nvidia-env-bypass` | tenants | no `NVIDIA_VISIBLE_DEVICES`, `NVIDIA_DRIVER_CAPABILITIES` or `CUDA_VISIBLE_DEVICES` in env | with the nvidia default runtime, that env would grant GPU access without a quota-counted request — outside every budget |
+| `spark-no-nvidia-env-bypass` | `spark.lab/tenant=true` (tenants, `llm-sandbox`) | no `NVIDIA_VISIBLE_DEVICES`, `NVIDIA_DRIVER_CAPABILITIES` or `CUDA_VISIBLE_DEVICES` in env | with the nvidia default runtime, that env would grant GPU access without a quota-counted request — outside every budget |
 | `spark-serving-needs-readiness` | `spark.lab/tier=serving` | Deployments/StatefulSets must have a `readinessProbe` | a vLLM pod takes minutes to load weights, and must not get traffic while it does |
 
 Plus built-ins: **PodSecurity** `restricted` on tenant namespaces (`baseline` on `llm-sandbox` and `llm-serving`, since NGC images run as root; `privileged` on `batch` for RDMA), **LimitRanger**, **ResourceQuota** — in each vCluster for its tenants, again at the root for the `vc-*` namespaces (baseline PSA, LimitRange safety net, the vCluster budget), and at the root for the LLM stack (`serving-budget`, `batch-budget`).
@@ -300,7 +337,7 @@ Expected:
 create pods -n tenant-alpha              yes
 create pods -n tenant-beta               no
 update resourcequota -n tenant-alpha     no
-watch secrets -n tenant-alpha            no   # Ctrl-C to stop
+watch secrets -n tenant-alpha            no
 list nodes                               yes
 ```
 
@@ -386,16 +423,16 @@ The CEL behind it uses optional-field access, so pods without `resources` don't 
 
 #### What this lab does (32 background LIST loops as Alice, metrics from both API servers)
 
-- **Load:** terminal A starts 32 background loops that run `kubectl -n tenant-alpha get pods` as Alice as fast as they can. All of them land in dev-lab's lane `spark-tenants` (10 shares, 16 queues, per-user fairness).
+- **Load:** terminal A starts 32 background loops that run `kubectl -n tenant-alpha get pods` as Alice as fast as they can, for as long as the file `.cache/flood` exists. All of them land in dev-lab's lane `spark-tenants` (10 shares, 16 queues, per-user fairness).
 - **Watching:** terminal B polls dev-lab's `/metrics` for that lane every 2 s. Terminal C times one request as Bob and one root request, and dumps the root's priority levels.
-- **Nothing is reconfigured.** `pkill` stops the loops. The load costs CPU on the Spark while it runs, so don't leave it on.
+- **Nothing is reconfigured.** Deleting `.cache/flood` stops the loops. The load costs CPU on the Spark while it runs, so don't leave it on.
 
 #### What to look for
 
 1. **dev-lab metrics (terminal B):** `apiserver_flowcontrol_current_inqueue_requests` and `…_current_executing_requests` for `priority_level="spark-tenants"` above 0 while the loops run; `rejected_requests_total` may start counting (Alice gets some `429`s).
 2. **Bob stays fast:** the `time` for Bob's `get pods` stays well under a second (about 100 ms).
 3. **The root barely notices:** `kubectl --context spark-root get nodes` is as fast as before, and the root's `spark-vcluster-syncers` row shows little activity, because LISTs of tenant pods are answered from dev-lab's own database.
-4. **Cleanup:** after `pkill`, `pgrep -fc "kubectl -n tenant-alpha get pods"` prints `0`.
+4. **Cleanup:** a few seconds after `rm .cache/flood`, `pgrep -fc "kubectl -n tenant-alpha get pods"` prints `0`.
 
 **If something's off:** no `spark-tenants` series at all → Alice's requests matched another FlowSchema; check that Alice's certificate group is `team-alpha` (Task 3) and that `dev-lab/16-apf` is applied. More in §7 (`429` row).
 
@@ -405,11 +442,13 @@ Generate tenant load as Alice (32 parallel LIST loops), and watch as admin in de
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
-# terminal A — Alice misbehaves
-for i in $(seq 32); do (while true; do KUBECONFIG=$ALICE kubectl -n tenant-alpha get pods -o name >/dev/null 2>&1; done &) ; done
+# terminal A — Alice misbehaves (a new terminal: set ALICE again)
+export ALICE=$PWD/.cache/alice.kubeconfig
+touch .cache/flood
+for i in $(seq 32); do (while [ -e .cache/flood ]; do KUBECONFIG=$ALICE kubectl -n tenant-alpha get pods -o name >/dev/null 2>&1; done &) ; done
 
-# terminal B — dev-lab's API server: the tenant lane fills up
-watch -n2 "kubectl --context dev-lab get --raw /metrics | grep -E 'apiserver_flowcontrol_(current_inqueue_requests|rejected_requests_total|current_executing_requests)\{.*spark-tenants' "   # Ctrl-C to stop
+# terminal B — dev-lab's API server: the tenant lane fills up (macOS has no 'watch')
+while true; do kubectl --context dev-lab get --raw /metrics | grep -E 'apiserver_flowcontrol_(current_inqueue_requests|rejected_requests_total|current_executing_requests)\{.*spark-tenants'; sleep 2; done   # Ctrl-C to stop
 
 # terminal C — Bob, and the root, are unaffected
 time KUBECONFIG=.cache/bob.kubeconfig kubectl -n tenant-beta get pods
@@ -417,8 +456,8 @@ time kubectl --context spark-root get nodes
 kubectl --context spark-root get --raw /debug/api_priority_and_fairness/dump_priority_levels | column -t -s, \
   | grep -E 'PriorityLevelName|spark-vcluster-syncers|global-default'
 
-# stop the flood
-pkill -f "kubectl -n tenant-alpha get pods"
+# stop the flood (terminal A): each loop ends after its current request
+rm .cache/flood
 ```
 
 Expected: in dev-lab, `current_inqueue_requests{priority_level="spark-tenants"}` climbs and some of Alice's calls may get `429`. Bob's call stays under ~100 ms (queues are shuffle-sharded per user). The root barely notices: LISTs of tenant pods are answered from dev-lab's own database. Now make the root notice — create and delete pods in a loop (each one is a syncer write to the root) and watch the `spark-vcluster-syncers` lane instead.

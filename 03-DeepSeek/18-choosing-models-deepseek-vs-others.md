@@ -237,7 +237,7 @@ That fits the everyday split with room for `r1-1.5b` as a third model (0.10, 14 
 | same Deployment name `vllm` | `nameSuffix: -qwen2-5-7b-tools` |
 | `svc/vllm` (selector `app: vllm`) would pick up the new pods | label `app: vllm-qwen2-5-7b-tools` with `includeSelectors: true` |
 | a second copy of the `hf-token` Secret | `$patch: delete`; both read the Vault-synced Secret |
-| metrics | its own ServiceMonitor selector; the dashboard keys on `model_name`, so both appear |
+| metrics | none in the overlay: 02's ServiceMonitor `llm-workloads` keeps only the Service names `vllm`, `vllm-prefill`, `vllm-decode`, `sglang` and `qwen-small-predictor`, so the side model is not scraped until its name is added there |
 
 **Time-slicing is not isolation.** Both engines submit kernels to the same GPU, which alternates between them, so one model's load raises the other's inter-token latency. Unified memory is shared too. The GB10 has no MIG. Task 5.6 measures the effect.
 
@@ -249,7 +249,7 @@ That fits the everyday split with room for `r1-1.5b` as a third model (0.10, 14 
 - **[Chapter 12](12-open-webui-and-litellm-gateway.md)**: the outcome becomes LiteLLM aliases. Clients don't change when the model behind an alias does. Keys can be restricted per model, which is how hosted fallback stays opt-in.
 - **[Chapter 14](14-tool-calling-and-agents.md)**: `agent_tools.py` and the tool parsers.
 - **[Chapter 15](15-automation-secrets-and-day2.md)**: Hugging Face and provider keys live in Vault on vault01 (`kv/spark-lab/hf`, `kv/spark-lab/providers`) and reach the cluster through `vault-sync`; the release gate decides whether a new model may replace the old one.
-- **[Chapter 16](16-telemetry.md)**: the dashboard shows both side-by-side models by `model_name`.
+- **[Chapter 16](16-telemetry.md)**: the dashboard keys on `model_name`, but it shows a side-by-side model only once `llm-workloads` scrapes its Service (§3.8).
 - **[04-Qwen](../04-Qwen/README.md)**: the deeper dive into the Qwen family on the same platform, reusing this module's gateway, RAG and telemetry.
 
 ---
@@ -312,14 +312,20 @@ Write down, before running anything, which model you expect to win on math accur
 
 The Llama repo is gated: accept the licence on Hugging Face and store the token in Vault first.
 
+Skip the vault01 block if Chapter 15 Task 5.1 already stored a token whose account accepted the Llama licence.
+
 ```bash
 # ▶ vault01 (ssh vault01)
-vault kv put kv/spark-lab/hf token="hf_..."
+read -rsp "HF token: " HF; echo
+printf %s "$HF" | vault kv put kv/spark-lab/hf token=-             # no value on the command line (Chapter 15 Task 5.1)
+unset HF
 ```
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-kubectl --context spark-root -n llm-serving create job --from=cronjob/vault-sync vs-now
+kubectl --context spark-root -n llm-serving delete job vs-ch18 --ignore-not-found
+kubectl --context spark-root -n llm-serving create job --from=cronjob/vault-sync vs-ch18
+kubectl --context spark-root -n llm-serving wait --for=condition=complete job/vs-ch18 --timeout=5m
 MAX_TOKENS=8192 POWER_W=200 scripts/compare-models.sh llama-3.1-8b r1-llama-8b r1-7b
 ```
 
@@ -533,7 +539,7 @@ scripts/serve-model.sh r1-7b
 kubectl --context spark-root apply -k k8s/multi/qwen2.5-7b-tools
 kubectl --context spark-root -n llm-serving rollout status deploy/vllm-qwen2-5-7b-tools --timeout=30m
 kubectl --context spark-root -n llm-serving get deploy -L model
-sed -i 's|model: hosted_vllm/qwen2.5-7b-tools, api_base: http://vllm.llm-serving:8000/v1|model: hosted_vllm/qwen2.5-7b-tools, api_base: http://vllm-qwen2-5-7b-tools.llm-serving:8000/v1|' k8s/apps/litellm.yaml
+sed -i '' 's|model: hosted_vllm/qwen2.5-7b-tools, api_base: http://vllm.llm-serving:8000/v1|model: hosted_vllm/qwen2.5-7b-tools, api_base: http://vllm-qwen2-5-7b-tools.llm-serving:8000/v1|' k8s/apps/litellm.yaml
 kubectl --context spark-root apply -k k8s/apps
 kubectl --context spark-root -n llm-serving rollout restart deploy/litellm
 ```
@@ -569,7 +575,7 @@ Decide whether the increase is acceptable for your users or whether the second m
 
 #### What this lab does (LiteLLM hosted aliases, tools `eval_harness.py`, `stream_probe.py`)
 
-- **Provider keys** at `kv/spark-lab/providers` on vault01, a new `SYNC_MAP` entry for Secret `provider-keys`, two hosted aliases in `litellm-config` and two env vars on LiteLLM. These are edits you make to your working copy.
+- **Provider keys** at `kv/spark-lab/providers` on vault01, a new `SYNC_MAP` entry and Role `resourceNames` entry for Secret `provider-keys`, read access in the Vault policy, two hosted aliases in `litellm-config` and two env vars on LiteLLM. These are edits you make to your working copy.
 - **Local run:** serves `r1-32b-fp8` and runs math and JSON at concurrency 8 with `max_tokens` 16384, with your measured watts for the cost.
 - **Hosted runs:** the same suites through `api.lab.local` for each hosted alias. **The lab's synthetic eval data leaves your network and costs money**; use a key with `max_budget`.
 - **Latency and break-even:** two streamed probes and a small cost calculation on the MacBook.
@@ -588,11 +594,13 @@ Decide whether the increase is acceptable for your users or whether the second m
 
 **Data leaves your network in this task.** Use only the lab's synthetic eval data.
 
-Store the provider keys in Vault and add an entry for Secret `provider-keys` to `vault-sync`'s `SYNC_MAP` ([Chapter 15](15-automation-secrets-and-day2.md)):
+Store the provider keys in Vault, then extend `vault-sync` ([Chapter 15](15-automation-secrets-and-day2.md)) in your working copy of `k8s/ops/vault-sync.yaml`: a `SYNC_MAP` entry for Secret `provider-keys` (keys `openai`, `anthropic`, `restart: ["deployment/litellm"]`), and `provider-keys` in the Role's `resourceNames`. Without the Role change the sync's first `GET` of that Secret gets `403` and the run fails. The policy `deepseek-serving` must also allow `read` on `kv/data/spark-lab/providers`.
 
 ```bash
 # ▶ vault01 (ssh vault01)
-vault kv put kv/spark-lab/providers openai="sk-..." anthropic="sk-ant-..."
+read -rsp "OpenAI key: " OA; echo; read -rsp "Anthropic key: " AN; echo
+printf '{"openai":"%s","anthropic":"%s"}' "$OA" "$AN" | vault kv put kv/spark-lab/providers -   # JSON on stdin, not argv
+unset OA AN
 ```
 
 Add the hosted models to `litellm-config` in `k8s/apps/litellm.yaml`. Use the model IDs from each provider's current documentation; names change often:

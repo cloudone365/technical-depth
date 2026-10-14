@@ -195,7 +195,7 @@ The Vault is **vault01**, the same one Semaphore uses. Give AWX its **own** AppR
 
 Each job now gets a freshly signed certificate with the signing role's lifetime (15 minutes on vault01). AWX stores **no** usable long-term access on its own: the private key alone won't pass sshd without a valid certificate.
 
-Two lab details. `group_vars/spark.yml` picks `ansible_user` from `vault_role_id`, which AWX doesn't define, so it would say `dgxadmin` and override the credential's username: give the job templates the extra variable `ansible_user: svc-ansible`. And play 1 (`00-vault-cert.yml`) skips itself for the same reason, so it never competes with the credential plugin.
+Two lab details. `group_vars/spark.yml` picks `ansible_user` from `vault_role_id`, which AWX doesn't define, so it would say `dgxadmin` and override the credential's username: give the job templates the extra variable `ansible_user: svc-ansible`. And play 1 (`00-vault-cert.yml`) skips its certificate block for the same reason, so it never competes with the credential plugin; its first task still needs `ANSIBLE_CONFIG` from `AWX_TASK_ENV` (Chapter 23 §3.4).
 
 ### 2.3 Workflow: drift → approval → remediate → validate
 

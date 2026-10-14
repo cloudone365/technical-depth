@@ -37,6 +37,37 @@ flowchart LR
   R2 -->|no| OK
 ```
 
+### 1.1 One `drift-cycle.sh` run, step by step
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant DC as tools/drift-cycle.sh<br/>(MacBook, 01-Ansible/lab)
+  participant AP as ansible-playbook<br/>26.1-drift-check.yml
+  participant SP as dgx-spark-1
+  participant RP as spark_drift_report.py
+  participant MON as monitoring host<br/>/var/lib/prometheus/node-exporter
+  participant HL as 04.3-baseline.yml + 12.1-telemetry.yml
+  DC->>AP: run_check check-TS<br/>(callback ansible.posix.json)
+  AP->>SP: roles under check_mode true, diff true
+  SP-->>AP: per task: ok, changed (would change), failed
+  AP-->>DC: drift/check-TS.json
+  DC->>RP: spark_drift_report.py check-TS.json
+  RP-->>DC: check-TS.md, check-TS.hosts,<br/>spark_config_drift.prom, exit 0, 2 or 3
+  DC->>MON: ansible monitoring -m copy spark_config_drift.prom
+  opt exit 2 and AUTO_HEAL=1
+    DC->>HL: --limit (check-TS.hosts) --tags baseline,telemetry_node
+    HL->>SP: re-apply the sysctl, the holds, the telemetry node files
+    DC->>AP: run_check recheck-TS
+  end
+  DC-->>DC: exit with the last check's code
+```
+
+- **Steps 2–3:** every task that *would* change is one drifted task. That is the `changed=` count you read in the Semaphore recap of `26.1 Drift check` (§4.1).
+- **Step 6** is where `exit=0`, `2` or `3` comes from, and the `.hosts` file is the `--limit` of step 8 (§4.2).
+- **Step 7** feeds the "Config drift (tasks)" stat in Grafana (Chapter 12). A failure here prints `WARN: could not publish drift metrics`.
+- **Steps 8–10** run only with `AUTO_HEAL=1` and only for the safe tags; fabric, runtime, driver and Kubernetes drift stays in the re-check report (§4.3).
+
 ---
 
 ## 2. Making check mode trustworthy (lessons baked into the roles)
@@ -311,8 +342,8 @@ Two ways to run the same check:
 ```bash
 # ▶ MacBook · technical-depth (repo root)
 cd "01-Ansible/lab"
-tools/drift-cycle.sh; echo "exit=$?"
-cat .cache/drift/check-*.md | tail -20
+BECOME_ARGS="-K -l dgx-spark-1,localhost" tools/drift-cycle.sh; echo "exit=$?"   # sudo password at each prompt; with two Sparks: BECOME_ARGS=-K
+cat "$(ls -t .cache/drift/check-*.md | head -1)" | tail -20
 ```
 
 ### 4.2 Create drift on purpose, then watch it
@@ -340,9 +371,9 @@ cat .cache/drift/check-*.md | tail -20
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
-ssh dgxadmin@192.168.0.101 'sudo sysctl -w vm.swappiness=60 && sudo sed -i "s/^vm.swappiness.*/vm.swappiness = 60/" /etc/sysctl.d/90-spark.conf'
-ssh dgxadmin@192.168.0.101 'sudo apt-mark unhold $(apt-mark showhold | grep -m1 nvidia)'
-tools/drift-cycle.sh; echo "exit=$?"          # → 2, dgx-spark-2 listed with both tasks
+ssh -t dgxadmin@192.168.0.101 'sudo sysctl -w vm.swappiness=60 && sudo sed -i "s/^vm.swappiness.*/vm.swappiness = 60/" /etc/sysctl.d/90-spark.conf'   # -t: sudo asks for the password
+ssh -t dgxadmin@192.168.0.101 'sudo apt-mark unhold $(apt-mark showhold | grep -m1 nvidia)'
+BECOME_ARGS=-K tools/drift-cycle.sh; echo "exit=$?"          # → 2, dgx-spark-2 listed with both tasks
 ```
 
 Expected report (abridged):
@@ -373,7 +404,8 @@ The Grafana "Config drift (tasks)" stat on the overview dashboard (Chapter 12) t
 2. **The re-check report** shows `0` drifted tasks for every host.
 3. **On the Spark:**
    ```bash
-   # ▶ dgx-spark-1 (ssh dgx-spark-1)
+   # ▶ dgx-spark-2 (ssh dgx-spark-2)
+   # the Spark you drifted in §4.2 (dgx-spark-1 with one Spark)
    sysctl vm.swappiness                  # vm.swappiness = 10
    apt-mark showhold | grep nvidia       # the package you unheld is back in the list
    ```
@@ -385,7 +417,7 @@ The Grafana "Config drift (tasks)" stat on the overview dashboard (Chapter 12) t
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
-AUTO_HEAL=1 tools/drift-cycle.sh; echo "exit=$?"     # → heal on dgx-spark-2 only → recheck → 0
+AUTO_HEAL=1 BECOME_ARGS=-K tools/drift-cycle.sh; echo "exit=$?"     # → heal on dgx-spark-2 only → recheck → 0 (one Spark: BECOME_ARGS="-K -l dgx-spark-1,localhost")
 ```
 
 ### 4.4 Schedule it

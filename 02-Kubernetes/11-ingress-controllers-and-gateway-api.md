@@ -39,18 +39,20 @@ flowchart LR
     TR["Traefik v3 · ns ingress<br/>entrypoints web :8000 / websecure :8443<br/>readTimeout 0 · idleTimeout 600s"]
     subgraph MW["Middlewares (per route)"]
       direction TB
-      M1["llm-body-limit<br/>32 MiB request body<br/>buffers responses: not on streaming routes"]
-      M2["llm-ratelimit<br/>20 r/s avg · burst 40"]
-      M3["llm-apikey<br/>basicAuth"]
+      M1["llm-body-limit<br/>32 MiB request body<br/>buffers responses: not on streaming routes<br/>(on Ingress llm only during §5.5)"]
+      M2["llm-ratelimit<br/>20 r/s avg · burst 40<br/>(the only one on Ingress llm)"]
+      M3["llm-apikey<br/>basicAuth<br/>(added in §5.6)"]
     end
     S1["Service mock-llm<br/>2 pods"]
     S2["Service mock-llm-canary"]
-    S3["Service triton :8001"]
+    S3["Service triton :8001<br/>(after Chapter 21)"]
     NP["NetworkPolicy<br/>allow-ingress-and-same-namespace"]
   end
   KP --> TR
-  TR --> MW
-  MW -->|"Ingress llm.lab.local"| S1
+  TR -->|"Ingress llm.lab.local"| M2
+  M2 --> S1
+  M1 -.- M2
+  M3 -.- M2
   TR -->|"HTTPRoute gw.lab.local<br/>90 / 10"| S1
   TR -->|"weight 10"| S2
   TR -->|"h2c / gRPC"| S3
@@ -83,6 +85,42 @@ One cluster handles the whole request. The root's MetalLB owns the address and k
 | Cross-namespace | no | `ReferenceGrant` |
 | Status | minimal | per-route `Accepted` / `ResolvedRefs` conditions: *debuggable* |
 | Where the CRDs live here | built in (every API server) | installed **on the root only** — dev-lab and dev-llms have their own API servers and don't have them |
+
+### 2.2 One streaming request, step by step
+
+`curl -N http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":100}'` from the MacBook, with the lab's routes as applied in §5.2.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as curl on the MacBook
+  participant SP as MetalLB speaker<br/>dgx-spark-1 · enP7s7
+  participant KP as root kube-proxy<br/>KUBE-EXT · KUBE-SVC
+  participant T as Traefik pod<br/>ns ingress · web :8000
+  participant RL as Middleware<br/>llm-ratelimit
+  participant M as mock-llm pod<br/>ns llm-serving · :8000
+  C->>SP: ARP who has 192.168.0.115<br/>(llm.lab.local from /etc/hosts)
+  SP-->>C: the Spark's mgmt MAC
+  C->>KP: POST /v1/chat/completions<br/>Host llm.lab.local · dst 192.168.0.115:80
+  KP->>T: DNAT to the Traefik pod :8000<br/>source masqueraded to the node
+  T->>T: router match: Host llm.lab.local + PathPrefix /v1<br/>Ingress llm, class traefik
+  T->>RL: bucket of the client IP (the node)
+  RL-->>T: under 20 r/s avg, burst 40
+  T->>M: request to a pod IP from the EndpointSlice of mock-llm<br/>allowed by allow-ingress-and-same-namespace
+  loop 100 tokens at 20 per second
+    M-->>T: data chunk
+    T-->>C: same chunk, flushed at once (no buffering middleware)
+  end
+  M-->>T: data [DONE]
+  T-->>C: data [DONE]
+```
+
+- **Steps 1–4** are the LoadBalancer path of Chapter 09 §5.7. Because of the masquerade in step 4, the rate limit in steps 6–7 and the access log in §5.5 see the node's address, not your laptop's.
+- **Step 5** fails with a plain `404 page not found` when the `Host` header or the IngressClass doesn't match (§5.2, §7).
+- **Step 7** answers `429` once the bucket is empty: the burst test in §5.5.
+- **Step 8** is where `breakfix 06` cuts the path (NetworkPolicy, Chapter 08 §5.5): Traefik waits and the client times out. A Service with no ready endpoints answers `503` here instead (`breakfix 08`).
+- **Steps 9–10** are what TTFB measures in §5.3. A `buffering` middleware in front of step 8 (`breakfix 09`, `llm-body-limit` in §5.5) holds every chunk until step 11, so TTFB equals the total time.
+- **`gw.lab.local`** takes the same path, but step 5 matches HTTPRoute `llm-gw` and step 8 picks `mock-llm` or `mock-llm-canary` by weight, 90/10 (§5.7). That route has no middlewares.
 
 ---
 
@@ -321,7 +359,7 @@ The limit is "per client IP" — but which IP? Look at what Traefik saw:
 kubectl --context spark-root -n ingress logs deploy/traefik-lab --tail=200 | grep -o '"ClientHost":"[^"]*"' | sort | uniq -c
 ```
 
-The lab values don't enable access logs: add `logs: {access: {enabled: true}}` to [`addons/traefik-values.yaml`](lab/addons/traefik-values.yaml) for this step and re-run `scripts/install-addons.sh traefik`. You'll find one address — the node's, from kube-proxy's masquerade (Chapter 09 §4) — so every laptop on the LAN shares one bucket. `externalTrafficPolicy: Local` on the Traefik Service keeps the real client IP (on one node there's no downside).
+The lab values don't enable access logs: add `logs: {access: {enabled: true, format: json}}` (the `grep` reads the JSON field `ClientHost`; the default format is plain text) to [`addons/traefik-values.yaml`](lab/addons/traefik-values.yaml) for this step and re-run `scripts/install-addons.sh traefik`. You'll find one address — the node's, from kube-proxy's masquerade (Chapter 09 §4) — so every laptop on the LAN shares one bucket. `externalTrafficPolicy: Local` on the Traefik Service keeps the real client IP (on one node there's no downside).
 
 ### 5.6 API-key auth (basicAuth as a simple key)
 

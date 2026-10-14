@@ -626,7 +626,7 @@ Time the whole thing. Under an hour from USB boot to validated is a good target.
    ```bash
    # ▶ dgx-spark-1 (ssh dgx-spark-1)
    systemctl is-active redfish-mock     # active
-   ss -ltnp | grep 8000                 # a python process listening on 0.0.0.0:8000
+   sudo ss -ltnp | grep 8000            # a python process listening on 0.0.0.0:8000 (-p needs sudo for a root process)
    ```
 
 **If something's off:** `Connection refused` → the unit died; `systemctl status redfish-mock`, then `systemctl reset-failed redfish-mock` and re-run. *Inventory via Redfish* fails while the `curl` works → read the URL in the error: the mockup speaks plain HTTP on port 8000, and the module must reach it that way. More in §6.
@@ -742,7 +742,7 @@ Ansible owns every box in that diagram: it templates the dnsmasq reservations fr
 | You want the old network setup back | `nmcli connection show` lists `mgmt-static` and your old profile | `nmcli connection modify "<old profile>" connection.autoconnect yes; nmcli connection up "<old profile>"; nmcli connection delete mgmt-static` (that is what `/root/mgmt-ip-rollback.sh` does) |
 | `netplan apply` warns `Permissions for /etc/netplan/*.yaml are too open` | `ls -l /etc/netplan` | `mode: "0600"` (the roles already do this) |
 | After `update-grub` + reboot, the GPU is missing | `nvidia-smi`; `dmesg \| grep -i nvrm` | Remove the drop-in, `update-grub`, reboot; bisect the argument you added |
-| Redfish mockup: `Connection refused` | `systemctl status redfish-mock` on the Spark | `systemctl reset-failed redfish-mock`; re-run; check the port with `ss -ltnp \| grep 8000` |
+| Redfish mockup: `Connection refused` | `systemctl status redfish-mock` on the Spark | `systemctl reset-failed redfish-mock`; re-run; check the port with `sudo ss -ltnp \| grep 8000` |
 
 ## 7. Validation
 

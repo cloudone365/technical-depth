@@ -463,6 +463,8 @@ Close the window, then the KServe comparison (Chapter 09 Task 5.7):
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
+kubectl --context spark-root apply -k ../../02-Kubernetes/lab/manifests/root-llms/90-serving/kserve   # ServingRuntime vllm-spark
+kubectl --context spark-root -n llm-serving delete isvc qwen-small                                      # 02's 32 Gi demo, frees quota
 kubectl --context spark-root apply -f k8s/kserve/r1-1.5b.yaml
 kubectl --context spark-root -n llm-serving get isvc r1-1-5b -w           # READY True after download + load · Ctrl-C to stop
 ```
@@ -602,12 +604,12 @@ kubectl --context spark-root -n llm-serving logs -f job/rag-ingest -c ingest
 kubectl --context spark-root -n llm-serving port-forward svc/qdrant 6333 >/dev/null &
 kubectl --context spark-root -n llm-serving port-forward svc/bge-m3 8001:8000 >/dev/null &
 kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null &
-E="--qdrant http://localhost:6333 --embed-url http://localhost:8001"
-for k in 1 3 5 10; do python3 tools/rag_demo.py eval $E -k $k | tail -1; done
-python3 tools/rag_demo.py ask "Why does the vLLM Deployment use Recreate and a preStop sleep?" $E \
+E=(--qdrant http://localhost:6333 --embed-url http://localhost:8001)      # an array: works in zsh and bash
+for k in 1 3 5 10; do python3 tools/rag_demo.py eval "${E[@]}" -k $k | tail -1; done
+python3 tools/rag_demo.py ask "Why does the vLLM Deployment use Recreate and a preStop sleep?" "${E[@]}" \
   --chat-url http://localhost:8000 --chat-model r1-7b --show-context | tail -15
-python3 tools/rag_demo.py ingest --repo ../.. --dirs "02-Kubernetes" "03-DeepSeek" $E
-python3 tools/rag_demo.py rollback $E
+python3 tools/rag_demo.py ingest --repo ../.. --dirs "02-Kubernetes" "03-DeepSeek" "${E[@]}"
+python3 tools/rag_demo.py rollback "${E[@]}"
 scripts/verify.sh rag
 ```
 
@@ -716,7 +718,7 @@ mkdir -p results
 scripts/llm-triage.sh | tee results/triage-known-good.txt
 for d in D01 D02 D03 D04 D05 D06 D07; do
   echo "=== $d"; scripts/breakfix.sh inject $d
-  read -rp "diagnose, then press enter for the answer… " _
+  printf 'diagnose, then press enter for the answer… '; read -r _      # zsh's read -p means something else
   scripts/breakfix.sh answer $d; scripts/breakfix.sh reset $d
 done
 kubectl --context dev-llms -n llm-sandbox apply --dry-run=server -k k8s/models/r1-1.5b

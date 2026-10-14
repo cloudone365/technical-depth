@@ -233,7 +233,7 @@ The catalog entry `qwen3-vl-8b` runs at util 0.20 with `--max-model-len 16384`, 
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 grep -A9 'name: qwen3-vl-8b' models.yaml
 scripts/serve-model.sh qwen3-vl-8b
-kubectl --context spark-root -n llm-serving get deploy vllm -o jsonpath='{.spec.template.spec.containers[0].args}' | tr ',' '\n' | grep -E 'mm|max-model-len|utilization'
+kubectl --context spark-root -n llm-serving get deploy vllm -o jsonpath='{range .spec.template.spec.containers[0].args[*]}{@}{"\n"}{end}' | grep -E 'mm|max-model-len|utilization'
 kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null 2>&1 &
 ```
 

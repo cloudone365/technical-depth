@@ -182,7 +182,7 @@ Nothing here is new infrastructure. The platform comes from [01-Ansible](../01-A
 
 | # | Goal | Do | Pass when |
 |---|---|---|---|
-| E7 | Serve and benchmark | `serve-model.sh qwen3-8b`; vLLM's benchmark Job or `stream_probe.py` at concurrency 1 and 16 ([Chapter 04](04-serving-qwen-with-vllm-and-sglang.md)) | TTFT, ITL, tokens/s at both concurrencies recorded |
+| E7 | Serve and benchmark | `serve-model.sh qwen3-8b`; vLLM's benchmark Job (concurrency 1, 8 and 32) or `stream_probe.py`, at concurrency 1 and 32 at least ([Chapter 04](04-serving-qwen-with-vllm-and-sglang.md)) | TTFT, ITL, tokens/s at both concurrencies recorded |
 | E8 | Show prefix caching | `python3 ../../02-Kubernetes/lab/scripts/ttft_probe.py --url http://localhost:8000 --model <name>` ([Chapter 04](04-serving-qwen-with-vllm-and-sglang.md)) | median TTFT with shared prefix clearly below unique prefix |
 | E9 | Quantisation trade-off | BF16 vs AWQ (or FP8) of the same model — add the quantised variant as a catalog entry (E11): memory, tokens/s, `fc_check.py run` and a quality probe ([Chapter 05](05-quantization-and-local-engines.md)) | four-column table; choice justified |
 | E10 | A local engine | the same model as GGUF on llama.cpp ([Chapter 05](05-quantization-and-local-engines.md)) | tokens/s and memory vs vLLM recorded |
@@ -198,7 +198,7 @@ Nothing here is new infrastructure. The platform comes from [01-Ansible](../01-A
 
 #### What to look for
 
-1. **Each Job:** Workload `ADMITTED True`; the log's `trainable params` line (E14: compare with your 40.4 M for Qwen2.5-7B, or ~33 M for the Qwen3-4B default).
+1. **Each Job:** Workload `ADMITTED True`; the log's `model_parameter_info` line (`… M Trainable`) (E14: compare with your 40.4 M for Qwen2.5-7B, or ~33 M for the Qwen3-4B default).
 2. **E15:** `rewards/margins` rising; **E16:** format reward rising first.
 3. **After every Job:** the window closed (§3.4 close commands).
 
@@ -209,7 +209,7 @@ Nothing here is new infrastructure. The platform comes from [01-Ansible](../01-A
 | # | Goal | Do | Pass when |
 |---|---|---|---|
 | E13 | An SFT that changes behaviour | `k8s/jobs/swift-sft.yaml` on a small dataset with a visible format change ([Chapter 07](07-ms-swift-and-sft.md)) | the adapter follows the format, the base doesn't; window closed afterwards |
-| E14 | Size LoRA before training | parameter count for r = 16, all linear layers, Qwen2.5-7B (§5.7) ([Chapter 08](08-peft-and-alignment.md)) | your count matches the trainable-parameter line in the ms-swift log |
+| E14 | Size LoRA before training | parameter count for r = 16, all linear layers, Qwen2.5-7B (§5.7) ([Chapter 08](08-peft-and-alignment.md)) | your count matches the `… M Trainable` figure of `model_parameter_info` in the ms-swift log (with `MODEL` set to Qwen2.5-7B-Instruct) |
 | E15 | DPO on your own pairs | `dpo.jsonl` from E17 → `k8s/jobs/swift-dpo.yaml`; compute one loss by hand (§5.7) ([Chapter 08](08-peft-and-alignment.md)) | reward margin rises in the log; hand-computed loss correct |
 | E16 | GRPO advantages | compute group advantages by hand (§5.7), then run `k8s/jobs/swift-grpo.yaml` briefly ([Chapter 08](08-peft-and-alignment.md)) | advantages correct; reward curve recorded for the steps you ran |
 | E17 | Synthetic data you can trust | `synth_data.py` from your own seeds with `--judge --dpo`; κ between the judge and 30 of your own labels (§5.7); the verifier of Chapter 09 §5.6 on four sampled candidates ([Chapter 09](09-synthetic-data-and-self-play.md)) | funnel and κ recorded; coverage for the verifier task stated |

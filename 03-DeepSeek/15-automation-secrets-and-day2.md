@@ -93,6 +93,38 @@ The day-2 schedule (UTC):
 
 A failed Job raises `KubeJobFailed` (Chapter 16); that is how a moved pin, a changed byte or a failed backup reaches you.
 
+### 2.1 One vault-sync run, step by step
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant CJ as CronJob vault-sync<br/>(llm-serving, SA vault-sync)
+  participant V as vault01<br/>192.168.0.211:8200
+  participant API as spark-root<br/>kube-apiserver :6443
+  participant L as deployment/litellm<br/>statefulset/open-webui
+  CJ->>V: POST /v1/auth/kubernetes/login<br/>role deepseek-serving + SA token
+  V->>API: TokenReview (as SA vault-token-reviewer)
+  API-->>V: authenticated: llm-serving/vault-sync
+  V-->>CJ: client_token, policy deepseek-serving, ttl 600s
+  loop each SYNC_MAP entry (hf, deepseek/litellm, deepseek/webui)
+    CJ->>V: GET /v1/kv/data/spark-lab/… (X-Vault-Token)
+    V-->>CJ: data.data (written to the audit log as HMACs)
+    CJ->>API: GET secret (hf-token, litellm-master-key, open-webui-secret)
+    alt same data
+      Note over CJ: unchanged
+    else different or missing
+      CJ->>API: PUT or POST the Secret
+      CJ->>API: PATCH pod template annotation vault-sync/restartedAt
+      API->>L: rolling restart, new env from the Secret
+    end
+  end
+```
+
+- **Steps 1–4** print `vault login ok: policies=['default', 'deepseek-serving'] ttl=600s` (Task 5.3). Steps 2–3 work only after `vault-k8s-auth-setup.sh` (Task 5.2) gave vault01 the root's API URL, CA and the reviewer token.
+- **Steps 5–6** are the reads you find in `/var/log/vault_audit.log` on vault01 (Task 5.5).
+- **Steps 7–10** print `synced …` and `restart …` lines. On the second run every entry takes the `unchanged` branch.
+- **Step 10** is what Task 5.4 checks: LiteLLM reads `LITELLM_MASTER_KEY` only at start, so the old key gets `401` only after the restart.
+
 ---
 
 ## 3. LLD
@@ -120,8 +152,8 @@ A failed Job raises `KubeJobFailed` (Chapter 16); that is how a moved pin, a cha
 | `serving-budget` holds the model's pod memory + the apps; record the current model | `preflight`, `serve` | no (reads, assert) |
 | tools and eval-data ConfigMaps | `tools` | only if tool files changed |
 | delete and recreate the prefetch Job | `prefetch` | **yes**: Job templates are immutable; fast when cached. `-e deepseek_skip_prefetch=true` skips it |
-| apply `k8s/models/<name>`; wait for Ready with the right `model` label | `serve` | only if the model changed; the wait is skipped in check mode |
-| apps | `apps` | no |
+| apply `k8s/models/<name>`; wait for Ready with the right `model` label | `serve` | if the model changed, and after every sync: the overlay carries 02's placeholder `hf-token` Secret, which differs from the synced one. The wait is skipped in check mode |
+| apps | `apps` | after every sync: `k8s/apps` carries the placeholder `litellm-master-key` and `open-webui-secret` (§3.3) |
 | RAG ingest | `rag` | **yes**: a new collection by design; a failed gate fails the play |
 | `scripts/verify.sh` | `verify` | never (`changed_when: false`); any `[FAIL]` fails the play |
 
@@ -182,7 +214,7 @@ The objects that make step 2 possible, created once by [`vault-k8s-auth-setup.sh
 |---|---|---|
 | vault01 | auth method | `kubernetes/`, configured with the root's API URL, its CA and a reviewer JWT |
 | spark-root | ServiceAccount `vault-token-reviewer` + ClusterRoleBinding to `system:auth-delegator` | lets vault01 call TokenReview |
-| vault01 | policy `deepseek-serving` | `read` on `kv/data/spark-lab/hf` and `kv/data/spark-lab/deepseek/*`, `list`/`read` on their metadata; nothing else |
+| vault01 | policy `deepseek-serving` | `read` on `kv/data/spark-lab/hf` and `kv/data/spark-lab/deepseek/*`, `list`/`read` on `kv/metadata/spark-lab/deepseek/*`; nothing else |
 | vault01 | role `deepseek-serving` | bound to SA `vault-sync` in namespace `llm-serving` only; token TTL 10 min |
 | spark-root | Role `vault-sync` | `get`/`update` on the three Secrets by name, `create` on Secrets, `patch` on `litellm` and `open-webui` by name |
 
@@ -320,17 +352,17 @@ vault kv get -field=token kv/spark-lab/hf | cut -c1-3                 # hf_
 2. **`vault policy read deepseek-serving`:** only the three `path` blocks of the script, nothing broader.
 3. **The role:** `bound_service_account_names [vault-sync]`, `bound_service_account_namespaces [llm-serving]`, `token_policies [deepseek-serving]`, `token_ttl 10m`.
 
-**If something's off:** the script reads the API server from the **current** context; any other context than `spark-root` binds the wrong cluster. `x509` errors from `vault` mean `VAULT_CACERT` points at the wrong file. More in §7.
+**If something's off:** the script runs every `kubectl` call with `--context spark-root` (override with `ROOT_CTX`), and hands vault01 that context's API URL and CA; with `ROOT_CTX` set to another context, vault01 would validate tokens against the wrong cluster. `x509` errors from `vault` mean `VAULT_CACERT` points at the wrong file. More in §7.
 
 #### Run it
 
-The setup script uses `vault`, `kubectl` and `jq` on the same machine, so it runs on the MacBook (`brew install hashicorp/tap/vault` if you don't have the CLI). It reads the API server URL and CA from the **current** kubeconfig context, which must be `spark-root`.
+The setup script uses `vault`, `kubectl` and `jq` on the same machine, so it runs on the MacBook (`brew install hashicorp/tap/vault` if you don't have the CLI). It reads the API server URL and CA from context `spark-root` in `$KUBECONFIG` (`ROOT_CTX` overrides the name), so vault01 must reach that URL.
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-export KUBECONFIG=~/technical-depth/01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml
+export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 kubectl config use-context spark-root
-export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=~/technical-depth/01-Ansible/lab/.cache/vault-ca.crt
+export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT="$PWD/../../01-Ansible/lab/.cache/vault-ca.crt"
 read -s "VAULT_TOKEN?Vault admin token: "; export VAULT_TOKEN                  # zsh; bash: read -s -p "…" VAULT_TOKEN
 scripts/vault-k8s-auth-setup.sh
 vault policy read deepseek-serving
@@ -361,7 +393,7 @@ Expected: the policy lists only the paths of §3.3; the role is bound to `vault-
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root -n llm-serving create configmap vault-ca \
-  --from-file=ca.crt="$HOME/technical-depth/01-Ansible/lab/.cache/vault-ca.crt" --dry-run=client -o yaml \
+  --from-file=ca.crt="$PWD/../../01-Ansible/lab/.cache/vault-ca.crt" --dry-run=client -o yaml \
   | kubectl --context spark-root apply -f -
 kubectl --context spark-root apply -k .                                 # tools ConfigMap (vault_sync.py)
 kubectl --context spark-root apply -f k8s/ops/vault-sync.yaml
@@ -431,7 +463,7 @@ Expected: `old key: 401`, `new key: 200`, LiteLLM and Open WebUI rolled. Virtual
 
 1. **The login:** `permission denied` (the role is bound to `vault-sync` only).
 2. **Both `can-i`:** `no`.
-3. **The audit count** is above 0 and grows by one per path after every sync run; the last entry shows the path and `"service_account_name":"vault-sync"`, with values only as `hmac-sha256:…`.
+3. **The audit count** is above 0 and grows after every sync run (a request and a response entry per path); the last entry shows the path and `"service_account_name":"vault-sync"`, with values only as `hmac-sha256:…`.
 
 **If something's off:** a successful login with the `default` SA means the role's `bound_service_account_names` is too wide; re-run Task 5.2. A count of 0 means the audit device isn't enabled on vault01 (01-Ansible Chapter 17). More in §7.
 
@@ -439,7 +471,7 @@ Expected: `old key: 401`, `new key: 200`, LiteLLM and Open WebUI rolled. Virtual
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT=~/technical-depth/01-Ansible/lab/.cache/vault-ca.crt
+export VAULT_ADDR=https://192.168.0.211:8200 VAULT_CACERT="$PWD/../../01-Ansible/lab/.cache/vault-ca.crt"
 TOKEN=$(kubectl --context spark-root -n llm-serving create token default)
 vault write auth/kubernetes/login role=deepseek-serving jwt="$TOKEN"                     # permission denied: wrong SA
 kubectl --context spark-root auth can-i get secret/litellm-db -n llm-serving --as=system:serviceaccount:llm-serving:vault-sync   # no
@@ -452,7 +484,7 @@ sudo grep 'spark-lab/' /var/log/vault_audit.log | grep -c '"service_account_name
 sudo grep 'spark-lab/' /var/log/vault_audit.log | grep vault-sync | tail -1 | cut -c1-400                # one entry: path, SA, no plain values
 ```
 
-Expected: reads by `service_account_name: vault-sync`, one per path per run; the audit device stores the values only as HMACs.
+Expected: reads by `service_account_name: vault-sync`, a request and a response entry per path per run; the audit device stores the values only as HMACs.
 
 ### Task 5.6 · The playbook from the MacBook: lint, preview, guards
 
@@ -496,7 +528,7 @@ Expected: the check run prints `Show the change` with the current model, the new
 #### What to look for
 
 1. **Semaphore run:** `failed=0`; the `Result` task shows the last lines of `verify.sh`, ending `… passed, … warnings, 0 failed`.
-2. **Second full run** with `deepseek_skip_prefetch=true` and `--skip-tags rag`: `changed=0` or 1. Prefetch and RAG, the tasks that change every time, are skipped; a remaining `changed` is usually the apps task writing the placeholder Secrets back over the synced ones, so sync again.
+2. **Second full run** with `deepseek_skip_prefetch=true` and `--skip-tags rag`: `changed=` 0 to 2. Prefetch and RAG, the tasks that change every time, are skipped; the `serve` and `apps` tasks report `changed` when they write the placeholder Secrets back over the synced ones, so sync again.
 3. **Switch run:** `Show the change` prints `vLLM: r1-7b → r1-32b-fp8 (rollback: --tags serve -e deepseek_model=r1-7b)`, and `get deploy vllm -L model` shows `r1-32b-fp8`; after the rollback run, `r1-7b`.
 
 **If something's off:** `Invalid kube-config file` → the kubeconfig isn't in sema01's state folder (run `19.1 Kubernetes` first). A run stuck at "Wait for vLLM to become Ready" for long → `describe pod -l app=vllm`; it gives up after 45 min. More in §7.
@@ -510,9 +542,9 @@ Expected: the task log ends with the `Result` task showing the last lines of `ve
 | Run | Wall time (record yours) | `changed=` |
 |---|---|---|
 | first (downloads) | | |
-| second (no prefetch, no rag) | | expect 0–1 |
+| second (no prefetch, no rag) | | expect 0–2 |
 
-Switch the model and back. **Semaphore UI:** run the template with survey value `r1-32b-fp8` and CLI args `["--tags", "serve", "-e", "deepseek_skip_prefetch=true"]` (drop the skip if the weights aren't cached yet). The log's `Show the change` line names the rollback; run it the same way with `r1-7b`.
+Switch the model and back. **Semaphore UI:** run the template with survey value `r1-32b-fp8` and CLI args `["--tags", "serve", "-e", "deepseek_skip_prefetch=true"]`. `--tags serve` never runs the prefetch; if the weights aren't cached yet, use `["--tags", "prefetch,serve"]`. The log's `Show the change` line names the rollback; run it the same way with `r1-7b`.
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab

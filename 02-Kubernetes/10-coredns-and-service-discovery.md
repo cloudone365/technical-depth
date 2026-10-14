@@ -63,6 +63,35 @@ flowchart LR
 
 Two resolvers, one network: the dev-lab CoreDNS pod and its Service are ordinary root objects in `vc-dev-lab` with a root ClusterIP. The difference is the API server each one reads.
 
+### 2.1 One external lookup from a dev-lab pod, step by step
+
+`getent ahosts huggingface.co` in `dns-default` (dev-lab `lab-tools`, `ndots:5`), as in §5.3. Each query below goes out as an A and an AAAA packet.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant P as dns-default pod<br/>dev-lab lab-tools · ndots 5
+  participant V as dev-lab CoreDNS<br/>kube-dns ClusterIP of dev-lab
+  participant VAPI as dev-lab API server
+  participant U as upstream<br/>per the forward line of dev-lab's Corefile
+  VAPI-->>V: watch: Services and EndpointSlices of dev-lab only
+  P->>V: huggingface.co.lab-tools.svc.cluster.local<br/>1 dot, fewer than 5, so the search list comes first
+  V-->>P: NXDOMAIN, answered from its watch cache
+  P->>V: huggingface.co.svc.cluster.local
+  V-->>P: NXDOMAIN
+  P->>V: huggingface.co.cluster.local
+  V-->>P: NXDOMAIN
+  P->>V: huggingface.co.
+  V->>U: forward, not a cluster.local name
+  U-->>V: A and AAAA records
+  V-->>P: NOERROR with the addresses
+```
+
+- **Steps 2–7** are the three search-domain queries. As A + AAAA they are the six packets `tcpdump` counts before the real name in §5.3. `dns-ndots1` (`ndots:1`) starts at step 8 and sends only 2.
+- **Step 1** is why `kps-prometheus.observability` and every other root name get NXDOMAIN here (§5.4): this CoreDNS knows only dev-lab's objects.
+- **The nameserver** in step 2 is dev-lab's `kube-dns` ClusterIP, written into the pod by the syncer (§5.1). A root pod sends the same queries to `10.43.0.10`, and the root's query log shows them (§5.2–5.3).
+- **Step 9** depends on the `forward` line you read in §5.1. That line decides whether the root DNS outage in §5.5 also breaks a tenant's external names.
+
 ---
 
 ## 3. LLD
@@ -198,7 +227,7 @@ kubectl --context spark-root -n kube-system get cm coredns -o yaml > /tmp/coredn
 kubectl --context spark-root apply -f manifests/root/30-networking/coredns-corefile.yaml
 sleep 35                                                                                        # 'reload' picks it up
 kubectl --context spark-root -n kube-system logs -l k8s-app=kube-dns --tail=5 | grep -i reload
-kubectl --context spark-root -n kube-system logs -l k8s-app=kube-dns -f --tail=0 --prefix=false > /tmp/coredns.log &
+kubectl --context spark-root -n kube-system logs -l k8s-app=kube-dns -f --tail=0 --prefix=false >> /tmp/coredns.log &   # append mode: §5.3 empties the file while this runs
 ```
 
 `kubectl apply` warns that the ConfigMap lacks the last-applied annotation — expected, kubeadm created it.
@@ -213,7 +242,7 @@ kubectl --context spark-root -n kube-system logs -l k8s-app=kube-dns -f --tail=0
 
 #### What to look for
 
-1. **Root:** `netshoot-host: 10 queries` (8 if the host has no `search lab.local`), all NXDOMAIN except the last `A IN huggingface.co. NOERROR`.
+1. **Root:** `netshoot-host: 8 queries`, all NXDOMAIN except the last `A IN huggingface.co. NOERROR`. A `huggingface.co.lab.local` pair (if the host has `search lab.local`) is answered by the `lab.local:53` block, which has no `log`, so it isn't counted.
 2. **`dns-default`:** 8 queries, A and AAAA for each of the 3 search domains and the real name.
 3. **`dns-ndots1`:** 2 queries, `A? huggingface.co.` and `AAAA? huggingface.co.`.
 4. **Timing:** `dns-ndots1`'s `real` time is lower than `dns-default`'s. The gap depends on the upstream, so expect a difference rather than a fixed number.
@@ -236,7 +265,7 @@ kill %1
 Expected:
 
 ```text
-netshoot-host: 10 queries        # 8 if your host has no 'search lab.local'
+netshoot-host: 8 queries         # A + AAAA for 3 cluster domains and the real name
 "AAAA IN huggingface.co.platform-tools.svc.cluster.local. NXDOMAIN
 "A IN huggingface.co.platform-tools.svc.cluster.local. NXDOMAIN
 …

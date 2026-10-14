@@ -42,7 +42,7 @@ flowchart LR
   AG -->|"/v1/chat/completions<br/>tools=[…]"| GW
   subgraph ROOT["spark-root · ns llm-serving"]
     GW["LiteLLM<br/>alias agent"] --> V
-    V["vLLM · Qwen<br/>chat template → tool prompt<br/>tool-call parser → tool_calls<br/>reasoning parser → reasoning_content"]
+    V["vLLM · Qwen<br/>chat template → tool prompt<br/>tool-call parser → tool_calls<br/>reasoning parser → reasoning"]
   end
   EXE -->|"kubectl get / Qdrant / HTTP"| SYS["cluster & data<br/>(least privilege)"]
   classDef gpu fill:#76b900,stroke:#3d6000,color:#000
@@ -101,7 +101,7 @@ Qwen3-Coder and the Qwen3.5 / Qwen3.6 generations use a different, XML-style cal
 | Model generation | `--tool-call-parser` | `--reasoning-parser` | Notes |
 |---|---|---|---|
 | Qwen2.5 (Instruct, Coder-Instruct) | `hermes` | — | no thinking mode |
-| QwQ-32B | `hermes` | `qwen3` (older vLLM: `deepseek_r1`) | always thinks |
+| QwQ-32B | `hermes` | `deepseek_r1` (as 03's `qwq-32b-awq` overlay sets it) | always thinks |
 | Qwen3 hybrid (e.g. Qwen3-8B, Qwen3-32B, Qwen3-30B-A3B) | `hermes` | `qwen3` | thinking on by default, switchable (§3.3) |
 | Qwen3 *-Instruct-2507 | `hermes` | — | non-thinking only |
 | Qwen3 *-Thinking-2507 | `hermes` | `deepseek_r1` in the lab catalog | thinking only; the template opens `<think>` itself, so the closing tag is all the output carries |
@@ -114,7 +114,7 @@ Both tool flags go together: `--enable-auto-tool-choice --tool-call-parser <name
 
 ### 3.3 Hybrid thinking and tools
 
-Qwen3 hybrid models think before answering unless told not to. With `--reasoning-parser qwen3` the thinking text arrives in `message.reasoning_content` (streaming: `delta.reasoning_content`), the answer or the tool calls in `content` / `tool_calls`.
+Qwen3 hybrid models think before answering unless told not to. With `--reasoning-parser qwen3` the thinking text arrives in `message.reasoning` (streaming: `delta.reasoning`; older vLLM releases and SGLang name it `reasoning_content`, Chapter 02 §2.6), the answer or the tool calls in `content` / `tool_calls`.
 
 | Switch | Where | Effect |
 |---|---|---|
@@ -125,7 +125,7 @@ Qwen3 hybrid models think before answering unless told not to. With `--reasoning
 For agents, thinking costs tokens on every step of the loop. A common pattern: thinking **on** for the planning step or hard multi-tool questions, **off** for routine tool selection and for the final summary. Two practical rules:
 
 - Give thinking requests a `max_tokens` large enough for the reasoning *and* the call. If the budget runs out inside `<think>`, you get `finish_reason: length`, empty `content`, no `tool_calls` — it looks like the model refused to call a tool.
-- In multi-turn history, send back only the assistant's `content` and `tool_calls`, not the previous `reasoning_content`; Qwen's templates are built for history without old thinking.
+- In multi-turn history, send back only the assistant's `content` and `tool_calls`, not the previous reasoning field; Qwen's templates are built for history without old thinking.
 
 ### 3.4 Structured outputs (constrained decoding)
 

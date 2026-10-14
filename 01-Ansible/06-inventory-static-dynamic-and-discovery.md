@@ -80,7 +80,7 @@ enable_plugins = ansible.builtin.yaml, ansible.builtin.ini, spark_mdns, ansible.
 
 #### What to look for
 
-1. **Command exit:** both playbooks end with `failed=0`. On the first `--tags facts` run, the facts.d directory and the fact script show `changed`; a re-run shows `changed=0`.
+1. **Command exit:** both playbooks end with `failed=0`. `04.3 Baseline` already installed the fact script in Chapter 04, so the `--tags facts` run shows `changed=0`; only on a Spark without it do the facts.d directory and the fact script show `changed`.
 2. **The cache holds the custom fact:**
    ```bash
    # ▶ MacBook · 01-Ansible/lab (venv active)
@@ -156,11 +156,11 @@ Now **target by state** with inventory patterns:
 # ▶ MacBook · 01-Ansible/lab (venv active)
 # only healthy GPU nodes that are Kubernetes workers and NOT under memory pressure
 # (30.1-validate targets the Sparks themselves; 19.1/20.1/20.2 run from localhost against the API)
-ansible-playbook playbooks/30.1-validate.yml -l 'gpu_ready:&k8s_workers:!uma_pressure'
+ansible-playbook playbooks/30.1-validate.yml -K -l 'gpu_ready:&k8s_workers:!uma_pressure'
 # every node still on an old driver major
 ansible 'driver_570' -m debug -a msg="needs upgrade"
 # one node at a time from a group
-ansible-playbook playbooks/29.1-emergency-drain.yml -l 'slurm_compute[1]'
+ansible-playbook playbooks/29.1-emergency-drain.yml -K -l 'slurm_compute[1],localhost'
 ```
 
 | Pattern | Meaning |
@@ -173,7 +173,7 @@ ansible-playbook playbooks/29.1-emergency-drain.yml -l 'slurm_compute[1]'
 
 These state-based patterns are a MacBook tool for the reason above. In Semaphore, limit by name or functional group, and keep `localhost` in the limit for play 1: `["--limit", "k8s_workers,localhost"]`.
 
-> **Stale facts = wrong groups.** Constructed groups are only as fresh as the cache (`fact_caching_timeout = 7200`). For safety-critical targeting (drain, upgrade), refresh first: `ansible spark -m setup -a filter=ansible_local`.
+> **Stale facts = wrong groups.** Constructed groups are only as fresh as the cache (`fact_caching_timeout = 7200`). For safety-critical targeting (drain, upgrade), refresh first: `ansible spark -K -m setup -a filter=ansible_local` (the Sparks' `ansible_become: true` makes even `setup` use sudo).
 
 ### 3.2 Discovery: a custom mDNS inventory plugin
 
@@ -325,6 +325,11 @@ class InventoryModule(BaseInventoryPlugin, Constructable):
 ---
 # ansible-inventory -i inventory-examples/spark.mdns.yml --graph
 # Requires: avahi-utils on the control node, control node on the Sparks' LAN.
+# MacBook (no avahi-browse on macOS): capture on a Spark, read the capture (Chapter 06 §3.2):
+#   ssh dgxadmin@192.168.0.100 'avahi-browse -p -r -t _ssh._tcp' > .cache/mdns.txt
+#   cp inventory-examples/spark.mdns.yml .cache/spark.mdns.yml
+#   echo 'from_file: .cache/mdns.txt' >> .cache/spark.mdns.yml
+#   ansible-inventory -i .cache/spark.mdns.yml --graph
 plugin: spark_mdns
 name_regex: '^dgx-spark-\d+$'
 # interface: enp0s31f6          # your control node's LAN NIC

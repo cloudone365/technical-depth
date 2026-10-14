@@ -313,7 +313,7 @@ A pod in `dev-llms`' `llm-sandbox` becomes `<pod>-x-llm-sandbox-x-dev-llms` in `
 
 ## 4. Communication flow: one pod, three API servers
 
-What happens when you try a small model in the sandbox with `kubectl --context dev-llms apply -f vllm-tiny.yaml` (a Deployment `vllm` in `llm-sandbox`):
+What happens when you try a small model in the sandbox with `kubectl --context dev-llms apply -f <your manifest>`: a Deployment `vllm` in `llm-sandbox`, sized down from `root-llms/90-serving/vllm` (the lab ships no sandbox copy; you write it):
 
 ```mermaid
 sequenceDiagram
@@ -396,12 +396,12 @@ Either path gives the same result. The vCluster definitions live once, in the 02
 
 ```bash
 # ▶ MacBook · technical-depth (repo root)
-# after A (or after 05 + 06 for B) — on your MacBook
+# after A (or after 19.1 + 20.1 for B) — on your MacBook
 cd "01-Ansible/lab"
 tools/fetch-kubeconfig.sh sema01                 # copies kubeconfig-spark-lab.yaml from sema01 to .cache/
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
 
-# B — the 02 lab scripts from the MacBook (after 05 + 06); they merge dev-lab/dev-llms into this local kubeconfig only
+# B — the 02 lab scripts from the MacBook (after 19.1 + 20.1); they merge dev-lab/dev-llms into this local kubeconfig only
 cd "../../02-Kubernetes/lab"
 scripts/install-addons.sh storage
 scripts/install-addons.sh metrics-server
@@ -411,7 +411,7 @@ scripts/install-addons.sh vclusters
 
 **Gate:** `kubectl config get-contexts` lists `spark-root`, `dev-lab`, `dev-llms`; `scripts/verify.sh vclusters` passes everything except the two `RuntimeClass nvidia missing` lines, which clear after `scripts/apply-lab.sh`.
 
-The LLM stack is installed on the root with `scripts/install-addons.sh traefik`, `kueue`, `keda` (and `kserve` when you need it), one at a time, followed by `scripts/apply-lab.sh` (its `root` part includes `manifests/root-llms`); `scripts/verify.sh llm-budget` checks its quotas (Chapter 05).
+Path A doesn't install `metrics-server` or `kps`: run `scripts/install-addons.sh metrics-server` and `kps` after it. The LLM stack is installed on the root with `scripts/install-addons.sh traefik`, `kueue`, `keda` (and `kserve` when you need it), one at a time, followed by `scripts/apply-lab.sh` (its `root` part includes `manifests/root-llms`); `scripts/verify.sh llm-budget` checks its quotas (Chapter 05).
 
 **If you built the old layout** with a large `llms` vCluster holding the LLM stack, remove it and rebuild on the root: `helm --kube-context spark-root uninstall llms -n vc-llms`, `kubectl --context spark-root delete ns vc-llms`, then `playbooks/20.2-vclusters.yml` (or `scripts/install-addons.sh vclusters`) to create `dev-llms` and the new budgets, `scripts/install-addons.sh traefik`, `kueue`, `keda` on the root (one at a time), and `scripts/apply-lab.sh`.
 
@@ -492,7 +492,7 @@ Same pod IPs, same ClusterIPs: the network is the root's (Cilium, kube-proxy). O
 #### What to look for
 
 1. **dev-lab:** `get pods -l app=bf02` shows 2 `Running` and 4 `Pending`.
-2. **A Pending pod's events:** a sync error with `exceeded quota: vcluster-budget, requested: requests.nvidia.com/gpu=1, used: 2, limited: 2`. There is no `FailedScheduling` event: the root scheduler never saw the pod.
+2. **A Pending pod's events:** a sync error with `exceeded quota: vcluster-budget, requested: requests.nvidia.com/gpu=1, used: requests.nvidia.com/gpu=2, limited: requests.nvidia.com/gpu=2`. There is no `FailedScheduling` event: the root scheduler never saw the pod.
 3. **Root quota:** `requests.nvidia.com/gpu` reads `2` used of `2` hard in `vcluster-budget`.
 4. **After `reset 02`:** no `bf02` pods are left in dev-lab, and the root quota shows `0` GPUs used (or whatever other dev-lab GPU pods hold).
 
@@ -563,7 +563,7 @@ Memory works the same way: more memory for a vCluster comes out of the LLM pool 
 1. Copy `vclusters/dev-lab.yaml` to `vclusters/train.yaml`; change the IP to `192.168.0.113` (in `annotations`, `extraSANs`, `exportKubeConfig.server`) and the context to `train`.
 2. Add namespace `vc-train`, a `vcluster-budget` and a `vcluster-defaults` LimitRange to `manifests/root/05-vclusters` (the platform's 3 CPU / ~11.7 GiB / 2 slices have no slack, so lower `serving-budget` in `manifests/root-llms/10-tenancy/quotas.yaml` first and give `vc-train` what you took).
 3. `kubectl --context spark-root apply -k manifests/root/05-vclusters`
-4. `helm --kube-context spark-root upgrade --install train loft/vcluster --version $VCLUSTER_VERSION -n vc-train -f vclusters/train.yaml --wait`
+4. `source versions.env && helm --kube-context spark-root upgrade --install train loft/vcluster --version $VCLUSTER_VERSION -n vc-train -f vclusters/train.yaml --wait` (in `02-Kubernetes/lab`; `versions.env` sets `VCLUSTER_VERSION`)
 5. `scripts/merge-vcluster-kubeconfig.sh train vc-train`
 6. Add `train` to `VCLUSTERS` in `tests/budget_check.py`, run it — then fix whatever it reports.
 

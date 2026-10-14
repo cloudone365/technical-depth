@@ -215,7 +215,7 @@ vLLM prints the real KV figure at start-up (`GPU KV cache size: … tokens`); co
 - **Serving (Chapter 04)**: every vLLM variant here is a generated overlay of the 02 base Deployment, switched with `scripts/serve-model.sh <name>`. Pre-quantized checkpoints need no flags beyond what the catalog sets; vLLM reads `quantization_config` from `config.json`.
 - **Weights (Chapter 06)**: all formats land in the `model-cache` PVC — Hugging Face snapshots under `/models/hf`, GGUF under `/models/gguf`, your own quantized output under `/models/quantized`.
 - **Fine-tuning (Chapters 07–08)**: train in BF16 (or QLoRA on NF4), merge the adapter, then quantize the merged model with the Job in §5.4. Do not train on top of AWQ/GPTQ weights and expect to merge.
-- **Gateway (Chapter 12)**: each engine is one LiteLLM model alias (`qwen-7b-awq`, `qwen-7b-gguf`, `qwen3-8b-nvfp4`); clients switch format by changing the model name, not the URL.
+- **Gateway (Chapter 12)**: each engine is one LiteLLM model alias (for example `qwen-32b-awq`, `qwen3-8b-gguf`, `qwen3-8b-nvfp4`); clients switch format by changing the model name, not the URL.
 - **Telemetry (Chapter 13)**: vLLM and llama-server (`--metrics`) are scraped by the root Prometheus; TensorRT-LLM exposes `/metrics` in recent releases — check your image.
 - **03-DeepSeek**: the llama.cpp and TensorRT-LLM manifests are 03's ([Chapter 07](../03-DeepSeek/07-alternative-engines-sglang-llamacpp-trtllm.md)); this chapter changes only the model.
 
@@ -549,7 +549,7 @@ Current official Qwen GGUFs carry the template already; prefer them.
 3. **Benchmark:** the 02 Job against `http://trtllm:8000` with the served name from `GET /v1/models`; record it in your table.
 4. **Afterwards:** `serve-model.sh qwen3-8b` and `--side qwen3-4b-instruct` both end with `0 failed`.
 
-**If something's off:** pod Pending with `exceeded quota` → 58 Gi doesn't fit next to what still runs; check that `llama-server` and `vllm` are at 0. The image tag may not support sm_121 yet; check NVIDIA's DGX Spark TensorRT-LLM playbook. More in §7.
+**If something's off:** no pod and a `FailedCreate … exceeded quota` event (`kubectl --context spark-root -n llm-serving get events`) → 58 Gi doesn't fit next to what still runs; check that `llama-server` and `vllm` are at 0. The image tag may not support sm_121 yet; check NVIDIA's DGX Spark TensorRT-LLM playbook. More in §7.
 
 #### Run it
 
@@ -565,7 +565,7 @@ kubectl --context spark-root -n llm-serving rollout status deploy/trtllm --timeo
 kubectl --context spark-root -n llm-serving logs deploy/trtllm | grep -Ei 'quant|nvfp4|kv cache|Uvicorn'
 ```
 
-The manifest's image tag is the one 03 pins; NVIDIA's DGX Spark TensorRT-LLM playbook names the tag it currently supports for the Spark — check it and set `TRTLLM_IMAGE` in `lab/versions.env` to match before you rely on the numbers. `kv_cache_config.free_gpu_memory_fraction` is a share of the memory still free *after* loading, which on unified memory is most of the box; the manifest keeps it at 0.30 so the KV pool stays inside the 58 Gi pod. For an 8B model you can lower the pod to 32 Gi and the fraction to 0.15.
+The manifest's image tag is the one 03 pins; NVIDIA's DGX Spark TensorRT-LLM playbook names the tag it currently supports for the Spark — check it before you rely on the numbers. The image is written in 03's manifest (03 records it as `TRTLLM_IMAGE` in `03-DeepSeek/lab/versions.env`); to use another tag, add a second expression to the `sed` above, `-e 's|tensorrt-llm/release:1.1.0|tensorrt-llm/release:<tag>|'`. `kv_cache_config.free_gpu_memory_fraction` is a share of the memory still free *after* loading, which on unified memory is most of the box; the manifest keeps it at 0.30 so the KV pool stays inside the 58 Gi pod. For an 8B model you can lower the pod to 32 Gi and the fraction to 0.15.
 
 Benchmark it with the same 02 Job (`--base-url http://trtllm:8000`, `--model` set to the served name in `GET /v1/models`) and scale it back to 0 afterwards:
 
@@ -602,7 +602,7 @@ A healthy result: measured single-stream speed is a clear fraction of the ceilin
 | FP8 model loads but decode is slower than BF16 | block-FP8 fell back to a generic kernel on this image | try the `FP8-dynamic` variant (per-channel) or AWQ; record the log line |
 | `ValueError: ... compressed-tensors ... scheme not supported` | NVFP4 / W4A4 checkpoint on an image without the kernels | serve it with TensorRT-LLM (Task 5.6) |
 | Pod `OOMKilled` while loading an AWQ 32B | pod memory below util × 121.7 GiB + overhead | raise request = limit to the catalog's `mem`; never lower util instead of fixing the pod |
-| Pending: `exceeded quota: serving-budget` | another engine still holds its request | `serve-model.sh --stop-side <name>`, the KEDA pause annotation for `vllm`, `kubectl scale … --replicas=0` for llama-server / trtllm |
+| No new pod; event `FailedCreate … exceeded quota: serving-budget` | another engine still holds its request | `serve-model.sh --stop-side <name>`, the KEDA pause annotation for `vllm`, `kubectl scale … --replicas=0` for llama-server / trtllm |
 | `vllm` comes back after `kubectl scale --replicas=0` | the KEDA ScaledObject keeps `minReplicaCount: 1` | park it with `autoscaling.keda.sh/paused-replicas=0` |
 | LLM Compressor Job `OOMKilled` | model loaded in BF16 + calibration activations | raise the Job's memory (request = limit) or quantize a smaller model; AWQ needs more than FP8_DYNAMIC |
 | `pip` in the Job replaces torch | the `llmcompressor` release requires a newer torch than the NGC image | pin the release that matches the image; never let the Job upgrade torch |

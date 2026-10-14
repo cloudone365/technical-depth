@@ -142,7 +142,7 @@ flowchart TD
     M1 --> T1["prereqs.yml<br/>no k3s · nvidia-container-runtime present · swap off<br/>/etc/modules-load.d/kubernetes.conf · sysctls"]
     T1 --> T2["containerd.yml<br/>CRI on · SystemdCgroup · nvidia runtime default · /etc/crictl.yaml"]
     T2 -.->|notify| H1["handlers/main.yml<br/>Restart containerd"]
-    T2 --> T3["packages.yml<br/>pkgs.k8s.io repo · kubelet/kubeadm/kubectl pinned + held"]
+    T2 --> T3["packages.yml<br/>pkgs.k8s.io repo · kubelet/kubeadm/kubectl pinned + held<br/>cri-tools (crictl)"]
     T3 --> CP{"control plane?"}
     CP -->|yes| T4["control_plane.yml"]
     CP -->|"no (dgx-spark-2)"| T5["workers.yml<br/>token + CA hash from dgx-spark-1<br/>templates/kubeadm-join.yaml.j2 → kubeadm join"]
@@ -173,11 +173,11 @@ Orange boxes run only in some cases: play 0 only under Semaphore, `workers.yml` 
       hosts:
         dgx-spark-1:
     k8s_workers:
-      hosts:
-        dgx-spark-2:
+      # hosts:
+      #   dgx-spark-2:
 ```
 
-Single Spark: remove dgx-spark-2 from `spark` and `k8s_workers`. The cluster is complete with one node, because the control plane carries no taint.
+The file ships for a single Spark: `dgx-spark-2` is commented out in `spark` and in `k8s_workers`. The cluster is complete with one node, because the control plane carries no taint. A second Spark: uncomment it in both places, and it joins as a worker.
 
 ### 2.4 LLD: the kubeadm config
 
@@ -372,7 +372,7 @@ Reading the picture from the outside in:
 |---|---|---|
 | `prereqs.yml` | Fails if `/usr/local/bin/k3s` exists; checks `/usr/bin/nvidia-container-runtime`; `swapoff -a` and comments swap out of `/etc/fstab`; loads `overlay`, `br_netfilter` (persisted in `/etc/modules-load.d/kubernetes.conf`); sets `bridge-nf-call-iptables`, `bridge-nf-call-ip6tables`, `ip_forward` in `/etc/sysctl.d/90-kubernetes.conf` | All declarative modules |
 | `containerd.yml` | Makes DGX OS's containerd usable by kubelet (below) | Regenerates only when CRI is disabled or `SystemdCgroup` is missing |
-| `packages.yml` | pkgs.k8s.io key + repo **per minor** (`/etc/apt/keyrings/kubernetes-v1.36.asc`), installs `kubelet`, `kubeadm`, `kubectl` `=1.36.5-1.1`, then **holds** them | Exact version pin + `dpkg_selections` |
+| `packages.yml` | pkgs.k8s.io key + repo **per minor** (`/etc/apt/keyrings/kubernetes-v1.36.asc`), checks the pinned version exists (`apt-cache madison kubeadm`), installs `kubelet`, `kubeadm`, `kubectl` `=1.36.5-1.1` and `cri-tools` (`crictl`), then **holds** the three | Exact version pin + `dpkg_selections` |
 | `control_plane.yml` | Audit policy, encryption key, kubeadm config, image pre-pull, `kubeadm init`, admin kubeconfig on the Spark (context renamed to `spark-root`), context merge on the controller (state folder), etcdctl/etcdutl, snapshot timer | `kubeadm init` only if `/etc/kubernetes/admin.conf` is absent |
 | `workers.yml` | 30-minute bootstrap token + CA hash from the control plane, `JoinConfiguration`, `kubeadm join`, removes the join file | Only if `/etc/kubernetes/kubelet.conf` is absent |
 
@@ -397,7 +397,11 @@ DGX OS ships Docker's `containerd.io`, and its stock `config.toml` **disables th
     replace: "SystemdCgroup = true"
   notify: Restart containerd
 
-- name: Register the NVIDIA runtime (nvidia-ctk edits config.toml in place)
+# → two read-only probes: grep -rEq over every *.toml under /etc/containerd
+#   ('nvidia' runtime registered? is it the default?), because newer nvidia-ctk
+#   releases write a drop-in /etc/containerd/conf.d/99-nvidia.toml
+
+- name: Register the NVIDIA runtime (nvidia-ctk edits config.toml or writes conf.d/99-nvidia.toml)
   ansible.builtin.command: >-
     nvidia-ctk runtime configure --runtime=containerd
     --config={{ kubeadm_cluster_containerd_config }}
@@ -570,7 +574,7 @@ CPU and slices are split exactly; memory is not. `llm-serving` and `batch` share
 
 - **Host prep on dgx-spark-1:** turns swap off (also in `/etc/fstab`), loads `overlay` and `br_netfilter`, and sets the three sysctls kubeadm needs. It stops right away if an old k3s is still installed.
 - **containerd:** if CRI is disabled (the stock DGX OS config), it saves `/etc/containerd/config.toml` as `config.toml.dgxos-orig` and writes containerd's full default config. Then it sets `SystemdCgroup = true` and makes `nvidia` the default runtime. Docker keeps working on the same containerd.
-- **Packages:** `kubelet`, `kubeadm`, `kubectl` at `1.36.5-1.1` from pkgs.k8s.io, then held so `apt upgrade` can't move them.
+- **Packages:** `kubelet`, `kubeadm`, `kubectl` at `1.36.5-1.1` from pkgs.k8s.io, then held so `apt upgrade` can't move them, plus `cri-tools` (`crictl`) from the same repository.
 - **Control plane:** audit policy, Secret encryption key (written once, never rotated by a re-run), `/etc/kubernetes/kubeadm-config.yaml`, image pre-pull, `kubeadm init`, `etcdctl`/`etcdutl`, and `etcd-snapshot.timer` (every 6 h). The API listens on `192.168.0.100:6443`.
 - **Play 2, on the controller:** Cilium 1.20.2 (VXLAN pod network, Hubble UI on NodePort 31235) and MetalLB 0.16.0 with the pool `192.168.0.110–119` on `enP7s7`.
 - **Kubeconfig:** context `spark-root` is merged into `kubeconfig-spark-lab.yaml` on sema01's state volume (other contexts are kept), and written to `~dgxadmin/.kube/config` on the Spark.
@@ -589,7 +593,7 @@ CPU and slices are split exactly; memory is not. `llm-serving` and `batch` share
    | `Allocatable` | `cpu: 17`, memory about 109.7 GiB (printed in Ki, about 115 000 000Ki). No `nvidia.com/gpu` yet: it appears after `20.1 GPU Operator`, as `15` |
    | kube-system pods | the four static pods (`kube-apiserver-dgx-spark-1`, `etcd-dgx-spark-1`, …), `coredns` ×2, `kube-proxy`, `cilium`, `cilium-operator`, `hubble-relay`, `hubble-ui`, all `Running` |
 
-4. **On the Spark** (second block): four files in `/etc/kubernetes/manifests`; `SystemdCgroup = true` and `default_runtime_name = "nvidia"` in `config.toml`; namespaces `k8s.io` and `moby` from `ctr`; `kubeadm`, `kubectl`, `kubelet` on hold.
+4. **On the Spark** (second block): four files in `/etc/kubernetes/manifests`; `SystemdCgroup = true` in `config.toml` and `default_runtime_name = "nvidia"` in `config.toml` or in the drop-in `conf.d/99-nvidia.toml` (newer `nvidia-ctk` writes it there); namespaces `k8s.io` and `moby` from `ctr`; `kubeadm`, `kubectl`, `kubelet` on hold.
 
 **If something's off:** "k3s is still installed" → run `19.2 Reset Kubernetes` with `reset_remove_k3s: true` (§8). `kubeadm init` preflight says `container runtime is not running` → CRI is still disabled in `config.toml`. Node `NotReady` → Cilium isn't ready yet (`cilium-dbg status`, §4.3). More in §6.
 
@@ -621,7 +625,7 @@ ssh dgxadmin@192.168.0.100
 ls /etc/kubernetes/manifests                       # etcd.yaml kube-apiserver.yaml kube-controller-manager.yaml kube-scheduler.yaml
 sudo crictl ps --name kube-apiserver               # CRI view, through /etc/crictl.yaml
 sudo ctr namespaces ls                             # k8s.io (kubelet) and moby (Docker): one containerd
-grep -nE 'SystemdCgroup|default_runtime_name' /etc/containerd/config.toml
+sudo grep -rnE --include='*.toml' 'SystemdCgroup|default_runtime_name' /etc/containerd   # config.toml and conf.d/99-nvidia.toml
 apt-mark showhold | grep -E 'kube'                 # kubeadm kubectl kubelet
 ```
 
@@ -638,7 +642,7 @@ apt-mark showhold | grep -E 'kube'                 # kubeadm kubectl kubelet
 1. **Command output:** `GPU 0: NVIDIA GB10 (UUID: GPU-…)`, then `pod "smi" deleted`.
 2. **The scheduler didn't count it.** Before Chapter 20, `kubectl --context spark-root describe node dgx-spark-1 | grep 'nvidia.com/gpu:'` prints nothing: there is no GPU resource to schedule or to charge to a quota. After `20.1 GPU Operator` it shows `15`.
 
-**If something's off:** an error from the runtime or `No devices were found` means `nvidia` is not containerd's default runtime: check `grep default_runtime_name /etc/containerd/config.toml` on the Spark and re-run `19.1 Kubernetes`. The first run waits for the image pull. More in §6.
+**If something's off:** an error from the runtime or `No devices were found` means `nvidia` is not containerd's default runtime: check `sudo grep -rn --include='*.toml' default_runtime_name /etc/containerd` on the Spark (the value can sit in `conf.d/99-nvidia.toml`) and re-run `19.1 Kubernetes`. The first run waits for the image pull. More in §6.
 
 #### Run it
 
@@ -884,7 +888,7 @@ Then, either way:
 
 ```bash
 # ▶ MacBook · any folder
-ssh dgxadmin@192.168.0.100 'sudo systemctl daemon-reload && sudo systemctl restart kubelet'
+ssh -t dgxadmin@192.168.0.100 'sudo systemctl daemon-reload && sudo systemctl restart kubelet'   # -t: sudo can ask for the password
 kubectl --context spark-root uncordon dgx-spark-1
 ```
 
@@ -911,7 +915,7 @@ Then set `kubeadm_cluster_version` in `roles/kubeadm_cluster/defaults/main.yml` 
 | AWX (Chapters 23, 24) | runs on `spark-root` in namespace `awx`; its PVC uses the default StorageClass `local-path` from playbook 20.2 |
 | NFS models (Chapter 15) | `hostPath: /mnt/models` or `csi-driver-nfs` |
 | Vault (vault01, Chapter 18) | the place for a copy of the Secret-encryption key (e.g. under `kv/spark-lab/`); pods get secrets via Vault Agent Injector or External Secrets pointed at vault01 |
-| Semaphore (sema01, Chapter 04) | runs 19.1 / 19.2 / 20.1 / 20.2 as templates; keeps the kubeconfig and kubeadm join material on its state volume; `tools/fetch-kubeconfig.sh` copies the kubeconfig to the MacBook |
+| Semaphore (sema01, Chapter 04) | runs 19.1 / 19.2 / 20.1 / 20.2 as templates; keeps the kubeconfig on its state volume (join tokens are made per run and never stored); `tools/fetch-kubeconfig.sh` copies the kubeconfig to the MacBook |
 | Drift detection (Chapter 26) | `19.1-kubernetes.yml --check` runs the read-only probes (`check_mode: false`) and reports containerd or package drift |
 | Drain & remediation (Chapter 29) | single node: draining dgx-spark-1 stops the models and both vClusters' workloads too |
 | 02-Kubernetes lab | `scripts/install-addons.sh` (metrics-server, kube-prometheus-stack) and `scripts/apply-lab.sh root|dev-lab|dev-llms` build on this cluster and the merged kubeconfig |
@@ -927,7 +931,7 @@ Then set `kubeadm_cluster_version` in `roles/kubeadm_cluster/defaults/main.yml` 
 | preflight: `swap is enabled` / `bridge-nf-call-iptables does not exist` | `swapon --show`; `lsmod \| grep br_netfilter` | Prereqs didn't run or were undone (a zram swap unit?). Re-run; disable the unit |
 | kubelet crash-loops **before** `init` | `journalctl -u kubelet -n 50` | Normal: kubelet waits for `/var/lib/kubelet/config.yaml`, which `kubeadm init` writes |
 | Pods start, then restart at random; kubelet logs cgroup errors | `grep SystemdCgroup /etc/containerd/config.toml` | Must be `true` (kubelet uses systemd). Fix, `systemctl restart containerd kubelet` |
-| Node `NotReady`, `NetworkPluginNotReady` | `sudo ls /etc/cni/net.d`; `kubectl --context spark-root -n kube-system get pods -l k8s-app=cilium` | Cilium not installed or not ready (play 2 of 05). `cilium-dbg status` in the agent pod |
+| Node `NotReady`, `NetworkPluginNotReady` | `sudo ls /etc/cni/net.d`; `kubectl --context spark-root -n kube-system get pods -l k8s-app=cilium` | Cilium not installed or not ready (play 2 of `19.1`). `cilium-dbg status` in the agent pod |
 | CoreDNS `Pending` | `kubectl --context spark-root -n kube-system describe pod -l k8s-app=kube-dns` | No CNI yet, or the node is tainted. `taints: []` only applies at `init`; remove a taint added later with `kubectl --context spark-root taint node dgx-spark-1 node-role.kubernetes.io/control-plane-` |
 | Worker join fails (token rejected, or `couldn't validate the identity of the API Server`) | `journalctl -u kubelet` on the worker; `controlPlaneEndpoint` in the config | Token expired (30 min) or the CA/endpoint changed since. Re-run 19.1: each run on an unjoined worker creates a fresh token and hash |
 | LoadBalancer Service stays `<pending>` | `kubectl --context spark-root -n metallb-system get ipaddresspool`; quota `services.loadbalancers` in `vc-*` | Pool missing (play 2 failed on the webhook: re-run), pool exhausted, or the vCluster's root quota is spent |
@@ -939,7 +943,7 @@ Then set `kubeadm_cluster_version` in `roles/kubeadm_cluster/defaults/main.yml` 
 ## 7. Validation
 
 - [ ] `kubectl --context spark-root get nodes`: every node `Ready`, arm64; dgx-spark-1 `Taints: <none>`.
-- [ ] `/etc/containerd/config.toml` has CRI enabled, `SystemdCgroup = true`, default runtime `nvidia`; `sudo crictl ps` works.
+- [ ] `/etc/containerd/config.toml` has CRI enabled and `SystemdCgroup = true`; default runtime `nvidia` (in `config.toml` or `conf.d/99-nvidia.toml`); `sudo crictl ps` works.
 - [ ] kubelet, kubeadm, kubectl held at 1.36.5.
 - [ ] A Secret reads `k8s:enc:aescbc:v1:key1:` in etcd; the audit log records its creation; `etcd-snapshot.timer` is active and `/var/lib/etcd-snapshots` has a snapshot.
 - [ ] Cilium status OK with `KubeProxyReplacement: False`; a LoadBalancer Service gets an IP from `.110–.119`.

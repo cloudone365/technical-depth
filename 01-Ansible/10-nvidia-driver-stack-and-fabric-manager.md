@@ -66,6 +66,40 @@ On a real HGX node, the rule you'd automate is "Fabric Manager version == driver
 
 > **The DGX Dashboard "Update" button** upgrades packages *and firmware* and then reboots. That's fine for a single personal box. Once the Spark is a shared node (Kubernetes/vCluster and Slurm workloads, a second Spark depending on it), use the playbook so drain, validation and holds wrap the same apt operation. Firmware is covered in Chapter 28.
 
+### 2.1 One upgrade, step by step
+
+What `10.2-dgxos-upgrade.yml` does for one Spark (`serial: 1`), run as the Semaphore template `10.2 DGX OS upgrade` with `vault_ssh_cert_ttl: 1h`:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant S as Semaphore task<br/>(container on sema01)
+  participant V as vault01
+  participant K as spark-root API<br/>192.168.0.100:6443
+  participant SL as Slurm controller<br/>(scontrol on dgx-spark-1)
+  participant N as dgx-spark-1<br/>(apt, systemd, GPU)
+  S->>V: play 1: AppRole login, sign/ansible (ttl 1h)
+  S->>N: apt-get -s full-upgrade
+  Note over S,N: upgrade_dry_run=true or 0 pending → meta end_host
+  S->>K: k8s_drain state=drain (context spark-root)
+  S->>SL: scontrol update State=DRAIN
+  S->>N: docker stop -t 60 for GPU containers
+  S->>N: apt-mark unhold (spark_nvidia_hold_regex)
+  S->>N: apt full-upgrade (async 3600, poll 15)
+  S->>N: reboot, wait until nvidia-smi -L answers (≤ 1800 s)
+  N-->>S: new SSH login, still inside the 1h certificate
+  S->>N: re-hold (packages.yml), spark_facts, container_runtime (CDI spec + smoke test)
+  S->>N: spark_validate checks
+  S->>K: k8s_drain state=uncordon
+  S->>SL: scontrol update State=RESUME, then sinfo shows idle
+```
+
+- **Step 2 is the dry run.** The `Report` task prints `N packages pending, M driver/CUDA/kernel`, then the play ends for that host (§3.2).
+- **Steps 3–4 run only once the scheduler exists.** Before Chapters 19 and 22 the drain prints `Kubernetes: not set up yet, skipped · Slurm: not set up yet, skipped`.
+- **Step 9 is why the TTL matters.** The reboot kills the ControlPersist master, so Ansible logs in again; if more than 15 minutes have passed since play 1, a default certificate is already expired and that login is refused (Chapter 02 §3.2).
+- **Step 10** is where the holds come back: run the audit (§3.1) afterwards and `held` matches `apt-mark showhold` again.
+- **Steps 12–13 run only if step 11 passes.** A failed validation leaves the node cordoned and drained on purpose (`max_fail_percentage: 0`).
+
 ---
 
 ## 3. Hands-on
@@ -109,6 +143,9 @@ On a real HGX node, the rule you'd automate is "Fabric Manager version == driver
 # Is the NVIDIA stack on each Spark internally consistent?
 #   kernel module (loaded) == kernel module (on disk) == userland libs == what nvidia-smi reports
 # A mismatch is THE classic post-upgrade failure: "Failed to initialize NVML: Driver/library version mismatch".
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: NVIDIA driver stack audit
   hosts: spark
   become: true

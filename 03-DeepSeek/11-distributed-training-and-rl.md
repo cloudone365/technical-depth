@@ -539,7 +539,7 @@ Optional, to see why CPU offload doesn't help: copy `zero3-nvme.json` with `"dev
 3. **NCCL** logs `NET/IB`, and the `ethtool` counters move on every step.
 4. **Speed:** many times faster per step than Task 5.7. Record per-rank peak, s/step and link GB/s.
 
-**If something's off:** a workload that is never admitted means the quota patches didn't apply. Ranks that hang at init mean the rendezvous IP or port 29500 is wrong or blocked. More in §7.
+**If something's off:** a workload that is never admitted means the quota patches didn't apply. Ranks that hang at init mean the rendezvous IP or port 29500 is wrong or blocked, or pod `fsdp-0-…` (rank 0, which must listen on 192.168.100.11) landed on dgx-spark-2: anti-affinity spreads the pods but doesn't choose which index goes where. Delete the Job and apply it again. More in §7.
 
 #### Run it
 
@@ -592,7 +592,7 @@ Compare with Task 5.7: same model and data, a fraction of the memory per box wit
 
 1. **Jobs:** every Job `Complete`, no `grpo-rollout` Deployment left.
 2. **Quota:** the last command shows `requests.cpu` 2, `limits.memory` 12Gi, `requests.storage` 200Gi as hard limits.
-3. **Serving:** the vLLM pod in `llm-serving` goes Ready again.
+3. **Serving:** the vLLM pod in `llm-serving` goes Ready again inside office hours. Outside them Chapter 09's office-hours ScaledObject `vllm` keeps it at 0; patch `minReplicaCount` to 1 (Chapter 09) before Task 5.3.
 4. **Storage:** after `delete pvc ds-swap`, `kubectl -n batch get pvc` lists only `deepseek-ckpt`.
 
 **If something's off:** vLLM stays at 0 replicas when the annotation is still there (`get scaledobject vllm -o yaml | grep paused`). If you disabled Argo CD self-heal for the window, turn it back on. More in §7.
@@ -609,7 +609,7 @@ kubectl --context spark-root -n llm-serving scale deploy bge-m3 --replicas=1 2>/
 kubectl --context spark-root -n batch describe resourcequota batch-budget | grep -E 'requests.cpu|limits.memory|requests.storage'
 ```
 
-Expected: `batch-budget` back at 2 CPU · 12Gi · 200Gi storage, `spark-cq` at 2 CPU · 12Gi, vLLM Ready. Delete `ds-swap` (`kubectl --context spark-root -n batch delete pvc ds-swap`) to free its 110 Gi of `batch` storage for the next job.
+Expected: `batch-budget` back at 2 CPU · 12Gi · 200Gi storage, `spark-cq` at 2 CPU · 12Gi, vLLM Ready (inside office hours). Delete `ds-swap` (`kubectl --context spark-root -n batch delete pvc ds-swap`) to free its 110 Gi of `batch` storage for the next job.
 
 ---
 

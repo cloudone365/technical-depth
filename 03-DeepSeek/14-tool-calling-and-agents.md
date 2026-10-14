@@ -151,7 +151,7 @@ Guided decoding and reasoning models: the schema constrains the answer, while th
 | tool model only | `qwen2.5-7b-tools` as **the** vLLM Deployment (`serve-model.sh`) | its util + 0.06 | this chapter's tasks |
 | planner + actor | r1-7b in `vllm`, `qwen2.5-7b-tools` next to it from `k8s/multi/` (its own Service `vllm-qwen2-5-7b-tools`) | both utils + 0.06, must stay ≲ 0.72 | R1 plans, Qwen calls tools |
 
-Read both values from `models.yaml` (or `scripts/serve-model.sh list`) before you start the second one, and check `serving-budget`: two 32 Gi pods plus the apps must fit 90 Gi.
+Read both values from `models.yaml` (or `scripts/serve-model.sh list`) before you start the second one, and check `serving-budget`: two 28 Gi pods plus bge-m3 (9 Gi) and the apps must fit 90 Gi.
 
 ---
 
@@ -188,7 +188,7 @@ Read both values from `models.yaml` (or `scripts/serve-model.sh list`) before yo
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-export KUBECONFIG=~/technical-depth/01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml
+export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 scripts/serve-model.sh qwen2.5-7b-tools
 kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null &
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
@@ -352,7 +352,7 @@ Expected: schema-constrained 20/20. Free-form is usually high but not always 20/
 #### What this lab does (script `lab/scripts/serve-model.sh`, overlay `lab/k8s/multi/qwen2.5-7b-tools`)
 
 - **Planner:** `deploy/vllm` switches back to r1-7b (util 0.20).
-- **Actor:** a second Deployment `vllm-qwen2-5-7b-tools` with its own Service and ServiceMonitor, util 0.20, 28 Gi. Util sum with bge-m3: 0.20 + 0.20 + 0.06 = 0.46.
+- **Actor:** a second Deployment `vllm-qwen2-5-7b-tools` with its own Service (label `app=vllm-qwen2-5-7b-tools`, so `svc/vllm` never selects it), util 0.20, 28 Gi. Util sum with bge-m3: 0.20 + 0.20 + 0.06 = 0.46.
 - **The agent** runs against the actor on `localhost:8002`.
 
 #### What to look for
@@ -390,17 +390,24 @@ Before the apply, add up the two catalog utils and bge-m3's 0.06: the sum must b
 2. **Your diagnosis** matches `answer D07`: the two flags are missing.
 3. **After reset:** the same question gives a `calculator` step and `ANSWER:` 1024.
 
-**If something's off:** the agent still works right after inject because the old pod is still serving; wait for `rollout status deploy/vllm`. The port-forward breaks on the pod change; start it again. More in §7.
+**If something's off:** the agent still works right after inject because the old pod is still serving; wait for `rollout status deploy/vllm`. `Connection refused` means the port-forward died with the old pod; start it again. More in §7.
 
 #### Run it
+
+Each apply replaces the vLLM pod, so the block waits for the rollout and restarts the port-forward on `localhost:8000` before each agent run.
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/breakfix.sh inject D07
+kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=20m
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null &
 python3 tools/agent_tools.py "What is 2**10?"
 scripts/breakfix.sh hint D07
 scripts/breakfix.sh answer D07
 scripts/breakfix.sh reset D07
+kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=20m
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null &
+python3 tools/agent_tools.py "What is 2**10?"                    # calculator step, ANSWER: 1024
 ```
 
 ---

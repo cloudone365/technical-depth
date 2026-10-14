@@ -50,10 +50,12 @@ roles/cx7_fabric/
 ├── defaults/main.yml          # every knob, documented, prefixed with the role name
 ├── meta/main.yml              # galaxy_info, platforms, dependencies (kept empty on purpose)
 ├── meta/argument_specs.yml    # typed input contract — validated before tasks run
-├── tasks/main.yml             # pre-flight → configure → verify → publish facts
-├── templates/40-cx7.yaml.j2   # {{ ansible_managed }} header in every template
-└── handlers/main.yml
+├── tasks/main.yml             # include fabric.yml only when cx7_fabric_interfaces is not empty
+├── tasks/fabric.yml           # configure → verify → publish facts
+└── templates/40-cx7.yaml.j2   # {{ ansible_managed }} header in every template
 ```
+
+No `handlers/`: the role applies netplan itself and verifies the result in the same run.
 
 | Convention | Why |
 |---|---|
@@ -213,7 +215,7 @@ cd "01-Ansible/lab"
 tools/build-collection.sh 0.1.0
 ansible-galaxy collection install .cache/dist/cloudone-spark-0.1.0.tar.gz -p /tmp/colltest
 ANSIBLE_COLLECTIONS_PATH=/tmp/colltest ansible-doc -t role -l cloudone.spark
-ANSIBLE_COLLECTIONS_PATH=/tmp/colltest ansible-playbook cloudone.spark.30-validate -i inventory -K
+ANSIBLE_COLLECTIONS_PATH=/tmp/colltest ansible-playbook cloudone.spark.30-validate -i inventory -K   # fails as shipped: see the trap in What to look for, item 4
 ```
 
 **Versioning:** follow SemVer. Adding a role is a minor bump. Renaming a variable or changing a default that alters behaviour on existing nodes (say, MTU) is **major**. Consumers pin versions:
@@ -247,7 +249,7 @@ collections:
 3. **The navigator run:** the play reaches the `Verdict` task and prints `All N checks passed`, with `failed=0` in the recap. A `FAILED checks: […]` list there is about the Spark's state (Chapter 30), not the EE: the EE did its job if the play got that far.
 4. Optional buildx step: `docker buildx imagetools inspect ghcr.io/cloudone365/spark-ee:1.0` lists both `linux/arm64` and `linux/amd64`.
 
-**If something's off:** `error: externally-managed-environment` from `pip install` means DGX OS's system Python refuses user installs; create a venv first (`python3 -m venv ~/.venvs/ee && . ~/.venvs/ee/bin/activate`). `permission denied` on the Docker socket means your user isn't in the `docker` group (use `sudo` or add the group). For the navigator run, `$SUDO_PW` must be set in that shell; with `--mode stdout --pae false` you can use `-K` instead and type the password. More in §5.
+**If something's off:** `error: externally-managed-environment` from `pip install` means DGX OS's system Python refuses user installs; create a venv first (`python3 -m venv ~/.venvs/ee && . ~/.venvs/ee/bin/activate`). `permission denied` on the Docker socket means your user isn't in the `docker` group (use `sudo` or add the group). For the navigator run, `-K` prompts only with `--mode stdout --pae false`; in the interactive TUI there is no prompt. More in §5.
 
 #### Run it
 
@@ -286,8 +288,9 @@ additional_build_steps:
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
 # native arm64 build, no emulation; run from a clone of technical-depth on the Spark
+python3 -m venv ~/.venvs/ee && . ~/.venvs/ee/bin/activate   # DGX OS's system Python refuses pip installs (PEP 668)
 pip install ansible-builder ansible-navigator
-cd "01-Ansible/lab"
+cd ~/technical-depth/01-Ansible/lab                          # your clone on the Spark
 ansible-builder build -t spark-ee:1.0 -f ee/execution-environment.yml --container-runtime docker -v 3
 docker image inspect spark-ee:1.0 --format '{{.Architecture}}'      # arm64
 docker run --rm spark-ee:1.0 ansible --version
@@ -308,7 +311,7 @@ Run playbooks through the EE, exactly as AWX will:
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
 ansible-navigator run playbooks/30.1-validate.yml --eei spark-ee:1.0 --mode stdout \
-  --pae false -i inventory --become-password-file <(echo "$SUDO_PW")
+  --pae false -i inventory -K                  # --pae false + stdout mode let ansible-playbook ask for the sudo password
 ```
 
 ### 3.3 Dependency hygiene
@@ -347,5 +350,5 @@ Freeze what actually ran: `pip freeze > .cache/pip.lock` and `ansible-galaxy col
 
 - [ ] `ansible-doc -t role -r roles cx7_fabric` shows the spec.
 - [ ] A misspelled key in host_vars fails at the arg-spec task.
-- [ ] `cloudone-spark-0.1.0.tar.gz` installs and `cloudone.spark.30-validate` runs.
+- [ ] `cloudone-spark-0.1.0.tar.gz` installs and `ansible-doc -t role -l cloudone.spark` lists the roles.
 - [ ] `spark-ee:1.0` is arm64 and `ansible-navigator run` works with it.

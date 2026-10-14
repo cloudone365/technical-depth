@@ -51,6 +51,34 @@ flowchart LR
 
 > **`async` export:** faster writes, but the server can acknowledge writes that aren't yet on disk. That's acceptable for a re-downloadable model cache and **not** for checkpoints you can't lose. Use `sync` for a checkpoint export.
 
+### 2.3 One mount and one read, step by step
+
+What `15.1 NFS RDMA` sets up (steps 1–6) and what happens when a model server on dgx-spark-2 reads a shard (steps 7–9):
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant A as Ansible<br/>(nfs_rdma role)
+  participant C as dgx-spark-2<br/>rpcrdma + NFSv4.2 client
+  participant N as dgx-spark-1 nfsd<br/>192.168.100.11:20049
+  participant D as /srv/models<br/>(NVMe on dgx-spark-1)
+  A->>N: nfs.conf rdma=y, rdma-port=20049, then read /proc/fs/nfsd/portlist
+  A->>C: modprobe rpcrdma, pick 192.168.100.11 (same /24 as its enp1s0f1np1)
+  A->>C: mount nfs4 vers=4.2,proto=rdma,port=20049 at /mnt/models (fstab, x-systemd.automount)
+  C->>N: RDMA-CM connect over the CX-7 link (RoCEv2)
+  N-->>C: export allowed for 192.168.100.0/24
+  Note over A,C: mount fails → the same mount with proto=tcp (port 2049)
+  A->>C: grep /mnt/models in /proc/mounts → proto=rdma
+  C->>N: NFS READ of /mnt/models/…/*.safetensors (rsize 1 MiB, nconnect=4)
+  N->>D: read the shard (page cache or NVMe)
+  N-->>C: RDMA Write of the data into the client's buffers
+```
+
+- **Step 1** is the *Confirm RDMA listener is registered* check (`rdma 20049` in the portlist). With one Spark, `nfs_client` is empty and the run ends after the server half.
+- **Step 2** takes the server's address from its `cx7_interfaces` in the client's own subnet. The management address is never used, and the export doesn't allow 192.168.0.0/24.
+- **The note after step 5** is the TCP fallback: the run still passes, and *Report transport* (step 6) prints `proto=tcp`. Check that line by eye.
+- **Steps 7–9** are what `fio` measures in §3.2. The server's NVMe or page cache (step 8) sets the ceiling, not the 200G link.
+
 ---
 
 ## 3. Hands-on

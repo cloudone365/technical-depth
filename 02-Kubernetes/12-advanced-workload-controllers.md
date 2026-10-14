@@ -91,6 +91,39 @@ flowchart TB
   style DEV fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
 ```
 
+### 2.1 A drain of dgx-spark-1, step by step
+
+What `kubectl --context spark-root drain dgx-spark-1 --ignore-daemonsets --delete-emptydir-data` asks the root to do. With `--dry-run=server` (§5.5) every write is checked but not stored.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant D as kubectl drain<br/>context spark-root
+  participant API as root API server
+  participant EV as Eviction API<br/>pods/eviction
+  participant PDB as PDBs on the root<br/>qdrant · mock-llm · echo-x-lab-tools-x-dev-lab
+  participant SY as dev-lab syncer
+  D->>API: cordon: Node dgx-spark-1 spec.unschedulable true
+  D->>API: list pods on dgx-spark-1
+  API-->>D: skip DaemonSet pods (spark-node-probe, cilium)<br/>and mirror pods (static control plane)
+  loop every other pod, in parallel
+    D->>EV: evict llm-serving/qdrant-0, vc-dev-lab/dev-lab-0, …
+    EV->>PDB: does a matching PDB allow one more disruption?
+    alt ALLOWED DISRUPTIONS above 0, or no PDB
+      EV-->>D: evicted, the pod gets SIGTERM and its grace period
+    else qdrant: maxUnavailable 0
+      EV-->>D: 429 Cannot evict pod … disruption budget<br/>drain retries after 5 s
+    end
+  end
+  API-->>SY: host pod of a dev-lab pod deleted
+  SY->>SY: the dev-lab controller recreates the virtual pod<br/>its host copy waits Pending on the cordoned node
+```
+
+- **Step 1** is why the node shows `SchedulingDisabled` after a real drain and not after a dry run (§5.5, item 3). Uncordon ends it.
+- **Step 3** explains what the dry-run output leaves out: the node probe DaemonSet and the root's own kube-apiserver and etcd are never evicted.
+- **Steps 4–7** are the PDB check. `qdrant` blocks (§5.5 expected output); `mock-llm` and the synced tenant PDB `echo-x-lab-tools-x-dev-lab` each allow one eviction at a time.
+- **Steps 8–9** happen only in a real drain. With one node, every replacement pod in every cluster waits `Pending` until `uncordon`.
+
 ---
 
 ## 3. LLD
@@ -182,7 +215,7 @@ kubectl --context dev-lab get sc           # the root's classes, seen from insid
 
 #### What to look for
 
-1. **Rollout:** `rollout status` ends with `statefulset rolling update complete …`, then `qdrant-0` is `1/1 Running` and `data-qdrant-0` is `Bound`.
+1. **Rollout:** `rollout status` ends with `partitioned roll out complete: 1 new pods have been updated...` (kubectl prints the partitioned form because the StatefulSet sets `partition: 0`), then `qdrant-0` is `1/1 Running` and `data-qdrant-0` is `Bound`.
 2. **dev-lab comparison:** on the root, `vc-dev-lab` has only the StatefulSet `dev-lab` and no Deployment; the echo pods have the same IPs on both sides.
 3. **Writes:** both `jq .status` lines print `"ok"`, and `points_count` is `2`.
 4. **After the delete:** `qdrant-0` Ready again within 120 s, `points_count` still `2`, and `sudo ls …/collections/` on the Spark lists `spark`.
@@ -452,8 +485,10 @@ vc-dev-lab    echo-x-lab-tools-x-dev-lab    2               N/A               1
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh inject 11          # (re)applies root-llms/50-workloads and prints the drain command
-kubectl --context spark-root drain dgx-spark-1 --ignore-daemonsets --delete-emptydir-data --dry-run=server 2>&1 | grep -E 'qdrant|dev-lab-0|dev-llms-0|disruption'
+kubectl --context spark-root drain dgx-spark-1 --ignore-daemonsets --delete-emptydir-data --dry-run=server --timeout=30s 2>&1 | grep -E 'qdrant|dev-lab-0|dev-llms-0|disruption'
 ```
+
+`--timeout=30s` is there because drain retries a PDB-blocked eviction every 5 s forever; without it, stop the command with Ctrl-C once the `Cannot evict` line appears. The drain then exits with an error, which is the expected result here.
 
 Expected:
 

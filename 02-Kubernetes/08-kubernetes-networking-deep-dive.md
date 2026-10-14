@@ -85,6 +85,37 @@ flowchart LR
 
 With one Spark, pod ↔ pod traffic never leaves the node: Cilium's eBPF program on the source `lxc*` looks up the destination in its endpoint map and redirects the packet straight to the destination's `lxc*`. There's no bridge and no VXLAN. With two Sparks, traffic for the other node's /24 goes into `cilium_vxlan` and out over the **management** NIC, because the 01-Ansible `kubeadm_cluster` role registers each node with its mgmt IP (`node-ip`) and Cilium tunnels between node IPs. The CX-7 stays free for RDMA.
 
+### 2.1 One connection between two dev-lab pods, step by step
+
+The request of §5.3: `netshoot` in dev-lab opens a TCP connection straight to one echo pod's IP on :8080. Both are root pods in `vc-dev-lab`; the addresses are the ones of the HLD.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant NS as netshoot pod<br/>vc-dev-lab · 10.42.0.15
+  participant LA as lxc of netshoot<br/>eBPF from-container
+  participant MAP as Cilium eBPF maps<br/>ipcache · endpoints · policy
+  participant LB as lxc of echo<br/>eBPF to-container
+  participant EC as echo pod<br/>vc-dev-lab · 10.42.0.23:8080
+  participant HB as Hubble<br/>in cilium-agent
+  NS->>LA: SYN to 10.42.0.23:8080<br/>default route via cilium_host, route MTU 1450
+  LA->>MAP: ipcache lookup of 10.42.0.23
+  MAP-->>LA: local endpoint, identity 40213
+  Note over LA,MAP: a 10.42.1.x destination would go to cilium_vxlan instead<br/>UDP 8472 to 192.168.0.101 (only with dgx-spark-2, §5.6)
+  LA->>LB: redirect to the echo pod's lxc (no bridge, no host route per pod)
+  LB->>MAP: ingress policy of 40213 for source identity 40877<br/>vcluster-boundary + translated tenant policies
+  MAP-->>LB: allowed
+  LB->>EC: deliver on eth0
+  LB-->>HB: flow event, verdict FORWARDED
+  EC-->>NS: SYN-ACK, same path back, matched by Cilium conntrack
+```
+
+- **Steps 1–3** are what `pod-netns.sh` prints in §5.2: the `/32` on `eth0`, the default route via the `cilium_host` router IP with `mtu 1450`, and the endpoint with its identity.
+- **Steps 3 and 5** use numeric identities, not IPs. Hubble prints them as `(ID:…)` in §5.3.
+- **Steps 5–6** are where the policies of §5.5 decide. When the source is `vc-dev-llms`, the `ingressDeny` of `vcluster-boundary` matches, the packet is dropped before step 7, and Hubble reports `DROPPED (Policy denied)` instead of `FORWARDED` in step 8.
+- **Steps 7 and 9** are what `tcpdump` inside the echo pod's netns sees in §5.3: two `10.42.0.x` addresses, no NAT, no VXLAN header.
+- **The note after step 3** is the only point where a second Spark changes the path (§5.6).
+
 ---
 
 ## 3. LLD
@@ -223,7 +254,7 @@ Expected: the same pod IPs in both listings — the second one with root names (
    | pod `eth0` | a `/32` address in `10.42.0.0/24` |
    | pod default route | `via <cilium_host IP> dev eth0 mtu 1450` |
    | `cilium_vxlan` | `vxlan external … dstport 8472` |
-   | Cilium endpoint | `POLICY (ingress) Disabled`, label `k8s:io.kubernetes.pod.namespace=vc-dev-lab` |
+   | Cilium endpoint | `POLICY (ingress) Enabled` (from `vcluster-boundary`), label `k8s:io.kubernetes.pod.namespace=vc-dev-lab` |
 
 3. **Note the `container-pid`:** §5.3 uses it.
 
@@ -264,7 +295,7 @@ vxlan external … dstport 8472 …
 10.42.0.23 via 10.42.0.147 dev cilium_host src 10.42.0.147 uid 0
 ── Cilium's view of this endpoint (identity, policy)
 ENDPOINT   POLICY (ingress)   POLICY (egress)   IDENTITY   LABELS (source:key[=value])   IPv6   IPv4         STATUS
-1834       Disabled           Disabled          40213      k8s:app=echo                         10.42.0.23   ready
+1834       Enabled            Disabled          40213      k8s:app=echo                         10.42.0.23   ready
                                                            k8s:io.kubernetes.pod.namespace=vc-dev-lab
                                                            k8s:vcluster.loft.sh/namespace=lab-tools …
 ```
@@ -274,7 +305,7 @@ Read it top to bottom:
 1. The pod's address is a **/32** and its only route is "everything via the router IP on `eth0`". There is no subnet on the link, so every packet, even to a neighbour pod, goes to the host side of the veth where Cilium's eBPF program (`from-container`) sees it.
 2. The host has **no per-pod route** and no bridge. Everything for the local podCIDR goes to `cilium_host`, and the eBPF program there delivers it to the right `lxc*` by looking it up in the endpoint map.
 3. The tenant's namespace (`lab-tools`) survives only as a label. To Cilium this is a pod in `vc-dev-lab`, which is exactly why the root can write one policy for the whole vCluster.
-4. `POLICY (ingress) Disabled`: nothing selects this pod yet. `lab-tools` has no NetworkPolicy, so it is open. In §5.5 the tenant pods flip to `Enabled`.
+4. `POLICY (ingress) Enabled`: the root's `vcluster-boundary` (applied with the vClusters by `install-addons.sh vclusters` / `20.2-vclusters.yml`) selects every pod in `vc-dev-lab`, and its deny rule needs ingress enforcement. With `enableDefaultDeny: false` it drops only traffic from `vc-dev-llms`. `lab-tools` has no NetworkPolicy of its own, so it is otherwise open. In §5.5 the tenant policies add default-deny for the pods in `tenant-alpha` and `tenant-beta`.
 
 ### 5.3 Watch packets: Hubble and tcpdump
 
@@ -460,7 +491,7 @@ The root copy of the tenant's policy has a **rewritten selector**: the tenant wr
 
 One more subtlety: Cilium by default lets the **node itself** (identity `reserved:host`) reach local pods, so kubelet probes keep working under default-deny. That's why `netshoot-host` (hostNetwork) is no good as a policy test client — use a pod.
 
-Now run the drill:
+Now run the drill (`breakfix.sh` needs bash ≥ 4; on macOS `brew install bash` once, see the guide's troubleshooting table):
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab

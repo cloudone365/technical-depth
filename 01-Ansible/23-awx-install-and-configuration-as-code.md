@@ -205,7 +205,7 @@ curl -s http://192.168.0.100:30080/api/v2/ping/ | jq .version
 #### What this lab does (playbook `playbooks/awx-config.yml`, which you write below)
 
 - **Collection:** installs `awx.awx` into `01-Ansible/lab/collections` and points it at AWX with `CONTROLLER_HOST`, `CONTROLLER_USERNAME` and `CONTROLLER_PASSWORD`.
-- **AWX objects, created through the API:** organization `SparkLab`; Machine credential `spark-ssh` (your `dgxadmin` key and sudo password); project `technical-depth` (this repository, branch `main`); inventory `spark-lab`, filled from `01-Ansible/lab/inventory/hosts.yml`; five job templates `spark · baseline`, `fabric`, `validate`, `drift` (check mode) and `drain`; and the schedule `drift-every-30m`.
+- **AWX objects, created through the API:** organization `SparkLab`; the global job setting `AWX_TASK_ENV` with `ANSIBLE_CONFIG=01-Ansible/lab/ansible.cfg`; Machine credential `spark-ssh` (your `dgxadmin` key and sudo password); project `technical-depth` (this repository, branch `main`); inventory `spark-lab`, filled from `01-Ansible/lab/inventory/hosts.yml`; five job templates `spark · baseline`, `fabric`, `validate`, `drift` (check mode) and `drain`; and the schedule `drift-every-30m`.
 - **Two files you create:** `playbooks/awx-config.yml` (the listing below) and `.cache/awx-secrets.yml` with `spark_become_password: …`, the file the run line passes with `-e @…`. Neither ships with the repository.
 - **No playbook runs on the Sparks** until a job is launched: the optional `awx … launch` line starts `spark · validate`, and the schedule starts `spark · drift` every 30 minutes.
 
@@ -242,6 +242,11 @@ export CONTROLLER_PASSWORD=$(kubectl --context spark-root -n awx get secret awx-
   tasks:
     - name: Organization
       awx.awx.organization: { name: "{{ org }}", state: present }
+
+    - name: Every job reads the lab's ansible.cfg (play 1, 00-vault-cert.yml, asserts it)
+      awx.awx.settings:
+        name: AWX_TASK_ENV
+        value: { ANSIBLE_CONFIG: "01-Ansible/lab/ansible.cfg" }   # relative to the project checkout, like Semaphore's
 
     - name: Machine credential (SSH key for the dgxadmin user)
       awx.awx.credential:
@@ -310,7 +315,7 @@ export CONTROLLER_PASSWORD=$(kubectl --context spark-root -n awx get secret awx-
 This machine credential is the **simple** version: your own `dgxadmin` key, stored in AWX. It is exactly the long-lived key the Semaphore path avoids. The production version is a *HashiCorp Vault Signed SSH* credential against vault01 for `svc-ansible` (Chapter 24 §2.2), AWX's counterpart of Semaphore's play 1. Two lab details when you switch:
 
 - `group_vars/spark.yml` sets `ansible_user` to `dgxadmin` whenever `vault_role_id` is undefined, which it is in AWX, and an inventory variable beats the credential's username. Give the job templates the extra variable `ansible_user: svc-ansible`.
-- Play 1 (`00-vault-cert.yml`) is skipped in AWX for the same reason, so it doesn't conflict with the credential plugin.
+- Play 1 (`00-vault-cert.yml`) skips its certificate block in AWX for the same reason, so it doesn't conflict with the credential plugin. Its first task still runs: it asserts that `01-Ansible/lab/ansible.cfg` is the loaded config, which is why the playbook above sets `ANSIBLE_CONFIG` in `AWX_TASK_ENV`.
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
@@ -360,7 +365,7 @@ sequenceDiagram
 
 #### Run it
 
-`lab/ee/execution-environment.yml` builds on the Spark itself, so the image is native `linux/arm64`:
+`lab/ee/execution-environment.yml` builds a native `linux/arm64` image on an Apple-silicon MacBook (the commands below) or on the Spark itself:
 
 ```yaml
 # lab/ee/execution-environment.yml
@@ -432,6 +437,7 @@ docker run --rm 192.168.0.100:5000/spark-ee:1.0 ansible-galaxy collection list |
 | Operator loops, AWX never appears | `kubectl --context spark-root -n awx logs deploy/awx-operator-controller-manager -c awx-manager` → look for `failed=1` | Usually a CR typo or a PVC that can't bind: `kubectl --context spark-root get pvc -n awx`. On kubeadm there is no StorageClass until `local-path` is installed (prerequisite above) |
 | `awx-postgres-15-0` CrashLoop: permission denied on data dir | `kubectl --context spark-root -n awx logs awx-postgres-15-0` | local-path volume permissions: delete the PVC (lab only) and let the operator recreate it |
 | Job stuck `pending` | `kubectl --context spark-root -n awx get pods \| grep automation-job`; `awx-task` logs | Capacity: the instance group shows 0 capacity; raise `task_resource_requirements` or wait for running jobs |
+| Job fails at play 1: `Ansible loaded '…' instead of 01-Ansible/lab/ansible.cfg` | Job output, first task | `AWX_TASK_ENV` lacks `ANSIBLE_CONFIG=01-Ansible/lab/ansible.cfg`: re-run `awx-config.yml` (§3.4), or set it under Settings → Jobs |
 | Job fails instantly: `ERROR! the role 'spark_facts' was not found` | Job output → working directory | AWX runs from the project root, so `lab/ansible.cfg` (and its `roles_path`) is **not** read. The lab ships `playbooks/roles → ../roles` so role lookup works relative to the playbook. Set other settings via the job template's env or `AWX_TASK_ENV` (Semaphore solves the same problem with `ANSIBLE_CONFIG="01-Ansible/lab/ansible.cfg"` in its container, Chapter 04 §4) |
 | `couldn't resolve module/action 'community.docker...'` | EE collection list | Build and use the custom EE (§3.6), or add `collections/requirements.yml` to the project |
 | Job can't reach 192.168.0.x | `kubectl --context spark-root -n awx exec` into a job pod → `nc -vz 192.168.0.101 22` | Pod → mgmt LAN traffic leaves through Cilium and is masqueraded to the node IP; check host firewalls, then `kubectl --context spark-root -n kube-system exec ds/cilium -- cilium-dbg monitor --type drop` for policy drops |

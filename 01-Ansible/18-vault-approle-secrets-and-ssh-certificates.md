@@ -201,7 +201,7 @@ Every playbook that SSHes to the Sparks starts with `import_playbook: 00-vault-c
 Design choices worth copying:
 
 - **`uri`, not `community.hashi_vault`.** Plain HTTP calls need no Python library, show exactly which endpoint is hit (it matches the audit log line for line), and behave identically in the stock and the lab Semaphore image.
-- **One login per task.** The token is used three times (sign, read) and then simply expires. No renew, no revoke, nothing to clean up.
+- **One login per task.** The token is used for the signature and the KV read(s), and then simply expires. No renew, no revoke, nothing to clean up.
 - **The certificate sits next to the key** (`id_ed25519-cert.pub`), so OpenSSH presents it automatically; `spark.yml` only sets the key path.
 - **Secrets are read up front,** inside the token's 10 minutes, into a fact on `localhost`; host plays take them from `hostvars['localhost'].vault_lab_secrets`.
 - **The paths read are a list (`loop: [ngc]`).** A new lab secret means a `vault kv put kv/spark-lab/<name>` plus its name in that loop; the policy already covers `kv/spark-lab/*`.

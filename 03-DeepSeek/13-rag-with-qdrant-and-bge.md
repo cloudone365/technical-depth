@@ -74,6 +74,42 @@ Where the pieces run:
 | ingest | Job `rag-ingest`: init container clones the repo, `rag_demo.py ingest` runs from the tools ConfigMap | `llm-serving` | no |
 | eval / ask | `rag_demo.py` on the MacBook through port-forwards, or in-cluster | — | no |
 
+### 2.1 One gated re-index, step by step
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant J as Job rag-ingest<br/>(llm-serving, UID 65534)
+  participant GH as github.com<br/>technical-depth
+  participant E as bge-m3<br/>:8000 /v1/embeddings
+  participant Q as qdrant<br/>:6333
+  J->>GH: init container clone: git clone --depth=1 into /work/repo
+  J->>J: chunk every .md under 01-Ansible, 02-Kubernetes, 03-DeepSeek
+  J->>E: embed the first chunk (dimension 1024)
+  J->>Q: PUT /collections/technical-depth-‹ts›, Cosine
+  loop every 32 chunks
+    J->>E: POST /v1/embeddings, model bge-m3
+    J->>Q: PUT /collections/technical-depth-‹ts›/points?wait=true
+  end
+  loop 16 gold questions (rag_gold.jsonl)
+    J->>E: embed the question
+    J->>Q: POST /collections/technical-depth-‹ts›/points/search, limit 5
+  end
+  alt hit@5 below 0.6
+    J->>Q: DELETE /collections/technical-depth-‹ts›
+    Note over J: GATE FAILED, exit 1, alias unchanged
+  else hit@5 at least 0.6
+    J->>Q: POST /collections/aliases<br/>delete_alias + create_alias in one call
+    J->>Q: DELETE collections older than the previous one
+    Note over J: gate passed, alias technical-depth moved
+  end
+```
+
+- **Step 1** needs egress from `llm-serving` to GitHub. The Job indexes `main`, not your working copy (Task 5.2).
+- **Steps 2–6** print `… files → … chunks` and `collection technical-depth-…: … points, dim 1024`.
+- **Steps 7–8** are the same `eval` you run from the MacBook in Task 5.3; the Job prints the `16 questions  hit@1 …  hit@5 …  MRR …` line.
+- **Step 9** is the gate drill (Task 5.6). **Steps 10–11** are a normal ingest; readers keep querying the alias `technical-depth` and never see the half-built collection. `rollback` (Task 5.5) repeats step 10 with the previous collection.
+
 ---
 
 ## 3. LLD
@@ -164,7 +200,7 @@ user:   Sources:
 
 - **Qdrant:** StatefulSet `qdrant` (`qdrant/qdrant:v1.13.4-unprivileged`, REST :6333) in `llm-serving` with a `local-nvme-retain` PVC. A no-op if 02 already deployed it.
 - **Tools and data:** `apply -k .` refreshes the ConfigMaps `deepseek-tools` (with `rag_demo.py`) and `deepseek-evaldata` (with `rag_gold.jsonl`, 16 questions).
-- **bge-m3:** the embedding server from Chapter 12 (util 0.06).
+- **bge-m3:** the embedding server from Chapter 12 (util 0.06), applied on its own. `apply -k k8s/apps` would also reset the LiteLLM and Open WebUI Secrets to their placeholders and undo Chapter 12 Task 5.6.
 - **Chat model:** `serve-model.sh r1-7b` prefetches, switches `deploy/vllm` to r1-7b and runs a smoke test.
 
 #### What to look for
@@ -179,7 +215,7 @@ user:   Sources:
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
-export KUBECONFIG=~/technical-depth/01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml
+export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 kubectl --context spark-root apply -k manifests/root-llms/50-workloads              # Qdrant (no-op if already there)
 kubectl --context spark-root -n llm-serving rollout status sts/qdrant --timeout=5m
 ```
@@ -187,7 +223,7 @@ kubectl --context spark-root -n llm-serving rollout status sts/qdrant --timeout=
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root apply -k .                                             # tools + eval data ConfigMaps
-kubectl --context spark-root apply -k k8s/apps                                      # bge-m3 (Chapter 12)
+kubectl --context spark-root apply -f k8s/apps/bge-m3.yaml                          # bge-m3 only (Chapter 12)
 kubectl --context spark-root -n llm-serving rollout status deploy/bge-m3 --timeout=20m
 scripts/serve-model.sh r1-7b
 ```

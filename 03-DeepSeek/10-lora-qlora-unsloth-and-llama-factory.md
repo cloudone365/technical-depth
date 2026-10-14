@@ -85,6 +85,43 @@ flowchart LR
   style ROOT fill:#e6f4f5,stroke:#0e7c86
 ```
 
+### 2.1 One adapter, step by step
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant M as MacBook<br/>03-DeepSeek/lab
+  participant API as spark-root<br/>API server
+  participant KQ as Kueue<br/>spark-cq · batch/train
+  participant J as Job sft<br/>(batch, 4 CPU · 48 Gi · 1 slice)
+  participant CK as PVC deepseek-ckpt<br/>(batch)
+  participant MC as PVC model-cache<br/>(llm-serving)
+  participant V as Deployment vllm<br/>(llm-serving, r1-1.5b)
+  M->>API: annotate scaledobject vllm paused-replicas=0
+  API->>V: scale to 0 (pod gone, its 14 Gi back in the pool)
+  M->>API: apply -k training-window
+  Note over API,KQ: batch-budget and spark-cq 8 CPU · 80 Gi<br/>serving-budget 2 CPU · 10 Gi
+  M->>API: apply -f k8s/jobs/sft.yaml (suspend true)
+  API->>KQ: Workload for Job sft, queue train, priority routine
+  KQ->>J: admit (48 Gi fits 80 Gi) and un-suspend
+  J->>J: pip install PIP_TRL pins, download R1-Distill-Qwen-1.5B
+  J->>CK: write /ckpt/sft-lora and /ckpt/sft-lora-merged
+  J-->>M: log line STATS with peak_cuda_gib
+  M->>API: apply -k 10-tenancy and 20-scheduling, remove the pause
+  M->>CK: publish-adapter.sh sft-lora (pod ckpt-reader, tar)
+  CK->>MC: tar stream into /models/adapters/sft-lora (pod cache-writer)
+  M->>API: apply -k k8s/lora/r1-1.5b-sft
+  API->>V: rollout with --enable-lora --lora-modules=r1-sft
+  M->>V: format_check.py --model r1-sft (port-forward 8000)
+  V-->>M: model r1-sft format N/50 correct N/50
+```
+
+- **Steps 1–3 are Task 5.4.** The window quotas evict nothing, so the vLLM pod must be gone first. While it runs, its memory is still held and a training pod waits `Pending` with `Insufficient memory`.
+- **Steps 4–6 are Kueue.** `kubectl -n batch get workloads` shows the Workload `ADMITTED`; a second 48 Gi Job stays queued before step 6 (48 + 48 Gi > 80 Gi).
+- **Steps 7–9 are the training log** (Tasks 5.5–5.6): `trainable params`, falling `'loss'`, `merged model →`, then `STATS {…}`. `unsloth` and `llamafactory` repeat steps 4–9 and write `/ckpt/unsloth-lora` and `/ckpt/lf-lora`. Step 10 closes the window (Task 5.7).
+- **Steps 11–12 cross namespaces.** PVCs belong to one namespace, so `publish-adapter.sh` runs one pod on each side and pipes a tar between them (Task 5.8, `[PASS] published …`).
+- **Steps 13–16 are Tasks 5.8–5.9.** The two other adapters are loaded at runtime with `/v1/load_lora_adapter` instead of a rollout.
+
 ---
 
 ## 3. LLD
@@ -394,7 +431,7 @@ Where to read them: the `STATS {…}` line at the end of the `sft` and `unsloth`
 
 1. **Before:** `get jobs` in `batch` lists `sft`, `unsloth`, `llamafactory` all `Complete`.
 2. **After:** `kubectl --context spark-root -n batch describe resourcequota batch-budget` shows hard `2` CPU and `12Gi`.
-3. **Serving:** `kubectl --context spark-root -n llm-serving get deploy vllm` returns to `1/1`.
+3. **Serving:** `kubectl --context spark-root -n llm-serving get deploy vllm` returns to `1/1` inside office hours. Outside them Chapter 09's office-hours ScaledObject `vllm` keeps it at `0/0` and scales it back to 0 after the cooldown, so run Tasks 5.8–5.10 inside office hours or patch `minReplicaCount` to 1 as in Chapter 09.
 
 **If something's off:** vLLM `exceeded quota: serving-budget` → the window is still applied; re-run the two `apply -k` lines. More in §7.
 
@@ -501,10 +538,11 @@ scripts/publish-adapter.sh sft-lora-merged
 kubectl --context spark-root apply -k k8s/models/r1-1.5b
 kubectl --context spark-root -n llm-serving set env deploy/vllm MODEL=/models/adapters/sft-lora-merged SERVED_NAME=r1-sft-merged
 kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=20m
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &   # the old one died with the pod
 python3 tools/format_check.py --url http://localhost:8000 --model r1-sft-merged -n 50   # same scores, base speed
 ```
 
-Restart the port-forward after the rollout. `scripts/serve-model.sh r1-1.5b` puts the catalog model back.
+The rollout replaces the pod, so the port-forward from Task 5.8 dies; the block starts a new one. `scripts/serve-model.sh r1-1.5b` puts the catalog model back.
 
 ---
 

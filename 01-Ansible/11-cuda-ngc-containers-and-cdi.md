@@ -48,6 +48,39 @@ flowchart TB
 | Legacy hook | `--gpus all` | `nvidia-container-runtime` prestart hook | Works everywhere; what most docs show |
 | **CDI** | `--device nvidia.com/gpu=all` | Container Device Interface spec (`/etc/cdi/nvidia.yaml`) | The standard used by Docker 25+, Podman and containerd/k8s. **Must be regenerated when the driver changes** |
 
+### 1.3 The two smoke tests, step by step
+
+What the role's two smoke tasks (§2) do on dgx-spark-1, one per row of §1.2:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant A as Ansible task<br/>(container_runtime smoke test)
+  participant D as dockerd<br/>(default-runtime nvidia, features.cdi)
+  participant CT as containerd<br/>(namespace moby)
+  participant R as nvidia-container-runtime
+  participant CDI as /etc/cdi/nvidia.yaml
+  participant C as cuda:13.0.1-base-ubuntu24.04<br/>container
+  A->>D: docker run --rm --gpus all … nvidia-smi
+  D->>D: add prestart hook nvidia-container-runtime-hook<br/>NVIDIA_VISIBLE_DEVICES=all
+  D->>CT: create the container, runtime nvidia
+  CT->>R: OCI spec
+  R->>C: hook (libnvidia-container) bind-mounts host libcuda and libnvidia-ml, adds /dev/nvidia*
+  C-->>A: NVIDIA GB10, 580.xx.xx
+  A->>D: docker run --rm --device nvidia.com/gpu=all … nvidia-smi -L
+  D->>CDI: resolve nvidia.com/gpu=all
+  CDI-->>D: device nodes, mounts and hooks for driver 580.x
+  D->>CT: create the container, CDI edits already in the OCI spec
+  CT->>R: OCI spec
+  R->>C: start
+  C-->>A: GPU 0: NVIDIA GB10 (UUID: GPU-…)
+```
+
+- **Steps 1–6** are the `--gpus :` line of the *Report container GPU visibility* task (§3.1); **steps 7–13** are its `CDI :` line, with `rc=0`.
+- **Step 9 is where a stale spec breaks.** After a driver upgrade the spec still names the old `libcuda.so.580.…`, and step 12 fails with `failed to stat …` (§5). The role's freshness check regenerates the spec before the smoke tests run.
+- **The PyTorch test in `11.2 CUDA smoke`** (§3.2) uses `--gpus=all`, so it takes steps 1–6, not the CDI path.
+- **Kubernetes pods** (Chapters 19–20) use the same containerd, in namespace `k8s.io` instead of `moby`, started by the kubelet instead of dockerd (§3.5).
+
 ---
 
 ## 2. The role
@@ -170,7 +203,7 @@ container_runtime_smoke_test: true
   community.docker.docker_login:
     registry_url: nvcr.io
     username: "$oauthtoken"
-    password: "{{ container_runtime_ngc_api_key }}"
+    password: "{{ container_runtime_ngc_api_key | trim }}"   # a pasted newline would break the login
     reauthorize: false
   no_log: true
   when:
@@ -287,7 +320,7 @@ ssh dgxadmin@192.168.0.100 'docker info --format "default={{.DefaultRuntime}} ru
 
 - **Host level:** copies `uma_probe.cu` to `/opt/spark-lab/cuda-smoke/`, compiles it with the host's `nvcc` for the GB10's architecture (`sm_121`), checks that the binary really contains `sm_121` code, and runs it. The probe prints the GPU's properties, how much unified memory CUDA sees, and the memory bandwidth of a simple kernel (saxpy over 2 × 1 GiB arrays).
 - **Container level:** starts `nvcr.io/nvidia/pytorch:25.11-py3` with `--gpus=all`, multiplies two 8192 × 8192 bf16 matrices 20 times, and prints the achieved TFLOPS.
-- **What it proves:** the host CUDA toolkit, the driver, the container runtime, CDI and the NGC image all work together. Nothing on the Spark is reconfigured; only the work directory and the binary are created. The first run pulls a ~20 GB PyTorch image, so it takes a while.
+- **What it proves:** the host CUDA toolkit, the driver, the container runtime (`--gpus` path; the CDI path is tested by `11.1 Containers`) and the NGC image all work together. Nothing on the Spark is reconfigured; only the work directory and the binary are created. The first run pulls a ~20 GB PyTorch image, so it takes a while.
 
 #### What to look for
 

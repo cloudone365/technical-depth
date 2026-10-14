@@ -89,6 +89,40 @@ dev-llms (`vc-dev-llms/dev-llms-0`) is built the same way as dev-lab. The LLM st
 
 A tenant's Deployment never reaches the root. Its **ReplicaSet and Pods are created by dev-lab's controller-manager**; only the Pods are copied down by the syncer. At the root, a tenant pod is a bare pod with no ReplicaSet owner — so the root's controllers don't heal it. If it dies, the dev-lab ReplicaSet replaces it, and the syncer creates the new copy.
 
+### 2.2 One deleted tenant pod, step by step
+
+§5.2 deletes one `echo` pod in dev-lab's `lab-tools`. Three controllers in two clusters react:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as kubectl --context dev-lab
+  participant DAPI as dev-lab API server<br/>(SQLite, pod dev-lab-0)
+  participant RSC as dev-lab ReplicaSet controller<br/>(dev-lab controller-manager)
+  participant SY as dev-lab syncer
+  participant RAPI as root API server
+  participant SCH as root scheduler
+  participant KL as kubelet dgx-spark-1
+  U->>DAPI: DELETE lab-tools/echo-…-abcde
+  DAPI-->>RSC: watch: pod has deletionTimestamp
+  DAPI-->>SY: watch: same event
+  SY->>RAPI: DELETE vc-dev-lab/echo-…-abcde-x-lab-tools-x-dev-lab
+  RAPI-->>KL: watch: stop the containers
+  RSC->>RSC: reconcile(lab-tools/echo-…): want 3, have 2 active
+  RSC->>DAPI: POST pod echo-…-fghij (event SuccessfulCreate)
+  DAPI-->>SY: watch: new pod
+  SY->>RAPI: POST host copy (APF lane spark-vcluster-syncers)
+  SCH->>RAPI: binding → dgx-spark-1 (event Scheduled)
+  KL->>RAPI: PATCH status Running (Pulled, Created, Started)
+  RAPI-->>SY: watch: host status changed
+  SY->>DAPI: copy status and events into dev-lab
+```
+
+- **Steps 6–7** are the `SuccessfulCreate` from `replicaset-controller` that §5.2's event watch shows about 1 s after the delete. Steps 10–11 are the `Scheduled`, `Pulled`, `Created`, `Started` events that step 13 copied up from the root.
+- **The root's controller-manager is in none of these steps.** That's why §5.3 can stop it and dev-lab still scales `echo`. What it does own is releasing `vcluster-budget` usage after step 5, which is why `status.used` doesn't drop while it's down.
+- **Steps 4 and 9** are the syncer's writes to the root. §5.6 counts them in `apiserver_flowcontrol_dispatched_requests_total{priority_level="spark-vcluster-syncers"}` and reads them in `managedFields`.
+- **§5.6 does step 4 by hand, from the root:** you delete the host copy, the syncer deletes the virtual pod in dev-lab, and steps 6–13 run again.
+
 ---
 
 ## 3. LLD
@@ -166,7 +200,7 @@ The `sudo` lines run on the Spark (`ssh dgxadmin@192.168.0.100`).
 | Check | Healthy value |
 |---|---|
 | Lease `HOLDER` (root) | `dgx-spark-1_<uuid>` for both |
-| `renewTime` in the `watch` | moves forward every ~2 s |
+| `renewTime` in the loop | moves forward every ~2 s |
 | `pgrep -a kube-controller` | three processes |
 | root controller-manager flags | `--allocate-node-cidrs=true`, `--cluster-cidr=10.42.0.0/16`, leader election on |
 | vCluster controller-manager flags | `--kubeconfig` pointing at its own API server; node-facing controllers switched off in `--controllers=` |
@@ -179,7 +213,7 @@ The `sudo` lines run on the Spark (`ssh dgxadmin@192.168.0.100`).
 # ▶ MacBook · any folder
 kubectl --context spark-root -n kube-system get lease kube-controller-manager kube-scheduler \
   -o custom-columns=NAME:.metadata.name,HOLDER:.spec.holderIdentity,RENEWED:.spec.renewTime,DURATION:.spec.leaseDurationSeconds
-watch -n1 "kubectl --context spark-root -n kube-system get lease kube-controller-manager -o jsonpath='{.spec.renewTime}'"   # Ctrl-C to stop
+while true; do kubectl --context spark-root -n kube-system get lease kube-controller-manager -o jsonpath='{.spec.renewTime}{"\n"}'; sleep 1; done   # macOS has no 'watch' · Ctrl-C to stop
 ```
 
 Expected: `renewTime` advances every ~2 s. If it stops for > 15 s, nothing the root's controller-manager owns will reconcile.
@@ -231,7 +265,7 @@ What to look for: the root's has `--allocate-node-cidrs=true --cluster-cidr=10.4
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab apply -k manifests/dev-lab/30-networking     # echo Deployment (3 replicas) in lab-tools
 kubectl --context dev-lab -n lab-tools get deploy,rs,pod -l app=echo -o wide
-kubectl --context dev-lab -n lab-tools get events -w &                 # leave running · Ctrl-C to stop
+kubectl --context dev-lab -n lab-tools get events -w &                 # runs in the background · stopped by kill %1 below
 POD=$(kubectl --context dev-lab -n lab-tools get pod -l app=echo -o name | head -1)
 kubectl --context dev-lab -n lab-tools delete "$POD" --wait=false     # dev-lab's ReplicaSet controller notices 2/3 and creates one
 kubectl --context dev-lab -n lab-tools set image deploy/echo echo=registry.k8s.io/e2e-test-images/agnhost:2.52

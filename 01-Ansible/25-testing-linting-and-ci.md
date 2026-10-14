@@ -39,7 +39,7 @@ flowchart TB
 - **Static layer:** `yamllint -s .`, `ansible-playbook --syntax-check` on every file in `playbooks/`, a check that `ansible_managed` appears only in `.j2` templates, then `ansible-lint` with the `production` profile.
 - **Fixture layer:** runs the Chapter 07 Jinja katas, feeds the captured avahi output in `tests/fixtures/` to the `spark_mdns` inventory plugin, and runs `tools/spark_drift_report.py` on `tests/fixtures/drift-sample.json`, which must exit `2` (drift found).
 - **Code layer:** `py_compile` on the Python tools, the `spark.fact` script and the inventory plugins; `bash -n` on the shell scripts.
-- **The listing below is shortened.** The file in the repo also stops early with a hint when the venv is not active, and runs the syntax check *before* `ansible-lint` so a parse error shows Ansible's own message.
+- **Two details in the listing below:** the script stops early with a hint when the venv is not active, and it runs the syntax check *before* `ansible-lint`, so a parse error shows Ansible's own message.
 
 #### What to look for
 
@@ -71,9 +71,38 @@ flowchart TB
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export ANSIBLE_CONFIG=$PWD/ansible.cfg
+# ansible-core aborts when stdin/stdout/stderr are non-blocking (it happens on
+# CI runners): force blocking file handles for everything below.
+python3 -c 'import os
+for fd in (0, 1, 2):
+    try: os.set_blocking(fd, True)
+    except OSError: pass'
+# The tools come from the lab's virtual environment (Chapter 02 §3.1). A new
+# terminal doesn't have it active: say so instead of "command not found".
+for t in yamllint ansible-lint ansible-playbook ansible-inventory; do
+  command -v "$t" >/dev/null || {
+    echo "$t not found. Activate the lab's virtual environment first:"
+    echo "  source ~/.venvs/spark-ansible/bin/activate"
+    echo "(not created yet? see Chapter 02 §3.1: python3 -m venv …, pip install -r requirements.txt)"
+    exit 1; }
+done
 echo "== yamllint";      yamllint -s .
-echo "== ansible-lint";  ansible-lint
-echo "== syntax-check";  for p in playbooks/*.yml; do ansible-playbook --syntax-check "$p" >/dev/null; done
+# Plain syntax-check BEFORE ansible-lint: ansible-lint only says "Unexpected error
+# code 1" — this prints ansible's own message (and a GitHub annotation in CI).
+echo "== syntax-check";  for p in playbooks/*.yml; do
+                           if ! err=$(ansible-playbook --syntax-check "$p" 2>&1 >/dev/null </dev/null); then
+                             echo "$err" >&2
+                             [ -n "${GITHUB_ACTIONS:-}" ] && echo "::error file=01-Ansible/lab/$p,title=syntax-check::$(tail -c 1500 <<<"$err" | tr '\n' ' ')"
+                             exit 1
+                           fi
+                         done
+# ansible_managed exists only inside the template module on newer ansible-core
+# (Semaphore's); in copy content it fails with "'ansible_managed' is undefined".
+echo "== ansible_managed only in .j2"
+                         if grep -rn --include='*.yml' 'ansible_managed' playbooks roles; then
+                           echo "Use a literal '# Managed by Ansible' line in copy content (keep {{ ansible_managed }} for .j2 templates)" >&2; exit 1
+                         fi
+echo "== ansible-lint";  ansible-lint </dev/null
 echo "== jinja katas";   kata=$(ansible-playbook playbooks/07.1-jinja-lab.yml); grep -q '7/7 Jinja katas passed' <<<"$kata"
 echo "== mdns plugin";   out=$(ANSIBLE_INVENTORY_ENABLED=spark_mdns ansible-inventory -i tests/fixtures/spark.mdns.yml --list)
                          echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert sorted(d["spark"]["hosts"])==["dgx-spark-1","dgx-spark-2"], d'
@@ -138,7 +167,7 @@ nvidia-smi --query-gpu=index,name,temperature.gpu,power.draw,utilization.gpu,mem
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
-ANSIBLE_STDOUT_CALLBACK=ansible.posix.json ansible-playbook playbooks/26.1-drift-check.yml > tests/fixtures/drift-real.json
+ANSIBLE_STDOUT_CALLBACK=ansible.posix.json ansible-playbook playbooks/26.1-drift-check.yml -l dgx-spark-1,localhost -K > tests/fixtures/drift-real.json   # -K: the sudo prompt goes to the terminal, not the file
 ```
 
 Then add a case to `run-local-checks.sh`. The Jinja katas (Chapter 07) are this pattern taken to its conclusion.
@@ -390,7 +419,7 @@ The management-plane files live in the same `lab/` tree, so the same workflow co
 | `semaphore/Dockerfile` | not linted yet | it carries a `# hadolint ignore=DL3006` marker, so adding `hadolint` to the static job is a one-line exercise |
 | `tools/fetch-kubeconfig.sh`, `tools/vault-ssh-cert.sh` | `bash -n tools/*.sh` | they parse; their behaviour is proven by the Chapter 04 Verify steps |
 
-Neither login case of `group_vars/spark.yml` (svc-ansible with `vault_role_id`, nvidia without) is exercised by CI: the syntax check doesn't render inventory variables. The Semaphore case only runs for real on sema01. Its test is the template `04.2 Ping` (Chapter 04 §5.6): run it after every change to play 1, `group_vars/spark.yml` or the Semaphore image.
+Neither login case of `group_vars/spark.yml` (`svc-ansible` with `vault_role_id`, `dgxadmin` without) is exercised by CI: the syntax check doesn't render inventory variables. The Semaphore case only runs for real on sema01. Its test is the template `04.2 Ping` (Chapter 04 §5.6): run it after every change to play 1, `group_vars/spark.yml` or the Semaphore image.
 
 ## 5. Troubleshooting & diagnostics
 

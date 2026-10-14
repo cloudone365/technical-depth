@@ -97,5 +97,5 @@ flowchart TB
 - **Training** runs in `batch` through Kueue (`train` → `spark-cq`) inside the training window (02-Kubernetes Chapter 14): vLLM parked, `spark-cq` raised to 8 CPU · 80 Gi · 3 slices; each pod ≤ 8 CPU · ≤ 80 Gi · 1 slice, request = limit.
 - **Admission** on the root: pinned image tags (see `lab/versions.env`), a readinessProbe on serving Deployments, no `NVIDIA_VISIBLE_DEVICES` env.
 - **Secrets** come from vault01 (`kv/spark-lab/hf` for the Hugging Face token, synced to Secret `hf-token` in `llm-serving`), never from files in the repo.
-- **Contexts.** `spark-root` runs the models; `dev-llms` (namespace `llm-sandbox`, 2 CPU · 4 Gi · 2 slices) is where you try a manifest or `qwen3-0.6b` first (`scripts/serve-model.sh qwen3-0.6b --sandbox`).
+- **Contexts.** `spark-root` runs the models; `dev-llms` (vCluster quota 2 CPU · 4 Gi · 2 slices; namespace `llm-sandbox` 1500m · 3 Gi · 2 slices) is where you try a manifest or `qwen3-0.6b` first (`scripts/serve-model.sh qwen3-0.6b --sandbox`).
 - **Versions.** Qwen generations, vLLM parsers and image tags change often: the lab pins what it tested in `lab/versions.env` and `lab/models.yaml`; for anything newer, check the current release and the model card.

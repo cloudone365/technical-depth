@@ -54,12 +54,12 @@ One **subnet per logical link** (`.100.x` and `.101.x`), so the kernel routes ea
 | Setting | Value | Where |
 |---|---|---|
 | Netplan file | `/etc/netplan/40-cx7.yaml`, mode `0600`, `renderer: networkd` | `cx7_fabric` template |
-| Addressing | host_vars `cx7_interfaces[]` | `inventory/host_vars/spark-0N.yml` |
+| Addressing | host_vars `cx7_interfaces[]` | `inventory/host_vars/dgx-spark-N.yml` |
 | MTU | 9000 (both ends must match) | host_vars |
 | `optional: true` | Boot doesn't wait for an unplugged cable | template |
 | Link verification | operstate `up`, speed `200000`, MTU, `ibv_devinfo` `PORT_ACTIVE` | role asserts |
 | Reachability | `ping -M do -s 8972` (DF set, jumbo) to each same-subnet peer | role |
-| Published facts | `cx7_fabric_primary_if`, `_primary_ip`, `_hca_list`, `_roce_gid_index` | consumed by NCCL, vLLM, Kubernetes (Multus NADs), NFS |
+| Published facts | `cx7_fabric_primary_if`, `_primary_ip`, `_hca_list`, `_roce_gid_index` | printed by `13.1` as the NCCL environment; `13.2` reads the GID index. `14.2`, `15.1` and `21.1` take their CX-7 names and addresses from `cx7_interfaces` (or their own vars), not from these facts |
 
 ### 2.3 Scaling past two Sparks (NVIDIA-documented topologies)
 
@@ -70,6 +70,37 @@ One **subnet per logical link** (`.100.x` and `.101.x`), so the kernel routes ea
 | 4+ | **Switch** (QSFP56/QSFP56-DD, 200G ports) | One L2 bridge on the switch, one subnet, DHCP from the switch or static | Force 200G on switch ports if autonegotiation lands at 100G; use the same cage on every Spark |
 
 To model a ring in this lab, give each host **two** `cx7_interfaces` groups on different cages with per-link subnets. The role's peer computation (same /24 → peer) already handles it.
+
+### 2.4 One `13.1 Fabric` run, step by step
+
+What the `cx7_fabric` role does on dgx-spark-1 with dgx-spark-2 in the inventory (§3.2):
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant S as Semaphore task<br/>(sema01)
+  participant N1 as dgx-spark-1<br/>(cx7_fabric role)
+  participant NP as netplan + systemd-networkd<br/>(dgx-spark-1)
+  participant N2 as dgx-spark-2<br/>192.168.100.12 · 192.168.101.12
+  S->>N1: spark_facts, then ibdev2netdev
+  N1-->>S: rocep1s0f1 port 1 ==> enp1s0f1np1 (Up) …
+  S->>N1: assert every cx7_interfaces name is in that list
+  S->>NP: template /etc/netplan/40-cx7.yaml (mode 0600)
+  S->>NP: netplan generate, then netplan apply (only when the file changed)
+  S->>N1: wait for operstate up (15 × 2 s), compare live MTU with 9000
+  S->>N1: read speed, mtu, operstate and ibv_devinfo port state
+  Note over S,N1: strict asserts only when a peer shares a /24 (cx7_fabric_strict auto)
+  S->>N1: find the RoCE v2 IPv4 GID index under /sys/class/infiniband
+  S->>S: set the cx7_fabric_* facts
+  N1->>N2: ping -M do -s 8972 -I enp1s0f1np1 192.168.100.12
+  N1->>N2: ping -M do -s 8972 -I enP2p1s0f1np1 192.168.101.12
+  S->>S: post_tasks print the NCCL environment
+```
+
+- **Step 3** fails with `… not found. ibdev2netdev shows: …` when the names in `host_vars` differ from §3.1.
+- **Steps 4–5** touch only the CX-7 netdevs. `enP7s7` stays with its NetworkManager profile (Chapter 03).
+- **Step 7** is the *Assert link health* line (§3.2 table). With one Spark there is no peer, so the same data goes to *Link health, report only*, and steps 10–11 have nothing to ping.
+- **Step 8** gives the `NCCL_IB_GID_INDEX` value printed in step 12 and the `-x` index that `13.2 RDMA perftest` passes to `ib_write_bw` (§3.3).
 
 ---
 
@@ -441,6 +472,9 @@ TASK [Print NCCL environment derived from the fabric]
 # RDMA verbs bandwidth/latency between two Sparks over CX-7 (RoCEv2).
 # Server side runs on the 2nd Spark (async), client on the 1st.
 #   ansible-playbook playbooks/13.2-rdma-perftest.yml -K [-e perftest_port_idx=1] [-e perftest_qps=4]
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: RDMA perftest (ib_write_bw / ib_write_lat)
   hosts: spark
   become: true
@@ -591,7 +625,7 @@ What stays the same, and what this chapter trains: **inventory-driven addressing
 | `PORT_ACTIVE` but perftest `Couldn't connect` | Wrong GID index (a RoCE v1 or link-local GID) | `show_gids`; use the RoCE v2 IPv4 index; pass `-x` |
 | perftest reports roughly half the expected rate | Only one logical interface, or `-q 1` | Test both netdevs concurrently; raise `-q` to 4–8 |
 | Random loss under load (switch topology) | `ethtool -S enp1s0f1np1 \| grep -E 'discard\|pause\|ecn'` | Congestion: Chapter 14 (ECN/PFC) |
-| Netplan apply cut the mgmt link | You put the mgmt NIC in `40-cx7.yaml` | Never. Mgmt lives in `30-mgmt.yaml` (Chapter 03) |
+| Netplan apply cut the mgmt link | You put the mgmt NIC in `40-cx7.yaml` | Never. On DGX OS the mgmt address is the NetworkManager profile `mgmt-static` (on a netplan host, `30-mgmt.yaml`), Chapter 03 |
 
 Fast triage bundle:
 

@@ -129,6 +129,42 @@ The `default` policy (attached to every token) lets a token look itself up and r
 
 > **KV v2 path gotcha:** the API path for *reading* is `kv/data/<path>`, for *listing* `kv/metadata/<path>`. Policies must use those exact prefixes; the CLI (`vault kv get kv/spark-lab/ngc`) hides the `data/` segment from you. `vault token capabilities <path>` tells you what the current token can do on a path.
 
+### 1.7 `17.1-vault.yml`, step by step
+
+The one playbook that writes to vault01 (role `vault_config`, §2.2) reads before every write. Each arrow is one HTTPS call from the MacBook, and each one is a request/response pair in vault01's audit log.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant PB as 17.1-vault.yml on the MacBook<br/>(localhost, VAULT_TOKEN from env)
+  participant V as vault01 :8200 API
+  participant AL as /var/log/vault_audit.log
+  PB->>PB: assert VAULT_TOKEN is set
+  PB->>V: GET ssh-client-signer/roles/ansible
+  V-->>PB: 200, allowed_users svc-ansible (assert, never written)
+  PB->>V: GET auth/approle/role/semaphore
+  V-->>PB: 200, token_policies [semaphore-ssh] (assert)
+  PB->>V: GET sys/mounts
+  opt kv/ not mounted
+    PB->>V: POST sys/mounts/kv type kv, version 2
+  end
+  PB->>V: GET sys/policies/acl/spark-lab-read
+  opt 404, or the text differs
+    PB->>V: PUT sys/policies/acl/spark-lab-read
+  end
+  opt spark-lab-read not in token_policies
+    PB->>V: POST auth/approle/role/semaphore<br/>token_policies = existing + spark-lab-read
+  end
+  PB->>V: POST kv/data/spark-lab/ngc api_key=REPLACE_ME, cas 0
+  V-->>PB: 200 first time, 400 when the secret exists
+  V->>AL: one request and one response line per call, values HMAC'd
+```
+
+- **Steps 1–6 only read and check.** A failed assert stops the run before anything is written (§3.2 "If something's off").
+- **Steps 7, 9 and 10 are the `opt` writes.** On a first run they show `changed` (*Mount KV v2*, *Write the lab policy*, *Attach the lab policy*); on a re-run they are `skipping`.
+- **Step 11** shows `changed` only when step 12 is a 200. The 400 is the `cas: 0` refusal that keeps your real NGC key, so a second run ends `changed=0` (§3.2).
+- **Step 13** is what §3.4 reads with `jq`; the §3.7 policy grants exactly the paths in steps 2–11.
+
 ---
 
 ## 2. Automating Vault with Ansible
@@ -570,7 +606,7 @@ vault status -format=json | jq '{sealed, initialized, storage_type, ha_enabled, 
 vault operator raft autopilot state | head
 vault read sys/audit
 vault read -field=token_policies auth/approle/role/semaphore                              # [semaphore-ssh spark-lab-read]
-python3 tools/capstone_scorecard.py | grep Chapter 17                                            # on the MacBook, in lab/
+python3 tools/capstone_scorecard.py | grep -A1 'Chapter 17/18'                                   # on the MacBook, in lab/: [PASS] + evidence
 ```
 
 - [ ] Sealed `false`, storage `raft`, one audit device writing `/var/log/vault_audit.log`.

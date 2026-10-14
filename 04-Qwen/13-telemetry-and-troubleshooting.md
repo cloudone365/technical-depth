@@ -69,6 +69,31 @@ flowchart LR
 
 The metrics pipeline is the platform's (02-Kubernetes) and the serving rules and dashboard are 03-DeepSeek's: they query vLLM's metrics by name, so they work for whichever model the `vllm` Deployment serves. vLLM labels its metrics with `model_name` (the served name, i.e. the catalog name), which is how you filter the dashboard to a Qwen model or compare two engines.
 
+### 2.1 From a truncated answer to an alert, step by step
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as client<br/>(curl, LiteLLM)
+  participant V as vllm pod<br/>(llm-serving, :8000/metrics)
+  participant P as Prometheus kps<br/>(observability)
+  participant AM as Alertmanager
+  participant G as Grafana
+  C->>V: chat request, thinking on, max_tokens 128
+  V-->>C: finish_reason length, empty content
+  V->>V: vllm:request_success_total with finished_reason=length +1
+  P->>V: scrape /metrics every 15 s (ServiceMonitor llm-workloads)
+  P->>P: relabel: vcluster=root · vnamespace=llm-serving · model_name kept
+  P->>P: ReasoningTruncated: length ÷ all over 15m > 0.2, by model_name
+  P->>AM: alert firing after for: 15m
+  G->>P: dashboard queries, model variable = qwen3-8b
+```
+
+- **Steps 1–3** are §5.5 (a): `jq` prints `finish: "length"` and an empty `content`.
+- **Steps 4–5** are what §5.2 checks: `vllm:num_requests_running` returns `["qwen3-8b"]`. Side engines (`vllm-<name>`) are not scraped unless you widen the `llm-workloads` keep regex (Chapter 04 §4).
+- **Steps 6–7** need sustained truncation: more than 20 % of requests for 15 minutes. One provoked request shows in the finish-reasons panel, not as an alert.
+- **Step 8** is §5.1: the dashboard "Spark · LLM serving (DeepSeek)" with its `model` variable set to the Qwen engine.
+
 ---
 
 ## 3. LLD
@@ -108,14 +133,14 @@ Metric names move between vLLM releases; after an image bump, `curl …/metrics 
 | Truncated thinking | `finish_reason=length` with empty `content` — users see nothing | the truncation ratio above (03's `ReasoningTruncated` alert fires at > 20 %) |
 | Tool-call parse failures | the parser couldn't extract a call; the call arrives as text | vLLM log lines from the tool parser; `fc_check.py` pass rate as a scheduled probe |
 | Context overflows | prompts over `--max-model-len` are rejected (400) | gateway 4xx by alias; vLLM log "maximum context length" |
-| YaRN on a short-prompt deployment | static scaling applies to every request | `kubectl get deploy vllm -o jsonpath` → `--rope-scaling` present where it shouldn't be |
+| YaRN on a short-prompt deployment | static scaling applies to every request | `kubectl get deploy vllm -o jsonpath` → `--hf-overrides` with `rope_parameters` (older images: `--rope-scaling`) present where it shouldn't be |
 | Parser/template drift after a model bump | new generation, new parser (Chapter 10 §3.2) | `fc_check.py` after every catalog change |
 
 A Qwen alert you can add next to 03's rules without a new file:
 
 ```yaml
 # PrometheusRule snippet (add to a rules file of your own in namespace observability)
-- alert: QwenToolCallsDegraded
+- alert: QwenRequestsTruncated
   expr: |
     (sum(rate(vllm:request_success_total{model_name=~"qwen.*",finished_reason="length"}[15m]))
       / sum(rate(vllm:request_success_total{model_name=~"qwen.*"}[15m]))) > 0.2
@@ -176,7 +201,7 @@ Fix order: (1) is the util sum over all running engines ≲ 0.72? (2) do the wei
 |---|---|---|
 | `stop` | normal end (`<|im_end|>` or a stop string) | — |
 | `length` with text in `content` | `max_tokens` too low for the answer | raise `max_tokens` in the client/preset |
-| `length` with empty `content` and long `reasoning_content` | thinking used the whole budget | larger budget, thinking off for this traffic, or a non-thinking model |
+| `length` with empty `content` and a long reasoning field (`reasoning` / `reasoning_content`) | thinking used the whole budget | larger budget, thinking off for this traffic, or a non-thinking model |
 | `tool_calls` | the model called a tool | the client must run it and continue |
 
 Qwen's end-of-turn token is `<|im_end|>` (id 151645); `<|endoftext|>` (id 151643) ends documents. Engines read both from `generation_config.json`. A hand-rolled pipeline that only knows one of them produces runaway generations that continue into an invented next turn — with vLLM and the model's own config this doesn't happen; check `generation_config.json` if you converted or merged a model yourself (Chapter 08 merges).
@@ -190,7 +215,8 @@ See Chapter 10 §7 for the full table. The short version: tool calls as text →
 Qwen2.5/Qwen3 use RoPE with base $\theta = 10^6$ (`rope_theta: 1000000.0` in `config.json`). A converted or re-packaged checkpoint that carries Llama's default $\theta = 10^4$ has wavelengths $\lambda_i = 2\pi\,\theta^{2i/d}$ up to 100× shorter in the slow dimensions, so positions beyond a few thousand tokens alias and the model degrades into repetition. Beyond the native 32K, YaRN must be configured explicitly:
 
 ```text
---rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' --max-model-len 131072
+# the pinned image (vLLM ≥ 0.12); before 0.12: --rope-scaling '{"rope_type":"yarn",…}'
+--hf-overrides '{"rope_parameters": {"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 32768, "rope_theta": 1000000}}' --max-model-len 131072
 ```
 
 Check `config.json` in the model cache (`rope_theta`, `max_position_embeddings`, `rope_scaling`) against the model card. And remember that vLLM's YaRN is static: enable it only on the deployment that needs long inputs (Chapter 01, Chapter 11 §3.5).
@@ -390,7 +416,7 @@ Restart the engine in another terminal (`kubectl --context spark-root -n llm-ser
 
 1. **(a):** `finish: "length"`, `content` empty or `null`, `thinking_chars` above 0.
 2. **(b):** every tool case `FAIL`, with `no tool call (check --enable-auto-tool-choice and --tool-call-parser)` or `request failed: HTTP Error 400` (vLLM refuses `tool_choice: auto` without those flags); `no-tool` and `json-schema` still `PASS`. After `serve-model.sh qwen3-8b`, the suite passes again.
-3. **(c):** one of three signatures, each with its evidence: `Pending` with `exceeded quota: serving-budget` or `Insufficient memory` in `describe pod`, or a CUDA OOM in the vLLM log at load.
+3. **(c):** one of three signatures, each with its evidence: no new pod and a `FailedCreate … exceeded quota: serving-budget` event, a `Pending` pod with `Insufficient memory` in `describe pod`, or a CUDA OOM in the vLLM log at load.
 
 **If something's off:** (b) still passes → the flags are still on the running pod; check its args. (c) starts fine → the sum wasn't really above 0.72; recount with `scripts/serve-model.sh list`.
 
@@ -405,7 +431,7 @@ Each one is a deliberate misconfiguration on the served model; `serve-model.sh` 
 kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000:8000 >/dev/null & pf=$!; sleep 2
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"qwen3-8b","max_tokens":128,
   "messages":[{"role":"user","content":"How many primes are below 200? Show your reasoning."}]}' \
-  | jq '{finish: .choices[0].finish_reason, content: .choices[0].message.content, thinking_chars: (.choices[0].message.reasoning_content // "" | length)}'
+  | jq '{finish: .choices[0].finish_reason, content: .choices[0].message.content, thinking_chars: (.choices[0].message.reasoning // .choices[0].message.reasoning_content // "" | length)}'
 kill $pf
 ```
 

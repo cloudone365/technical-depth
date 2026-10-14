@@ -55,6 +55,41 @@ flowchart LR
 | `/usr/local/cuda/gds/tools/gdscheck[-p]` | Platform capability report |
 | `/usr/local/cuda/gds/tools/gdsio` | Benchmark tool with transfer types (`-x 0` GPU direct, `-x 1` CPU only, `-x 2` CPU→GPU) |
 
+### 2.1 One GPU-direct read on the Spark, step by step
+
+What happens during the `-x 0` read test of `16.1 GDS check` on GB10:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant P as 16.1 task<br/>Read tests (item 0)
+  participant G as gdsio -x 0<br/>(8 threads, 1M I/O)
+  participant L as libcufile.so
+  participant CJ as /etc/cufile.json
+  participant FS as nvidia_fs module
+  participant N as NVMe<br/>/srv/models/gdsio.bin
+  participant M as LPDDR5x pool<br/>(CPU + GPU)
+  P->>P: sync and echo 3 > /proc/sys/vm/drop_caches
+  P->>G: gdsio -f /srv/models/gdsio.bin -x 0 -I 0 -T 15
+  G->>L: cuFileDriverOpen
+  L->>CJ: read allow_compat_mode true,<br/>log dir /var/log/cufile
+  L->>FS: is nvidia_fs loaded?
+  FS-->>L: no (gds_summary.nvidia_fs_loaded false)
+  G->>L: register the file and a GPU buffer
+  loop 15 s
+    G->>L: cuFileRead 1M
+    L->>N: compat mode: POSIX pread
+    N-->>M: DMA into a host bounce buffer
+    L->>M: cudaMemcpy bounce buffer → GPU buffer<br/>(same physical pool on GB10)
+  end
+  G-->>P: Throughput: … GiB/s → bench.gpu_direct
+```
+
+- **Step 1** makes every read test cold. Without it, the 2nd and 3rd tests would read the page cache, not the NVMe.
+- **Steps 5–6** are what `nvidia_fs_loaded` reports. On a DGX H100 with `nvidia_fs` loaded, steps 9–11 become one P2P DMA into HBM.
+- **Steps 9–11 are compat mode.** `-x 2` (`cpu_gpu_bounce`) does the same pread and copy in gdsio itself, so on the Spark `gpu_direct` and `cpu_gpu_bounce` land close together.
+- **Step 12** is the line the *Add results* task picks with its `Throughput:` regex. An error anywhere before it gives `n/a`; the reason is in `/var/log/cufile/cufile.log` (§5).
+
 ---
 
 ## 3. Hands-on
@@ -69,7 +104,7 @@ flowchart LR
 
 #### What to look for
 
-1. **Semaphore run:** `failed=0`. A first run shows `changed` on `/etc/cufile.json` and the test file (plus the package, if it was installed); a re-run shows `changed=0`.
+1. **Semaphore run:** `failed=0`. A first run shows `changed` on `/etc/cufile.json` and the test file (plus the package, if it was installed); a re-run shows `changed=0` on `dgx-spark-1` (`localhost` still shows the new certificate from play 1).
 2. **The *Report* task** prints `gds_summary`. Expected on GB10 (unified memory):
 
    | Field | Expected on this Spark |
@@ -92,6 +127,9 @@ flowchart LR
 # On GB10 the "GPU memory" IS system memory (coherent UMA), so the question is
 # not "can NVMe DMA into the GPU BAR" but "what path does cuFile take, and is it
 # faster than plain POSIX reads for your loader?" This play answers that with data.
+- name: Short-lived SSH certificate from vault01 (Semaphore runs only)
+  ansible.builtin.import_playbook: 00-vault-cert.yml
+
 - name: GDS / cuFile assessment
   hosts: spark
   become: true

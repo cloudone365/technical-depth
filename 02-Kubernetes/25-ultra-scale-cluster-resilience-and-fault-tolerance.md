@@ -83,7 +83,7 @@ flowchart TB
   AS --> PVC
   PVC -->|"on (re)start: newest COMPLETE"| T
   KILL -->|"pod status + DisruptionTarget"| JC
-  X86 -->|"podFailurePolicy: FailJob"| Q
+  X86 -->|"podFailurePolicy: FailJob,<br/>then a manual taint (§5.4)"| Q
   classDef gpu fill:#76b900,stroke:#3d6000,color:#000
   classDef store fill:#bf8700,stroke:#7a5600,color:#fff
   classDef sec fill:#cf222e,stroke:#82071e,color:#fff
@@ -96,6 +96,45 @@ flowchart TB
   style LLMS fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
   style ROOT fill:#e6f4f5,stroke:#0e7c86
 ```
+
+### 2.1 A kill and a resume, step by step
+
+§5.2 deletes the training pod and §5.3 evicts it. Both end in a replacement pod that resumes from the PVC; they differ in how the Job controller counts the loss:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as kubectl on the MacBook<br/>(context spark-root)
+  participant API as root API server
+  participant KL as kubelet<br/>dgx-spark-1
+  participant P1 as pod resilient-train-…<br/>(first pod, ns batch)
+  participant JC as Job controller<br/>(kube-controller-manager)
+  participant CK as PVC ckpt<br/>/data/k8s/batch/ckpt
+  participant P2 as pod resilient-train-…<br/>(replacement)
+  P1->>CK: async_save step-N, then COMPLETE<br/>on step-(N-50)
+  alt delete the pod (§5.2)
+    U->>API: delete pod
+    API->>KL: stop the container
+    KL->>API: pod phase Failed
+    JC->>API: status.failed +1 (backoffLimit 6)
+  else evict the pod (§5.3)
+    U->>API: create pods/eviction
+    API->>API: add pod condition DisruptionTarget
+    API->>KL: stop the container
+    KL->>API: pod phase Failed
+    JC->>API: rule Ignore, status.failed stays 0
+  end
+  JC->>API: create the replacement pod
+  P2->>CK: load the newest step-*/COMPLETE
+  P2-->>U: log RESUMED from /ckpt/step-N
+  Note over P2: every 25 steps: canary vs canary.json<br/>mismatch = exit 86 = FailJob, no replacement
+```
+
+- **Step 1** is the `checkpoint started (blocking … ms)` line (§5.1). A checkpoint gets `COMPLETE` only when the next one starts, so the resume point is the one before the newest `step-*` directory.
+- **The delete branch** is §5.2: `status.failed` is `1` afterwards.
+- **The eviction branch** is §5.3: `failed=0`, because the `DisruptionTarget` rule says `Ignore`.
+- **The `RESUMED` line** names the step it continues from, a multiple of 50.
+- **The note** is §5.4: exit 86 matches the `FailJob` rule before any retry, so no replacement pod is created. The taint that follows is a manual step.
 
 ---
 
@@ -199,7 +238,7 @@ ssh dgxadmin@192.168.0.100 'ls /data/k8s/batch/ckpt/'                           
 
 1. **Pods:** the old pod goes `Terminating`, a new `resilient-train-…` pod appears and runs.
 2. **Log:** `RESUMED from /ckpt/step-N at step N`, where N is a multiple of 50 (the newest complete checkpoint), then `DONE at step 400`.
-3. **Lost work:** at most one checkpoint interval (50 steps).
+3. **Lost work:** up to two checkpoint intervals (just under 100 steps), because a checkpoint is marked `COMPLETE` only when the next one starts.
 4. **Job status:** `kubectl --context spark-root -n batch get job resilient-train -o jsonpath='{.status.failed}'` → `1`.
 
 **If something's off:** no `RESUMED` line → no checkpoint was complete yet (kill later), or the Job had already finished: 400 steps go fast once the image is cached. To start over, `delete -k` the layer (§5.6, this also deletes the PVC and its checkpoints), apply it again and kill the pod sooner. More in §7.
@@ -213,7 +252,7 @@ kubectl --context spark-root -n batch get pods -l job-name=resilient-train -w   
 kubectl --context spark-root -n batch logs -f job/resilient-train | grep -E 'RESUMED|DONE'
 ```
 
-Expected: `RESUMED from /ckpt/step-100 at step 100` (or whichever was the newest *complete* checkpoint), then `DONE at step 400`. Lost work per failure ≤ one checkpoint interval. The replacement pod was created by the root's Job controller, in the same cluster whose kubelet reported the old one gone.
+Expected: `RESUMED from /ckpt/step-100 at step 100` (or whichever was the newest *complete* checkpoint), then `DONE at step 400`. Lost work per failure is under two checkpoint intervals: the newest `step-*` directory has no `COMPLETE` marker yet. The replacement pod was created by the root's Job controller, in the same cluster whose kubelet reported the old one gone.
 
 ### 5.3 An eviction doesn't count as a failure
 

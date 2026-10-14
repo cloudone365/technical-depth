@@ -336,7 +336,7 @@ scripts/breakfix.sh list
 n=$(printf '%02d' $(( (RANDOM % 14) + 1 ))); echo "drill $n"; scripts/breakfix.sh inject "$n"   # 01–14; 15 only on purpose
 # … diagnose using §1 and §3 only …
 scripts/breakfix.sh hint "$n"; scripts/breakfix.sh answer "$n"; scripts/breakfix.sh reset "$n"
-scripts/collect-diag.sh && tar tzf diag-*.tar.gz | head -40
+scripts/collect-diag.sh && tar tzf "$(ls -t diag-*.tar.gz | head -1)" | head -40   # newest bundle: tar reads only one archive
 ```
 
 Then rehearse the three vCluster-specific failures that `breakfix.sh` doesn't script.
@@ -349,7 +349,7 @@ kubectl --context dev-lab -n lab-tools get pods                         # works
 kubectl --context spark-root -n vc-dev-lab scale statefulset dev-lab --replicas=0
 kubectl --context dev-lab -n lab-tools get pods --request-timeout=5s    # fails: no API server
 kubectl --context spark-root -n vc-dev-lab get pods | grep -- '-x-lab-tools-x-dev-lab'   # tenant pods still Running
-scripts/collect-diag.sh >/dev/null && tar tzf diag-*.tar.gz | grep UNREACHABLE         # the bundle records it
+scripts/collect-diag.sh >/dev/null && tar tzf "$(ls -t diag-*.tar.gz | head -1)" | grep UNREACHABLE   # the newest bundle records it
 kubectl --context spark-root -n vc-dev-lab scale statefulset dev-lab --replicas=1
 kubectl --context spark-root -n vc-dev-lab rollout status statefulset dev-lab --timeout=5m
 ```

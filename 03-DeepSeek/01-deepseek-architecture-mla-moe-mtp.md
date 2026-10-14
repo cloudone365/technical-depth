@@ -60,7 +60,7 @@ During decoding, every new token attends to the keys and values of all previous 
 | GQA (grouped-query) | K and V for a few shared KV heads | Qwen2.5-32B: 8 KV heads × 128 | 256 KiB |
 | **MLA** | one compressed latent `c_kv` (512) + one shared RoPE key (64) | **DeepSeek-V3**: 61 layers × 576 | **68.6 KiB** |
 
-DeepSeek-V3 caches less per token than Qwen2.5-7B with GQA (56 KiB at 28 layers vs V3's 61 layers).
+DeepSeek-V3 caches only a little more per token than Qwen2.5-7B with GQA (68.6 vs 56 KiB), with 88× the parameters and 61 layers instead of 28.
 
 ```mermaid
 flowchart LR
@@ -290,7 +290,7 @@ The naive form rebuilds K and V for every cached token at every step; the absorb
 
 1. **Command exit:** 0, a six-row table like the one below.
 2. **The MLA rows:** `deepseek-v2-lite` 30.4 KiB and `deepseek-v3` 68.6 KiB per token, against an MHA equivalent of 324 KiB and 5,856 KiB.
-3. **The comparison:** V3 (671B) caches less per token than `qwen2.5-7b` (56 KiB) would at 10× the size, and far less than `qwen2.5-32b` (256 KiB). That is the point of MLA.
+3. **The comparison:** V3 (671B) caches about as much per token as `qwen2.5-7b` (56 KiB), a model 88× smaller, and far less than `qwen2.5-32b` (256 KiB). That is the point of MLA.
 
 **If something's off:** a `KeyError` traceback → a misspelled model name; `python3 tools/model_math.py --list` shows the names it knows. More in §6.
 
@@ -379,7 +379,7 @@ python3 tools/moe_router_demo.py --experts 64 --topk 6 --groups 1 --limited 1 --
 
 1. **Command exit:** 0.
 2. **First line:** `α=0.85 k=1 c=0.05: 1.85 tokens/step, ≈1.76× decode speed-up`.
-3. **The sweep table:** speed-up grows with α and with k, and drops below 1× at low α. Keep it for Task 8.
+3. **The sweep table:** speed-up grows with α. At α = 0.5 it peaks at k = 2 and falls again for larger k: extra draft tokens cost more than they save. Keep it for Task 8.
 
 **If something's off:** nothing in this task depends on the Spark; a different first line means a different version of the script. More in §6.
 
@@ -603,17 +603,17 @@ From `model_math.py` with the catalog's settings (121.7 GiB, 3 GiB activations a
 | Model | Attention | Weights | KV/token | util | KV budget | Tokens in cache | Concurrent seqs |
 |---|---|---|---|---|---|---|---|
 | DeepSeek-V2-Lite (16B MoE) | MLA | 29.3 GiB | **30.4 KiB** | 0.45 | 22.5 GiB | ~777K | 47 @ 16K |
-| R1-Distill-Qwen-7B | GQA (4 KV heads) | 14.2 GiB | 56 KiB | 0.30 | 19.3 GiB | ~362K | 11 @ 32K |
+| R1-Distill-Qwen-7B | GQA (4 KV heads) | 14.2 GiB | 56 KiB | 0.20 | 7.2 GiB | ~134K | 4 @ 32K |
 | R1-Distill-Qwen-32B | GQA (8 KV heads) | 61.0 GiB | 256 KiB | 0.70 | 21.2 GiB | ~87K | 5 @ 16K |
 
-The MLA model holds about twice the tokens of the 7B in a similar budget, and roughly 9× those of the 32B. [Chapter 05](05-model-catalog-and-memory-math.md) turns this into the full catalog and the memory rule (sum of util over models running together ≲ 0.72; request = limit for every GPU pod).
+Per GiB of KV budget the MLA model stores 1.8× the tokens of the 7B and 8.4× those of the 32B; at its larger util it holds ~6× the 7B's cache and ~9× the 32B's. [Chapter 05](05-model-catalog-and-memory-math.md) turns this into the full catalog and the memory rule (sum of util over models running together ≲ 0.72; request = limit for every GPU pod).
 
 ### 4.2 Speculation costs memory
 
 | Configuration | util | What's resident |
 |---|---|---|
-| `r1-7b` alone | 0.30 | 14.2 GiB weights + KV |
-| `r1-7b` + 1.5B draft | 0.36 | + ~3.4 GiB draft weights + draft KV |
+| `r1-7b` alone | 0.20 | 14.2 GiB weights + KV |
+| `r1-7b` + 1.5B draft | 0.26 | + ~3.4 GiB draft weights + draft KV |
 
 Reasoning models emit long `<think>` chains, so decode dominates their latency and they benefit most from speculation. High-concurrency serving benefits least.
 

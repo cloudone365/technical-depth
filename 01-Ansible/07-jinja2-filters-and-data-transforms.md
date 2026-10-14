@@ -258,12 +258,12 @@ The `cx7_fabric` role uses a Jinja block for the peer-pair calculation because t
 
 - The `-` in `{%-`/`-%}` strips whitespace, so the result is a clean `[...]` string, which Ansible then converts to a real list.
 - `set _ = list.append(...)` is the idiom for mutation, because Jinja has no statement form of it.
-- If the logic grows past about 15 lines, write a **filter plugin** (`filter_plugins/spark.py`) and unit-test it with `pytest` instead.
+- If the logic grows past about 15 lines, write a **filter plugin** (`playbooks/filter_plugins/spark_filters.py`, §2.3) and unit-test it with `pytest` instead.
 
 ### 2.3 A custom filter for the hardest one
 
 ```python
-# lab/filter_plugins/spark_filters.py  (optional exercise)
+# lab/playbooks/filter_plugins/spark_filters.py  (optional exercise: you create it; Ansible loads filter plugins from a filter_plugins/ folder next to the playbook)
 import re
 
 def ibdev2netdev(text):
@@ -349,7 +349,7 @@ Tools for debugging expressions:
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
 ansible localhost -m debug -a "msg={{ '580.82.09' is version('580', '>=') }}"
-ansible dgx-spark-1 -m debug -a "msg={{ hostvars['dgx-spark-2'].cx7_interfaces | map(attribute='address') }}"
+ansible dgx-spark-1 -m debug -a "msg={{ hostvars['dgx-spark-1'].cx7_interfaces | map(attribute='address') }}"
 ansible-console localhost      # then: debug msg="{{ ... }}"
 ```
 

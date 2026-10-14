@@ -164,7 +164,7 @@ It is read-only: it never restarts, scales or patches anything.
 
 #### What this lab does (scripts `lab/scripts/serve-model.sh`, `lab/scripts/llm-triage.sh`)
 
-- **Puts the stack in a known state:** r1-7b in `deploy/vllm`, and the Chapter 12 apps applied (bge-m3, LiteLLM + PostgreSQL, Open WebUI).
+- **Puts the stack in a known state:** r1-7b in `deploy/vllm`, and the Chapter 12 apps applied (bge-m3, LiteLLM + PostgreSQL, Open WebUI). Both applies write placeholder Secrets, so the block runs Chapter 15's `vault-sync` once before the triage.
 - **Runs the triage once** and saves it to `results/triage-known-good.txt`. The triage is read-only: it never restarts, scales or patches anything.
 - **On the Spark:** the host facts the triage's `host` section would read (it skips them on the MacBook).
 
@@ -176,7 +176,7 @@ It is read-only: it never restarts, scales or patches anything.
    |---|---|
    | serving | `[PASS] vLLM Ready`, `[PASS] reasoning parser on`, `util 0.20   max-model-len …` |
    | gateway | `[PASS] LiteLLM Ready`, `[PASS] router timeout 900s`, `[PASS] LiteLLM DB present` |
-   | secrets | `[PASS] secret … set` for the three Secrets (a `[WARN] … placeholder` until Chapter 15's sync has run) |
+   | secrets | `[PASS] secret … set` for the three Secrets and `[PASS] litellm-master-key managed by vault-sync` (a `[WARN] … placeholder` if the sync didn't run) |
    | day-2 | `[PASS] no failed Jobs in llm-serving` |
    | host | `not on the Spark … skipped` from the MacBook |
 
@@ -190,6 +190,9 @@ It is read-only: it never restarts, scales or patches anything.
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh r1-7b
 kubectl --context spark-root apply -k k8s/apps
+kubectl --context spark-root -n llm-serving delete job vs-triage --ignore-not-found
+kubectl --context spark-root -n llm-serving create job --from=cronjob/vault-sync vs-triage   # the apply wrote placeholder Secrets
+kubectl --context spark-root -n llm-serving wait --for=condition=complete job/vs-triage --timeout=5m
 mkdir -p results
 scripts/llm-triage.sh | tee results/triage-known-good.txt
 ```
@@ -292,7 +295,7 @@ python3 tools/model_math.py deepseek-r1-distill-qwen-32b --util 0.70 --ctx 16384
 
 1. **Quota:** `sandbox-budget` with `requests.cpu` 1500m, `requests.memory` 3Gi and 2 GPU slices: the namespace's share of the vCluster's 2 CPU · 4 Gi.
 2. **Dry run:** each object reports `… (server dry run)`, with no `Error from server`. A Deployment dry run checks the object and admission webhooks; it creates no pod, so the quota is not tested here.
-3. **Trap:** the overlay's objects carry `namespace: llm-serving`. If kubectl answers `the namespace from the provided object "llm-serving" does not match the namespace "llm-sandbox"`, render and retarget instead: `kubectl kustomize k8s/models/r1-1.5b | sed 's/namespace: llm-serving/namespace: llm-sandbox/' | kubectl --context dev-llms apply --dry-run=server -f -`.
+3. **Why the `sed`:** the overlay's objects carry `namespace: llm-serving`. `apply -n llm-sandbox -k …` would stop with `the namespace from the provided object "llm-serving" does not match the namespace "llm-sandbox"`, so the block renders the overlay and retargets it.
 
 **If something's off:** `context "dev-llms" does not exist` → fetch the vCluster kubeconfig (02-Kubernetes Chapter 04). More in §7.
 
@@ -303,7 +306,8 @@ For a manifest-level fix (D01, D07), prove the corrected args on the small model
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context dev-llms -n llm-sandbox get resourcequota
-kubectl --context dev-llms -n llm-sandbox apply --dry-run=server -k k8s/models/r1-1.5b
+kubectl kustomize k8s/models/r1-1.5b | sed 's/namespace: llm-serving/namespace: llm-sandbox/' \
+  | kubectl --context dev-llms apply --dry-run=server -f -
 ```
 
 The sandbox has 2 CPU · 4 Gi · 2 slices, so only a tiny model actually runs there; the server-side dry run still checks admission and the args.

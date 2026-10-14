@@ -70,7 +70,7 @@ Everything in this module is checked twice: locally without a GPU, and in GitHub
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 source versions.env
-pip install yamllint shellcheck-py pyyaml torch $PIP_TRL
+pip install yamllint shellcheck-py pyyaml torch $(echo "$PIP_TRL")   # $(…) splits the list in zsh and bash alike
 # kubectl, kubeconform, promtool and mikefarah yq: versions as in the CI workflow
 tests/run-local-checks.sh                                   # static + tools + mocks
 QDRANT=/path/to/qdrant API=1 tests/run-local-checks.sh      # + real Qdrant + server-side dry run + pod templates
@@ -143,7 +143,7 @@ The exit code is non-zero on `GATE FAILED`, so the gate drops into CI, the Ansib
 #### What to look for
 
 1. **Open:** no `app=vllm` pod left in `llm-serving`; `batch-budget` hard 8 / 80Gi.
-2. **Close:** `batch-budget` back at 2 / 12Gi, vLLM Ready again.
+2. **Close:** `batch-budget` back at 2 / 12Gi, vLLM Ready again (inside office hours once E16's ScaledObject is in place; outside them it stays at 0).
 
 **If something's off:** `exceeded quota` for new serving pods during the window is expected. vLLM missing after the window → the annotation is still there. More in §7.
 
@@ -153,6 +153,7 @@ The exit code is non-zero on `GATE FAILED`, so the gate drops into CI, the Ansib
 # ▶ MacBook · 02-Kubernetes/lab
 # open: park vLLM, lend the LLM pool to batch (spark-cq 8 CPU · 80 Gi · 3 slices)
 kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite
+while kubectl --context spark-root -n llm-serving get pod -l app=vllm -o name | grep -q .; do sleep 5; done
 kubectl --context spark-root apply -k manifests/root-llms/training-window
 # … run the Job (≤ 8 CPU · ≤ 80 Gi · 1 slice per pod, request = limit) …
 # close: everyday quotas back, vLLM back
@@ -240,7 +241,7 @@ The exercises reuse every lab file; nothing here is new infrastructure. The plat
 3. **E15:** the probe through LiteLLM ends after about 30 s while D04 is injected; the direct probe finishes.
 4. **E16:** `get deploy vllm` replicas 1 → 0 → 1 across the schedule; the Job admitted only while the window is open.
 
-**If something's off:** vLLM scaled to 0 outside office hours is E16 working; any request brings it back (activation threshold 0). More in the chapter each row links to.
+**If something's off:** vLLM scaled to 0 outside office hours is E16 working. A request doesn't bring it back: with no pod, `svc/vllm` has no endpoints and no `vllm:num_requests_*` series exists, so the Prometheus trigger only keeps a running replica up while requests are in flight. Patch `minReplicaCount` to 1 (Chapter 09) to serve outside office hours. More in the chapter each row links to.
 
 #### Run it
 

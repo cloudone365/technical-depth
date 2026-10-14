@@ -131,8 +131,8 @@ sequenceDiagram
 
 - **Steps 1–2 are only the lab's path.** Port-forward is a debugging tunnel through the API server; production traffic goes client → Traefik → Service → pod, as in Chapter 11.
 - **Step 4 is what KEDA scales on.** `vllm:num_requests_waiting` counts requests in the queue; `vllm:num_requests_running` counts those in the batch (§3.3).
-- **Steps 6–9 are TTFT**: queueing plus prefill. Steps 11–14 repeat once per output token; their spacing is the inter-token latency the benchmark reports (§5.5).
-- **When the KV cache is full**, new requests wait at step 5, and under pressure vLLM preempts a running request, frees its blocks and recomputes it later (`vllm:num_preemptions`). That's why `--gpu-memory-utilization`, `--max-model-len` and `--max-num-seqs` decide throughput (§3.1).
+- **Steps 4–9 are TTFT**: queueing (the note before step 5) plus prefill. Steps 10–13 repeat once per output token; their spacing is the inter-token latency the benchmark reports (§5.5).
+- **When the KV cache is full**, new requests wait before step 5, and under pressure vLLM preempts a running request, frees its blocks and recomputes it later (`vllm:num_preemptions`). That's why `--gpu-memory-utilization`, `--max-model-len` and `--max-num-seqs` decide throughput (§3.1).
 
 ---
 
@@ -213,7 +213,7 @@ kubectl --context spark-root -n llm-serving describe resourcequota serving-budge
 
 #### What to look for
 
-1. **Command exit:** `wait` prints `job.batch/model-prefetch condition met`; `apply -k` prints `deployment.apps/vllm` and `service/vllm` created.
+1. **Command exit:** `wait` prints `job.batch/model-prefetch condition met`; `apply -k` prints `secret/hf-token configured`, `service/vllm created` and `deployment.apps/vllm created`.
 2. **The vLLM log** shows, in order: `Loading weights`, `Model loading took … GiB`, `Available KV cache memory: … GiB`, `GPU KV cache size: … tokens`, CUDA graph capture, `Uvicorn running on http://0.0.0.0:8000`. Write down your KV-cache size; §3.1 predicts about 21 GiB at 0.20 for this model.
 3. **What was charged:**
 
@@ -359,8 +359,8 @@ The `pod.mem.max` column is the 32 Gi limit as the kernel sees it, in the pod's 
 # ▶ MacBook · 02-Kubernetes/lab
 ( for i in $(seq 5); do curl -sN localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
    -d '{"model":"qwen2.5-0.5b","stream":true,"max_tokens":1500,"messages":[{"role":"user","content":"Count slowly."}]}' \
-   | tail -1 & done; wait ) &
-sleep 3; kubectl --context spark-root -n llm-serving rollout restart deploy/vllm; wait
+   | grep -F '[DONE]' & done; wait ) &
+sleep 3; kubectl --context spark-root -n llm-serving rollout restart deploy/vllm; wait $!   # waits for the 5 streams only
 ```
 
 Expected: each stream ends with `data: [DONE]`. The preStop sleep and 120 s grace let running generations finish before SIGTERM. Streams longer than 120 s would still be cut, so size the grace to your longest generation. The grace period travels with the delete: the kubelet gives the container exactly the `terminationGracePeriodSeconds` the API server recorded. Restart the port-forward afterwards (it was bound to the old pod).
@@ -452,7 +452,7 @@ Expected: one line, `root llm-serving vllm-… ← llm-serving/vllm-…` — on 
 1. **Command exit:** `install-addons.sh keda` ends after `deploy/keda-operator` rolls out; `apply -f` creates two ScaledObjects.
 2. **`get scaledobject,hpa`:** both ScaledObjects `READY` `True`, and one HPA per ScaledObject (`keda-hpa-vllm`, `keda-hpa-mock-llm`).
 3. **Under load:** `get deploy mock-llm -w` shows the replica count climb, up to 6.
-4. **After the load:** the count goes back down after the cooldown (120 s) and the HPA's scale-down window.
+4. **After the load:** the count goes back down to 1 after the HPA's scale-down window (5 min by default). KEDA's `cooldownPeriod` (120 s) only applies to scaling to 0, which `minReplicaCount: 1` never does.
 
 **If something's off:** ScaledObject not `Ready` with `connection refused` or `no such host` → kps not installed or wrong `serverAddress` (§7). No scale-out → `curl` can't reach `llm.lab.local`: add `192.168.0.115 llm.lab.local` to `/etc/hosts` on the MacBook. More in §7.
 
@@ -471,7 +471,7 @@ KEDA creates an HPA in `llm-serving`; the root's controller-manager scales the D
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 seq 400 | xargs -P64 -I{} curl -sN -o /dev/null http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":200}' &
-kubectl --context spark-root -n llm-serving get deploy mock-llm -w        # 2 → up to 6, back after cooldown · Ctrl-C to stop
+kubectl --context spark-root -n llm-serving get deploy mock-llm -w        # 1 (or still 2) → up to 6, back to 1 about 5 min after the load · Ctrl-C to stop
 ```
 
 From now on, KEDA owns `deploy/vllm`'s replica count: `kubectl scale` alone is undone at the next poll. To swap engines (Chapters 21–23), use the pause annotation in §9.
@@ -541,16 +541,16 @@ platform     3 CPU · ~11.7 GiB · 2 slices (no quota)                   ← Cil
 
 CPU and slices are split exactly (3 + 8 + 2 = 13 CPU, 2 + 6 + 3 = 11 slices); only memory is shared. Serving may use the whole pool while nothing trains; a training job takes up to 12 Gi of the same pool. What keeps the two from overcommitting unified memory is the scheduler: every GPU container sets memory request = limit, so a pod that doesn't fit waits Pending and never squeezes a running model. What each lab object charges to `serving-budget` (CPU requests, memory **limits** — equal to the requests for the engines — slices, from the manifests), and the share of the UMA pool it asks vLLM/SGLang for:
 
-| Object | CPU | Memory limit | Slices | util | Volume |
+| Object | CPU | Memory limit | Slices | util | Chapter |
 |---|---|---|---|---|---|
 | `mock-llm` ×2 + `mock-llm-canary` (always on) | 150m | 384 Mi | 0 | – | 09 (KEDA may scale mock-llm to 6: +200m, +512 Mi) |
-| `qdrant` (always on) | 250m | 2 Gi | 0 | – | 10 |
-| `vllm` | 1500m | 32 Gi | 1 | 0.20 | 21 |
-| `vllm-bench` Job | 500m | 1.5 Gi | 0 | – | 21 |
-| `triton` + `triton-perf` | 1000m + 500m | 12 Gi + 2 Gi | 1 | small (toy models) | 22 |
-| `sglang` | 1500m | 32 Gi | 1 | 0.20 (`--mem-fraction-static`) | 23 |
-| KServe `qwen-small` predictor | 1500m | 32 Gi | 1 | 0.20 | 23 |
-| `vllm-prefill` + `vllm-decode` + `pd-proxy` | 1600m | 40.25 Gi | 2 | 0.15 + 0.15 | 24 |
+| `qdrant` (always on) | 250m | 2 Gi | 0 | – | 12 |
+| `vllm` | 1500m | 32 Gi | 1 | 0.20 | 20 |
+| `vllm-bench` Job | 500m | 1.5 Gi | 0 | – | 20 |
+| `triton` + `triton-perf` | 1000m + 500m | 12 Gi + 2 Gi | 1 | small (toy models) | 21 |
+| `sglang` | 1500m | 32 Gi | 1 | 0.20 (`--mem-fraction-static`) | 22 |
+| KServe `qwen-small` predictor | 1500m | 32 Gi | 1 | 0.20 | 22 |
+| `vllm-prefill` + `vllm-decode` + `pd-proxy` | 1600m | 40.25 Gi | 2 | 0.15 + 0.15 | 23 |
 
 | Combination | CPU | Memory | util sum | Fits 8 CPU · 90 Gi (and ≲ 0.72)? |
 |---|---|---|---|---|

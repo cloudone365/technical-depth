@@ -121,6 +121,38 @@ flowchart TB
 
 **Why the LLMs run on the root.** The models are the Spark's main job, so they run in the cluster that owns the hardware: they get all the memory headroom (one ~90 GiB pool, no vCluster control plane or second quota on top), no syncer translation (a vLLM pod is `vllm-…` in `llm-serving` everywhere — kubectl, Prometheus, Traefik) and no nested quota. Two small, identical vClusters remain: `dev-lab` for tenancy and syncer drills, `dev-llms` as an LLM sandbox with its own API server where manifests and tiny models are tried before they go to the root. The trade-off: whoever administers the root also operates the LLM stack, and it is isolated by namespaces (quotas, LimitRanges, NetworkPolicy, CEL admission, PSA, PriorityClasses), not by its own API server. Chapter 04 §1.2 has the full reasoning.
 
+### 2.1 One build, step by step
+
+Who talks to whom while §4 Tasks 1–5 build the lab (Semaphore path for the 01-Ansible stages):
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant MAC as MacBook<br/>browser · kubectl
+  participant SEMA as sema01 · Semaphore<br/>192.168.0.210
+  participant VLT as vault01<br/>192.168.0.211
+  participant SPK as dgx-spark-1<br/>192.168.0.100
+  participant RAPI as root API server<br/>:6443
+  participant VC as vc-dev-lab · dev-lab-0<br/>API 192.168.0.111
+  MAC->>SEMA: run template 19.1 Kubernetes
+  SEMA->>VLT: AppRole login, sign SSH key (ssh-client-signer/sign/ansible, 15 min)
+  SEMA->>SPK: SSH as svc-ansible: containerd, kubeadm init, etcd-snapshot.timer
+  SEMA->>RAPI: helm: Cilium, MetalLB pool lab-pool .110–.119
+  SEMA->>SEMA: kubeconfig-spark-lab.yaml (context spark-root) in /opt/spark-lab/cache
+  MAC->>SEMA: run 20.1 GPU Operator, then 20.2 vClusters
+  SEMA->>RAPI: GPU Operator (15 slices) · root/05-vclusters · helm loft/vcluster 0.37.1 ×2
+  RAPI->>VC: StatefulSet dev-lab → pod dev-lab-0, Service LoadBalancer .111
+  SEMA->>SEMA: merge contexts dev-lab, dev-llms into the same kubeconfig
+  MAC->>SEMA: tools/fetch-kubeconfig.sh sema01 (ssh + docker compose exec)
+  MAC->>RAPI: install-addons.sh (metrics-server, kps, traefik, kueue, keda) · apply-lab.sh root
+  MAC->>VC: apply-lab.sh dev-lab (and dev-llms) · verify.sh
+```
+
+- **Steps 1–5** are Task 1. Their gate is the Semaphore log ending `failed=0`; step 3 is what `preflight.sh` checks on the Spark.
+- **Step 2** is why no long-lived SSH key exists for the Spark: each run gets a 15-minute certificate for `svc-ansible` (01-Ansible Chapter 01).
+- **Steps 6–9** are the 20.x templates. Step 8 is what `kubectl --context spark-root -n vc-dev-lab get pods,svc` shows: `dev-lab-0` Running and `EXTERNAL-IP 192.168.0.111` (Chapter 04 §6.1).
+- **Step 10** is the only way the three contexts reach the MacBook. Steps 11–12 are Tasks 3–5; with `install-addons.sh all` instead of 20.2, steps 7–9 run from the MacBook too (Task 3).
+
 ---
 
 ## 3. LLD — the master tables
@@ -148,12 +180,12 @@ flowchart TB
 | root · `vc-dev-llms` | baseline | **2 CPU req · 4 Gi · 2 slices · 200 Gi · 1 LB** | — (Cilium boundary, APF lane) | — |
 | root · `llm-serving` | baseline | `serving-budget`: **8 CPU req · up to 90 Gi · 6 slices · 1 Ti** | no-latest, readiness required; NetworkPolicy `allow-ingress-and-same-namespace` | serving |
 | root · `batch` | privileged (warn: baseline). RDMA needs hostNetwork/IPC_LOCK | `batch-budget` = Kueue `spark-cq`: **2 CPU · up to 12 Gi · 3 slices · 200 Gi** | no-latest | batch |
-| root · `ingress` | baseline | none (platform share) | — | platform |
+| root · `ingress` | baseline | none (platform share) | — | — (Traefik sets no class: priority 0) |
 | root · `platform-tools` | privileged | none (platform team) | — | platform / preemptible |
 | root · `observability`, `gpu-operator`, `metallb-system` | privileged | none | — | platform |
 | dev-lab · `tenant-alpha`, `tenant-beta` | restricted | 500m · 2 Gi · 1 slice · 100 Gi · 10 pods | no-latest, ≤1 slice, no NVIDIA env | interactive |
 | dev-lab · `lab-tools` | baseline | none inside (the root caps it) | — | mixed |
-| dev-llms · `llm-sandbox` | baseline | 1500m · 3 Gi · 2 slices · 150 Gi | no-latest, readiness required | — |
+| dev-llms · `llm-sandbox` | baseline | 1500m · 3 Gi · 2 slices · 150 Gi | no-latest, ≤1 slice, no NVIDIA env, readiness required | — |
 
 ### 3.3 Capacity plan (one Spark)
 
@@ -217,7 +249,7 @@ flowchart LR
 ```bash
 # ▶ MacBook · any folder
 git clone https://github.com/cloudone365/technical-depth.git && cd "technical-depth/02-Kubernetes/lab"
-pip install yamllint shellcheck-py pyyaml     # plus kubectl, helm, kubeconform, promtool (see CI workflow)
+pip install yamllint shellcheck-py pyyaml     # in a venv (e.g. source ~/.venvs/spark-ansible/bin/activate); plus kubectl, helm, kubeconform, promtool (see CI workflow)
 tests/run-local-checks.sh
 ```
 
@@ -328,7 +360,7 @@ A first run pulls many images and takes a while. Re-running is safe (`helm upgra
    | http://192.168.0.100:32000 | Grafana login page |
    | `kubectl config get-contexts -o name` | `spark-root`, `dev-lab`, `dev-llms` |
 
-**Built with Semaphore (`20.2`) instead of `install-addons.sh all`?** `20.2` installs storage and the vClusters but not Traefik, Kueue or KEDA. Run `scripts/install-addons.sh traefik`, then `kueue`, then `keda` before Task 4–5; until then `verify.sh llm-budget` prints `[....] Kueue not installed on the root yet`.
+**Built with Semaphore (`20.2`) instead of `install-addons.sh all`?** `20.2` installs storage and the vClusters but not metrics-server, kube-prometheus-stack, Traefik, Kueue or KEDA. Run `scripts/install-addons.sh metrics-server`, `kps`, `traefik`, `kueue`, then `keda` before Task 4–5; until then `apply-lab.sh` skips the folders whose CRDs are missing and `verify.sh llm-budget` prints `[....] Kueue not installed on the root yet`.
 
 **If something's off:** a vCluster never Ready → its PVC is `Pending` because storage wasn't installed first. Traefik without an IP → the MetalLB pool. More in §8 (gate 3).
 
@@ -543,7 +575,7 @@ scripts/verify.sh
 ── serving (root, llm-serving) …
 ── observability (root) …
 
-58 passed, 0 warnings, 0 failed
+60 passed, 0 warnings, 0 failed
 ```
 
 (The exact count grows as you deploy more of the optional layers.)
@@ -574,7 +606,7 @@ scripts/verify.sh
 |---|---|---|
 | 1 | `kubeadm init` preflight errors (swap, port 6443 busy) | an old k3s is still there → `19.2-reset-kubernetes.yml -e reset_remove_k3s=true`; swap → the role turns it off, check `/etc/fstab` |
 | 1 | node `NotReady` | Cilium not running: `kubectl --context spark-root -n kube-system logs ds/cilium`; leftover CNI files from an earlier cluster → reset playbook |
-| 1 | GPU Operator validator not Running | 01-Ansible Chapter 20 troubleshooting. containerd must have the `nvidia` runtime (`grep nvidia /etc/containerd/config.toml`) |
+| 1 | GPU Operator validator not Running | 01-Ansible Chapter 20 troubleshooting. containerd must have the `nvidia` runtime (`sudo grep -r --include=*.toml nvidia /etc/containerd`: newer toolkits write `conf.d/99-nvidia.toml`, not `config.toml`) |
 | 2 | no etcd snapshot | `systemctl status etcd-snapshot.service`; `etcdctl` version must match the etcd image (role downloads it) |
 | 3 | a vCluster never Ready | its PVC Pending → storage not installed first; `kubectl --context spark-root -n vc-<name> describe pod <name>-0` |
 | 3 | `context dev-lab` unreachable | MetalLB didn't assign `.111` (pool, `services.loadbalancers` quota) → Chapter 04 §8 |

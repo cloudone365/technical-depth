@@ -31,12 +31,13 @@ Qwen adds two gateway questions that a single-mode model doesn't raise:
 ```mermaid
 flowchart LR
   subgraph CL["clients"]
-    UI["Open WebUI<br/>webui.lab.local"]
+    BR["browser<br/>webui.lab.local"]
     SDK["SDKs · agents · IDE<br/>api.lab.local"]
   end
   subgraph ROOT["spark-root"]
     TR["Traefik · ns ingress<br/>192.168.0.115 · timeouts 900 s"]
     subgraph LLMS["ns llm-serving · serving-budget"]
+      UI["Open WebUI (03 apps)<br/>calls litellm:4000 in-cluster"]
       LL["LiteLLM (03 apps)<br/>qwen · qwen-fast · qwen-coder · agent · embeddings<br/>keys · tpm/rpm · fallbacks"]
       PG[("litellm-db<br/>keys · spend")]
       V["vllm · Qwen catalog model<br/>tool + reasoning parsers"]
@@ -44,10 +45,11 @@ flowchart LR
       E["bge-m3"]
     end
   end
-  UI --> TR
+  BR --> TR
   SDK --> TR
   TR --> LL
   TR --> UI
+  UI --> LL
   LL --> PG
   LL --> V & V2 & E
   classDef gpu fill:#76b900,stroke:#3d6000,color:#000
@@ -57,10 +59,44 @@ flowchart LR
   class V,V2,E gpu
   class TR,LL net
   class PG store
-  class UI,SDK host
+  class UI,BR,SDK host
 ```
 
-The data path is 03's: Traefik → LiteLLM → engine Service. What this chapter changes is the **model list** in the `litellm-config` ConfigMap and the **model presets** in Open WebUI. LiteLLM addresses a vLLM engine by its Service and served model name (`hosted_vllm/<catalog name>`); the 04 overlays serve the catalog name, so an alias line names a catalog entry.
+The data path is 03's: Traefik → LiteLLM → engine Service for API clients, and Traefik → Open WebUI → LiteLLM (in-cluster, `http://litellm.llm-serving:4000/v1`) for the browser. What this chapter changes is the **model list** in the `litellm-config` ConfigMap and the **model presets** in Open WebUI. LiteLLM addresses a vLLM engine by its Service and served model name (`hosted_vllm/<catalog name>`); the 04 overlays serve the catalog name, so an alias line names a catalog entry.
+
+### 2.1 One request through the gateway, step by step
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as curl / SDK<br/>(MacBook)
+  participant TR as Traefik<br/>192.168.0.115
+  participant LL as LiteLLM<br/>litellm:4000
+  participant PG as litellm-db
+  participant V as vllm<br/>qwen3-8b
+  participant V2 as vllm-qwen3-4b-instruct
+  C->>TR: POST /v1/chat/completions<br/>model qwen · Bearer key · Host api.lab.local
+  TR->>LL: HTTPRoute litellm (timeout 900 s)
+  LL->>PG: look up the key: models · tpm_limit · rpm_limit
+  alt key bucket empty
+    LL-->>C: 429
+  else main engine up
+    LL->>V: hosted_vllm/qwen3-8b at vllm.llm-serving:8000/v1
+    V-->>LL: content + reasoning
+  else deploy/vllm parked
+    LL->>V: retries fail (num_retries 2)
+    LL->>V2: fallback qwen → qwen-fast
+    V2-->>LL: content
+  end
+  LL->>PG: spend for the key
+  LL-->>C: 200 + x-litellm-* headers
+```
+
+- **Steps 1–2** need `api.lab.local` → 192.168.0.115 in the MacBook's `/etc/hosts`. Open WebUI skips them: it calls `litellm:4000` inside the cluster.
+- **Steps 3–4** are §5.4: the scoped key `qwen-tpm-test` gets `429` on the thinking alias first.
+- **Steps 5–6** are §5.3: `thinking_chars` comes from the reasoning field; `qwen-nothink` adds `extra_body` to this hop.
+- **Steps 7–9** are §5.5: the `x-litellm-attempted-fallbacks` header, and `x-litellm-model-api-base` pointing at `vllm-qwen3-4b-instruct`.
+- **Step 10** is the `spend` that `/key/info` shows in §5.4.
 
 ---
 
@@ -106,7 +142,7 @@ Retry back-off in most clients follows truncated exponential back-off with jitte
 
 | Feature | What Qwen needs | Setting |
 |---|---|---|
-| Thinking display | vLLM `--reasoning-parser qwen3` so thinking arrives as `reasoning_content` | nothing in Open WebUI; it renders a collapsible "Thought for N seconds" block |
+| Thinking display | vLLM `--reasoning-parser qwen3` so thinking arrives in its own field (`reasoning`, or `reasoning_content` in older releases) | nothing in Open WebUI; it renders a collapsible "Thought for N seconds" block |
 | Thinking off for a preset | `/no_think` system prompt (hybrid models), or the `qwen-fast` alias | Workspace → Models → new model on top of `qwen`, system prompt |
 | Native tool calling | the served model's tool-call parser (Chapter 10) | model's Advanced Params → Function Calling: Native |
 | Images | alias pointing at a Qwen-VL model | the model must be marked with vision capability in Workspace → Models |
@@ -151,7 +187,7 @@ Retry back-off in most clients follows truncated exponential back-off with jitte
 
 3. **Quota:** `limits.memory` used about 71Gi of 90Gi (32 + 20 for the engines, ~19 for the apps); `requests.memory` a little lower, because the app pods request less than their limits.
 
-**If something's off:** side engine Pending with `exceeded quota` → another engine (for example `qwen3-vl-8b`) still runs; stop it. More in §7.
+**If something's off:** no side pod and a `FailedCreate … exceeded quota` event → another engine (for example `qwen3-vl-8b`) still runs; stop it. More in §7.
 
 #### Run it
 
@@ -237,7 +273,7 @@ Keep this edit in your fork of the repo (or in Git behind Argo CD, 03 Chapter 15
 | `qwen-fast` | `thinking_chars` 0, few completion tokens |
 | `qwen-nothink` | 0 if the gateway forwards `extra_body`; above 0 if it drops it. Record which |
 
-**If something's off:** `thinking_chars` 0 on `qwen` too, with many completion tokens → the image returns the trace as `reasoning`, and the `jq` reads only `reasoning_content`; add `// .choices[0].message.reasoning`. A 400 `model not found` → the served name differs from the alias target (§7).
+**If something's off:** `thinking_chars` 0 on `qwen` too, with many completion tokens → the trace is in a field the `jq` doesn't read (it reads `reasoning` and `reasoning_content`); check the raw JSON. A 400 `model not found` → the served name differs from the alias target (§7).
 
 #### Run it
 
@@ -246,7 +282,7 @@ Keep this edit in your fork of the repo (or in Git behind Argo CD, 03 Chapter 15
 for m in qwen qwen-nothink qwen-fast; do
   curl -s $API/v1/chat/completions "${H[@]}" -d "{\"model\":\"$m\",\"max_tokens\":4096,
     \"messages\":[{\"role\":\"user\",\"content\":\"Is 221 prime? One line.\"}]}" \
-  | jq -c "{alias: \"$m\", thinking_chars: (.choices[0].message.reasoning_content // \"\" | length), completion_tokens: .usage.completion_tokens, answer: .choices[0].message.content}"
+  | jq -c "{alias: \"$m\", thinking_chars: (.choices[0].message.reasoning // .choices[0].message.reasoning_content // \"\" | length), completion_tokens: .usage.completion_tokens, answer: .choices[0].message.content}"
 done
 ```
 
@@ -292,7 +328,7 @@ Same question, same limit: the thinking tokens use up the bucket (§3.2). `qwen-
 
 #### What this lab does (park the main engine, send two requests)
 
-- **Takes `deploy/vllm` to 0** so `qwen` and `qwen-nothink` lose their engine. In this lab KEDA owns that Deployment, so use the pause annotation shown under the code; a plain `scale` is undone.
+- **Takes `deploy/vllm` to 0** with the KEDA pause annotation, so `qwen` and `qwen-nothink` lose their engine. KEDA owns that Deployment; a plain `kubectl scale` is undone.
 - **Sends** one short request through each alias and prints the status, the time and LiteLLM's `x-litellm-*` response headers.
 - **Restores** the main engine afterwards.
 
@@ -302,25 +338,24 @@ Same question, same limit: the thinking tokens use up the bucket (§3.2). `qwen-
 2. **`qwen-nothink`:** a 5xx after the retries; it has no fallback and shares the parked engine.
 3. **Afterwards:** `deployment "vllm" successfully rolled out`.
 
-**If something's off:** both aliases still answer from `vllm` → KEDA scaled it back up; use the pause annotation. `qwen` fails too → the fallback entry is missing from `router_settings` (§5.2).
+**If something's off:** both aliases still answer from `vllm` → the pause annotation is missing (`kubectl --context spark-root -n llm-serving get scaledobject vllm -o yaml`). `qwen` fails too → the fallback entry is missing from `router_settings` (§5.2).
 
 #### Run it
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
-kubectl --context spark-root -n llm-serving scale deploy vllm --replicas=0
+kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite
+sleep 60                                           # KEDA scales to 0 within its polling interval; the pod drains (preStop 15 s)
 for m in qwen qwen-nothink; do
   curl -s -D - -o /dev/null -w "$m %{http_code} %{time_total}s\n" $API/v1/chat/completions "${H[@]}" \
     -d "{\"model\":\"$m\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" \
     | grep -iE '^x-litellm-(model-api-base|attempted-fallbacks)|^qwen'
 done
-kubectl --context spark-root -n llm-serving scale deploy vllm --replicas=1
+kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas-
 kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=20m
 ```
 
 Note the extra latency the failed attempts added. Aliases on the same engine fail together; only a fallback to a *different* engine helps. The same mechanism reaches across model families: `{"qwen": ["qwen-fast", "reasoning-fast"]}` with an R1 distill from 03 served as an engine. Whether a cross-family fallback is acceptable is a product decision: the answer style changes.
-
-If the vLLM ScaledObject from 02 manages this Deployment, use the pause annotation instead of `scale` (`kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite`, and remove it afterwards), or KEDA will scale it back.
 
 ### 5.6 Open WebUI presets for Qwen
 

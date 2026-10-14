@@ -51,35 +51,47 @@ The webhooks are called by the root API server, which reaches the webhook Servic
 
 ```mermaid
 flowchart TB
-  subgraph LLMS["root spark-root · ns llm-serving · up to two engines (Chapter 20 §9)"]
+  PROBE["ttft_probe.py on the MacBook<br/>shared vs unique prefix<br/>(via kubectl port-forward)"]
+  subgraph ROOT["root spark-root (one API server, one scheduler)"]
     direction TB
-    subgraph SAME["same GB10 · same model"]
+    APIS["kube-apiserver<br/>CRDs InferenceService, ServingRuntime …<br/>calls KServe and cert-manager webhooks"]
+    subgraph KSERVE["ns kserve · ns cert-manager (no quota, platform headroom)"]
       direction LR
-      V["vLLM<br/>APC (automatic prefix cache)<br/>hash of full blocks"]
-      SG["SGLang<br/>RadixAttention<br/>radix tree of token prefixes"]
-      KS["KServe predictor<br/>→ Deployment (vLLM runtime)"]
+      CTRL["kserve-controller-manager<br/>(controller + webhook server)"]
+      CM["cert-manager<br/>(webhook certificates)"]
     end
-    subgraph KSERVE["KServe control plane (RawDeployment) · ns kserve, cert-manager"]
-      CTRL["kserve-controller"] --> SR["ServingRuntime vllm-spark"]
-      CTRL --> ISVC["InferenceService qwen-small<br/>storageUri hf://…"]
-      CM["cert-manager<br/>(webhook certs)"]
+    subgraph LLMS["ns llm-serving · serving-budget · up to two engines (Chapter 20 §9)"]
+      direction TB
+      SR["ServingRuntime vllm-spark"]
+      ISVC["InferenceService qwen-small<br/>storageUri hf://Qwen/Qwen2.5-0.5B-Instruct"]
+      subgraph SAME["same GB10 · same model · one at a time in the lab"]
+        direction LR
+        V["Deployment vllm · Service vllm:8000<br/>APC (automatic prefix cache)<br/>hash of full blocks"]
+        SG["Deployment sglang · Service sglang:30000<br/>RadixAttention<br/>radix tree of token prefixes"]
+        KS["Deployment qwen-small-predictor<br/>Service qwen-small-predictor:80 → 8080<br/>(vLLM runtime)"]
+      end
     end
-    ISVC -.-> KS
+    APIS <-->|"webhook calls · watch events"| CTRL
+    CM -.->|"TLS cert"| CTRL
+    CTRL -->|"reads"| SR
+    CTRL -->|"reconciles"| ISVC
+    CTRL -->|"creates"| KS
   end
-  PROBE["ttft_probe.py<br/>shared vs unique prefix<br/>(via port-forward)"] --> V & SG & KS
-  HOST["Ollama in Docker on the Spark<br/>outside Kubernetes · no quota"]
+  PROBE --> V & SG & KS
+  HOST["Ollama in Docker on the Spark :11434<br/>outside Kubernetes · no quota"]
   PROBE -.-> HOST
   classDef gpu fill:#76b900,stroke:#3d6000,color:#000
   classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
   classDef tenant fill:#eaeef2,stroke:#57606a,color:#000
   classDef ext fill:#24292f,stroke:#000,color:#fff
   class V,SG,KS gpu
-  class CTRL,SR,ISVC,CM ctrl
+  class APIS,CTRL,SR,ISVC,CM ctrl
   class PROBE tenant
   class HOST ext
   style SAME fill:#f4fbe8,stroke:#76b900
   style KSERVE fill:#f6f8fa,stroke:#1f6feb
   style LLMS fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
+  style ROOT fill:#e6f4f5,stroke:#0e7c86
 ```
 
 ### 2.1 Prefix caching: why it matters for agents and RAG
@@ -92,6 +104,38 @@ Every request in a RAG or agent workflow repeats the same long system prompt, to
 | Eviction | LRU of free blocks | LRU of tree nodes |
 | Best at | identical prefixes | branching conversations, tree-of-thought, many partial overlaps |
 
+### 2.2 From InferenceService to a serving pod, step by step
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as kubectl on the MacBook<br/>(context spark-root)
+  participant A as root kube-apiserver
+  participant W as KServe webhook<br/>(ns kserve, cert from cert-manager)
+  participant K as kserve-controller-manager
+  participant S as root scheduler
+  participant P as pod qwen-small-predictor-…<br/>(llm-serving, dgx-spark-1)
+  U->>A: apply -k 90-serving/kserve<br/>ServingRuntime vllm-spark + InferenceService qwen-small
+  A->>W: mutating and validating webhook calls (HTTPS)
+  W-->>A: allowed, defaults filled in
+  A-->>K: watch event InferenceService qwen-small
+  K->>A: create Deployment and Service qwen-small-predictor<br/>(container and probes from vllm-spark, init container storage-initializer)
+  Note over A: Deployment admitted by the CEL policy<br/>spark-serving-needs-readiness (readinessProbe present)
+  A->>A: ReplicaSet controller creates the pod<br/>admission: ResourceQuota serving-budget charges 1500m · 32 Gi · 1 slice
+  S->>A: bind the pod to dgx-spark-1
+  P->>P: storage-initializer downloads hf://Qwen/Qwen2.5-0.5B-Instruct to /mnt/models
+  P->>P: kserve-container runs vllm serve /mnt/models --port=8080
+  P-->>A: readinessProbe /health on 8080 passes
+  A-->>K: watch event pod Ready
+  K->>A: InferenceService status READY True
+```
+
+- **Steps 2–3** need cert-manager: until its certificate exists, the webhook has no TLS and the apply fails with a webhook error (§7). Install order in `install-addons.sh kserve`: cert-manager, then KServe, then the cluster runtimes.
+- **Step 5** is what `get deploy,svc,hpa -l serving.kserve.io/inferenceservice=qwen-small` shows in §5.4. Nothing is created in a vCluster: `dev-llms` has no `InferenceService` CRD at all.
+- **Step 5 (the note) and step 6** are the same checks your hand-written vLLM Deployment passes: the CEL policy and `serving-budget`. A refusal shows up in `kubectl --context spark-root -n llm-serving get events`, not on the InferenceService.
+- **Step 8** is the slow part on the first run. Read it with `kubectl --context spark-root -n llm-serving logs <predictor pod> -c storage-initializer`.
+- **Step 12** is what `get inferenceservice qwen-small -w` waits for; then `/v1/models` on the port-forward lists `qwen-small`.
+
 ---
 
 ## 3. LLD
@@ -102,7 +146,7 @@ Every request in a RAG or agent workflow repeats the same long system prompt, to
 | pod resources | 1500m · 32 Gi (request = limit) · 1 slice | same | same (in the `ServingRuntime`) |
 | replicas | 1 (KEDA, Chapter 20 §5.7) | 0 in the manifest — scale to 1 in §5.2 | `minReplicas: 1`, `maxReplicas: 1` |
 | port | 8000 | 30000 | 8080 (container) → Service `qwen-small-predictor` 80 |
-| health | `/health` | `/health` | KServe-managed probe on the predictor |
+| health | `/health` | `/health` | `/health` on 8080 (startup and readiness probes in the `ServingRuntime`) |
 | metrics | `/metrics` (`vllm:*`) | `/metrics` with `--enable-metrics` (`sglang:*`) | runtime's own (`vllm:*`) |
 | weights | PVC `model-cache` | PVC `model-cache` | storage-initializer downloads to an emptyDir (`hf://`) |
 
@@ -148,7 +192,7 @@ export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 
 3. **Record** the shared and unique medians and the speed-up in §5.6.
 
-**If something's off:** a speed-up near `1.0x` means prefix caching is off or the prompt changed between requests (check the engine flags). `connection refused` means the port-forward isn't running or vLLM is parked (KEDA `paused-replicas`, Chapter 20 §9). More in §7.
+**If something's off:** a speed-up near `1.0x` means prefix caching is off or the prompt changed between requests (check the engine flags). `connection refused` means the port-forward isn't running or vLLM is parked (KEDA `paused-replicas`, Chapter 20 §9). `bind: address already in use` → an older port-forward (Chapter 20 §5.2) still holds 8000; stop it (`jobs`, then `kill %N`) and check that `kill %1` below stops the right job. More in §7.
 
 #### Run it
 

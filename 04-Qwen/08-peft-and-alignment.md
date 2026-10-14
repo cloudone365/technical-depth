@@ -380,7 +380,7 @@ Compare seconds per step with the first run. If `pip install` on the vLLM image 
 2. **Answers:** the DPO model differs mostly in length and tone.
 3. **GRPO summary:** `first 20: …   last 20: …` with the last value higher than the first.
 
-**If something's off:** the `awk` line prints nothing → the accuracy metric has another name in your ms-swift release; adjust the `grep` pattern. The GRPO Job's log is gone after 24 h (`ttlSecondsAfterFinished: 86400`).
+**If something's off:** the `awk` line prints nothing → the accuracy metric has another name in your ms-swift release (4.5.3 logs `rewards/MathAccuracy/mean` and `…/std`; the pattern keeps only the mean); adjust the `grep` pattern. The GRPO Job's log is gone after 24 h (`ttlSecondsAfterFinished: 86400`).
 
 #### Run it
 
@@ -390,7 +390,7 @@ For GRPO, the training log is the first measurement: compare the mean accuracy r
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
-kubectl --context spark-root -n batch logs job/swift-grpo | grep -oE "'rewards/[A-Za-z_]*[Aa]ccuracy[A-Za-z_/]*': [0-9.]+" \
+kubectl --context spark-root -n batch logs job/swift-grpo | grep -oE "'rewards/[A-Za-z_]*[Aa]ccuracy[A-Za-z_]*/mean': [0-9.]+" \
   | awk -F': ' '{v[NR]=$2} END {n=NR; k=(n<20?n:20); for(i=1;i<=k;i++){a+=v[i]; b+=v[n-k+i]}; printf "first %d: %.3f   last %d: %.3f\n", k, a/k, k, b/k}'
 ```
 

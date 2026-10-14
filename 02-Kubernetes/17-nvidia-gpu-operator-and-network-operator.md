@@ -87,6 +87,40 @@ flowchart TB
 
 **One kps for three clusters.** Tenants can't run a Prometheus Operator inside a vCluster (and it couldn't see the root's metrics anyway). The platform team scrapes the vClusters' workloads from the root, where their pods really run. The LLM stack is simpler: its model servers are root pods in `llm-serving`, scraped like any root Service, and KEDA — also on the root — queries `http://kps-prometheus.observability.svc:9090` directly (Chapter 20).
 
+### 2.1 A device-plugin profile switch, step by step
+
+§5.3 switches `dgx-spark-1` from 15 slices to one whole GPU. Nothing in Helm changes; a node label and the operator's `config-manager` sidecars do the work:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as kubectl on the MacBook<br/>(context spark-root)
+  participant RA as root API server
+  participant CM as config-manager sidecars<br/>(device-plugin and GFD pods)
+  participant DP as nvidia-device-plugin<br/>(ns gpu-operator)
+  participant GFD as gpu-feature-discovery
+  participant KL as kubelet<br/>dgx-spark-1
+  participant SY as dev-llms syncer<br/>(pod dev-llms-0)
+  participant VA as dev-llms API server
+  U->>RA: patch cm time-slicing-config<br/>(add key whole-gpu)
+  U->>RA: label node dgx-spark-1<br/>nvidia.com/device-plugin.config=whole-gpu
+  RA-->>CM: watch: node label changed
+  CM->>DP: write profile whole-gpu, restart the plugin
+  CM->>GFD: write profile whole-gpu
+  DP->>KL: re-register, ListAndWatch: 1 device
+  KL->>RA: node status: allocatable nvidia.com/gpu 1
+  GFD->>RA: node label nvidia.com/gpu.replicas=1
+  RA-->>SY: watch: node dgx-spark-1 changed
+  SY->>VA: copy labels and allocatable (1)
+  Note over RA: quotas unchanged:<br/>serving-budget 6, vcluster-budget 2
+```
+
+- **Steps 1–2** are the `patch` and `label` commands in §5.3. The ConfigMap key is read only when the label names it; the default stays `any` (15).
+- **Steps 3–8** take a few seconds to a minute; that's the `sleep 45`. Pods that already hold a slice keep it. Only new allocations see the new count.
+- **Steps 7–8** are the first check line in §5.3: allocatable and `gpu.replicas` both `1`.
+- **Steps 9–10** are the second check line: `dev-llms` shows `1` too. No vCluster runs a device plugin; it only copies the root's node.
+- **The note** is the third check line: `serving-budget` still says 6. From now on the root scheduler's `Insufficient nvidia.com/gpu` is the binding limit, in every cluster.
+
 ---
 
 ## 3. LLD
@@ -215,7 +249,7 @@ cd "02-Kubernetes/lab"
 kubectl --context spark-root get clusterpolicies.nvidia.com -o jsonpath='{.items[0].status.state}{"\n"}'
 kubectl --context spark-root -n gpu-operator get ds,pods -o wide
 kubectl --context spark-root get clusterpolicies.nvidia.com cluster-policy -o json \
-  | jq '.spec | {driver: .driver.enabled, toolkit: .toolkit.enabled, cdi: .cdi.enabled, mig: .migManager.enabled, dcgmExporter: .dcgmExporter.enabled, devicePlugin: .devicePlugin.config}'
+  | jq -c '.spec | {driver: .driver.enabled, toolkit: .toolkit.enabled, cdi: .cdi.enabled, mig: .migManager.enabled, dcgmExporter: .dcgmExporter.enabled, devicePlugin: .devicePlugin.config}'
 kubectl --context spark-root -n gpu-operator logs -l app=nvidia-operator-validator -c nvidia-operator-validator --tail=5
 kubectl --context spark-root -n gpu-operator get cm time-slicing-config -o jsonpath='{.data.any}{"\n"}'
 ```
@@ -527,7 +561,7 @@ scripts/verify.sh gpu observability
 
 | Symptom | Cause | Diagnose | Fix |
 |---|---|---|---|
-| ClusterPolicy `notReady` | a component DaemonSet not ready | `kubectl --context spark-root -n gpu-operator get pods` → the failing one's logs | most often the validator: host driver/toolkit problem, or containerd lost the `nvidia` runtime (`grep -n nvidia /etc/containerd/config.toml`, Chapters 15/16) |
+| ClusterPolicy `notReady` | a component DaemonSet not ready | `kubectl --context spark-root -n gpu-operator get pods` → the failing one's logs | most often the validator: host driver/toolkit problem, or containerd lost the `nvidia` runtime (`grep -rn --include='*.toml' nvidia /etc/containerd/`, which also reads `conf.d/99-nvidia.toml`, and `sudo crictl info`; Chapter 16 §5.1) |
 | allocatable `nvidia.com/gpu` 0 or missing | device plugin crashed / wrong config key | `kubectl --context spark-root -n gpu-operator logs ds/nvidia-device-plugin-daemonset` | fix the ConfigMap (YAML inside YAML: indentation!), delete the plugin pod |
 | Allocatable is 15 on the root but 0/stale in a vCluster | node sync lagging or the vCluster control plane down | `kubectl --context spark-root -n vc-<name> logs <name>-0 -c syncer --tail=50` | restart the vCluster pod; `scripts/verify.sh vclusters` |
 | GPU pod in a vCluster `Pending`, no events | root quota on `vc-<name>` spent, not the GPU | `kubectl --context spark-root -n vc-<name> describe resourcequota vcluster-budget` | break/fix 02, Chapter 04 §8 |

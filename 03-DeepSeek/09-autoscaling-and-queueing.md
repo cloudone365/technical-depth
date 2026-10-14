@@ -35,7 +35,7 @@ Time-slicing shares **compute**; it does not partition memory. The guards agains
 flowchart TB
   subgraph DAY["office hours · everyday quotas"]
     direction LR
-    K1["KEDA cron trigger<br/>desiredReplicas 1"] --> V1["vLLM r1-7b<br/>1 slice · util 0.20 · 28 Gi"]
+    K1["KEDA ScaledObject vllm<br/>cron trigger: 1 replica<br/>+ prometheus trigger"] --> V1["vLLM r1-7b<br/>1 slice · util 0.20 · 28 Gi"]
     B1["bge-m3 · LiteLLM · Open WebUI<br/>llm-serving 8 CPU · 90 Gi"]
     Q1["Kueue spark-cq<br/>2 CPU · 12 Gi · 3 slices<br/>small jobs only"]
   end
@@ -61,6 +61,40 @@ flowchart TB
 ```
 
 The dotted arrow is the main limitation of scale-to-zero: with vLLM at 0 there is no pod to queue requests, so the Prometheus trigger never fires. Something in front would have to hold the request and signal demand (KEDA's HTTP add-on, or a gateway-side queue). The lab uses a **schedule** instead, because it is predictable and the GB10 is shared with training anyway. The training window is a deliberate step, not a trigger, because it changes quotas.
+
+### 2.1 A training Job through the window, step by step
+
+Tasks 5.3–5.6 walk one Job, `sft`, through Kueue and the training window:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant M as MacBook<br/>kubectl
+  participant API as root API server<br/>(spark-root)
+  participant KQ as Kueue<br/>ClusterQueue spark-cq
+  participant KE as KEDA<br/>ScaledObject vllm
+  participant S as kube-scheduler<br/>(dgx-spark-1)
+  M->>API: apply k8s/jobs/sft.yaml (suspend true, queue train, priority routine)
+  API->>KQ: Workload for Job sft: 4 CPU, 48 Gi, 1 slice
+  KQ-->>API: not admitted: spark-cq has 2 CPU, 12 Gi (everyday)
+  M->>API: annotate scaledobject vllm paused-replicas=0
+  KE->>API: scale Deployment vllm to 0, its 28 Gi leave the node
+  M->>API: apply -k root-llms/training-window
+  API->>KQ: spark-cq nominal quota 8 CPU, 80 Gi
+  KQ->>API: admit the Workload, unsuspend Job sft
+  API->>API: Job controller creates pod sft-…, batch-budget (8 CPU, 80 Gi) admits it
+  S->>S: bind the pod where 48 Gi are free (request = limit)
+  M->>API: apply grpo-urgent (priority-class urgent)
+  KQ->>API: evict sft (Preempted), admit grpo-urgent
+  M->>API: apply -k root-llms/10-tenancy and 20-scheduling, remove the pause
+  KE->>API: vllm back to 1 replica (inside office hours)
+```
+
+- **Steps 1–3** are Task 5.3: `kubectl --context spark-root -n batch describe workloads` names `cpu` and `memory`, and no `sft-…` pod exists.
+- **Steps 4–5** park vLLM through KEDA. A plain `kubectl scale` would be undone at KEDA's next poll (§3.2).
+- **Steps 6–10** are Task 5.4. `spark-cq`'s `flavorsUsage` shows 4 CPU and 48Gi. If a model server still holds memory, step 10 stops at `Pending` with `Insufficient memory`.
+- **Steps 11–12** are Task 5.5: an event with reason `Preempted` on the `sft` workload. `sft` starts again from the beginning when it is re-admitted.
+- **Steps 13–14** are Task 5.6. Close the window after the training pods are done: vLLM's pod waits `Pending` while their memory is still in use.
 
 ---
 

@@ -33,10 +33,13 @@ On one Spark, Triton is also the *cheap* engine: the lab's toy pipeline needs 12
 
 ```mermaid
 flowchart LR
-  C["client<br/>HTTP :8000 / gRPC :8001"] --> SCHED
+  MAC["MacBook<br/>curl localhost:8000 / :8002"] -->|"kubectl port-forward svc/triton 8000 8002<br/>(§5.2)"| SVC
+  DOCK["perf_analyzer in Docker<br/>on the MacBook (§5.5)"] -->|"gRPC triton.lab.local:80<br/>192.168.0.115"| TR
   subgraph LLMS["root spark-root · ns llm-serving"]
     direction LR
-    subgraph TRITON["Deployment triton · priority spark-serving"]
+    SVC["Service triton<br/>http 8000 · grpc 8001 (h2c) · metrics 8002"]
+    PA["Job triton-perf / pod grpc-test<br/>perf_analyzer (SDK image)"] -->|"gRPC triton:8001"| SVC
+    subgraph TRITON["Deployment triton · priority spark-serving · 1 CPU · 12 Gi · 1 slice"]
       direction LR
       SCHED["request scheduler"] --> ENS["ensemble 'pipeline'"]
       ENS --> P["preprocess (python)<br/>KIND_CPU × 2<br/>dynamic batching ≤ 2 ms"]
@@ -44,30 +47,69 @@ flowchart LR
       S -->|"SCORE FP32[1]"| ENS
       MET["metrics :8002<br/>nv_inference_*"]
     end
-    REPO[("model repository<br/>ConfigMaps → init container → /repo")] --> TRITON
-    PA["perf_analyzer Job triton-perf<br/>(SDK image)"] -->|gRPC| C
+    SVC --> SCHED
+    REPO[("ConfigMaps triton-preprocess,<br/>triton-scorer, triton-pipeline<br/>→ init container layout → emptyDir /repo")] --> TRITON
   end
+  TR["Traefik · ns ingress<br/>GRPCRoute triton (Chapter 11 §5.9)"] -->|"h2c"| SVC
   subgraph ROOT["root spark-root · ns observability · the GB10"]
     direction LR
     GPU["GB10 slice<br/>triton_python_backend_stub"]
-    PROM["Prometheus<br/>ServiceMonitor llm-workloads<br/>port 'metrics'"]
+    PROM["Prometheus kps<br/>ServiceMonitor llm-workloads<br/>port 'metrics'"]
   end
   S --> GPU
-  MET --> PROM
+  PROM -->|"scrape :8002"| MET
   classDef gpu fill:#76b900,stroke:#3d6000,color:#000
   classDef ctrl fill:#1f6feb,stroke:#0b3d91,color:#fff
+  classDef net fill:#8250df,stroke:#4c2889,color:#fff
   classDef store fill:#bf8700,stroke:#7a5600,color:#fff
   classDef obs fill:#fb8500,stroke:#9a5200,color:#000
+  classDef ext fill:#24292f,stroke:#000,color:#fff
   classDef tenant fill:#eaeef2,stroke:#57606a,color:#000
   class S,GPU gpu
   class SCHED,ENS,P ctrl
+  class SVC,TR net
   class REPO store
   class MET,PROM obs
-  class C,PA tenant
+  class MAC,DOCK ext
+  class PA tenant
   style TRITON fill:#f4fbe8,stroke:#76b900,stroke-width:2px
   style LLMS fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
   style ROOT fill:#e6f4f5,stroke:#0e7c86
 ```
+
+There is no Ingress or HTTPRoute to Triton: the labs reach it through `kubectl port-forward` (§5.2, §5.3), from pods in `llm-serving` (`triton-perf`, `grpc-test`), and in §5.5 through the `GRPCRoute` you add in Chapter 11 §5.9.
+
+### 2.1 One ensemble request, step by step
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as curl on the MacBook<br/>(port-forward svc/triton 8000)
+  participant H as Triton HTTP :8000<br/>(pod triton-…)
+  participant E as ensemble pipeline
+  participant PB as preprocess batcher<br/>(max_queue_delay 2 ms)
+  participant PI as preprocess instance<br/>(KIND_CPU, 1 of 2)
+  participant SB as scorer batcher<br/>(preferred 16/32, 2 ms)
+  participant SI as scorer instance<br/>(triton_python_backend_stub on the GB10 slice)
+  C->>H: POST /v2/models/pipeline/infer<br/>TEXT BYTES shape [2,1]
+  H->>E: inference request for pipeline
+  E->>PB: TEXT (input_map TEXT → TEXT)
+  Note over PB: waits up to 2 ms for more requests<br/>to fill a batch (max_batch_size 64)
+  PB->>PI: execute(requests)
+  PI-->>E: IDS INT32 [2,16] (output_map IDS → ids)
+  E->>SB: ids as IDS
+  Note over SB: waits up to 2 ms, aims for 16 or 32
+  SB->>SI: execute(requests)
+  SI-->>E: SCORE FP32 [2,1] (torch on cuda)
+  E-->>H: SCORE
+  H-->>C: outputs[0] = SCORE, shape [2,1]
+  Note over H: per model: nv_inference_count += batch items<br/>nv_inference_exec_count += 1 per execute
+```
+
+- **Steps 1–2 and 10** are what §5.2 shows: `/v2/models/pipeline/infer` with two texts returns two scores. `triton-perf` and `grpc-test` enter at step 1 over gRPC `:8001` instead.
+- **Steps 3, 5 and 6** follow the `input_map`/`output_map` in `pipeline/config.pbtxt`. A wrong key there gives the `unable to find … output` error in §7.
+- **The notes before steps 4 and 7 are dynamic batching.** Under load (§5.3) several clients' requests reach one `execute`, so `nv_inference_count` grows faster than `nv_inference_exec_count`. Their ratio is the average batch size; with `max_queue_delay_microseconds: 0` it falls towards 1.
+- **Steps 7–8 run on the GB10.** The process that holds the slice is `triton_python_backend_stub`; §5.2 finds it with `nvidia-smi` and maps it to the `triton-…` pod. With two scorer instances, two stubs share the slice; §5.4 drops to one.
 
 ---
 
@@ -161,8 +203,8 @@ vLLM can stay running: both fit `serving-budget` (§3.4).
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving describe resourcequota serving-budget | grep -E 'requests.cpu|limits.memory|gpu'
 kubectl --context spark-root apply -k manifests/root-llms/90-serving/triton
-kubectl --context spark-root -n llm-serving logs deploy/triton -c layout
 kubectl --context spark-root -n llm-serving rollout status deploy/triton --timeout=15m     # first pull ≈ 15 GB
+kubectl --context spark-root -n llm-serving logs deploy/triton -c layout                  # the init container's file list
 kubectl --context spark-root -n llm-serving logs deploy/triton | grep -E 'successfully loaded|READY|Started'
 ```
 
@@ -178,7 +220,7 @@ I… Started HTTPService at 0.0.0.0:8000
 I… Started Metrics Service at 0.0.0.0:8002
 ```
 
-If the rollout never starts, look for `exceeded quota: serving-budget` (other engines hold more than ~75 Gi of the 90) or, on a Pending pod, `Insufficient memory` (a batch job holds the rest of the shared LLM memory pool) in `kubectl --context spark-root -n llm-serving get events`; park an engine (Chapter 20 §9). With two 32 Gi engines up, or vLLM + P/D, Triton and the perf Job in §5.3 still fit (80.4 and 88.6 Gi).
+If the rollout never starts, look for `exceeded quota: serving-budget` (other engines hold more than ~78 Gi of the 90) or, on a Pending pod, `Insufficient memory` (a batch job holds the rest of the shared LLM memory pool) in `kubectl --context spark-root -n llm-serving get events`; park an engine (Chapter 20 §9). With two 32 Gi engines up, or vLLM + P/D, Triton and the perf Job in §5.3 still fit (80.4 and 88.6 Gi).
 
 ### 5.2 Talk to it
 
@@ -195,7 +237,7 @@ If the rollout never starts, look for `exceeded quota: serving-budget` (other en
 2. **Repository index:** three lines, `pipeline`, `preprocess`, `scorer`, each `"state":"READY"`.
 3. **Ensemble steps:** `"preprocess"` then `"scorer"`.
 4. **Inference:** `{"name":"SCORE","datatype":"FP32","shape":[2,1],"data":[…, …]}`: two scores for two inputs.
-5. **GPU processes:** `triton_python_backend_stub` lines whose `pod…` part matches the UID of the `triton-…` pod, with dashes written as underscores. A `vllm` process may also be listed if vLLM runs.
+5. **GPU processes:** `triton_python_backend_stub` lines whose `pod…` part matches the UID of the `triton-…` pod, with dashes written as underscores. Processes of the `vllm` pod may also be listed if vLLM runs; their `pod…` part carries the vLLM pod's UID.
 
 **If something's off:** `bind: address already in use` → another port-forward holds 8000; stop it (`jobs`, then `kill %N`). Empty `data` or an error about `TEXT` → check the request's input name and shape against `curl -s localhost:8000/v2/models/pipeline/config`. No Triton process in `nvidia-smi` → the scorer fell back to CPU (§7).
 
@@ -218,7 +260,7 @@ Confirm the scorer really runs on the GPU, and that the GPU process belongs to t
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 ssh dgxadmin@192.168.0.100 'for p in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader); do
-  echo "$p $(cat /proc/$p/comm) $(grep -o "pod[0-9a-f_-]*" /proc/$p/cgroup | head -1)"; done'
+  echo "$p $(cat /proc/$p/comm) $(grep -oE "pod[0-9a-f]{8}[0-9a-f_-]+" /proc/$p/cgroup | head -1)"; done'
 kubectl --context spark-root -n llm-serving get pods -o custom-columns=UID:.metadata.uid,NAME:.metadata.name | grep triton
 ```
 
@@ -249,7 +291,7 @@ Expected: `triton_python_backend_stub` processes whose cgroup contains `pod<uid>
 # ▶ MacBook · 02-Kubernetes/lab
 before=$(curl -s localhost:8002/metrics | awk '/^nv_inference_(count|exec_count)\{model="scorer"/ {print $2}' | paste -sd' ')
 kubectl --context spark-root -n llm-serving patch job triton-perf -p '{"spec":{"suspend":false}}'
-kubectl --context spark-root -n llm-serving logs -f job/triton-perf | grep -E 'Concurrency|Throughput|p99 latency'
+kubectl --context spark-root -n llm-serving logs -f job/triton-perf --pod-running-timeout=15m | grep -E 'Concurrency|Throughput|p99 latency'   # first SDK image pull takes minutes
 after=$(curl -s localhost:8002/metrics | awk '/^nv_inference_(count|exec_count)\{model="scorer"/ {print $2}' | paste -sd' ')
 echo "$before | $after" | awk '{printf "scorer average batch size during the test: %.1f\n", ($4-$1)/($5-$2)}'
 ```
@@ -270,7 +312,7 @@ kubectl --context spark-root apply -k manifests/root-llms/90-serving/triton
 kubectl --context spark-root -n llm-serving rollout restart deploy/triton && kubectl --context spark-root -n llm-serving rollout status deploy/triton
 ```
 
-and repeat. Batch size falls towards 1, and throughput at high concurrency falls with it. That's the latency/throughput trade dynamic batching makes. The re-apply creates `triton-perf` suspended again, ready for the next run.
+The restart ends the §5.2 port-forward (it was bound to the old pod): start it again (`kubectl --context spark-root -n llm-serving port-forward svc/triton 8000 8002 &`) before you read `before` once more. The default `RollingUpdate` strategy briefly runs a second Triton pod, so the restart needs another 12 Gi and one slice free in `serving-budget`; with two 32 Gi engines up, park one first. Then repeat. Batch size falls towards 1, and throughput at high concurrency falls with it. That's the latency/throughput trade dynamic batching makes. The re-apply creates `triton-perf` suspended again, ready for the next run.
 
 ### 5.4 Instance groups
 
@@ -319,7 +361,7 @@ The pod has no `resources`, so the llm-serving LimitRange gives it 50m / 512 Mi 
 
 ```bash
 # ▶ MacBook · any folder
-docker run --rm --network host --add-host triton.lab.local:192.168.0.115 nvcr.io/nvidia/tritonserver:25.09-py3-sdk \
+docker run --rm --add-host triton.lab.local:192.168.0.115 nvcr.io/nvidia/tritonserver:25.09-py3-sdk \
   perf_analyzer -m pipeline -u triton.lab.local:80 -i grpc --string-data "hello spark" --concurrency-range 4
 ```
 

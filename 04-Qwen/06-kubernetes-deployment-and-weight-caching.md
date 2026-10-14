@@ -57,7 +57,7 @@ flowchart LR
     DEP["Deployment vllm<br/>request = limit · 1 slice"]
     SVC["Service vllm:8000"]
     KEDA["ScaledObject vllm<br/>num_requests_waiting"]
-    TR["Traefik 192.168.0.115<br/>llm.lab.local/v1"]
+    TR["Traefik 192.168.0.115<br/>llm.lab.local/v1<br/>(→ vllm after Task 5.6)"]
     SEC --> PRE --> PVC --> DEP --> SVC
     TR --> SVC
     KEDA -.-> DEP
@@ -80,6 +80,42 @@ flowchart LR
 ```
 
 Everything runs on the root under its real names: the pod is `vllm-…` in `llm-serving`, the PVC lands on dgx-spark-1 at `/data/k8s/retain/llm-serving/model-cache`, and the root's Prometheus, KEDA and Traefik see it directly. The admission rules for `llm-serving` apply to every overlay: pinned image tag, a readinessProbe, no `NVIDIA_VISIBLE_DEVICES` env, PSA baseline, priority `spark-serving`.
+
+### 2.1 A model switch, step by step
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant M as serve-model.sh<br/>(MacBook)
+  participant A as root API server<br/>(spark-root)
+  participant J as Job model-prefetch<br/>(llm-serving)
+  participant HF as huggingface.co
+  participant C as PVC model-cache<br/>(/models/hf)
+  participant S as dgx-spark-1<br/>(page cache)
+  participant V as deploy/vllm pod
+  M->>A: get deploy -n llm-serving
+  A-->>M: --gpu-memory-utilization of every running engine
+  M->>M: Σ util + catalog util ≤ 0.72 ?
+  M->>A: apply Job model-prefetch (MODEL, REVISION from models.yaml)
+  A->>J: start pod, HF_TOKEN from Secret hf-token (optional)
+  J->>HF: hf download --revision (pinned SHA or main)
+  J->>C: blobs + snapshots/SHA under models--Qwen--…
+  M->>A: wait for condition=complete
+  M->>S: ssh sudo -n drop_caches (only with DROP_CACHES=1)
+  M->>A: apply -k k8s/models/NAME
+  A->>V: Recreate: old pod preStop sleep 15, then the new pod
+  V->>C: read safetensors through the page cache
+  V->>V: take util × 121.7 GiB, profile, capture CUDA graphs
+  M->>A: rollout status (readinessProbe /health)
+  M->>V: exec smoke request "12*12"
+  V-->>M: 144
+```
+
+- **Steps 1–3** are the `[PASS] budget: running … ≤ 0.72` line; `FORCE=1` skips step 3.
+- **Steps 4–8** are Task 5.3: the Job log ends with `downloaded Qwen/Qwen3-8B@<sha> in <n>s`, and on the Spark the files sit under `/data/k8s/retain/llm-serving/model-cache/hf`.
+- **Step 9** is Task 5.4's `[....] page cache dropped (UMA headroom for the load)`; without `DROP_CACHES=1` the script skips it.
+- **Steps 10–14** are what `t_ready` times in Task 5.5 (`Loading weights took`, `Model loading took` in the log); step 12 is where a cold or warm page cache makes the difference.
+- **Steps 15–16** print `[PASS] answer: 144`. Task 5.6 then routes `llm.lab.local` through Traefik to the same `svc/vllm`.
 
 ---
 
@@ -401,7 +437,7 @@ free -g | head -2
 
 #### Run it
 
-Three starts of the same model, timed from pod creation to Ready:
+Three starts of the same model, timed from pod creation to Ready. Define the timer:
 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
@@ -411,7 +447,17 @@ t_ready() {
   kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=30m >/dev/null
   echo "$1: $(( $(date +%s) - t0 )) s"
 }
-ssh -t dgx-spark-1 "sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'"; t_ready "cached on NVMe, cold page cache"
+```
+
+Run the next line **on its own**: `sudo` on the Spark asks for the `dgxadmin` password, and lines pasted after it would be read as password attempts. The cold start follows on the same line, right after the drop:
+
+```bash
+# ▶ MacBook · 04-Qwen/lab
+ssh -t dgx-spark-1 "sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'" && t_ready "cached on NVMe, cold page cache"
+```
+
+```bash
+# ▶ MacBook · 04-Qwen/lab
 t_ready "warm page cache"
 kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -E 'Loading weights took|Model loading took|graph capturing|init engine'
 ```
@@ -489,7 +535,7 @@ Compare the list with the catalog's revisions. A repo or revision not in the cat
 | Check | Expected |
 |---|---|
 | `hf-token` | synced from `kv/spark-lab/hf`, starts with `hf_`, no token in any repo file |
-| overlay diff | only args, `MODEL`, `SERVED_NAME`, memory and labels differ from 02's base |
+| overlay diff | only image, args, `MODEL`, `SERVED_NAME`, the optional token, memory and labels differ from 02's base; no `hf-token` Secret |
 | `--dry-run=server` | accepted by the root's admission policies |
 | prefetch | completes with the pinned SHA; `snapshots/<sha>` exists on the PVC |
 | `serving-budget` | the model's memory appears once, request = limit; total ≤ 90 Gi |

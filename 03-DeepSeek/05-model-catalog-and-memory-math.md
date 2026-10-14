@@ -73,7 +73,7 @@ flowchart TB
   style POOL fill:#f4fbe8,stroke:#76b900,stroke-width:2px
 ```
 
-The page cache is the trap that catches most people. Reading 60 GB of safetensors fills the page cache with 60 GB of file data, the kernel reclaims it lazily, and vLLM measures free memory at start-up. A model that fits on paper then fails to start. `scripts/serve-model.sh` drops the page cache before every load for this reason.
+The page cache is the trap that catches most people. Reading 60 GB of safetensors fills the page cache with 60 GB of file data, the kernel reclaims it lazily, and vLLM measures free memory at start-up. A model that fits on paper then fails to start. Drop the page cache on dgx-spark-1 before a big load (`sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'`). `scripts/serve-model.sh` tries this too, but only works when it runs on the Spark itself; from the MacBook it can't reach the Spark's page cache.
 
 ### 2.2 Where the catalog's models come from
 
@@ -425,7 +425,7 @@ Restart `uma-watch.sh` on the new pod. Watch `MemAvailable` fall in two steps (w
 
 1. **Both `serve-model.sh` runs** end with `0 failed`.
 2. **Report:** R1 higher on maths with a reasoning share above 0.5 and many more output tokens; Qwen at least as good on JSON, with shorter answers and lower latency. Fill in the table.
-3. **Optional run, before `serve-model.sh r1-32b`:** `kubectl --context spark-root -n batch get pods` is empty and `serving-budget` shows no more than about 3 Gi of `limits.memory` used.
+3. **Optional run, before `serve-model.sh r1-32b`:** `kubectl --context spark-root -n batch get pods` is empty and `serving-budget` shows no more than the current `vllm` pod (40 Gi for `qwen2.5-32b-awq`) plus about 3 Gi of `limits.memory` used. The `Recreate` rollout removes the old `vllm` pod before the 87 Gi one is admitted.
 
 **If something's off:** `r1-32b` `Pending` with `exceeded quota: serving-budget` → something in `llm-serving` is still running; `kubectl --context spark-root -n llm-serving get deploy,statefulset`. More in §7.
 
@@ -466,7 +466,7 @@ kubectl --context spark-root -n llm-serving get deploy,statefulset              
 kubectl --context spark-root -n llm-serving scale deploy bge-m3 litellm --replicas=0      # if the app stack is deployed
 kubectl --context spark-root -n llm-serving scale statefulset open-webui litellm-db --replicas=0
 # any second model or other engine you started (k8s/multi/*, sglang, trtllm, llama-server): scale it to 0 as well
-kubectl --context spark-root -n llm-serving describe resourcequota serving-budget | grep limits.memory   # ≤ 3 Gi used
+kubectl --context spark-root -n llm-serving describe resourcequota serving-budget | grep limits.memory   # ≤ the vllm pod + ~3 Gi used
 scripts/serve-model.sh r1-32b
 ```
 
@@ -580,7 +580,7 @@ Then configure your editor's OpenAI-compatible provider (Continue, Cline, …): 
 
 | You see | Cause | Fix |
 |---|---|---|
-| `insufficient memory … gpu_memory_utilization` at start (drill D02) | the fraction asks for memory others hold: another engine, a batch job, or the page cache | lower util; drop the page cache (`serve-model.sh` does it); park other engines |
+| `insufficient memory … gpu_memory_utilization` at start (drill D02) | the fraction asks for memory others hold: another engine, a batch job, or the page cache | lower util; drop the page cache on dgx-spark-1; park other engines |
 | KV tokens much lower than predicted | large `--max-num-seqs` × `--max-num-batched-tokens` activation peak | lower those, or account for them in `--overhead-gib` |
 | vLLM pod `OOMKilled` (137) | pod limit below the CPU-side peak (tokenizer, CUDA graphs, host buffers, CUDA memory if charged) | raise request and limit together to measured peak + 20 %, then re-check §3.4 |
 | Pod Pending, `Insufficient memory` | the pool is taken by other engines and batch pods (all request = limit) | `kubectl --context spark-root describe node dgx-spark-1 \| grep -A9 'Allocated resources'`; park an engine or wait for the batch job |

@@ -34,7 +34,7 @@ flowchart LR
   OV -->|"serve-model.sh NAME"| FLOW
   subgraph FLOW["serve-model.sh (MacBook, --context spark-root)"]
     direction TB
-    P1["prefetch Job<br/>weights into model-cache"] --> P2["drop page cache<br/>UMA headroom"] --> P3["scale SGLang / TRT-LLM to 0"] --> P4["kubectl apply -k overlay"] --> P5["rollout status<br/>up to 45 min"] --> P6["smoke test<br/>12×12 → 144"]
+    P1["prefetch Job<br/>weights into model-cache"] --> P2["drop page cache<br/>only when run on the Spark"] --> P3["scale SGLang / TRT-LLM to 0"] --> P4["kubectl apply -k overlay"] --> P5["rollout status<br/>up to 45 min"] --> P6["smoke test<br/>12×12 → 144"]
   end
   FLOW --> V["Deployment vllm · ns llm-serving<br/>label model=NAME<br/>request = limit = catalog mem"]
   CI["CI: gen_overlays.py --check<br/>kubeconform · server dry-run"] -.-> OV
@@ -54,8 +54,8 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  CL["clients<br/>llm.lab.local → 192.168.0.115"] --> TR["Traefik · ns ingress"]
-  TR --> LL["LiteLLM · aliases<br/>reasoning · coder · tools"]
+  CL["clients<br/>api.lab.local → 192.168.0.115"] --> TR["Traefik · ns ingress<br/>HTTPRoute litellm"]
+  TR --> LL["LiteLLM · aliases<br/>reasoning · reasoning-fast · agent"]
   LL --> SVC["Service vllm:8000"]
   SVC --> POD["vLLM pod<br/>served name = catalog name"]
   POD --> PVC[("model-cache PVC<br/>local-nvme-retain")]
@@ -75,7 +75,41 @@ flowchart LR
   class CL ext
 ```
 
-Clients never talk to a Hugging Face repo id. They use the catalog name (`r1-7b`) as the model, or better, a LiteLLM alias ([Chapter 12](12-open-webui-and-litellm-gateway.md)) that maps a task to whichever catalog model currently serves it.
+The gateway path in the second diagram exists from [Chapter 12](12-open-webui-and-litellm-gateway.md) on (`llm.lab.local` is 02's Ingress to the mock LLM, not to vLLM). The labs in this chapter reach vLLM with `kubectl port-forward svc/vllm 8000` or `kubectl exec`. Clients never talk to a Hugging Face repo id. They use the catalog name (`r1-7b`) as the model, or better, a LiteLLM alias ([Chapter 12](12-open-webui-and-litellm-gateway.md)) that maps a task to whichever catalog model currently serves it.
+
+### 2.1 A model switch, step by step
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant M as serve-model.sh<br/>(MacBook)
+  participant API as root API server<br/>(spark-root)
+  participant J as Job model-prefetch<br/>(llm-serving)
+  participant C as PVC model-cache<br/>(/models/hf)
+  participant D as Deployment vllm<br/>(Recreate)
+  participant P as vLLM pod
+  M->>API: delete Job model-prefetch, apply it with MODEL = catalog hf, REVISION
+  API->>J: start pod (python:3.12-slim)
+  J->>C: hf download --cache-dir /models/hf (HF_TOKEN from Secret hf-token, optional)
+  M->>API: wait condition=complete (60 min)
+  M->>API: scale deploy sglang trtllm --replicas=0
+  M->>API: apply -k k8s/models/NAME
+  API->>D: new pod template: args, MODEL, SERVED_NAME, memory request = limit, label model
+  D->>P: Recreate: stop the old pod first (preStop sleep 15)
+  D->>API: create the new pod (quota serving-budget, then the scheduler)
+  P->>C: load weights from /models/hf
+  P->>P: profile memory, KV cache = util × 121.7 GiB − weights − activations
+  P-->>D: startupProbe /health OK, pod Ready
+  M->>API: rollout status deploy/vllm (45 min)
+  M->>P: kubectl exec curl localhost:8000/v1/chat/completions "What is 12*12?"
+  P-->>M: content 144, reasoning_content length
+```
+
+- **Steps 1–4** print `[PASS] weights cached`. A failure here is a download problem: `kubectl --context spark-root -n llm-serving logs job/model-prefetch` (a gated model without a token is drill D05).
+- **Steps 6–7 are the only change to the Deployment.** KEDA's ScaledObject `vllm` is not touched, so replicas stay at 1 (§3.4). The overlay also re-applies the base's placeholder Secret `hf-token` (§4).
+- **Steps 8–9** are the few minutes of 503 in the Risk line. A refused pod shows as a ReplicaSet event `exceeded quota: serving-budget`, a pod that doesn't fit the node as `Pending` with `Insufficient memory` (§7).
+- **Step 11** writes `Available KV cache memory` and `GPU KV cache size` to the vLLM log (Task 5.3). Drills D02 and D03 fail here.
+- **Steps 14–15** print `[PASS] answer: 144  (reasoning chars: N)`. With drill D01 injected, N is 0.
 
 ---
 
@@ -251,7 +285,7 @@ kubectl --context spark-root -n llm-serving create secret generic hf-token \
 
 #### What to look for
 
-1. **Script output:** the six lines shown below, ending with `[PASS] answer: 144  (reasoning chars: N)`, then `3 passed, 0 warnings, 0 failed`.
+1. **Script output:** the five lines shown below, ending with `[PASS] answer: 144  (reasoning chars: N)`, then `3 passed, 0 warnings, 0 failed`.
 2. **Cluster charge:**
 
    | Command | Healthy value |
@@ -273,13 +307,12 @@ scripts/serve-model.sh r1-7b
 ```text
 [....] prefetching deepseek-ai/DeepSeek-R1-Distill-Qwen-7B into model-cache
 [PASS] weights cached
-[....] page cache dropped (UMA headroom for the load)
 [....] waiting for vLLM (r1-7b) — first start compiles CUDA graphs
 [PASS] vLLM ready with r1-7b
 [PASS] answer: 144  (reasoning chars: 412)
 ```
 
-(Your reasoning length will differ.) The script drops the page cache only if it can run `sudo` locally; from the MacBook it can't, so do it on the Spark before a large model:
+(Your reasoning length will differ.) The script drops the page cache only when it runs on the Spark itself, and then prints `[....] page cache dropped (UMA headroom for the load)` after `weights cached`. From the MacBook it can't, so do it on the Spark before a large model:
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)

@@ -71,7 +71,7 @@ Times are rough working times for one Spark, not counting reading.
 | **Part II** | **Node provisioning** | | | |
 | 10 | [NVIDIA driver stack & Fabric Manager](10-nvidia-driver-stack-and-fabric-manager.md) | `10.1 Driver audit`; upgrade dry run | 20 min | Driver audit green, NVIDIA packages held |
 | 11 | [CUDA, NGC containers & CDI](11-cuda-ngc-containers-and-cdi.md) | `11.1 Containers`, `11.2 CUDA smoke` | 40 min | `uma_probe … check=PASS` |
-| 12 | [GPU telemetry & alerting](12-gpu-telemetry-and-alerting.md) | `12.1 Telemetry` | 30 min | Grafana *Spark Lab / Overview* shows GPU, UMA, CX-7 |
+| 12 | [GPU telemetry & alerting](12-gpu-telemetry-and-alerting.md) | `12.1 Telemetry` | 30 min | Grafana *Spark Lab → DGX Spark Lab — Overview* shows GPU, UMA, CX-7 |
 | **Part III** | **Fabric & storage** | | | |
 | 13 | [ConnectX-7 fabric & OpenSM](13-connectx7-fabric-and-opensm.md) | `13.1 Fabric`, `13.2 RDMA perftest` (2 Sparks) | 45 min | Links at 200000 Mb/s, MTU 9000 |
 | 14 | [RoCEv2, QoS & NCCL](14-rocev2-qos-and-nccl.md) | `14.1 RoCE QoS` (optional), `14.2 NCCL test` (2 Sparks) | 60 min | NCCL log says `via NET/IB` |
@@ -341,7 +341,7 @@ ansible-playbook playbooks/11.2-cuda-smoke.yml -K
 ansible-playbook playbooks/12.1-telemetry.yml -K   # break-glass
 ```
 
-✅ **Done when** Grafana at `http://192.168.0.100:3000` (the Spark's port 3000, not Semaphore's on sema01) → *Spark Lab / Overview* shows the GPU, UMA and CX-7 panels.
+✅ **Done when** Grafana at `http://192.168.0.100:3000` (the Spark's port 3000, not Semaphore's on sema01) → folder *Spark Lab* → *DGX Spark Lab — Overview* shows the GPU, UMA and CX-7 panels.
 
 ---
 
@@ -612,6 +612,8 @@ python3 tools/capstone_scorecard.py   # grades the MacBook's .cache; for Semapho
 | `04.1-semaphore-target.yml` | `svc-ansible`, NOPASSWD sudo, trust vault01's SSH CA | MacBook (once) | 04 |
 | `04.2-ping.yml` | Connectivity + identity | Semaphore `04.2 Ping` | 04 |
 | `04.3-baseline.yml` | Custom facts + OS baseline | Semaphore `04.3 Baseline` | 04 |
+| `05.1-async-download.yml` | Background model download (`async`/`poll: 0`) joined after the baseline | MacBook or Semaphore `05.1 Async download` | 05 |
+| `06.1-netbox-seed.yml` | Describe the lab in NetBox through its API (optional) | MacBook (`NETBOX_TOKEN`) | 06 |
 | `07.1-jinja-lab.yml` | Jinja katas | MacBook or Semaphore (localhost only) | 07 |
 | `09.1-fleet-sim.yml` · `09.2-fleet-bench.yml` | Performance lab | MacBook (it benchmarks your own controller) | 09 |
 | `10.1-driver-audit.yml` | Driver consistency | Semaphore | 10 |
@@ -619,7 +621,7 @@ python3 tools/capstone_scorecard.py   # grades the MacBook's .cache; for Semapho
 | `11.1-containers.yml` | Docker, toolkit, CDI, NGC (key from vault01) | Semaphore | 11 |
 | `11.2-cuda-smoke.yml` | sm_121 + PyTorch smoke | Semaphore | 11 |
 | `12.1-telemetry.yml` | node_exporter, collector, Prometheus/Grafana/Alertmanager | Semaphore | 12 |
-| `13.1-fabric.yml` | CX-7 addressing + verification | Semaphore (2 Sparks) | 13 |
+| `13.1-fabric.yml` | CX-7 addressing + verification | Semaphore (one Spark: addresses the ports, reports the links; strict checks with 2 Sparks) | 13 |
 | `13.2-rdma-perftest.yml` · `14.1-roce-qos.yml` · `14.2-nccl-test.yml` | Fabric performance and QoS | Semaphore (2 Sparks) | 13–14 |
 | `15.1-nfs-rdma.yml` | Shared model cache | Semaphore (2 Sparks) | 15 |
 | `16.1-gds-check.yml` | GDS / cuFile assessment | Semaphore | 16 |

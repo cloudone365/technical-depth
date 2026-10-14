@@ -138,6 +138,39 @@ fi
 exit 0
 ```
 
+### 1.3 One GPU job, step by step
+
+What happens for the test job of `22.1 Slurm` (`srun -p gpu --gres=gpu:1 -t 2 nvidia-smi -L`), and what the health check does in the background:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as srun on dgx-spark-1
+  participant MU as munged
+  participant CT as slurmctld :6817<br/>(dgx-spark-1)
+  participant SD as slurmd :6818
+  participant ST as slurmstepd<br/>(job cgroup v2)
+  participant HC as spark-slurm-healthcheck.sh
+  U->>MU: create a credential for the user
+  U->>CT: srun -p gpu --gres=gpu:1 nvidia-smi -L<br/>+ munge credential
+  CT->>CT: select/cons_tres: node in partition gpu<br/>with a free gpu:gb10, CPUs, RealMemory
+  CT->>SD: launch the step on the chosen node
+  SD->>ST: start slurmstepd
+  ST->>ST: cgroup v2: cores, memory,<br/>devices: /dev/nvidia0 only with --gres
+  ST->>ST: run nvidia-smi -L
+  ST-->>U: GPU 0: NVIDIA GB10 (UUID: GPU-…)
+  loop every 120 s (HealthCheckInterval)
+    SD->>HC: run HealthCheckProgram
+    HC->>HC: nvidia-smi -L within 15 s? critical Xid in 10 min?<br/>MemAvailable at least 4 GiB?
+    HC->>CT: on a failure: scontrol update State=DRAIN<br/>Reason="healthcheck: …"
+  end
+```
+
+- **Steps 1–2** need the same `/etc/munge/munge.key` on every node. Different keys or skewed clocks fail here with `Munge decode failed` (§5).
+- **Step 3** reads `Gres=gpu:gb10:1` and `RealMemory` from `slurm.conf`. One GPU per node, so a second GPU job waits, and a `-N 2` job is refused with one Spark (§3.3).
+- **Step 6** is `ConstrainDevices=yes`. In §3.1 the job without `--gres` gets no `/dev/nvidia0` and `nvidia-smi` finds no GPU at step 7. §3.5 tests whether GPU allocations count against the memory limit set here.
+- **Steps 9–11** are §3.4. The role's resume task leaves a `healthcheck:` drain alone; a human resumes it.
+
 ---
 
 ## 2. The role
@@ -177,6 +210,7 @@ exit 0
     owner: munge
     group: munge
     mode: "0400"
+  diff: false              # never print the key with --diff
   notify: Restart munge
 
 - name: Directories

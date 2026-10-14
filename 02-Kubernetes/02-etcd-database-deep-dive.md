@@ -459,7 +459,7 @@ With one member, `defrag` blocks **the only** member: the root API server stalls
    | dev-lab namespace `survives-restore` | still there |
 
 3. **The syncer:** `kubectl --context spark-root -n vc-dev-lab get pods -w` shows host copies created or removed for a minute or two, then it settles.
-4. **Gate:** `scripts/verify.sh platform vclusters` ends `0 failed`. Its etcd-snapshot line reads `[....] no etcd snapshot on this machine yet` when you run it as `dgxadmin`, because `/var/lib/etcd-snapshots` is mode 0700 root; `etcd-drill.sh status` (with sudo) is the real check.
+4. **Gate:** `scripts/verify.sh platform vclusters` ends `0 failed`. Its etcd-snapshot line reads `[....] no etcd snapshot on this machine yet`: on the MacBook there is no `/var/lib/etcd-snapshots`, and on the Spark `dgxadmin` can't read it (mode 0700 root). `etcd-drill.sh status` (with sudo, on the Spark) is the real check.
 
 **If something's off:** `kubectl` hangs after the restore → etcd didn't start; `sudo crictl ps -a --name etcd` and its logs. To undo, move `/var/lib/etcd.before-restore-<ts>` back to `/var/lib/etcd`. More in §7 (fourth row).
 

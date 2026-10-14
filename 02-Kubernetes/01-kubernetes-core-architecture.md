@@ -107,7 +107,7 @@ Rule of thumb: **only the API server talks to etcd.** Every other component is a
 | kube-proxy | DaemonSet | `:10249` metrics | ConfigMap `kube-system/kube-proxy` (mode iptables), chains `KUBE-SERVICES`, `KUBE-SVC-*` (Chapter 09) |
 | Cilium | DaemonSet + operator | `8472/udp` VXLAN, `:9962` metrics | `cilium_host`, `cilium_vxlan`, `lxc*` veths, `/etc/cni/net.d/05-cilium.conflist` (Chapter 08) |
 | containerd | systemd `containerd.service` (DGX OS `containerd.io`, shared with Docker) | unix socket | `/run/containerd/containerd.sock`, config `/etc/containerd/config.toml`, `/etc/crictl.yaml` |
-| nvidia runtime | containerd runtime handler | — | `default_runtime_name = "nvidia"` in the containerd config (01-Ansible `nvidia-ctk runtime configure --set-as-default`) |
+| nvidia runtime | containerd runtime handler | — | `default_runtime_name = "nvidia"` in `/etc/containerd/config.toml` or, with newer toolkits, the drop-in `/etc/containerd/conf.d/99-nvidia.toml` (01-Ansible `nvidia-ctk runtime configure --set-as-default`) |
 | kubeadm config | file | — | `/etc/kubernetes/kubeadm-config.yaml` (what Ansible fed `kubeadm init`), ConfigMap `kube-system/kubeadm-config` |
 
 ### 3.2 Objects you'll see in `kube-system` (and around it)
@@ -171,10 +171,10 @@ sequenceDiagram
   box rgb(230,244,245) Node · dgx-spark-1
     participant K as kubelet
     participant C as containerd
-    participant N as dgxadmin runtime + runc
+    participant N as nvidia runtime + runc
   end
   U->>V: POST /api/v1/namespaces/tenant-beta/pods
-  V->>V: authn → RBAC → admission (PSA restricted, CEL, tenant quota) → SQLite
+  V->>V: authn → RBAC → admission (PSA restricted, tenant quota, CEL once 15-admission is applied) → SQLite
   V-->>U: 201 Created (Pending)
   V->>A: syncer: create gpu-smoke-x-tenant-beta-x-dev-lab in vc-dev-lab
   A->>A: authn → authz → mutating adm. → schema → validating adm. (PSA, root quota)

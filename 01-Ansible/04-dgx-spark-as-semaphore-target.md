@@ -732,7 +732,7 @@ The `spark_baseline` role installs the tooling you'll need in every later chapte
   tags: [baseline, time]
 
 - name: Headless (no desktop)
-  ansible.builtin.include_tasks: headless.yml
+  ansible.builtin.import_tasks: headless.yml
   when:
     - spark_baseline_headless | bool
     - not spark_baseline_container_mode
@@ -1040,8 +1040,8 @@ Create the remaining templates (`04.2 Ping` and `04.3 Baseline` exist already), 
 | `10.2 DGX OS upgrade` | `10.2-dgxos-upgrade.yml` | reboots: extra variable `vault_ssh_cert_ttl: 1h` (§13); also Chapter 28 |
 | `11.1 Containers` | `11.1-containers.yml` | Docker, NVIDIA toolkit, NGC login (key from §7) |
 | `11.2 CUDA smoke` | `11.2-cuda-smoke.yml` | sm_121 + PyTorch smoke test |
-| `12.1 Telemetry` | `12.1-telemetry.yml` | DCGM exporter, node exporter |
-| `13.1 Fabric` | `13.1-fabric.yml` | CX-7 addressing: only with dgx-spark-2; also Chapter 14 |
+| `12.1 Telemetry` | `12.1-telemetry.yml` | node exporter + GPU textfile collector, Prometheus, Alertmanager, Grafana (DCGM exporter off by default) |
+| `13.1 Fabric` | `13.1-fabric.yml` | CX-7 addressing; with one Spark it addresses the ports and only reports the uncabled links; also Chapter 14 |
 | `13.2 RDMA perftest` | `13.2-rdma-perftest.yml` | needs dgx-spark-2 |
 | `14.1 RoCE QoS` | `14.1-roce-qos.yml` | optional: DSCP/PFC/ECN; needs dgx-spark-2 |
 | `14.2 NCCL test` | `14.2-nccl-test.yml` | needs dgx-spark-2 |

@@ -85,6 +85,35 @@ Two rules shape the design:
 1. **Clients talk only to LiteLLM.** Open WebUI has `ENABLE_OLLAMA_API=false` and a single OpenAI connection to `http://litellm.llm-serving:4000/v1`. Agents (Chapter 14) and RAG (Chapter 13) use the same endpoint in production. Nothing outside `llm-serving` addresses vLLM directly.
 2. **Only the engines use the GPU.** LiteLLM, PostgreSQL and Open WebUI are CPU pods; they count against `serving-budget` (8 CPU · 90 Gi) but not against the util sum. bge-m3 is a vLLM engine with `--gpu-memory-utilization=0.06` (≈ 7.3 GiB of the ~121.7 GiB) and one time-slice.
 
+### 2.1 One chat message, step by step
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Browser<br/>webui.lab.local
+  participant T as Traefik 192.168.0.115<br/>(ingress, lab-gateway)
+  participant W as open-webui-0<br/>:8080
+  participant L as LiteLLM<br/>:4000
+  participant P as litellm-db<br/>PostgreSQL :5432
+  participant V as vllm<br/>:8000 (r1-7b)
+  B->>T: POST webui.lab.local (chat, model reasoning-fast)
+  T->>W: HTTPRoute open-webui, timeouts.request 900s
+  W->>L: POST /v1/chat/completions stream true<br/>Bearer key of the connection (seeded from OPENAI_API_KEYS)
+  L->>P: look up the key: allowed models, rpm_limit, budget
+  Note over L: 401 if the alias is not allowed<br/>429 above rpm_limit
+  L->>V: router picks hosted_vllm/r1-7b at vllm.llm-serving:8000
+  V-->>L: delta.reasoning_content chunks, then delta.content
+  L-->>W: same chunks (hosted_vllm keeps reasoning_content)
+  W-->>B: Thinking block, then the answer
+  L->>P: spend log: model, tokens, cost per token
+```
+
+- **Steps 1–2** are the Gateway path from 02 Chapter 11. `api.lab.local` takes the same path with HTTPRoute `litellm` and skips Open WebUI (Tasks 5.2–5.5).
+- **Step 4** is Task 5.3: the `401` for `reasoning` and the `429` burst come from LiteLLM before any GPU work.
+- **Step 5** is where retries and fallbacks happen. When `reasoning` has no backend, LiteLLM tries `reasoning-sglang`, then `reasoning-fast`; the `x-litellm-attempted-fallbacks` header shows it (Task 5.5).
+- **Steps 6–8** are the thinking stream of Task 5.7. With an `openai/` prefix or no reasoning parser, the reasoning arrives inside `content` instead.
+- **Step 9** is what `spend/logs` and `key/info` read in Task 5.4.
+
 ---
 
 ## 3. LLD
@@ -206,7 +235,7 @@ The manifests carry placeholder Secrets (`sk-lab-change-me`, `change-me-…`). T
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-export KUBECONFIG=~/technical-depth/01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml
+export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 kubectl --context spark-root apply -k k8s/apps                                    # bge-m3, LiteLLM + PostgreSQL, Open WebUI, HTTPRoutes
 kubectl --context spark-root -n llm-serving rollout status sts/litellm-db --timeout=5m
 kubectl --context spark-root -n llm-serving rollout status deploy/litellm --timeout=10m   # DB migrations on first start
@@ -471,6 +500,7 @@ spec:
         - {name: backups, persistentVolumeClaim: {claimName: webui-backups}}
 EOF
 kubectl --context spark-root -n llm-serving wait --for=condition=complete job/webui-restore --timeout=2m
+kubectl --context spark-root -n llm-serving logs job/webui-restore                # webui.db and webui.db.before-restore
 kubectl --context spark-root -n llm-serving scale sts open-webui --replicas=1
 ```
 
@@ -483,31 +513,39 @@ Then prove sessions survive a restart: stay logged in, `kubectl --context spark-
 #### What this lab does (script `lab/scripts/serve-model.sh`, overlay `lab/k8s/sglang/r1-32b-fp8`)
 
 - **vLLM** switches to r1-32b-fp8 on dgx-spark-1.
-- **SGLang** serves the same model on dgx-spark-2, after you point the second `reasoning-pool` entry's `api_base` at it.
+- **SGLang** serves the same model on dgx-spark-2. The overlay has no node pin and mounts `model-cache`, a `local-nvme-retain` volume that lives on dgx-spark-1, so the commands pin the pod to dgx-spark-2 and give it an `emptyDir` for the weights (downloaded again there). The second `reasoning-pool` entry already points at the Service `sglang:30000`, so LiteLLM needs no change.
+- **Raises `serving-budget` memory to 180 Gi for the run:** two 58 Gi engines plus bge-m3 and the apps don't fit 90 Gi. Re-applying 02's `10-tenancy` puts it back.
 - **20 concurrent requests** to `reasoning-pool`; LiteLLM's least-busy routing spreads them.
 - **With only one Spark:** skip this Task; both engines don't fit the util budget and `serving-budget` together.
 
 #### What to look for
 
-1. **`serve-model.sh`** ends with `[PASS] answer: 144 …`, and the SGLang pod is Ready on dgx-spark-2.
+1. **`serve-model.sh`** ends with `[PASS] answer: 144 …`, and `get pod -l app=sglang -o wide` shows the SGLang pod Ready on dgx-spark-2.
 2. **The count** lists both `pool-vllm` and `pool-sglang` in `x-litellm-model-id`.
 
-**If something's off:** only `pool-vllm` appears when SGLang isn't Ready (it is then cooled down for 60 s after 3 failures). More in §7.
+**If something's off:** only `pool-vllm` appears when SGLang isn't Ready (it is then cooled down for 60 s after 3 failures). SGLang `Pending` with `exceeded quota: serving-budget` → the quota patch didn't apply; with `volume node affinity conflict` → the `emptyDir` patch didn't apply. More in §7.
 
 #### Run it
 
-`reasoning-pool` puts vLLM and SGLang, both serving r1-32b-fp8, behind one name. On one Spark this doesn't fit: two 32B FP8 engines need about 2 × 0.40 of util (> 0.72) and two ~56 Gi pods (> 90 Gi `serving-budget`). With dgx-spark-2, run SGLang there (Chapter 07) and change the second deployment's `api_base` to its Service:
+`reasoning-pool` puts vLLM and SGLang, both serving r1-32b-fp8, behind one name. On one Spark this doesn't fit: two 32B FP8 engines need 2 × 0.45 of util (0.90 > 0.72) and two 58 Gi pods (116 Gi > 90 Gi `serving-budget`). With dgx-spark-2, run SGLang there (Chapter 07). The quota is per namespace, not per node, so raise it for the run:
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh r1-32b-fp8
-kubectl --context spark-root apply -k k8s/sglang/r1-32b-fp8                    # scheduled on dgx-spark-2
-for i in $(seq 20); do curl -si $API/v1/chat/completions "${H[@]}" \
-  -d '{"model":"reasoning-pool","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}' \
-  | grep -i '^x-litellm-model-id' & done; wait | sort | uniq -c
+kubectl --context spark-root -n llm-serving patch resourcequota serving-budget --type merge \
+  -p '{"spec":{"hard":{"requests.memory":"180Gi","limits.memory":"180Gi"}}}'
+kubectl --context spark-root apply -k k8s/sglang/r1-32b-fp8
+kubectl --context spark-root -n llm-serving patch deploy sglang --type json -p '[
+  {"op":"add","path":"/spec/template/spec/nodeSelector","value":{"kubernetes.io/hostname":"dgx-spark-2"}},
+  {"op":"replace","path":"/spec/template/spec/volumes/0","value":{"name":"models","emptyDir":{}}}]'
+kubectl --context spark-root -n llm-serving rollout status deploy/sglang --timeout=60m   # downloads ~34 GB on dgx-spark-2
+kubectl --context spark-root -n llm-serving get pod -l app=sglang -o wide               # NODE dgx-spark-2
+{ for i in $(seq 20); do curl -si $API/v1/chat/completions "${H[@]}" \
+    -d '{"model":"reasoning-pool","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}' \
+    | grep -i '^x-litellm-model-id' & done; wait; } | sort | uniq -c
 ```
 
-Expected: both `pool-vllm` and `pool-sglang` appear; with concurrent requests least-busy spreads them.
+Expected: both `pool-vllm` and `pool-sglang` appear; with concurrent requests least-busy spreads them. Clean up: `kubectl --context spark-root -n llm-serving scale deploy sglang --replicas=0` and `kubectl --context spark-root apply -k ../../02-Kubernetes/lab/manifests/root-llms/10-tenancy` (quota back to 90 Gi).
 
 ### Task 5.10 · Drills
 
@@ -526,8 +564,11 @@ Expected: both `pool-vllm` and `pool-sglang` appear; with concurrent requests le
 
 #### Run it
 
+The direct-to-vLLM comparison and the D08 command use `localhost:8000`, so start a port-forward first.
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
+kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
 scripts/breakfix.sh inject D04      # LiteLLM timeout lowered to 30 s: long answers cut off
 scripts/breakfix.sh hint D04
 scripts/breakfix.sh reset D04

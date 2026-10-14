@@ -198,8 +198,8 @@ CPU(s): 20
    | `nvidia.com/gpu.sharing-strategy` | `time-slicing` |
    | `feature.node.kubernetes.io/cpu-model.vendor_id` | `ARM` |
 
-3. **Capacity vs allocatable** (second command): capacity `nvidia.com/gpu` `15`, `cpu` `20`, and `memory` close to the whole unified pool. Allocatable is lower by the kubelet reservation (3 CPU / 12 GiB): `cpu` `17`, `memory` about 109.7 GiB (shown in `Ki`), `nvidia.com/gpu` `15`.
-4. **dev-llms view** (third command): one row, `dgx-spark-1`, with `SPARK.LAB/GPU` `gb10`, a product name ending in `-SHARED`, and `GPU.REPLICAS` `15`. dev-llms may still only use 2 slices: that limit is a quota, not a node property.
+3. **Capacity vs allocatable** (second command): capacity `nvidia.com/gpu` `15`, `cpu` `20`, and `memory` close to the whole unified pool. Allocatable is lower by the kubelet reservations plus the hard-eviction threshold (3 CPU; 6 + 2 + 4 = 12 GiB): `cpu` `17`, `memory` about 109.7 GiB (shown in `Ki`), `nvidia.com/gpu` `15`.
+4. **dev-llms view** (third command): one row, `dgx-spark-1`, with `GPU` `gb10` (kubectl names a label column after the last part of the key, here `spark.lab/gpu`), a `GPU.PRODUCT` ending in `-SHARED`, and `GPU.REPLICAS` `15`. dev-llms may still only use 2 slices: that limit is a quota, not a node property.
 
 **If something's off:** `nvidia.com/gpu: 1` instead of 15 → the time-slicing ConfigMap is not applied (Chapter 16 §7). `No resources found` in dev-llms → node sync is off in the vCluster values (`lab/vclusters/dev-llms.yaml`). More in §7.
 
@@ -263,7 +263,7 @@ kubectl --context dev-lab -n tenant-beta delete pod gpu-smoke
 
 #### What to look for
 
-1. **Command exit:** both `apply` commands print `created` (or `unchanged`/`configured` on a re-run). `kubectl --context spark-root -n platform-tools get job gemm-solo` ends with `COMPLETIONS 1/1`.
+1. **Command exit:** the three `apply` commands print `created` (or `unchanged`/`configured` on a re-run). `kubectl --context spark-root -n platform-tools get job gemm-solo` ends with `COMPLETIONS 1/1`.
 2. **The JSON line** from `logs -f`:
 
    | Field | Healthy value |
@@ -291,7 +291,7 @@ kubectl --context spark-root -n platform-tools logs -f job/gemm-solo
 ```
 
 ```json
-{"pod": "gemm-solo-…", "device": "NVIDIA GB10", "cc": "12.1", "n": 8192, "tflops": 87.4, "mem_total_gib": 121.7, "mem_free_gib": 101.2}
+{"pod": "gemm-solo-…", "device": "NVIDIA GB10", "cc": "12.1", "n": 8192, "tflops": 46.4, "mem_total_gib": 121.7, "mem_free_gib": 101.2}
 ```
 
 The TFLOPS figure is illustrative, so **record your own**. It's your "one tenant, no contention" baseline for Chapter 16. `mem_total_gib` from CUDA equals the whole UMA pool, and `mem_free_gib` moves as the OS and other pods — in all three clusters — allocate.

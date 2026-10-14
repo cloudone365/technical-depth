@@ -128,7 +128,7 @@ Long-context settings for the lab's models:
 
 | Model | Native window | KV/token | KV for one full-window sequence | On one Spark |
 |---|---|---|---|---|
-| R1-Distill-Qwen-7B (util 0.30) | 131,072 | 56 KiB | 7 GiB | yes: `k8s/long-context/r1-7b-128k`, ~362K KV tokens = 2 full-window sequences |
+| R1-Distill-Qwen-7B (util 0.20) | 131,072 | 56 KiB | 7 GiB | yes: `k8s/long-context/r1-7b-128k`, ~134K KV tokens = 1 full-window sequence |
 | R1-Distill-Qwen-32B (BF16, util 0.70) | 131,072 | 256 KiB | 32 GiB | no: ~21 GiB of KV left (drill D03); FP8 weights + FP8 KV get closer |
 | DeepSeek-V2-Lite (MLA) | 32,768 | 30.4 KiB | ~1 GiB | yes |
 | DeepSeek-V3/R1 (MLA) | 131,072 | 68.6 KiB | 8.6 GiB | the weights don't fit |
@@ -448,7 +448,7 @@ Expect TTFT to grow faster than linearly and hit rates to drop at the longest le
 #### What this lab does (Job `02-Kubernetes/lab/manifests/root/60-storage/fio-job.yaml`, then a cold and a warm vLLM start)
 
 - **fio:** creates a 64 Gi `local-nvme` PVC and a Job `fio-ai` in `platform-tools`, which runs four 45-second profiles on a 16 GB file: sequential 1M read and write, random 128k read, random 4k read.
-- **Cold vs warm load:** `serve-model.sh r1-7b` drops the page cache before applying, so its start is cold; the `rollout restart` that follows is warm (weights still in page cache).
+- **Cold vs warm load:** `serve-model.sh r1-7b` serves the 32K overlay. You then drop the page cache on dgx-spark-1, so the next `rollout restart` reads the weights from NVMe (cold); a second `rollout restart` finds them in the page cache (warm). `serve-model.sh` can't drop the Spark's page cache from the MacBook.
 - **Clean-up:** deleting the fio manifest removes the Job and its scratch PVC.
 
 #### What to look for
@@ -474,13 +474,24 @@ kubectl --context spark-root -n platform-tools logs -f job/fio-ai | grep -E '^\S
 | `dataloader-randread-128k` | shuffled training shards | |
 | `small-randread-4k` | KV blocks, metadata | |
 
-Cold vs warm weight load (`serve-model.sh` drops the page cache before applying, so its first start is cold):
+Cold vs warm weight load. Serve the 32K overlay, then drop the page cache on the Spark so the next start reads from NVMe:
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh r1-7b
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
+```
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+kubectl --context spark-root -n llm-serving rollout restart deploy/vllm                 # cold
+kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=20m
 kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -E 'Loading weights took|Model loading took|init engine'
-kubectl --context spark-root -n llm-serving rollout restart deploy/vllm
+kubectl --context spark-root -n llm-serving rollout restart deploy/vllm                 # warm
 kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=20m
 kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -E 'Loading weights took|Model loading took|init engine'
 ```

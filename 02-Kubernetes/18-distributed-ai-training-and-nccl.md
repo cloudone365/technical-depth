@@ -75,6 +75,42 @@ flowchart LR
 
 **Why two gates?** Kueue admits *workloads* against its own books: `spark-cq` and the jobs submitted to it, nothing else. The `batch-budget` quota counts every *pod* in `batch`, including pods Kueue never saw, and the scheduler counts the node's real memory, which serving shares. Both see pods one at a time, as the Job controller creates them. Kueue's all-or-nothing promise therefore holds only if the quota and the node have room for the whole gang (§5.3).
 
+### 2.1 One gang run, step by step
+
+What happens between `kubectl apply -k manifests/root-llms/80-distributed/base` and `correctness OK` (§5.1):
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as kubectl on the MacBook<br/>(context spark-root)
+  participant API as root API server<br/>(quota batch-budget)
+  participant KQ as Kueue controller<br/>(ns kueue-system)
+  participant JC as Job controller<br/>(kube-controller-manager)
+  participant SC as kube-scheduler
+  participant DNS as root CoreDNS
+  participant R1 as pod ddp-1<br/>(rank 1)
+  participant R0 as pod ddp-0<br/>(rank 0, master)
+  U->>API: create Job ddp<br/>suspend true, queue-name train
+  KQ->>KQ: Workload: 2 x (1 CPU, 6Gi, 1 slice)<br/>against spark-cq (2 CPU, 12Gi, 3 slices)
+  KQ->>API: admit, set suspend false
+  JC->>API: create pods for index 0 and index 1
+  API->>API: batch-budget checks each pod<br/>(refusal = FailedCreate on the Job)
+  SC->>API: bind both pods to dgx-spark-1<br/>if memory and a slice are free
+  R1->>DNS: resolve ddp-0.ddp-workers.batch.svc.cluster.local
+  R1->>R0: c10d rendezvous on :29500
+  loop 6 sizes, 1 MiB to 1 GiB
+    R0->>R1: all_reduce (gloo, TCP over the pod network)
+  end
+  R0-->>U: log: size table, correctness OK
+  JC->>API: Job complete, Kueue frees spark-cq usage
+```
+
+- **Steps 2–3** are Kueue's books: `get workloads` shows `ADMITTED` `True`, and `spark-cq` shows 2 CPU · 12 Gi · 2 slices used while the ranks run (§5.1).
+- **Step 5** is the second gate. In §5.3 the `slice-filler` makes `batch-budget` refuse one pod, and the Job shows `FailedCreate … exceeded quota: batch-budget`.
+- **Step 6** is the third gate: the node's memory, shared with `llm-serving`. A rank that doesn't fit is `Pending` with `Insufficient memory`.
+- **Steps 7–8** work before rank 0 is Ready because `ddp-workers` sets `publishNotReadyAddresses: true`. If step 7 fails, rank 0 waits forever with both pods `Running` (§7).
+- **The loop** is what §5.4 stalls by freezing rank 1, and what §5.5 moves to NCCL over RoCE (`NET/IB`) between two Sparks.
+
 ---
 
 ## 3. LLD
@@ -343,7 +379,7 @@ kubectl kustomize manifests/root-llms/80-distributed/base | yq 'with(select(.kin
 kubectl --context spark-root -n batch logs -f -l job-name=ddp --prefix
 ```
 
-After 20 s, rank 1's Python processes freeze (SIGSTOP) for 90 s. The pattern `allreduce_bench[.]py$` matches torchrun and its worker but not the wrapping shell, whose command line doesn't *end* in `.py`. Rank 0's all-reduce timings jump from milliseconds to ~90 s for one step, **with no error**. That's what a straggler (thermal throttle, noisy neighbour, bad link) looks like from the healthy rank.
+After 20 s, rank 1's Python processes freeze (SIGSTOP) for 90 s. The pattern `allreduce_bench[.]py$` matches torchrun and its worker but not the wrapping shell, whose command line doesn't *end* in `.py`. One row of rank 0's table jumps from milliseconds to thousands of ms (the 90 s pause spread over that row's 10 timed iterations), **with no error**. That's what a straggler (thermal throttle, noisy neighbour, bad link) looks like from the healthy rank.
 
 The hang triage sequence, from inside the pods:
 
@@ -359,7 +395,7 @@ kubectl --context spark-root -n batch exec "$R1" -- sh -c 'for p in $(pgrep -f a
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
-# from 02-Kubernetes/lab in a copy of this repo on the Spark, with the lab kubeconfig exported
+# kubectl on the Spark uses ~/.kube/config (context spark-root), which is all this script needs
 R1=<rank 1's pod name, as printed on the MacBook>
 scripts/cgroup-inspect.sh batch "${R1#pod/}"      # context defaults to spark-root
 ```

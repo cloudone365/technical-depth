@@ -390,7 +390,7 @@ compactor:
 
 #### What to look for
 
-1. **Semaphore run:** `failed=0`. On a first run expect `changed` on the auditd rules (plus the `Load audit rules` handler), the Loki and Alloy containers, the data source and the ARA service. A re-run shows `changed=0`.
+1. **Semaphore run:** `failed=0`. On a first run expect `changed` on the auditd rules (plus the `Load audit rules` handler), the Loki and Alloy containers, the data source and the ARA service. A re-run shows `changed=0` on the Sparks (`localhost` still shows the new certificate from play 1).
 2. **"Confirm rules are active"** is `ok`. It fails the play if the `network` rule is not loaded, so `ok` means auditd took the rules.
 3. **Endpoints**, with the commands below:
 
@@ -518,7 +518,7 @@ Line the three up by time: the Semaphore task's start, the `sign/ansible` reques
 
 #### What to look for
 
-1. **`ausearch` output:** a `type=SYSCALL` record with `comm="sed"`, `key="network"`, and `auid=` set to the user who logged in (`dgxadmin` when you SSH in as `dgxadmin`; the example line shows `nvidia`). The `auid` is the human behind `sudo`.
+1. **`ausearch` output:** a `type=SYSCALL` record with `comm="sed"`, `key="network"`, and `auid=dgxadmin`, the user who logged in over SSH. The `auid` is the human behind `sudo`.
 2. **Drift cycle:** `drift check exit=2`, and the report lists a `cx7_fabric` task for the edited Spark.
 3. **Loki (optional):** the query `{job="auditd"} |~ "key=\"network\""` in Grafana Explore shows the same event.
 4. **After `13.1 Fabric`:** `grep mtu /etc/netplan/40-cx7.yaml` on the Spark shows `9000` again, and a new drift run exits `0`.
@@ -529,10 +529,10 @@ Line the three up by time: the Semaphore task's start, the `sign/ansible` reques
 
 ```bash
 # ▶ MacBook · 01-Ansible/lab (venv active)
-ssh dgxadmin@192.168.0.101 'sudo sed -i "s/mtu: 9000/mtu: 1500/" /etc/netplan/40-cx7.yaml'
-ssh dgxadmin@192.168.0.101 'sudo ausearch -k network -i --start recent | tail -20'
-# → type=SYSCALL ... comm="sed" ... auid=nvidia ... key="network"
-tools/drift-cycle.sh      # drift reports the fabric template (and doesn't auto-heal it)
+ssh -t dgxadmin@192.168.0.101 'sudo sed -i "s/mtu: 9000/mtu: 1500/" /etc/netplan/40-cx7.yaml'   # -t: sudo asks for the password
+ssh -t dgxadmin@192.168.0.101 'sudo ausearch -k network -i --start recent | tail -20'
+# → type=SYSCALL ... comm="sed" ... auid=dgxadmin ... key="network"
+BECOME_ARGS=-K tools/drift-cycle.sh      # drift reports the fabric template (and doesn't auto-heal it)
 ```
 
 **Semaphore UI:** a human puts it back with the template **13.1 Fabric** and `--limit dgx-spark-2,localhost` (break-glass, on the MacBook in `01-Ansible/lab`: `ansible-playbook playbooks/13.1-fabric.yml -K -l dgx-spark-2,localhost`).
@@ -565,12 +565,12 @@ The model servers in `llm-serving` and `batch` are root objects, so the root's l
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
 # 1. A platform change on the root: who touched the LLM serving budget?
 kubectl --context spark-root -n llm-serving annotate resourcequota serving-budget spark.lab/audit-test="$(date +%s)" --overwrite
-ssh dgxadmin@192.168.0.100 "sudo tail -n 2000 /var/log/kubernetes/audit/audit.log | jq -c 'select(.objectRef.resource==\"resourcequotas\" and .verb==\"patch\") | {user: .user.username, verb, ns: .objectRef.namespace, name: .objectRef.name}' | tail -1"
+ssh -t dgxadmin@192.168.0.100 "sudo tail -n 2000 /var/log/kubernetes/audit/audit.log | jq -c 'select(.objectRef.resource==\"resourcequotas\" and .verb==\"patch\") | {user: .user.username, verb, ns: .objectRef.namespace, name: .objectRef.name}' | tail -1"
 # → {"user":"kubernetes-admin","verb":"patch","ns":"llm-serving","name":"serving-budget"}
 
 # 2. A tenant write inside dev-lab: the root logs the syncer, not the tenant
 kubectl --context dev-lab -n default create configmap audit-probe --from-literal=k=v
-ssh dgxadmin@192.168.0.100 "sudo tail -n 2000 /var/log/kubernetes/audit/audit.log | jq -c 'select(.objectRef.namespace==\"vc-dev-lab\" and .objectRef.resource==\"configmaps\" and .verb==\"create\") | {user: .user.username, name: .objectRef.name}' | tail -1"
+ssh -t dgxadmin@192.168.0.100 "sudo tail -n 2000 /var/log/kubernetes/audit/audit.log | jq -c 'select(.objectRef.namespace==\"vc-dev-lab\" and .objectRef.resource==\"configmaps\" and .verb==\"create\") | {user: .user.username, name: .objectRef.name}' | tail -1"
 # → user is a ServiceAccount in vc-dev-lab (system:serviceaccount:vc-dev-lab:…), name audit-probe-x-default-x-dev-lab
 kubectl --context dev-lab -n default delete configmap audit-probe
 ```

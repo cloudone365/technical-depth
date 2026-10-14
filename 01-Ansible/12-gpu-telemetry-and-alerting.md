@@ -37,12 +37,12 @@ flowchart LR
       G["Grafana :3000<br/>provisioned DS + dashboard"] --> P
     end
   end
-  subgraph S2["dgx-spark-2"]
+  subgraph S2["dgx-spark-2 (optional)"]
     T2["timer → collector"] --> TF2[".prom"] --> NE2["node_exporter :9100"]
   end
   P -->|scrape| NE1 & NE2
   P -.->|scrape| DC1
-  P -.->|"/v1/sys/metrics"| V["vault01 · 192.168.0.211:8200<br/>(outside the Spark)"]
+  P -.->|"/v1/sys/metrics<br/>(optional job, §5)"| V["vault01 · 192.168.0.211:8200<br/>(outside the Spark)"]
   AM -->|webhook| W["Slack / ntfy / email"]
   DD["DGX Dashboard :11000<br/>(NVIDIA's local UI — unchanged)"]
   classDef mgmt fill:#fff3e6,stroke:#fb8500,color:#000
@@ -58,7 +58,7 @@ flowchart LR
 | node_exporter args | `--collector.textfile.directory=… --collector.systemd --collector.processes` |
 | Stack | `/opt/spark-monitoring/compose.yml`: `prom/prometheus`, `prom/alertmanager`, `grafana/grafana` (multi-arch images) |
 | Retention | `30d` (`gpu_telemetry_retention`) |
-| Dashboard | `roles/gpu_telemetry/files/spark-overview.json` → folder "Spark Lab" |
+| Dashboard | `roles/gpu_telemetry/files/spark-overview.json` (*DGX Spark Lab — Overview*) → folder "Spark Lab" |
 | Alerts | `SparkGPUUnresponsive`, `SparkGPUMetricsStale`, `SparkGPUXid`, `SparkGPUHot`, `SparkUnifiedMemoryLow`, `SparkCX7Degraded`, `SparkNodeDown` |
 
 **Why a textfile collector instead of a custom exporter?** No daemon to crash, no port to secure. The atomic `mktemp` + `mv` means Prometheus never scrapes a half-written file, and a hung `nvidia-smi` shows up as `spark_gpu_up 0` rather than a stuck exporter.
@@ -426,7 +426,7 @@ groups:
 
 **Part 2: the monitoring stack (hosts in the `monitoring` group, i.e. dgx-spark-1).**
 - **Containers:** Docker Compose in `/opt/spark-monitoring` starts **Prometheus** (:9090, 30 days of history), **Alertmanager** (:9093) and **Grafana** (:3000).
-- **Pre-provisioned Grafana:** the data source and the "Spark Lab → Overview" dashboard are already there.
+- **Pre-provisioned Grafana:** the data source and the dashboard *DGX Spark Lab — Overview* in folder *Spark Lab* are already there.
 - **Alert rules:** seven of them (§3), checked with `promtool` before anything starts. A bad rule fails the play instead of breaking Prometheus.
 
 #### What to look for
@@ -450,7 +450,7 @@ groups:
    | `spark_cx7_link_speed_mbps` | `200000` on a cabled port; `-1` or absent on an unused port is fine with one Spark |
 
 3. **Prometheus:** the commands below list targets (`dgx-spark-1 up`) and the seven alert rule names.
-4. **Grafana:** open http://192.168.0.100:3000. Log in as `admin` with `gpu_telemetry_grafana_admin_password`; that is `change-me-via-vault` unless you set it as an extra variable on the template, so change it. Then open Spark Lab → Overview. Run `11.2 CUDA smoke` or load a model: the unified-memory panel should dip while it runs and recover after.
+4. **Grafana:** open http://192.168.0.100:3000. Log in as `admin` with `gpu_telemetry_grafana_admin_password`; that is `change-me-via-vault` unless you set it as an extra variable on the template, so change it. Then open Dashboards → Spark Lab → *DGX Spark Lab — Overview*. Run `11.2 CUDA smoke` or load a model: the unified-memory panel should dip while it runs and recover after.
 5. **Alerts:** trigger and clear at least `SparkNodeDown` and `SparkGPUMetricsStale` (§4.1). They should show as *firing* on http://192.168.0.100:9090/alerts, then go back to inactive.
 
 **If something's off:** no `spark_*` metrics → `journalctl -u spark-gpu-metrics -n 20`, then run `sudo /usr/local/sbin/spark-gpu-metrics.sh` by hand. Empty Grafana panels → pick "Prometheus" in the dashboard's data-source dropdown. More in §6.
@@ -471,7 +471,7 @@ ssh dgxadmin@192.168.0.100 'cat /var/lib/prometheus/node-exporter/spark_gpu.prom
 # stack
 curl -s http://192.168.0.100:9090/api/v1/targets | jq -r '.data.activeTargets[] | "\(.labels.host) \(.health)"'
 curl -s http://192.168.0.100:9090/api/v1/rules | jq -r '.data.groups[].rules[].name'
-# Grafana: http://192.168.0.100:3000  (admin / gpu_telemetry_grafana_admin_password) → Spark Lab → Overview
+# Grafana: http://192.168.0.100:3000  (admin / gpu_telemetry_grafana_admin_password) → Spark Lab → DGX Spark Lab — Overview
 #   (the Spark's :3000; Semaphore's UI is http://192.168.0.210:3000 on sema01)
 ```
 

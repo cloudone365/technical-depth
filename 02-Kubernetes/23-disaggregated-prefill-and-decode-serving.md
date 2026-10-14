@@ -34,25 +34,31 @@ In one engine, a burst of long prompts stalls every in-flight decode (TPOT spike
 sequenceDiagram
   autonumber
   box rgb(246,248,250) Client side
-    participant C as client
-    participant X as pd-proxy
+    participant C as curl or ttft_probe.py<br/>(port-forward svc/pd-proxy 8000)
+    participant X as pd-proxy<br/>(pd_proxy.py)
   end
   box rgb(234,246,214) Prefill worker
-    participant P as vllm-prefill
+    participant P as vllm-prefill<br/>(Service vllm-prefill:8000)
   end
   box rgb(221,234,255) Decode worker
-    participant D as vllm-decode
+    participant D as vllm-decode<br/>(Service vllm-decode:8000)
   end
   C->>X: POST /v1/chat/completions (stream)
   X->>P: same request, max_tokens=1, stream=false,<br/>kv_transfer_params.do_remote_decode=true
-  P->>P: prefill whole prompt → KV blocks kept (lease)
-  P-->>X: 1 token + kv_transfer_params {engine_id, block_ids, host, port}
-  X->>D: original request + kv_transfer_params (do_remote_prefill)
-  D->>P: NIXL/UCX read of KV blocks (side channel :5600, P's pod IP)
-  Note over D,P: same GPU on 1 Spark · CX-7 RDMA on 2 Sparks
+  P->>P: prefill whole prompt → KV blocks kept for decode
+  P-->>X: 1 token + kv_transfer_params<br/>(remote_engine_id, remote_block_ids, remote_host, remote_port)
+  X->>D: original request + those kv_transfer_params
+  D->>P: NIXL handshake on the side channel<br/>(remote_host = P's pod IP, port 5600)
+  D->>P: NIXL/UCX read of the KV blocks
+  Note over D,P: cuda_ipc / shm on 1 Spark · RDMA over the CX-7 on 2 Sparks
   D-->>X: stream tokens
   X-->>C: stream (+ header X-Prefill-Ms)
 ```
+
+- **Step 1** is §5.3's `curl` (and §5.4's probe) through `kubectl port-forward svc/pd-proxy 8000`.
+- **Steps 2–4** are timed by the proxy: their duration is the `X-Prefill-Ms` header. If prefill returns no `kv_transfer_params`, the proxy still sends step 5, and decode recomputes the prompt (the trap in §5.3).
+- **Step 6** is what `hubble observe --namespace llm-serving --port 5600` shows: pod IP to pod IP, no Service. The address is the one in the prefill log's side-channel line (§5.2).
+- **Step 7** is the KV handoff. The decode log shows NIXL/remote-transfer lines for it (§5.3); on one Spark the bytes never touch the network.
 
 ```mermaid
 flowchart LR
@@ -183,6 +189,7 @@ kubectl --context spark-root describe node dgx-spark-1 | grep -A9 'Allocated res
 kubectl --context spark-root apply -k manifests/root-llms/90-serving/pd-disagg
 kubectl --context spark-root -n llm-serving rollout status deploy/vllm-prefill --timeout=30m
 kubectl --context spark-root -n llm-serving rollout status deploy/vllm-decode --timeout=30m
+kubectl --context spark-root -n llm-serving rollout status deploy/pd-proxy
 kubectl --context spark-root -n llm-serving logs deploy/vllm-prefill | grep -iE 'nixl|kv_transfer|connector' | head
 ```
 
@@ -266,7 +273,7 @@ On one GB10 expect **no latency win**, and possibly a small loss: both roles sha
 - **Needs dgx-spark-2** as a worker of the root. With only dgx-spark-1, read this section and skip it; your result from §5.4 is the one-Spark answer.
 - **Checks the plumbing:** a throw-away pod `rdma-test` in `batch` (500m, 4 Gi, one `rdma/rdma_shared_cx7`, `IPC_LOCK`) prints its interfaces and RDMA devices, then you delete it.
 - **Relaxes Pod Security** on `llm-serving` from `baseline` to `privileged` for the experiment. Re-applying `manifests/root-llms/00-platform` puts it back.
-- **Your edits:** pin prefill to dgx-spark-1 and decode to dgx-spark-2, attach `batch/cx7-rdma`, set `UCX_NET_DEVICES` and `UCX_TLS`, add `IPC_LOCK` and an RDMA resource. Then a prefill-heavy benchmark (8,192-token prompts, 64-token outputs) against P/D and against the monolithic engine.
+- **Your edits:** pin prefill to dgx-spark-1 and decode to dgx-spark-2, attach `batch/cx7-rdma`, set `UCX_NET_DEVICES` and `UCX_TLS`, add `IPC_LOCK` and an RDMA resource. Then a prefill-heavy benchmark (8,000-token prompts, 64-token outputs) against P/D and against the monolithic engine.
 
 #### What to look for
 
@@ -287,6 +294,7 @@ dgx-spark-2 joins the **root** (01-Ansible `k8s_workers`), where the models run,
 kubectl --context spark-root get nodes                                    # dgx-spark-1, dgx-spark-2
 kubectl --context spark-root -n batch get network-attachment-definitions  # cx7-rdma
 kubectl --context spark-root apply -f manifests/root-llms/85-network-operator/rdma-test-pod.yaml
+kubectl --context spark-root -n batch wait --for=condition=Ready pod/rdma-test --timeout=15m   # first pull of the PyTorch image
 kubectl --context spark-root -n batch logs rdma-test                            # net1 + the rocep* devices
 kubectl --context spark-root -n batch delete pod rdma-test
 ```
@@ -310,12 +318,14 @@ Then add to the prefill Deployment `nodeSelector: {kubernetes.io/hostname: dgx-s
           - name: vllm
             env:
               - {name: UCX_NET_DEVICES, value: "rocep1s0f1:1,roceP2p1s0f1:1"}
-              - {name: UCX_TLS, value: "rc,cuda_copy,cuda_ipc"}
+              - {name: UCX_TLS, value: "rc,cuda_copy,cuda_ipc"}   # replaces the existing UCX_TLS=all entry
             securityContext: {capabilities: {add: [IPC_LOCK]}}
-            resources: {limits: {rdma/rdma_shared_cx7: "1"}}     # Network Operator / Multus (Chapter 17 §5.6)
+            resources:                                           # keep memory and GPU, add one RDMA device
+              requests: {cpu: 750m, memory: 20Gi, nvidia.com/gpu: "1"}
+              limits: {memory: 20Gi, nvidia.com/gpu: "1", rdma/rdma_shared_cx7: "1"}   # Network Operator / Multus (Chapter 17 §5.6)
 ```
 
-`nodeSelector` uses the nodes' own `kubernetes.io/hostname` labels; the root scheduler places each role on its Spark. Then run a prefill-heavy mix (long prompts, short outputs) against both setups with `vllm bench serve --random-input-len 8192 --random-output-len 64`. Now decode TPOT stays flat while prefill runs on the other Spark.
+`nodeSelector` uses the nodes' own `kubernetes.io/hostname` labels; the root scheduler places each role on its Spark. Then run a prefill-heavy mix (long prompts, short outputs) against both setups with `vllm bench serve --random-input-len 8000 --random-output-len 64` (input + output must stay within `--max-model-len=8192`). Now decode TPOT stays flat while prefill runs on the other Spark.
 
 ---
 
