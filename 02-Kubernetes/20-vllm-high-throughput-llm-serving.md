@@ -425,7 +425,7 @@ KEDA creates an HPA in `llm-serving`; the root's controller-manager scales the D
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 seq 400 | xargs -P64 -I{} curl -sN -o /dev/null http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":200}' &
-kubectl --context spark-root -n llm-serving get deploy mock-llm -w        # 2 → up to 6, back after cooldown
+kubectl --context spark-root -n llm-serving get deploy mock-llm -w        # 2 → up to 6, back after cooldown · Ctrl-C to stop
 ```
 
 From now on, KEDA owns `deploy/vllm`'s replica count: `kubectl scale` alone is undone at the next poll. To swap engines (Chapters 21–23), use the pause annotation in §9.

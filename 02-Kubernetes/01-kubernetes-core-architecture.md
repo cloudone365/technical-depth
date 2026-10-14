@@ -302,14 +302,14 @@ Terminal A (the tenant's view):
 
 ```bash
 # ▶ MacBook · any folder
-kubectl --context dev-lab -n tenant-beta get events -w --field-selector involvedObject.name=gpu-smoke
+kubectl --context dev-lab -n tenant-beta get events -w --field-selector involvedObject.name=gpu-smoke   # Ctrl-C to stop
 ```
 
 Terminal B (the platform's view):
 
 ```bash
 # ▶ MacBook · any folder
-kubectl --context spark-root -n vc-dev-lab get events -w | grep gpu-smoke
+kubectl --context spark-root -n vc-dev-lab get events -w | grep gpu-smoke   # Ctrl-C to stop
 ```
 
 Terminal C:
@@ -318,7 +318,7 @@ Terminal C:
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab apply -k manifests/dev-lab/00-platform && kubectl --context dev-lab apply -k manifests/dev-lab/10-tenancy
 kubectl --context dev-lab apply -f manifests/dev-lab/70-gpu/gpu-smoke.yaml
-kubectl --context dev-lab -n tenant-beta get pod gpu-smoke -w -o wide
+kubectl --context dev-lab -n tenant-beta get pod gpu-smoke -w -o wide   # Ctrl-C to stop
 ```
 
 Expected event order on the root, which matches the sequence diagram:

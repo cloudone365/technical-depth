@@ -271,7 +271,7 @@ Read the `fsync/fdatasync/sync_file_range` section: **99.00th percentile should 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -f manifests/root/60-storage/fio-job.yaml     # platform-tools, 4 CPUs, 64 Gi scratch PVC
-kubectl --context spark-root -n platform-tools get pods -w                        # start the fio above while it runs
+kubectl --context spark-root -n platform-tools get pods -w                        # start the fio above while it runs · Ctrl-C to stop
 ```
 
 The tail latency jumps. That's what happens to the API server — and to both vClusters, whose SQLite files sit on the same disk — during a checkpoint write. Delete the job afterwards (`kubectl --context spark-root delete -f manifests/root/60-storage/fio-job.yaml`).
@@ -494,7 +494,7 @@ kubectl --context spark-root get ns doomed-by-restore                      # Not
 kubectl --context spark-root -n platform-tools get cm doomed               # NotFound
 kubectl --context spark-root -n platform-tools get secret demo             # still there (created before)
 kubectl --context dev-lab get ns survives-restore                          # still there: dev-lab's state is not in etcd
-kubectl --context spark-root -n vc-dev-lab get pods -w                     # watch the syncer reconcile
+kubectl --context spark-root -n vc-dev-lab get pods -w                     # watch the syncer reconcile · Ctrl-C to stop
 scripts/verify.sh platform vclusters
 ```
 

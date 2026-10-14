@@ -440,7 +440,7 @@ kubectl --context spark-root -n batch logs -f job/grpo-learner | grep -E "NCCL|c
 ```bash
 # ▶ dgx-spark-2 (ssh dgx-spark-2)
 curl -s http://192.168.100.12:8000/health/ && echo " rollout server up"
-watch -n1 "ethtool -S enp1s0f1np1 | grep -E 'rx_bytes_phy|tx_bytes_phy'"
+watch -n1 "ethtool -S enp1s0f1np1 | grep -E 'rx_bytes_phy|tx_bytes_phy'"   # Ctrl-C to stop
 ```
 
 Expected: NCCL selects `NET/IB` on the RoCE devices, and a ~1 GB burst crosses the link after every optimizer step (§3.4). Clean up with `kubectl --context spark-root delete -f k8s/rl/grpo-2spark.yaml`.
@@ -561,7 +561,7 @@ Expected: Kueue admits the pair only now (gang admission: both or neither). `ran
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
-watch -n1 "ethtool -S enp1s0f1np1 | grep -E 'rx_bytes_phy|tx_bytes_phy'"
+watch -n1 "ethtool -S enp1s0f1np1 | grep -E 'rx_bytes_phy|tx_bytes_phy'"   # Ctrl-C to stop
 ```
 
 | | per-rank peak (GiB) | s/step | link GB/s during step |

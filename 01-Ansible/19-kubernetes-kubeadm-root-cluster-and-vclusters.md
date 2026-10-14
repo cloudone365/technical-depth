@@ -703,7 +703,7 @@ Try MetalLB with a throwaway Service:
 # ▶ MacBook · any folder
 kubectl --context spark-root create deploy lb-demo --image=nginx:1.27-alpine
 kubectl --context spark-root expose deploy lb-demo --port 80 --type LoadBalancer
-kubectl --context spark-root get svc lb-demo -w                # EXTERNAL-IP from 192.168.0.110–119
+kubectl --context spark-root get svc lb-demo -w                # EXTERNAL-IP from 192.168.0.110–119 · Ctrl-C to stop
 curl -sI http://$(kubectl --context spark-root get svc lb-demo -o jsonpath='{.status.loadBalancer.ingress[0].ip}') | head -1
 arp -a | grep 192.168.0.11                                     # the IP resolves to dgx-spark-1's enP7s7 MAC (macOS: arp; Linux: ip neigh)
 kubectl --context spark-root delete svc,deploy lb-demo

@@ -196,7 +196,7 @@ spec:
 # still inside .cache/awx from §3.1
 kubectl --context spark-root apply -f awx.yaml
 kubectl --context spark-root -n awx logs -f deploy/awx-operator-controller-manager -c awx-manager | grep -E 'PLAY RECAP|failed=[1-9]'
-kubectl --context spark-root -n awx get pods -w      # awx-web, awx-task, awx-postgres-15-0 → Running
+kubectl --context spark-root -n awx get pods -w      # awx-web, awx-task, awx-postgres-15-0 → Running · Ctrl-C to stop
 curl -s http://192.168.0.100:30080/api/v2/ping/ | jq .version
 ```
 

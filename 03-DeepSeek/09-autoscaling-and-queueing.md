@@ -180,14 +180,14 @@ export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 scripts/serve-model.sh r1-7b
 kubectl --context spark-root apply -f k8s/autoscale/vllm-office-hours.yaml
 kubectl --context spark-root -n llm-serving get scaledobject vllm
-kubectl --context spark-root -n llm-serving get hpa keda-hpa-vllm -w
+kubectl --context spark-root -n llm-serving get hpa keda-hpa-vllm -w   # Ctrl-C to stop
 ```
 
 Expected: `READY True`, `ACTIVE True` inside the window. After it ends and 15 min pass with no requests, the Deployment goes to `0/0` and its 28 Gi (the `r1-7b` pod's request = limit) leave the node's allocated memory:
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-kubectl --context spark-root -n llm-serving get deploy vllm -w
+kubectl --context spark-root -n llm-serving get deploy vllm -w   # Ctrl-C to stop
 kubectl --context spark-root describe node dgx-spark-1 | grep -A9 'Allocated resources'
 ```
 
@@ -319,7 +319,7 @@ kubectl --context spark-root -n batch get workloads -o wide             # sft ad
 yq '.metadata.name = "grpo-urgent" | .metadata.labels."kueue.x-k8s.io/priority-class" = "urgent"
     | .spec.template.spec.containers[0].args[0] |= sub("--steps 200"; "--steps 20")' k8s/jobs/grpo.yaml \
   | kubectl --context spark-root apply -f -
-kubectl --context spark-root -n batch get workloads -w
+kubectl --context spark-root -n batch get workloads -w   # Ctrl-C to stop
 kubectl --context spark-root -n batch get events --field-selector reason=Preempted
 ```
 
@@ -382,7 +382,7 @@ The lab's InferenceService overrides the runtime's 32 Gi with 14 Gi request = li
 kubectl --context spark-root apply -k ../../02-Kubernetes/lab/manifests/root-llms/90-serving/kserve
 kubectl --context spark-root -n llm-serving delete isvc qwen-small
 kubectl --context spark-root apply -f k8s/kserve/r1-1.5b.yaml
-kubectl --context spark-root -n llm-serving get isvc r1-1-5b -w           # READY True after download + load
+kubectl --context spark-root -n llm-serving get isvc r1-1-5b -w           # READY True after download + load · Ctrl-C to stop
 kubectl --context spark-root -n llm-serving port-forward svc/r1-1-5b-predictor 8080:80 &
 python3 tools/stream_probe.py --url http://localhost:8080 --model r1-1-5b
 ```

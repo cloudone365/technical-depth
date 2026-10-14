@@ -464,7 +464,7 @@ Close the window, then the KServe comparison (Chapter 09 Task 5.7):
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root apply -f k8s/kserve/r1-1.5b.yaml
-kubectl --context spark-root -n llm-serving get isvc r1-1-5b -w           # READY True after download + load
+kubectl --context spark-root -n llm-serving get isvc r1-1-5b -w           # READY True after download + load · Ctrl-C to stop
 ```
 
 ✅ **Done when** the ScaledObject `vllm` is `READY True` and the Deployment reads `0/0` outside office hours, `sft` waits under the everyday quota with a message naming cpu/memory, a routine Job shows `Preempted` when `grpo-urgent` arrives, `serving-budget` is back to 8 CPU · 90Gi with vLLM Ready, and `r1-1-5b` answers with `reasoning_content`.

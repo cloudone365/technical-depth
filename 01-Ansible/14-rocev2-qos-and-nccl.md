@@ -411,7 +411,7 @@ Counters to watch during a run:
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
-watch -n1 "ethtool -S enp1s0f1np1 | grep -E 'rx_prio3_(bytes|pause)|tx_prio3_(bytes|pause)|rx_discards|np_cnp_sent|rp_cnp_handled'"
+watch -n1 "ethtool -S enp1s0f1np1 | grep -E 'rx_prio3_(bytes|pause)|tx_prio3_(bytes|pause)|rx_discards|np_cnp_sent|rp_cnp_handled'"   # Ctrl-C to stop
 ```
 
 ## 6. Validation

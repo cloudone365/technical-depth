@@ -263,7 +263,7 @@ kubectl --context spark-root get crd | grep -cE 'kserve|cert-manager'        # a
 kubectl --context dev-llms get crd | grep -cE 'kserve|cert-manager'          # 0 — a vCluster's API server never heard of them
 kubectl --context spark-root get pods -n kserve; kubectl --context spark-root get pods -n cert-manager
 kubectl --context spark-root apply -k manifests/root-llms/90-serving/kserve
-kubectl --context spark-root -n llm-serving get inferenceservice qwen-small -w      # READY True
+kubectl --context spark-root -n llm-serving get inferenceservice qwen-small -w      # READY True · Ctrl-C to stop
 kubectl --context spark-root -n llm-serving get deploy,svc,hpa -l serving.kserve.io/inferenceservice=qwen-small
 kubectl --context spark-root -n llm-serving port-forward svc/qwen-small-predictor 8080:80 &
 curl -s localhost:8080/v1/models | jq -r '.data[].id'

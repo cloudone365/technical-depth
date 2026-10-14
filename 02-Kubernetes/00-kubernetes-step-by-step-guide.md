@@ -41,6 +41,8 @@ Every shell block starts with one `# ▶` line that says where to run it:
 
 Semaphore steps (sema01, 192.168.0.210) are prose that starts with **Semaphore UI:**. On macOS zsh, the `setopt interactivecomments` line from the [01-Ansible guide](../01-Ansible/00-ansible-step-by-step-guide.md#where-each-command-runs) lets you paste blocks that start with `# ▶`.
 
+**Watch commands don't end on their own.** A line with `-w`/`--watch` (or `watch …`) keeps printing until you press **Ctrl-C**; those lines are marked `Ctrl-C to stop`. When one sits in the middle of a block, press Ctrl-C once you've seen the state it describes, then run the lines after it.
+
 **Once per MacBook shell:** `export KUBECONFIG=~/technical-depth/01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml` (or put it in `~/.zshrc`). The blocks don't repeat it.
 
 **Once on the Spark: a checkout of this repo** for the scripts that must run there:

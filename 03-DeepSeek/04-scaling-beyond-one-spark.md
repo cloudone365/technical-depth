@@ -587,7 +587,7 @@ python3 -m pip install --user "huggingface_hub[cli]"
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root apply -f k8s/multinode/lws-vllm-70b.yaml
-kubectl --context spark-root -n llm-multinode get pods -o wide -w        # vllm-70b-0 on dgx-spark-1, vllm-70b-0-1 on dgx-spark-2
+kubectl --context spark-root -n llm-multinode get pods -o wide -w        # vllm-70b-0 on dgx-spark-1, vllm-70b-0-1 on dgx-spark-2 · Ctrl-C to stop
 kubectl --context spark-root -n llm-multinode logs -f vllm-70b-0 | grep -E 'NCCL INFO (NET/IB|Using network)|tensor_parallel|Uvicorn'
 ```
 

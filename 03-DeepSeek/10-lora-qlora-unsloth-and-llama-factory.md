@@ -331,7 +331,7 @@ kubectl --context spark-root apply -k .                                   # deep
 kubectl --context spark-root apply -f k8s/jobs/train-common.yaml          # PVC deepseek-ckpt
 kubectl --context spark-root -n batch delete job sft --ignore-not-found
 kubectl --context spark-root apply -f k8s/jobs/sft.yaml
-kubectl --context spark-root -n batch get workloads -w                    # ADMITTED
+kubectl --context spark-root -n batch get workloads -w                    # ADMITTED · Ctrl-C to stop
 kubectl --context spark-root -n batch logs -f job/sft | grep -E "trainable params|'loss'|merged|STATS"
 ```
 

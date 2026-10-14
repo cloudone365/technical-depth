@@ -355,7 +355,7 @@ The DaemonSet pod comes back on a cordoned node because the DaemonSet controller
 kubectl --context dev-lab apply -k manifests/dev-lab/00-platform
 kubectl --context dev-lab apply -k manifests/dev-lab/10-tenancy
 kubectl --context dev-lab apply -f manifests/dev-lab/50-workloads/tokenizer-indexed-job.yaml
-kubectl --context dev-lab -n tenant-alpha get pods -l job-name=tokenize-shards -w          # 2 at a time
+kubectl --context dev-lab -n tenant-alpha get pods -l job-name=tokenize-shards -w          # 2 at a time · Ctrl-C to stop
 ```
 
 While it runs, push it past the tenant budget — parallelism is mutable on a running Job:

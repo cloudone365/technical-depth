@@ -253,7 +253,7 @@ Now one serving-priority pod arrives:
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 yq 'select(.kind=="Pod")' manifests/root/20-scheduling/preemption-demo.yaml | kubectl --context spark-root apply -f -
-kubectl --context spark-root -n platform-tools get pod urgent -w                      # Pending, then Running a few seconds later
+kubectl --context spark-root -n platform-tools get pod urgent -w                      # Pending, then Running a few seconds later · Ctrl-C to stop
 kubectl --context spark-root -n platform-tools get events --field-selector reason=Preempted
 ```
 
@@ -282,7 +282,7 @@ spec:
       command: ["sleep", "infinity"]
       resources: {limits: {nvidia.com/gpu: "1", memory: 64Mi}, requests: {cpu: 10m, memory: 64Mi}}
 EOF
-kubectl --context dev-llms -n llm-sandbox get pod urgent-from-dev-llms -w
+kubectl --context dev-llms -n llm-sandbox get pod urgent-from-dev-llms -w   # Ctrl-C to stop
 kubectl --context spark-root -n platform-tools get events --field-selector reason=Preempted
 kubectl --context spark-root -n vc-dev-llms get pods -o custom-columns=NAME:.metadata.name,CLASS:.spec.priorityClassName,PRIO:.spec.priority | grep urgent
 ```

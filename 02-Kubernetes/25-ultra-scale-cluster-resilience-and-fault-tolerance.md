@@ -209,7 +209,7 @@ ssh dgxadmin@192.168.0.100 'ls /data/k8s/batch/ckpt/'                           
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 sleep 20; kubectl --context spark-root -n batch delete pod -l job-name=resilient-train --wait=false
-kubectl --context spark-root -n batch get pods -l job-name=resilient-train -w          # a new pod starts (backoffLimit)
+kubectl --context spark-root -n batch get pods -l job-name=resilient-train -w          # a new pod starts (backoffLimit) · Ctrl-C to stop
 kubectl --context spark-root -n batch logs -f job/resilient-train | grep -E 'RESUMED|DONE'
 ```
 

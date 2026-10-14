@@ -179,7 +179,7 @@ The `sudo` lines run on the Spark (`ssh dgxadmin@192.168.0.100`).
 # ▶ MacBook · any folder
 kubectl --context spark-root -n kube-system get lease kube-controller-manager kube-scheduler \
   -o custom-columns=NAME:.metadata.name,HOLDER:.spec.holderIdentity,RENEWED:.spec.renewTime,DURATION:.spec.leaseDurationSeconds
-watch -n1 "kubectl --context spark-root -n kube-system get lease kube-controller-manager -o jsonpath='{.spec.renewTime}'"
+watch -n1 "kubectl --context spark-root -n kube-system get lease kube-controller-manager -o jsonpath='{.spec.renewTime}'"   # Ctrl-C to stop
 ```
 
 Expected: `renewTime` advances every ~2 s. If it stops for > 15 s, nothing the root's controller-manager owns will reconcile.
@@ -231,7 +231,7 @@ What to look for: the root's has `--allocate-node-cidrs=true --cluster-cidr=10.4
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab apply -k manifests/dev-lab/30-networking     # echo Deployment (3 replicas) in lab-tools
 kubectl --context dev-lab -n lab-tools get deploy,rs,pod -l app=echo -o wide
-kubectl --context dev-lab -n lab-tools get events -w &                 # leave running
+kubectl --context dev-lab -n lab-tools get events -w &                 # leave running · Ctrl-C to stop
 POD=$(kubectl --context dev-lab -n lab-tools get pod -l app=echo -o name | head -1)
 kubectl --context dev-lab -n lab-tools delete "$POD" --wait=false     # dev-lab's ReplicaSet controller notices 2/3 and creates one
 kubectl --context dev-lab -n lab-tools set image deploy/echo echo=registry.k8s.io/e2e-test-images/agnhost:2.52
@@ -284,7 +284,7 @@ The host pods have no ReplicaSet owner. (The `OWNER` column shows what vCluster 
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab -n tenant-alpha describe resourcequota tenant-budget
 kubectl --context dev-lab apply -f manifests/dev-lab/50-workloads/tokenizer-indexed-job.yaml
-kubectl --context dev-lab -n tenant-alpha get pods -l job-name=tokenize-shards -w     # 2 at a time (parallelism)
+kubectl --context dev-lab -n tenant-alpha get pods -l job-name=tokenize-shards -w     # 2 at a time (parallelism) · Ctrl-C to stop
 kubectl --context dev-lab -n tenant-alpha describe resourcequota tenant-budget | grep -E 'cpu|pods'
 kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget | grep -E 'cpu|memory'
 ```

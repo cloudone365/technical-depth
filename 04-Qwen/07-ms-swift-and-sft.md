@@ -387,7 +387,7 @@ kubectl --context spark-root apply -f k8s/jobs/swift-sft.yaml
 # with your own data instead:
 # sed 's|value: "vicgalle/alpaca-gpt4#2000"|value: /data/train.jsonl|' k8s/jobs/swift-sft.yaml | kubectl --context spark-root apply -f -
 kubectl --context spark-root -n batch get workloads
-kubectl --context spark-root -n batch get pods -l job=swift-sft -w
+kubectl --context spark-root -n batch get pods -l job=swift-sft -w   # Ctrl-C to stop
 ```
 
 The Workload shows `ADMITTED  True` once `spark-cq` has room; Kueue then un-suspends the Job and the pod starts. Follow the log — the first minutes are the `pip install` and the model download onto `qwen-train`:

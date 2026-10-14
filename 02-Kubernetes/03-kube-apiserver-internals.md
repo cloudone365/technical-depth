@@ -300,7 +300,7 @@ Expected:
 create pods -n tenant-alpha              yes
 create pods -n tenant-beta               no
 update resourcequota -n tenant-alpha     no
-watch secrets -n tenant-alpha            no
+watch secrets -n tenant-alpha            no   # Ctrl-C to stop
 list nodes                               yes
 ```
 
@@ -409,7 +409,7 @@ Generate tenant load as Alice (32 parallel LIST loops), and watch as admin in de
 for i in $(seq 32); do (while true; do KUBECONFIG=$ALICE kubectl -n tenant-alpha get pods -o name >/dev/null 2>&1; done &) ; done
 
 # terminal B — dev-lab's API server: the tenant lane fills up
-watch -n2 "kubectl --context dev-lab get --raw /metrics | grep -E 'apiserver_flowcontrol_(current_inqueue_requests|rejected_requests_total|current_executing_requests)\{.*spark-tenants' "
+watch -n2 "kubectl --context dev-lab get --raw /metrics | grep -E 'apiserver_flowcontrol_(current_inqueue_requests|rejected_requests_total|current_executing_requests)\{.*spark-tenants' "   # Ctrl-C to stop
 
 # terminal C — Bob, and the root, are unaffected
 time KUBECONFIG=.cache/bob.kubeconfig kubectl -n tenant-beta get pods
