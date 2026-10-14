@@ -272,6 +272,33 @@ kubectl --context spark-root -n llm-serving get pods -o wide | grep vllm
 
 The pod's 32 Gi, 1.5 CPU and 1 slice appear in `serving-budget` (checked when the API server admits the pod) and in the node's *Allocated resources* (counted by the scheduler when it placed the pod). Because the request equals the limit, the 32 Gi the scheduler subtracted is the size the engine may really reach. There is one quota layer, and the pod name is the one in the Deployment's ReplicaSet — no vCluster suffix.
 
+#### What each command does
+
+The four blocks above, in order (kitchen terms from the chapter notes: weights = the recipe book, `model-cache` = the shelf, vLLM = the kitchen).
+
+**Block 1 · Weights onto the shelf (MacBook)**
+
+1. **`[ -n "${HF_TOKEN:-}" ] && kubectl … create secret generic hf-token … --dry-run=client -o yaml | kubectl … apply -f -`**: creates Secret `hf-token` only if `HF_TOKEN` is set in your terminal. `--dry-run=client -o yaml | apply` writes the YAML and lets `apply` create or update it, so the line can run twice (a plain `create` fails when the Secret exists). The Qwen 0.5B smoke model is public, so no token is fine; gated models (Llama) need one, and the prefetch Job and vLLM read it from this Secret.
+2. **`kubectl … apply -f manifests/root-llms/60-storage/model-prefetch-job.yaml`**: starts Job `model-prefetch` in `llm-serving`. Its pod runs `hf download Qwen/Qwen2.5-0.5B-Instruct` into PVC `model-cache`; on the Spark the files land in `/data/k8s/retain/llm-serving/model-cache`. Downloading first keeps vLLM's start short and predictable (a slow download can't trip its startup probe), and every later engine reads the same shelf.
+3. **`kubectl … wait --for=condition=complete job/model-prefetch --timeout=30m`**: blocks until the Job is `Complete` (`job.batch/model-prefetch condition met`), at most 30 min, so vLLM never loads a half-downloaded model.
+
+**Block 2 · Clean the counter (on the Spark)**
+
+4. **`sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'`**: `sync` writes pending data to disk; `echo 3 > drop_caches` makes Linux forget the files it kept in memory for speed (`buff/cache` in `free -h`). It runs on the Spark because that is where the memory is: CPU and GPU share one 121 GiB pool, and vLLM sizes itself from free memory at start, so §5.3 then measures vLLM alone. Safe: Linux re-reads files from disk when needed. `sudo` asks for the `dgxadmin` password.
+
+**Block 3 · Open the kitchen (MacBook)**
+
+5. **`kubectl … apply -k manifests/root-llms/90-serving/vllm`**: `-k` applies the folder's kustomization, `vllm.yaml`: Deployment `vllm` (NGC vLLM container, 1 GPU slice, 1.5 CPU, 32 Gi with request = limit, `--gpu-memory-utilization=0.20`) and Service `vllm` (the stable name `vllm:8000`). Before the pod starts, the CEL policy checks it has a readiness probe, `serving-budget` checks the 32 Gi fit the 90 Gi, and the scheduler finds a node with 32 Gi and a free slice. The PodSecurity `restricted` warning is expected.
+6. **`kubectl … logs -f deploy/vllm | grep -E '…'`**: follows the log and keeps only the milestones (weights loaded, KV-cache size, CUDA graphs, API server up, any `ERROR`). These lines are the chapter's first measurement; write them down. Ctrl-C stops following.
+
+**Block 4 · Check the bill (MacBook)**
+
+7. **`kubectl … describe resourcequota serving-budget | grep …`**: the namespace budget. vLLM's 32 Gi, 1.5 CPU and 1 slice now sit on top of the helpers (mock-llm, Qdrant): GPU `1/6`, memory about 34 of 90 Gi. Enforced by the API server when it admits the pod.
+8. **`kubectl … describe node dgx-spark-1 | grep -A9 'Allocated resources'`**: what the scheduler has promised all pods on the whole machine, vLLM's 32 Gi and 1500m included. The quota is per namespace; this is the node. With request = limit, the 32 Gi set aside is the most vLLM may use.
+9. **`kubectl … get pods -o wide | grep vllm`**: one `vllm-…` pod, `1/1 Running`, on `dgx-spark-1`, with its pod IP. `1/1` = the readiness probe passes, so Service `vllm` sends it traffic.
+
+The setup block at the top of §5 (`cd`, `export KUBECONFIG`, `apply-lab.sh root`) is only needed in a fresh terminal: it points `kubectl` at the lab kubeconfig and makes sure the LLM namespaces, quotas and the `model-cache` PVC exist.
+
 ### 5.2 First request (streaming)
 
 #### What this lab does (port-forward to Service `vllm`)
