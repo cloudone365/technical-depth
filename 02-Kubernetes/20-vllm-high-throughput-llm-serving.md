@@ -441,9 +441,19 @@ Each restart also ends the §5.2 port-forward (its pod is gone). Start it again 
 2. **Five lines** `data: [DONE]`, one per stream. A missing line means a stream was cut.
 3. **Afterwards:** a new `vllm-…` pod becomes `1/1 Running` after its startup; the port-forward is gone, so start it again (§5.2).
 
-**If something's off:** fewer than five `[DONE]` → a generation took longer than the 120 s grace; lower `max_tokens` or raise `terminationGracePeriodSeconds`. `curl` fails immediately → the port-forward from §5.2 was not running.
+**If something's off:** fewer than five `[DONE]` → a generation took longer than the 120 s grace; lower `max_tokens` or raise `terminationGracePeriodSeconds`. No `[DONE]` at all and `failed to find sandbox … not found` or `lost connection to pod` right away → the port-forward still pointed at a pod from before an earlier restart; run the first block again (fresh port-forward), then the test.
 
 #### Run it
+
+A port-forward is tied to the one pod it picked when it started, not to the Service. After any restart (§5.3) it still points at the old, deleted pod, and every request fails at once with `failed to find sandbox … not found`. So the block starts a fresh one and checks the engine answers before the test:
+
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
+kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=15m    # the current pod is ready
+pkill -f 'port-forward svc/vllm' ; sleep 1                                             # drop a stale port-forward
+kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null 2>&1 &
+sleep 2; curl -s localhost:8000/v1/models | jq -r '.data[].id'                          # qwen2.5-0.5b
+```
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
