@@ -402,7 +402,30 @@ cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide,
 scripts/uma-watch.sh llm-serving "$(kubectl --context spark-root -n llm-serving get pod -l app=vllm -o jsonpath='{.items[0].metadata.name}')" spark-root 2
 ```
 
-The `pod.mem.max` column is the 32 Gi limit as the kernel sees it, in the pod's cgroup. While it runs, restart the Deployment in another terminal (`kubectl --context spark-root -n llm-serving rollout restart deploy/vllm`) and restart `uma-watch.sh` on the new pod. `Recreate` frees the old pod's memory before the new one allocates. Change the strategy to `RollingUpdate` and repeat: the rollout goes through, because a second 32 Gi pod fits `serving-budget` (66.4 of 90 Gi, §9) and the node still has 32 Gi unrequested in the LLM memory pool when no batch job runs, and MemAvailable dips by roughly *two* engines' worth (0.40 of the pool) while both copies are up. The quota no longer stops a double copy; memory is the limit, which is why the lab keeps `Recreate`. Set it back.
+The `pod.mem.max` column is the 32 Gi limit as the kernel sees it, in the pod's cgroup. Leave the script running and open a **second terminal on the MacBook** for the restart:
+
+```bash
+# ▶ MacBook · any folder (second terminal; uma-watch.sh keeps running on the Spark)
+kubectl --context spark-root -n llm-serving rollout restart deploy/vllm
+kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=15m   # "successfully rolled out"
+```
+
+Watch the Spark window while it runs. `Recreate` stops the old pod first: `MemAvailable` jumps up by about one engine, then falls again while the new pod loads. When the old pod is gone its cgroup disappears, so `uma-watch.sh` prints errors or stops changing: press Ctrl-C and run the same `uma-watch.sh` line again. It looks up the new pod by its label.
+
+**Optional: two copies at once.** Switch the Deployment to `RollingUpdate`, restart again, and watch `MemAvailable` dip by about *two* engines' worth (0.40 of the pool) while both pods run. The rollout goes through, because a second 32 Gi pod fits `serving-budget` (66.4 of 90 Gi, §9) and the node still has 32 Gi unrequested in the LLM memory pool when no batch job runs. The quota doesn't stop a double copy; memory is the limit, which is why the lab keeps `Recreate`. Set it back afterwards:
+
+```bash
+# ▶ MacBook · any folder (second terminal)
+kubectl --context spark-root -n llm-serving patch deploy vllm --type merge \
+  -p '{"spec":{"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}}}}'
+kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=15m    # the patch itself starts a rollout
+# back to the lab setting (rollingUpdate must be cleared for Recreate)
+kubectl --context spark-root -n llm-serving patch deploy vllm --type merge \
+  -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
+kubectl --context spark-root -n llm-serving get deploy vllm -o jsonpath='{.spec.strategy.type}{"\n"}'   # Recreate
+```
+
+Each restart also ends the §5.2 port-forward (its pod is gone). Start it again before §5.4: `kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &`.
 
 ### 5.4 Graceful rollout with streams in flight
 
