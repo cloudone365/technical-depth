@@ -469,15 +469,15 @@ Expected: each stream ends with `data: [DONE]`. The `preStop` drain holds SIGTER
 
 #### What this lab does (manifest `lab/manifests/root-llms/90-serving/vllm/vllm-bench.yaml`)
 
-- **Job `vllm-bench`** in `llm-serving`: runs `vllm bench serve` against `http://vllm:8000` three times, at concurrency 1, 8 and 32. Each pass sends 128 random prompts (1024 tokens in, 256 out).
+- **Job `vllm-bench`** in `llm-serving`: runs `vllm bench serve` against `http://vllm:8000` three times, at concurrency 1, 8 and 32. Each pass sends random prompts (1024 tokens in, 256 out): 32 at concurrency 1, 128 at 8 and 32. The log is filtered, so each pass prints nothing until it ends: the serial pass takes about 4 min on a GB10 slice (~6–7 s per request at ~42 tokens/s), the whole Job about 10 min.
 - **Prints** throughput, TTFT, TPOT, ITL and end-to-end latency for each pass.
 - **Charges** 500m CPU and 1.5 Gi to `serving-budget`; no GPU slice. The Job deletes itself an hour after it finishes.
 - **Second run with a neighbour:** `gemm-contention` at 2 replicas on the root, then back to 0.
 
 #### What to look for
 
-1. **Command exit:** `job.batch/vllm-bench created`; the log shows three blocks, `=== max-concurrency 1`, `8`, `32`.
-2. **In each block:** `Successful requests: 128`. Fewer means requests failed.
+1. **Command exit:** `job.batch/vllm-bench created`; the log shows three blocks, `=== max-concurrency 1 (32 prompts, <time>)`, `8`, `32`. Silence between them is normal. To see it working, `kubectl --context spark-root -n llm-serving logs deploy/vllm --tail=3` prints vLLM's 10-second stats line (`Running: 1 reqs` during the serial pass).
+2. **In each block:** `Successful requests: 32` (concurrency 1) or `128`. Fewer means requests failed.
 3. **The shape** in the table below: throughput rises a lot from 1 to 8 and again to 32; TTFT and TPOT rise with concurrency.
 4. **With `gemm-contention` running:** lower throughput and higher latency at every level. That drop is the cost of a GPU neighbour from another namespace.
 

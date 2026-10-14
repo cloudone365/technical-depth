@@ -17,12 +17,15 @@ spec:
           command: ["bash", "-c"]
           args:
             - |
+              # the output is filtered, so each pass is silent until it ends; concurrency 1 is
+              # serial (~6-7 s per request on a GB10 slice), so it gets 32 prompts, not 128
               for c in 1 8 32; do
-                echo "=== max-concurrency $c"
+                n=128; [ "$c" = 1 ] && n=32
+                echo "=== max-concurrency $c ($n prompts, $(date +%T))"
                 vllm bench serve --backend openai-chat --endpoint /v1/chat/completions \
                   --base-url http://vllm:8000 --model qwen2.5-0.5b --tokenizer "$MODEL" \
                   --dataset-name random --random-input-len 1024 --random-output-len 256 \
-                  --num-prompts 128 --max-concurrency "$c" --percentile-metrics ttft,tpot,itl,e2el \
+                  --num-prompts "$n" --max-concurrency "$c" --percentile-metrics ttft,tpot,itl,e2el \
                   2>&1 | grep -E 'throughput|TTFT|TPOT|ITL|E2EL|Successful'
               done
           env:
