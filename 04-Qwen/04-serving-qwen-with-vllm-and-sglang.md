@@ -78,7 +78,7 @@ LiteLLM and Open WebUI (Chapter 12) reach the same Services inside the cluster, 
 | `qwen3-coder-30b-fp8` | Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 | 0.40 | 56Gi | 65,536 | `qwen3_coder` tools, `--max-num-seqs=16` |
 | `qwen3.6-35b-fp8` | Qwen/Qwen3.6-35B-A3B-FP8 | 0.45 | 64Gi | 65,536 | `--reasoning-parser=qwen3`, `qwen3_coder` tools, image limit, `--max-num-seqs=8` |
 
-Every overlay also carries the base's `--enable-prefix-caching`, `--download-dir=/models/hf`, probes, `preStop` sleep and `strategy: Recreate`. QwQ-32B is not duplicated: 03-DeepSeek's catalog serves `qwq-32b-awq`.
+Every overlay also carries the base's `--enable-prefix-caching`, `--download-dir=/models/hf`, probes, `preStop` drain and `strategy: Recreate`. QwQ-32B is not duplicated: 03-DeepSeek's catalog serves `qwq-32b-awq`.
 
 `gen_overlays.py --check` enforces the rules from 02-Kubernetes Chapter 14 and fails CI when they break:
 
@@ -108,7 +108,7 @@ sequenceDiagram
   A->>J: download into model-cache
   J-->>M: complete
   M->>A: apply -k k8s/models/<name> (main) or renamed overlay (--side)
-  A->>V: Recreate: old pod drains (preStop 15 s), new pod loads
+  A->>V: Recreate: old pod drains (preStop, until idle), new pod loads
   M->>V: rollout status, then exec smoke request "12*12"
   V-->>M: answer 144 (+ reasoning length)
 ```

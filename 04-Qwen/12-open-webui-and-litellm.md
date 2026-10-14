@@ -345,7 +345,7 @@ Same question, same limit: the thinking tokens use up the bucket (§3.2). `qwen-
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite
-sleep 60                                           # KEDA scales to 0 within its polling interval; the pod drains (preStop 15 s)
+sleep 60                                           # KEDA scales to 0 within its polling interval; the pod drains (preStop: 5 s, then until idle)
 for m in qwen qwen-nothink; do
   curl -s -D - -o /dev/null -w "$m %{http_code} %{time_total}s\n" $API/v1/chat/completions "${H[@]}" \
     -d "{\"model\":\"$m\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" \

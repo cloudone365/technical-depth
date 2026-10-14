@@ -197,11 +197,11 @@ Budget at `--gpu-memory-utilization 0.20` ≈ 24 GiB: the 0.5B model (≈1 GiB w
 | `startupProbe` | `/health`, 10 s × 180 = 30 min | killing a pod that's still downloading or compiling (breakfix 05) |
 | `readinessProbe` | `/health`, 5 s | routing to a loading or overloaded pod. Required in `llm-serving` by the CEL policy `spark-serving-needs-readiness` |
 | `livenessProbe` | `/health`, 15 s × 4 | a wedged engine |
-| `preStop: sleep 15` + `terminationGracePeriodSeconds: 120` | — | cutting in-flight streams on rollout (Chapter 09 §5.6) |
+| `preStop` drain + `terminationGracePeriodSeconds: 120` | wait 5 s, then until `vllm:num_requests_running` + `_waiting` = 0 (≤ 100 s) | cutting in-flight streams on rollout: vLLM aborts open requests on SIGTERM, so the wait must happen before it (§5.4, Chapter 09 §5.6) |
 | `strategy: Recreate` | — | two copies of the model in UMA (and 2 × 32 Gi in the quota) during a rollout |
 | `/dev/shm` 8 Gi | memory-backed emptyDir | tensor-parallel and worker IPC |
 
-The probes are executed by the kubelet on dgx-spark-1 against the pod, and their results go straight into the pod status on the root API server — there is no second copy of the pod to update. The `preStop` sleep covers the propagation that matters for traffic: the pod leaving the Service's EndpointSlice, which is what kube-proxy and Traefik route by (Chapter 09).
+The probes are executed by the kubelet on dgx-spark-1 against the pod, and their results go straight into the pod status on the root API server — there is no second copy of the pod to update. The `preStop` hook covers two things. Its first 5 s cover the propagation that matters for traffic: the pod leaving the Service's EndpointSlice, which is what kube-proxy and Traefik route by (Chapter 09), so no new requests arrive. Then it reads the engine's own `/metrics` once a second and returns when nothing is running or waiting. Only then does the kubelet send SIGTERM, which makes vLLM abort whatever is still open. A fixed `sleep 15` is not enough: measured on this Spark, one 1500-token answer from the 0.5B model takes about 35 s, and five streams were cut at about 730 tokens each.
 
 ### 3.3 Metrics you'll use
 
@@ -433,7 +433,7 @@ Each restart also ends the §5.2 port-forward (its pod is gone). Start it again 
 
 - **Starts 5 long streaming requests** (exactly 1500 tokens each: `min_tokens` + `ignore_eos` stop the model from ending early) through a fresh port-forward.
 - **Restarts the vLLM Deployment** 2 s later, while the streams are still running.
-- **Shows the graceful path:** the old pod leaves the Service endpoints, the `preStop` sleep (15 s) and the 120 s grace period let running generations finish, and only then is the engine stopped.
+- **Shows the graceful path:** the old pod leaves the Service endpoints, the `preStop` hook waits until vLLM reports no running or waiting requests (at most ~105 s, inside the 120 s grace), and only then is the engine stopped. The old pod stays `Terminating` for those ~35 s.
 
 #### What to look for
 
@@ -463,7 +463,7 @@ sleep 2; curl -s localhost:8000/v1/models | jq -r '.data[].id'                  
 sleep 2; kubectl --context spark-root -n llm-serving rollout restart deploy/vllm; wait $!   # waits for the 5 streams only
 ```
 
-Expected: each stream ends with `data: [DONE]`. The preStop sleep and 120 s grace let running generations finish before SIGTERM. Streams longer than 120 s would still be cut, so size the grace to your longest generation. The grace period travels with the delete: the kubelet gives the container exactly the `terminationGracePeriodSeconds` the API server recorded. Restart the port-forward afterwards (it was bound to the old pod).
+Expected: each stream ends with `data: [DONE]`. The `preStop` drain holds SIGTERM back until the generations are done; vLLM itself does not finish open requests on SIGTERM, it aborts them (`curl exit 18` after a few hundred tokens is what a plain `sleep 15` gave on the Spark). Streams longer than the drain window (~105 s) would still be cut, so size the grace to your longest generation. The grace period travels with the delete: the kubelet gives the container exactly the `terminationGracePeriodSeconds` the API server recorded. Restart the port-forward afterwards (it was bound to the old pod).
 
 ### 5.5 Benchmark
 

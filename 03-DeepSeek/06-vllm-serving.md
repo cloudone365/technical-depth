@@ -95,7 +95,7 @@ sequenceDiagram
   M->>API: scale deploy sglang trtllm --replicas=0
   M->>API: apply -k k8s/models/NAME
   API->>D: new pod template: args, MODEL, SERVED_NAME, memory request = limit, label model
-  D->>P: Recreate: stop the old pod first (preStop sleep 15)
+  D->>P: Recreate: stop the old pod first (preStop drain until no requests run)
   D->>API: create the new pod (quota serving-budget, then the scheduler)
   P->>C: load weights from /models/hf
   P->>P: profile memory, KV cache = util × 121.7 GiB − weights − activations

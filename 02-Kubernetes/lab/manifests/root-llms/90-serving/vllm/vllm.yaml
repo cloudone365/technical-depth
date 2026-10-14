@@ -70,8 +70,29 @@ spec:
             periodSeconds: 15
             failureThreshold: 4
           lifecycle:
-            preStop:                   # leave the EndpointSlice before SIGTERM → no cut streams
-              exec: {command: ["sleep", "15"]}
+            # Drain before SIGTERM. vLLM aborts open requests on SIGTERM (measured on the
+            # Spark: 5 streams cut at ~730 of 1500 tokens with a plain 'sleep 15'), so the
+            # grace period alone saves nothing. Wait 5 s for the pod to leave the
+            # EndpointSlice, then until vllm:num_requests_running + _waiting is 0, at most
+            # 100 s more (terminationGracePeriodSeconds 120 covers preStop + shutdown).
+            preStop:
+              exec:
+                command:
+                  - python3
+                  - -c
+                  - |
+                    import time, urllib.request
+                    time.sleep(5)
+                    for _ in range(100):
+                        try:
+                            m = urllib.request.urlopen("http://127.0.0.1:8000/metrics", timeout=2).read().decode()
+                        except Exception:
+                            break
+                        n = sum(float(l.rsplit(" ", 1)[1]) for l in m.splitlines()
+                                if l.startswith(("vllm:num_requests_running", "vllm:num_requests_waiting")))
+                        if n == 0:
+                            break
+                        time.sleep(1)
           resources:
             requests: {cpu: 1500m, memory: 32Gi, nvidia.com/gpu: "1"}   # request = limit: the scheduler counts the real size
             limits: {memory: 32Gi, nvidia.com/gpu: "1"}

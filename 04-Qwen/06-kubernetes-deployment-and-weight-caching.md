@@ -103,7 +103,7 @@ sequenceDiagram
   M->>A: wait for condition=complete
   M->>S: ssh sudo -n drop_caches (only with DROP_CACHES=1)
   M->>A: apply -k k8s/models/NAME
-  A->>V: Recreate: old pod preStop sleep 15, then the new pod
+  A->>V: Recreate: old pod drains (preStop), then the new pod
   V->>C: read safetensors through the page cache
   V->>V: take util × 121.7 GiB, profile, capture CUDA graphs
   M->>A: rollout status (readinessProbe /health)
@@ -123,7 +123,7 @@ sequenceDiagram
 
 ### 3.1 The base Deployment and what an overlay changes
 
-The base is 02's [`vllm.yaml`](../02-Kubernetes/lab/manifests/root-llms/90-serving/vllm/vllm.yaml): `vllm serve $(MODEL)` with `--served-model-name=$(SERVED_NAME)`, `--gpu-memory-utilization=0.20`, `--max-model-len=8192`, `--enable-prefix-caching`, `--download-dir=/models/hf`; `HF_HOME=/models/hf`; 32 Gi request = limit, 1.5 CPU, one `nvidia.com/gpu` slice; startup/readiness/liveness probes on `/health`; `preStop: sleep 15`, `terminationGracePeriodSeconds: 120`, `strategy: Recreate`; an 8 Gi memory-backed `/dev/shm`.
+The base is 02's [`vllm.yaml`](../02-Kubernetes/lab/manifests/root-llms/90-serving/vllm/vllm.yaml): `vllm serve $(MODEL)` with `--served-model-name=$(SERVED_NAME)`, `--gpu-memory-utilization=0.20`, `--max-model-len=8192`, `--enable-prefix-caching`, `--download-dir=/models/hf`; `HF_HOME=/models/hf`; 32 Gi request = limit, 1.5 CPU, one `nvidia.com/gpu` slice; startup/readiness/liveness probes on `/health`; a `preStop` drain (until no request runs, ≤ ~105 s), `terminationGracePeriodSeconds: 120`, `strategy: Recreate`; an 8 Gi memory-backed `/dev/shm`.
 
 An overlay leaves all of that alone and replaces exactly these fields (and removes one object, §3.5):
 

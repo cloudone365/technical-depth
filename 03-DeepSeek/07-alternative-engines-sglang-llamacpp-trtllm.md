@@ -130,7 +130,7 @@ sequenceDiagram
   participant C as PVC model-cache
   M->>API: annotate scaledobject vllm paused-replicas=0
   K->>V: scale to 0 replicas
-  V->>V: preStop sleep 15, pod ends, its 58 Gi leave serving-budget
+  V->>V: preStop drain, pod ends, its 58 Gi leave serving-budget
   M->>API: get pod -l app=vllm until none is left
   M->>API: apply -k k8s/sglang/r1-32b-fp8 (replicas 1, 58 Gi request = limit)
   API->>S: pod admitted by serving-budget, scheduled on dgx-spark-1

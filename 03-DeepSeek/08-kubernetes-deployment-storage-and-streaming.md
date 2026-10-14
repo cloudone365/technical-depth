@@ -158,7 +158,7 @@ sequenceDiagram
 | `strategy.type` | `Recreate` | a rolling update runs two copies and doubles the UMA used. Plan ~1–5 min downtime per switch |
 | `priorityClassName` | `spark-serving` (50000) | serving outranks `spark-batch` (10000); training never preempts a model |
 | `terminationGracePeriodSeconds` | 120 | longer than most generations, so streams finish on rollout |
-| `lifecycle.preStop` | `sleep 15` | the pod leaves the EndpointSlice before SIGTERM, so new requests stop arriving first |
+| `lifecycle.preStop` | drain: 5 s, then until `vllm:num_requests_running` + `_waiting` = 0 (≤ 100 s) | the pod leaves the EndpointSlice first, then open streams finish before SIGTERM (vLLM aborts open requests on SIGTERM) |
 | `startupProbe` | `/health`, 10 s × 180 | up to 30 min for first load and CUDA-graph capture without liveness killing it |
 | `readinessProbe` / `livenessProbe` | `/health` 5 s / 15 s × 4 | traffic only when the engine is up. The readiness probe is required in `llm-serving` by the CEL policy `spark-serving-needs-readiness` |
 | `resources` | cpu 1500m · memory 32Gi **request = limit** (patched per model) · `nvidia.com/gpu: 1` | 1 of 15 time-slices. Memory request = limit so the scheduler reserves the size the engine can really reach in the shared ~90 GiB pool |
@@ -271,7 +271,7 @@ Keep a working set, not the catalog: the reasoning group plus the two or three c
 | LiteLLM | `router_settings.timeout`, `litellm_settings.request_timeout` | 900 s | ConfigMap `litellm-config` |
 | Open WebUI → LiteLLM | `AIOHTTP_CLIENT_TIMEOUT` | 900 s | env in `k8s/apps/open-webui.yaml` |
 | vLLM | none on the server; bounded by `max_tokens` × inter-token latency | — | — |
-| vLLM shutdown | `preStop sleep 15` + grace 120 s | — | 02 base Deployment |
+| vLLM shutdown | `preStop` drain (≤ ~105 s) + grace 120 s | — | 02 base Deployment |
 
 ### 3.10 The SSE wire format with the reasoning parser
 
