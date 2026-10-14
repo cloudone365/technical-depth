@@ -188,6 +188,7 @@ Blue: control plane. Purple: network. Green: GPU and serving. Orange: observabil
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 scripts/preflight.sh
 ls /etc/kubernetes/manifests/
 sudo crictl ps --name 'kube-|etcd' -o table
@@ -203,6 +204,7 @@ Then follow one pod through the API server, scheduler, kubelet, containerd and t
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 scripts/etcd-drill.sh status && scripts/etcd-drill.sh snapshot
 scripts/etcd-sandbox.sh up
 scripts/etcd-sandbox.sh kill-leader
@@ -308,6 +310,7 @@ tests/kueue-gang-test.sh
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 pod=$(kubectl --context dev-lab -n lab-tools get pod -l app=echo -o jsonpath='{.items[0].metadata.name}')
 scripts/pod-netns.sh lab-tools "$pod" dev-lab         # finds the pod's real copy on the root
 ```
@@ -327,6 +330,7 @@ A dev-lab Service is programmed by the **root's** kube-proxy (Chapter 09 §5.1):
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 scripts/svc-trace.sh lab-tools echo dev-lab
 ```
 

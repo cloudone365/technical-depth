@@ -237,6 +237,7 @@ Tasks 1–7 below, in order. Task 1 and every `sudo` / `crictl` line run on the 
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 scripts/preflight.sh
 ```
 

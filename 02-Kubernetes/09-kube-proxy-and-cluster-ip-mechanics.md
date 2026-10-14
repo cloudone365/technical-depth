@@ -163,7 +163,7 @@ There's one conntrack table per kernel. Every vCluster's connections, the root's
 
 ## 5. Lab
 
-Each block's location line says where it runs: most from the MacBook, and `svc-trace.sh` from `~/technical-depth/02-Kubernetes/lab` on the Spark (it needs `sudo iptables-save` and `sudo conntrack`), with the lab kubeconfig exported:
+Each block's location line says where it runs: most from the MacBook, and `svc-trace.sh` from `~/technical-depth/02-Kubernetes/lab` on the Spark (it needs `sudo iptables-save` and `sudo conntrack`):
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
@@ -210,6 +210,7 @@ kubectl --context dev-lab apply -k manifests/dev-lab/30-networking
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 scripts/svc-trace.sh lab-tools echo dev-lab
 ```
 
@@ -298,6 +299,7 @@ sleep 5
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 scripts/svc-trace.sh lab-tools echo dev-lab | grep -c 'DNAT'     # a NEW pod replaced it (RS wants 3) → still 3
 ```
 

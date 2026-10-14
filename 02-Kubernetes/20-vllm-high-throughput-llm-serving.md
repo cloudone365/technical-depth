@@ -398,7 +398,7 @@ On the Spark (the script reads `/sys/fs/cgroup`; the context defaults to `spark-
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
-# from 02-Kubernetes/lab in a copy of this repo on the Spark, with the lab kubeconfig exported
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 scripts/uma-watch.sh llm-serving "$(kubectl --context spark-root -n llm-serving get pod -l app=vllm -o jsonpath='{.items[0].metadata.name}')" spark-root 2
 ```
 

@@ -271,6 +271,7 @@ ECHO=$(kubectl --context dev-lab -n lab-tools get pod -l app=echo -o jsonpath='{
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 # (repo copy on the Spark: the guide's "Where each command runs"; set ECHO= to the pod name from the MacBook first)
 scripts/pod-netns.sh lab-tools "$ECHO" dev-lab
 ```

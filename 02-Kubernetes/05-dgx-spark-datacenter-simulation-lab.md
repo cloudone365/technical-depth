@@ -293,6 +293,7 @@ export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 # (repo copy on the Spark: the guide's "Where each command runs")
 scripts/preflight.sh
 ```
@@ -326,6 +327,7 @@ kubectl --context spark-root get secrets -A -o json | kubectl --context spark-ro
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 scripts/etcd-drill.sh status && scripts/etcd-drill.sh snapshot
 systemctl list-timers etcd-snapshot.timer
 ```

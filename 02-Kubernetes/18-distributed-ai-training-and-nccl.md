@@ -395,6 +395,7 @@ kubectl --context spark-root -n batch exec "$R1" -- sh -c 'for p in $(pgrep -f a
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 # kubectl on the Spark uses ~/.kube/config (context spark-root), which is all this script needs
 R1=<rank 1's pod name, as printed on the MacBook>
 scripts/cgroup-inspect.sh batch "${R1#pod/}"      # context defaults to spark-root

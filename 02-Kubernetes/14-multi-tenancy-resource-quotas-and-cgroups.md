@@ -389,6 +389,7 @@ kubectl --context spark-root apply -f manifests/root/12-cgroups/qos-trio.yaml
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 for p in guaranteed burstable besteffort; do scripts/cgroup-inspect.sh platform-tools qos-$p | sed -n '1,8p;/oom_score_adj=/p'; echo; done
 ```
 
@@ -418,6 +419,7 @@ kubectl --context dev-lab -n lab-tools run qos-v --image=registry.k8s.io/pause:3
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 scripts/cgroup-inspect.sh lab-tools qos-v dev-lab | sed -n '1,6p'
 ```
 
@@ -464,6 +466,7 @@ kubectl --context spark-root apply -f manifests/root/12-cgroups/cpu-throttle.yam
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 sleep 30; scripts/cgroup-inspect.sh platform-tools cpu-throttle | grep -A3 'cpu.stat'
 ```
 
@@ -501,6 +504,7 @@ kubectl --context dev-lab -n lab-tools get pod bf04-oom -o jsonpath='{.status.co
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 scripts/cgroup-inspect.sh lab-tools bf04-oom dev-lab | grep -A6 memory.events
 ```
 
@@ -540,6 +544,7 @@ kubectl --context spark-root -n platform-tools logs -f uma-cgroup-experiment
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 # in parallel, on the Spark:
 scripts/uma-watch.sh platform-tools uma-cgroup-experiment spark-root 1
 ```

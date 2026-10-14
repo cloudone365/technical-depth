@@ -143,6 +143,7 @@ tests/run-local-checks.sh                   # proves your toolchain, no Spark ne
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 # one-time: git clone https://github.com/cloudone365/technical-depth.git ~/technical-depth (see the guide's "Where each command runs")
 # 1. On the Spark
 scripts/preflight.sh                        # host, kubeadm, Cilium, MetalLB, 15 slices, vCluster contexts

@@ -207,6 +207,7 @@ There's nothing to migrate: kubeadm created etcd at `kubeadm init`. Look at how:
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 sudo grep -E -- '--(data-dir|listen-client-urls|listen-peer-urls|listen-metrics-urls|initial-cluster|cert-file|trusted-ca-file|snapshot-count)=' \
   /etc/kubernetes/manifests/etcd.yaml
 sudo ls /etc/kubernetes/pki/etcd/
@@ -379,6 +380,7 @@ The sandbox is three etcd containers under Docker. Docker on DGX OS shares `cont
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 scripts/etcd-sandbox.sh up
 scripts/etcd-sandbox.sh kill-leader
 scripts/etcd-sandbox.sh kill-two
@@ -418,6 +420,7 @@ This is why a Kubernetes control plane with 1 of 3 etcd members left serves `kub
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 scripts/etcd-sandbox.sh fill          # 32 MiB quota → NOSPACE
 scripts/etcd-sandbox.sh recover-space # compact → defrag --cluster → alarm disarm
 ```
@@ -469,6 +472,7 @@ Make a marker on each side of the snapshot, so you can see exactly what rolls ba
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 scripts/etcd-drill.sh snapshot                                  # → /var/lib/etcd-snapshots/etcd-dgx-spark-1-<ts>-drill.db
 kubectl --context spark-root create namespace doomed-by-restore    # root, after the snapshot
 kubectl --context spark-root -n platform-tools create configmap doomed --from-literal=x=1

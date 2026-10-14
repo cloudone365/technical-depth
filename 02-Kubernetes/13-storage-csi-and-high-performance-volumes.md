@@ -453,6 +453,7 @@ Clean up: `kubectl --context spark-root delete -f manifests/root/60-storage/fio-
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+cd ~/technical-depth/02-Kubernetes/lab   # the repo copy on the Spark (02 guide, "Where each command runs")
 # terminal A (on the Spark): watch the pool while vLLM (Chapter 20) loads
 POD=$(kubectl --context spark-root -n llm-serving get pod -l app=vllm -o jsonpath='{.items[0].metadata.name}')
 scripts/uma-watch.sh llm-serving "$POD" spark-root 2
