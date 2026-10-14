@@ -8,14 +8,15 @@
 source "$(dirname "$0")/lib.sh"
 user=${1:?user}; group=${2:?group}; ctx=${3:-$DEV_CTX}; out="$LAB_DIR/.cache"; mkdir -p "$out"
 k() { kc "$ctx" "$@"; }
-openssl req -new -newkey ed25519 -nodes -keyout "$out/$user.key" -subj "/CN=$user/O=$group" -out "$out/$user.csr" 2>/dev/null
+# EC P-256: macOS LibreSSL has no ed25519 for req
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$out/$user.key" -subj "/CN=$user/O=$group" -out "$out/$user.csr" 2>/dev/null
 k delete csr "$user" --ignore-not-found >/dev/null
 cat <<YAML | k apply -f -
 apiVersion: certificates.k8s.io/v1
 kind: CertificateSigningRequest
 metadata: {name: $user}
 spec:
-  request: $(base64 -w0 < "$out/$user.csr")
+  request: $(base64 < "$out/$user.csr" | tr -d '\n')   # macOS base64 has no -w0
   signerName: kubernetes.io/kube-apiserver-client
   expirationSeconds: 604800
   usages: [client auth]

@@ -45,12 +45,15 @@
     manager: apt
 
 # dpkg_selections fails on a package that isn't installed, so on a first run
-# there is nothing to release and this task skips.
+# there is nothing to release and this task skips. Only a package whose
+# installed version differs from the pin is released: releasing an unchanged
+# one would make "Hold Kubernetes packages" report changed on every run.
 - name: Release the hold so a version change can apply
   ansible.builtin.dpkg_selections:
     name: "{{ item }}"
     selection: install
   loop: "{{ ['kubelet', 'kubeadm', 'kubectl'] | select('in', ansible_facts.packages) | list }}"
+  when: ansible_facts.packages[item][0].version != (kubeadm_cluster_version ~ kubeadm_cluster_package_suffix)
   changed_when: false
 
 - name: Install kubelet, kubeadm, kubectl (exact version)

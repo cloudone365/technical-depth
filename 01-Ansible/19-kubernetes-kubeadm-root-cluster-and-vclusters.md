@@ -582,7 +582,7 @@ CPU and slices are split exactly; memory is not. `llm-serving` and `batch` share
 
 #### What to look for
 
-1. **Semaphore run:** `failed=0` on `dgx-spark-1` and `localhost`. On a first run expect `changed` on the containerd config, the packages, `Kubeadm init` and the two Helm installs. On a re-run `Pre-pull` and `Kubeadm init` are `skipping` and the Helm installs `ok`. A few bookkeeping tasks still show `changed` on every run (re-holding the three packages); that is normal.
+1. **Semaphore run:** `failed=0` on `dgx-spark-1` and `localhost`. On a first run expect `changed` on the containerd config, the packages, `Kubeadm init` and the two Helm installs. On a re-run `Pre-pull` and `Kubeadm init` are `skipping` and the Helm installs `ok`. The package holds are only released and re-set when the pinned version changes, so a plain re-run leaves them `ok`.
 2. **The "Report CRI status" task** prints `CRI reachable`. On the very first run it prints `not checked yet (crictl not installed yet)`, because `packages.yml` installs `crictl` (package `cri-tools`) after this check. The probe is allowed to fail, so on a re-run check by eye that it says `reachable`.
 3. **The node**, with the first commands under "Run it":
 

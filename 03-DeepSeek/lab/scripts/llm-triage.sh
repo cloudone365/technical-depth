@@ -96,7 +96,7 @@ if want host; then
     awk -v a="$avail" 'BEGIN {exit !(a < 8)}' && bad "MemAvailable < 8 GiB → OOM risk (drop caches, lower util; Chapter 08)"
     nvidia-smi --query-gpu=name,temperature.gpu,power.draw,clocks_event_reasons.active --format=csv,noheader 2>/dev/null | sed 's/^/        /'
     x=$(sudo -n dmesg 2>/dev/null | grep -ci 'xid')
-    [[ ${x:-0} -gt 0 ]] && bad "$x Xid lines in dmesg → 02-Kubernetes Chapter 15 Xid table"
+    [[ ${x:-0} -gt 0 ]] && bad "$x Xid lines in dmesg → 02-Kubernetes Chapter 26 §3.8 (GPU errors, Xid)"
   else info "not on the Spark (no /proc/meminfo or nvidia-smi) — skipped"; fi
 fi
 summary

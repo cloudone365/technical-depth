@@ -13,6 +13,7 @@
   gather_facts: false
   connection: local                                   # API calls from the MacBook, no SSH
   vars:
+    ansible_become: false                             # group_vars/spark.yml sets true; here it would sudo on the MacBook
     ansible_python_interpreter: "{{ ansible_playbook_python }}"   # the venv's Python (has pynetbox), not group_vars' /usr/bin/python3
     netbox_url: "{{ lookup('ansible.builtin.env', 'NETBOX_URL') | default('http://192.168.0.100:8081', true) }}"
     netbox_token: "{{ lookup('ansible.builtin.env', 'NETBOX_TOKEN') }}"

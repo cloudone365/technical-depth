@@ -90,7 +90,7 @@ sequenceDiagram
 ```
 
 - **Steps 1–3** are §5.5 (a): `jq` prints `finish: "length"` and an empty `content`.
-- **Steps 4–5** are what §5.2 checks: `vllm:num_requests_running` returns `["qwen3-8b"]`. Side engines (`vllm-<name>`) are not scraped unless you widen the `llm-workloads` keep regex (Chapter 04 §4).
+- **Steps 4–5** are what §5.2 checks: `vllm:num_requests_running` returns `["qwen3-8b"]`. Side engines (`vllm-<name>`) are scraped too, with their own `vservice`; add `vservice="vllm"` to a query to see the main model only.
 - **Steps 6–7** need sustained truncation: more than 20 % of requests for 15 minutes. One provoked request shows in the finish-reasons panel, not as an alert.
 - **Step 8** is §5.1: the dashboard "Spark · LLM serving (DeepSeek)" with its `model` variable set to the Qwen engine.
 

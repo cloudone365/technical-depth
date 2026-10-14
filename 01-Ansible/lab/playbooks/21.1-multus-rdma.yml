@@ -15,7 +15,7 @@
     multus_version: v4.3.0                   # check https://github.com/k8snetworkplumbingwg/multus-cni/releases
     multus_rdma_resource: rdma_shared_cx7
     multus_rdma_ifnames: [enp1s0f1np1, enP2p1s0f1np1]
-    multus_rdma_dp_image: ghcr.io/mellanox/k8s-rdma-shared-dev-plugin:latest   # pin a release tag
+    multus_rdma_dp_image: ghcr.io/mellanox/k8s-rdma-shared-dev-plugin:v1.5.3   # same release as 02 nicclusterpolicy.yaml
     multus_test_image: ubuntu:24.04          # perftest + verbs utils installed at start (readiness waits for it)
     # NADs are namespaced: platform-tools for the platform test pods below, batch
     # for the training pods of the root's LLM stack (02-Kubernetes manifests/root-llms).

@@ -237,7 +237,7 @@ That fits the everyday split with room for `r1-1.5b` as a third model (0.10, 14 
 | same Deployment name `vllm` | `nameSuffix: -qwen2-5-7b-tools` |
 | `svc/vllm` (selector `app: vllm`) would pick up the new pods | label `app: vllm-qwen2-5-7b-tools` with `includeSelectors: true` |
 | a second copy of the `hf-token` Secret | `$patch: delete`; both read the Vault-synced Secret |
-| metrics | none in the overlay: 02's ServiceMonitor `llm-workloads` keeps only the Service names `vllm`, `vllm-prefill`, `vllm-decode`, `sglang` and `qwen-small-predictor`, so the side model is not scraped until its name is added there |
+| metrics | none in the overlay: 02's ServiceMonitor `llm-workloads` keeps Services matching `vllm(-.*)?`, so the side model is scraped with `vservice="vllm-<name>"` |
 
 **Time-slicing is not isolation.** Both engines submit kernels to the same GPU, which alternates between them, so one model's load raises the other's inter-token latency. Unified memory is shared too. The GB10 has no MIG. Task 5.6 measures the effect.
 

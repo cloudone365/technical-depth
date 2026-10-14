@@ -39,7 +39,7 @@ ANSWER[05]="Events: 'Liveness probe failed: HTTP probe failed with statuscode: 5
 TITLE[06]="NetworkPolicy blocks the ingress controller"; CTX[06]=spark-root
 SYMPTOM[06]="curl -H 'Host: llm.lab.local' http://192.168.0.115/v1/models hangs then 504/502; pods are Ready"
 HINT[06]="Pod-to-pod works inside llm-serving; from the ingress namespace it doesn't. What changed in llm-serving — and what does Hubble say?"
-ANSWER[06]="kubectl --context spark-root -n llm-serving get netpol → only bf06-default-deny is left; allow-ingress-and-same-namespace is gone. NetworkPolicies are a union of allows: once a pod is selected by any Ingress policy, everything not explicitly allowed is dropped. Cilium enforces it on the node: kubectl --context spark-root -n kube-system exec ds/cilium -- hubble observe --verdict DROPPED --last 20 shows Traefik → mock-llm drops. Fix: kubectl --context spark-root apply -k manifests/root-llms/10-tenancy (restores the allow)."
+ANSWER[06]="kubectl --context spark-root -n llm-serving get netpol → only bf06-default-deny is left; allow-ingress-and-same-namespace is gone. NetworkPolicies are a union of allows: once a pod is selected by any Ingress policy, everything not explicitly allowed is dropped. Cilium enforces it on the node: kubectl --context spark-root -n kube-system exec ds/cilium -c cilium-agent -- hubble observe --verdict DROPPED --last 20 shows Traefik → mock-llm drops. Fix: kubectl --context spark-root apply -k manifests/root-llms/10-tenancy (restores the allow)."
 TITLE[07]="Root cluster DNS down";                     CTX[07]=spark-root
 SYMPTOM[07]="platform pods can't resolve names: Grafana alert notifications fail, 'could not resolve host' from platform-tools/netshoot-host"
 HINT[07]="Test by IP and by name from netshoot-host on the root. Then try the same from netshoot in dev-lab — what is different?"
@@ -87,7 +87,7 @@ inject() {
     06) kr -n llm-serving delete netpol allow-ingress-and-same-namespace --ignore-not-found; kr apply -f "$BF/06-"*.yaml ;;
     05|08|09) kr apply -f "$BF/$1-"*.yaml ;;
     07) kr -n kube-system scale deploy coredns --replicas=0 ;;
-    11) info "apply root-llms/50-workloads first (qdrant + PDB), then run: kubectl --context $ROOT_CTX drain $(node) --ignore-daemonsets --delete-emptydir-data --dry-run=server"
+    11) info "apply root-llms/50-workloads first (qdrant + PDB), then run: kubectl --context $ROOT_CTX drain $(node) --ignore-daemonsets --delete-emptydir-data --dry-run=server --timeout=30s"
         kr apply -k "$LAB_DIR/manifests/root-llms/50-workloads" ;;
     13) kr taint node "$(node)" spark.lab/maintenance=true:NoSchedule --overwrite ;;
   esac

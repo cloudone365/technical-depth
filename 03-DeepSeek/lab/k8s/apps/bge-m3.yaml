@@ -18,7 +18,7 @@ spec:
           command: ["vllm", "serve", "BAAI/bge-m3"]
           args: ["--task=embed", "--served-model-name=bge-m3", "--host=0.0.0.0", "--port=8000",
                  "--gpu-memory-utilization=0.06", "--max-model-len=8192", "--download-dir=/models/hf"]
-          env: [{name: HF_HOME, value: /models/hf}]
+          env: [{name: HF_HOME, value: /models/hf}, {name: HF_HUB_CACHE, value: /models/hf}]
           ports: [{name: http, containerPort: 8000}]
           startupProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, failureThreshold: 90}
           readinessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 5}

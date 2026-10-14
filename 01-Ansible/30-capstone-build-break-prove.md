@@ -652,7 +652,7 @@ The lesson from fault 3 is why the lab ships a **staleness** alert, `SparkGPUMet
 
 #### What to look for
 
-1. **`site`, first run:** `failed=0`. **Second run:** `changed=0` on every Spark, except the three items of `Hold Kubernetes packages` in `19.1` (re-applied on every run, Chapter 19 §4.1); `localhost` shows play 1's new certificate. Any other `changed` task on the second run is an idempotence bug to fix before you go on.
+1. **`site`, first run:** `failed=0`. **Second run:** `changed=0` on every Spark; `localhost` shows play 1's new certificate. Any other `changed` task on the second run is an idempotence bug to fix before you go on.
 2. **`30.1 Validate`:** the "Verdict" task prints `All N checks passed`. N is 13 with two Sparks (the CX-7 link check is included) and 12 with one. Checks for services that aren't installed yet are named after `skipped:`; after the full rebuild there should be none.
 3. **Drift:** `BECOME_ARGS="-K -l dgx-spark-1,localhost" tools/drift-cycle.sh; echo "drift exit=$?"` on the MacBook (in `01-Ansible/lab`) prints `drift exit=0`. With two Sparks, `BECOME_ARGS=-K`.
 4. **After the Kubernetes rebuild:**

@@ -1,6 +1,6 @@
 # Run r1-1.5b NEXT TO the main vLLM Deployment (Chapter 18): the same catalog overlay, renamed to
 # vllm-r1-1-5b, relabelled app=vllm-r1-1-5b (so svc/vllm never selects these pods), with its own
-# Service and ServiceMonitor, sharing the hf-token Secret.
+# Service, sharing the hf-token Secret. Prometheus scrapes it through 02's llm-workloads (keep regex vllm(-.*)?).
 #   kubectl --context spark-root apply -k k8s/multi/r1-1.5b     → svc/vllm-r1-1-5b:8000
 # Budget: it adds util 0.10 and 14 Gi (request = limit) next to the main model — keep Σ util
 # ≲ 0.72 (e.g. r1-7b 0.20 + qwen2.5-7b-tools 0.20 + r1-1.5b 0.10 + bge-m3 0.06 = 0.56).

@@ -13,7 +13,8 @@ dir=$(find /sys/fs/cgroup/kubepods* -maxdepth 3 -type d \( -name "*pod${uid//-/_
 printf '%-9s %14s %12s %16s %16s\n' time MemAvailable Cached pod.mem.current pod.mem.max
 while sleep "$iv"; do
   read -r avail cached < <(awk '/MemAvailable/{a=$2} /^Cached/{c=$2} END{print a*1024, c*1024}' /proc/meminfo)
+  cur=$(cat "$dir/memory.current")   # awk, not bc: bc isn't installed on every DGX OS image
   printf '%-9s %11.1f GiB %8.1f GiB %12.2f GiB %16s\n' "$(date +%T)" \
-    "$(bc -l <<<"$avail/2^30")" "$(bc -l <<<"$cached/2^30")" \
-    "$(bc -l <<<"$(cat "$dir/memory.current")/2^30")" "$(cat "$dir/memory.max")"
+    "$(awk -v v="$avail" 'BEGIN{print v/2^30}')" "$(awk -v v="$cached" 'BEGIN{print v/2^30}')" \
+    "$(awk -v v="$cur" 'BEGIN{print v/2^30}')" "$(cat "$dir/memory.max")"
 done

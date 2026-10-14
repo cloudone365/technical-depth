@@ -5,7 +5,7 @@ A lean lab for the [Qwen step-by-step guide](../00-qwen-step-by-step-guide.md): 
 - **the platform** from [02-Kubernetes](../../02-Kubernetes/lab/README.md) (built by [01-Ansible](../../01-Ansible/lab/README.md)): the kubeadm root cluster on **dgx-spark-1** (192.168.0.100) with GPU Operator **15 time-slices**, Kueue, KEDA, Traefik at 192.168.0.115; the vLLM base Deployment (`02-Kubernetes/lab/manifests/root-llms/90-serving/vllm`), the `model-cache` PVC, the prefetch Job, the training window and `scripts/lib.sh`;
 - **the application stack** from [03-DeepSeek](../../03-DeepSeek/lab/README.md): Open WebUI, LiteLLM, BGE-M3 + Qdrant RAG (`03-DeepSeek/lab/k8s/apps`, `03-DeepSeek/lab/tools/rag_demo.py`) and the telemetry (`03-DeepSeek/lab/observability`). This lab only tells them which Qwen model to use.
 
-Three kubectl contexts in `01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml`: **`spark-root`** (runs the models: `llm-serving`, training: `batch`), `dev-lab` (tenants) and **`dev-llms`** (the LLM sandbox, namespace `llm-sandbox`, 2 CPU · 4 Gi · 2 slices). The scripts source 02's `scripts/lib.sh`, so `k` always means `kubectl --context spark-root` and `kdl` means `kubectl --context dev-llms`.
+Three kubectl contexts in `01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml`: **`spark-root`** (runs the models: `llm-serving`, training: `batch`), `dev-lab` (tenants) and **`dev-llms`** (the LLM sandbox vCluster: 2 CPU · 4 Gi · 2 slices at the root; namespace `llm-sandbox` inside it: 1500m · 3 Gi). The scripts source 02's `scripts/lib.sh`, so `k` always means `kubectl --context spark-root` and `kdl` means `kubectl --context dev-llms`.
 
 ## The rules the catalog follows
 

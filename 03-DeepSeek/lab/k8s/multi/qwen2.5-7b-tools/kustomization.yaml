@@ -1,6 +1,6 @@
 # Run qwen2.5-7b-tools NEXT TO the main vLLM Deployment (Chapter 18): the same catalog overlay, renamed to
 # vllm-qwen2-5-7b-tools, relabelled app=vllm-qwen2-5-7b-tools (so svc/vllm never selects these pods), with its own
-# Service and ServiceMonitor, sharing the hf-token Secret.
+# Service, sharing the hf-token Secret. Prometheus scrapes it through 02's llm-workloads (keep regex vllm(-.*)?).
 #   kubectl --context spark-root apply -k k8s/multi/qwen2.5-7b-tools     → svc/vllm-qwen2-5-7b-tools:8000
 # Budget: it adds util 0.20 and 28 Gi (request = limit) next to the main model — keep Σ util
 # ≲ 0.72 (e.g. r1-7b 0.20 + qwen2.5-7b-tools 0.20 + r1-1.5b 0.10 + bge-m3 0.06 = 0.56).

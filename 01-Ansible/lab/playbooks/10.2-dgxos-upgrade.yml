@@ -51,7 +51,7 @@
 
     - name: Release NVIDIA holds for this upgrade
       ansible.builtin.shell: >-
-        set -o pipefail; apt-mark showhold | grep -E '{{ spark_nvidia_hold_regex }}' | xargs -r apt-mark unhold
+        set -o pipefail; { apt-mark showhold | grep -E '{{ spark_nvidia_hold_regex }}' || true; } | xargs -r apt-mark unhold
       args: { executable: /bin/bash }
       changed_when: true
 

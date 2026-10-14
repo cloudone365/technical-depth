@@ -69,7 +69,7 @@ flowchart LR
   style SRC fill:#f6f8fa,stroke:#57606a
 ```
 
-Everything runs on the root cluster. The model servers live in `llm-serving`, so the platform team's ServiceMonitor `llm-workloads` (02's [`vcluster-workloads.yaml`](../02-Kubernetes/lab/manifests/root/95-observability/vcluster-workloads.yaml)) scrapes the port named `http` of the Services `vllm`, `vllm-prefill`, `vllm-decode`, `sglang` and `qwen-small-predictor` there, and the port named `metrics` of `traefik-lab-metrics` in `ingress`. It keeps only those names, so `bge-m3`, Chapter 14's `vllm-qwen2-5-7b-tools` and Chapter 09's KServe `r1-1-5b-predictor` are not scraped. It adds `vcluster="root"` and `vnamespace="llm-serving"` labels. A model you try in the `dev-llms` sandbox shows up in the same queries with `vcluster="dev-llms"`, so one dashboard covers both.
+Everything runs on the root cluster. The model servers live in `llm-serving`, so the platform team's ServiceMonitor `llm-workloads` (02's [`vcluster-workloads.yaml`](../02-Kubernetes/lab/manifests/root/95-observability/vcluster-workloads.yaml)) scrapes the port named `http` of the Services matching `vllm(-.*)?|sglang|.*-predictor` there (the main `vllm`, side engines such as Chapter 14's `vllm-qwen2-5-7b-tools`, P/D, SGLang and KServe predictors such as Chapter 09's `r1-1-5b-predictor`), and the port named `metrics` of `traefik-lab-metrics` in `ingress`. `bge-m3` is not scraped. Each series carries `vservice`, so filter `vservice="vllm"` for the main engine. It adds `vcluster="root"` and `vnamespace="llm-serving"` labels. A model you try in the `dev-llms` sandbox shows up in the same queries with `vcluster="dev-llms"`, so one dashboard covers both.
 
 ### 2.1 One truncated request to a firing alert, step by step
 

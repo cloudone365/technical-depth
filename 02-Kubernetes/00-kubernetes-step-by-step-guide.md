@@ -52,7 +52,7 @@ Semaphore steps (sema01, 192.168.0.210) are prose that starts with **Semaphore U
 git clone https://github.com/cloudone365/technical-depth.git ~/technical-depth
 ```
 
-Before each session on the Spark, `git -C ~/technical-depth pull`. `kubectl` on the Spark uses `~/.kube/config`, written by `19.1 Kubernetes` (the root's `admin.conf`, context `spark-root`): enough for every root step. The scripts that look up a vCluster pod (`pod-netns.sh … dev-lab`, `svc-trace.sh … dev-lab`) also need the `dev-lab`/`dev-llms` contexts: copy the full lab kubeconfig there and `export KUBECONFIG=~/.kube/spark-lab.yaml` as in [Chapter 02 §5](02-etcd-database-deep-dive.md#5-lab).
+Before each session on the Spark, `git -C ~/technical-depth pull`. `kubectl` on the Spark uses `~/.kube/config`, written by `19.1 Kubernetes` (the root's `admin.conf`, context `spark-root`): enough for every root step. `pod-netns.sh … dev-lab` finds a vCluster pod's root copy with `spark-root` alone. `svc-trace.sh … dev-lab` reads the Service inside the vCluster, so it also needs the `dev-lab`/`dev-llms` contexts: copy the full lab kubeconfig there and `export KUBECONFIG=~/.kube/spark-lab.yaml` as in [Chapter 02 §5](02-etcd-database-deep-dive.md#5-lab).
 
 ---
 

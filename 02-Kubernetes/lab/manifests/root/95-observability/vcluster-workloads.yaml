@@ -32,7 +32,7 @@ spec:
       relabelings:
         - action: keep
           sourceLabels: [__meta_kubernetes_service_annotation_vcluster_loft_sh_object_name]
-          regex: vllm|vllm-prefill|vllm-decode|sglang|qwen-small-predictor
+          regex: vllm(-.*)?|sglang|.*-predictor     # vllm, side engines vllm-<name>, P/D, SGLang, KServe predictors
         - sourceLabels: [__meta_kubernetes_namespace]
           regex: vc-(.*)
           targetLabel: vcluster
@@ -81,7 +81,7 @@ spec:
       relabelings:
         - action: keep
           sourceLabels: [__meta_kubernetes_service_name]
-          regex: vllm|vllm-prefill|vllm-decode|sglang|qwen-small-predictor
+          regex: vllm(-.*)?|sglang|.*-predictor     # vllm, side engines vllm-<name>, P/D, SGLang, KServe predictors
         - targetLabel: vcluster
           replacement: root
         - sourceLabels: [__meta_kubernetes_namespace]

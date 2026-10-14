@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Switch the served chat model (Chapter 08): prefetch → drop page cache → apply
+# Switch the served chat model (Chapter 08): prefetch → drop page cache (on the Spark; DROP_CACHES=1 over ssh) → apply
 # overlay → wait → smoke test, on the root (context spark-root). Replaces the model
 # in Deployment vllm; k8s/multi/ adds more next to it within the 0.72 util budget.
 #   scripts/serve-model.sh list
@@ -22,8 +22,14 @@ rev=$(model_field "$name" revision); rev=${rev:-main}
 sed -e "s|value: Qwen/Qwen2.5-0.5B-Instruct|value: $hf|" -e "s|{name: REVISION, value: main}|{name: REVISION, value: \"$rev\"}|" \
   "$K8S_LAB/manifests/root-llms/60-storage/model-prefetch-job.yaml" | k apply -f - >/dev/null
 k -n $NS wait --for=condition=complete job/model-prefetch --timeout=60m >/dev/null && ok "weights cached" || { bad "prefetch failed: kubectl --context spark-root -n $NS logs job/model-prefetch"; exit 1; }
-if [[ -w /proc/sys/vm/drop_caches ]] || sudo -n true 2>/dev/null; then
+# The page cache lives on the Spark: dropping it only works there (or over ssh).
+if [[ -e /proc/sys/vm/drop_caches ]] && { [[ -w /proc/sys/vm/drop_caches ]] || sudo -n true 2>/dev/null; }; then
   sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches' && info "page cache dropped (UMA headroom for the load)"
+elif [[ ${DROP_CACHES:-0} == 1 ]]; then
+  ssh dgx-spark-1 "sudo -n sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'" && info "page cache dropped on dgx-spark-1" \
+    || warn "could not drop the page cache over ssh (needs passwordless sudo); on the Spark: sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'"
+else
+  info "page cache not dropped from this machine; for a cold load run on the Spark: sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'"
 fi
 k -n $NS scale deploy sglang trtllm --replicas=0 2>/dev/null || true
 k apply -k "$DS_DIR/k8s/models/$name" >/dev/null

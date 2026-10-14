@@ -12,6 +12,11 @@ source "$(dirname "$0")/lib.sh"
 
 name=${1:?usage: serve-model.sh <name> [--side|--sandbox] [--render] | list | --stop-side <name>}
 mode=main; render=0
+if [[ $name == --stop-side ]]; then
+  side=vllm-${2:?usage: serve-model.sh --stop-side <name>}
+  k -n "$NS" delete deploy,svc "$side" --ignore-not-found && ok "$side removed"
+  exit 0
+fi
 for a in "${@:2}"; do
   case $a in
     --side) mode=side ;;
@@ -33,12 +38,6 @@ for s in cat["sets"]:
 PY
   exit 0
 fi
-if [[ $name == --stop-side ]]; then
-  side=vllm-${2:?usage: serve-model.sh --stop-side <name>}
-  k -n "$NS" delete deploy,svc "$side" --ignore-not-found && ok "$side removed"
-  exit 0
-fi
-
 hf=$(model_field "$name" hf); [[ -n $hf ]] || { bad "unknown model $name (scripts/serve-model.sh list)"; exit 2; }
 util=$(model_field "$name" util)
 deploy=vllm; [[ $mode == side ]] && deploy=vllm-$name
@@ -97,7 +96,12 @@ k -n "$NS" delete job model-prefetch --ignore-not-found >/dev/null
 rev=$(model_field "$name" revision); rev=${rev:-main}
 sed -e "s|value: Qwen/Qwen2.5-0.5B-Instruct|value: $hf|" -e "s|{name: REVISION, value: main}|{name: REVISION, value: \"$rev\"}|" \
   "$K8S_LAB/manifests/root-llms/60-storage/model-prefetch-job.yaml" | k apply -f - >/dev/null
-k -n "$NS" wait --for=condition=complete job/model-prefetch --timeout=60m >/dev/null && ok "weights cached" \
+# wait for complete OR failed (a plain wait --for=complete sits out the whole timeout on a failed Job)
+pf=""; for _ in $(seq 720); do
+  pf=$(k -n "$NS" get job model-prefetch -o jsonpath='{range .status.conditions[?(@.status=="True")]}{.type} {end}' 2>/dev/null)
+  [[ $pf == *Complete* || $pf == *Failed* ]] && break; sleep 5
+done
+[[ $pf == *Complete* ]] && ok "weights cached" \
   || { bad "prefetch failed: kubectl --context spark-root -n $NS logs job/model-prefetch"; exit 1; }
 if [[ ${DROP_CACHES:-0} == 1 ]]; then
   ssh dgx-spark-1 "sudo -n sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'" && info "page cache dropped (UMA headroom for the load)"

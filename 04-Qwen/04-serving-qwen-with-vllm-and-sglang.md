@@ -206,7 +206,7 @@ Metric names move between releases; `curl -s localhost:8000/metrics | grep -E '^
 - **02 vLLM base** ([`vllm.yaml`](../02-Kubernetes/lab/manifests/root-llms/90-serving/vllm/vllm.yaml)): every overlay keeps its probes (startup 30 min for first downloads, readiness required by the `llm-serving` admission policy), `preStop` drain, `Recreate`, `spark-serving` priority, 8 Gi `/dev/shm` and the `model-cache` mount. Changes to probes or lifecycle belong in the base, not in the catalog.
 - **Traefik** (root, namespace `ingress`, `192.168.0.115`): Task 3 adds an Ingress for `qwen.lab.local` that reuses 02's `llm-ratelimit` middleware (not `llm-body-limit`, which buffers streams: 02 Chapter 11 §5.5). 02's own `llm.lab.local` keeps pointing at `mock-llm`.
 - **KEDA** ([`autoscaling.yaml`](../02-Kubernetes/lab/manifests/root-llms/90-serving/autoscaling.yaml)): the ScaledObject `vllm` owns the main Deployment's replica count. Park it with `kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite`, bring it back by removing the annotation. Side engines have no ScaledObject.
-- **Prometheus**: the root ServiceMonitor `llm-workloads` keeps Services named `vllm`, `sglang` (and the 02 P/D and KServe names), so the main model and SGLang are scraped with `vcluster="root"`, `vnamespace="llm-serving"`. Side engines (`vllm-<name>`) are not matched by that list: to scrape them, widen the `keep` regex of the `llm-workloads` ServiceMonitor in 02's [`vcluster-workloads.yaml`](../02-Kubernetes/lab/manifests/root/95-observability/vcluster-workloads.yaml) to `vllm(-.*)?|vllm-prefill|…` (telemetry in Chapter 13).
+- **Prometheus**: the root ServiceMonitor `llm-workloads` keeps Services matching `vllm(-.*)?|sglang|.*-predictor` (02's [`vcluster-workloads.yaml`](../02-Kubernetes/lab/manifests/root/95-observability/vcluster-workloads.yaml)), so the main model, side engines (`vllm-<name>`) and SGLang are scraped with `vcluster="root"`, `vnamespace="llm-serving"` and their own `vservice` (telemetry in Chapter 13).
 - **Applications**: LiteLLM, Open WebUI and the RAG tools come from 03-DeepSeek's lab; they address models by served name (`qwen3-8b`) at `http://vllm.llm-serving:8000` or `http://vllm-<name>.llm-serving:8000` — Chapter 12 adds the LiteLLM aliases.
 - **Weights and secrets** (Chapter 06): the prefetch Job and the Hugging Face token from Vault; pin `revision` in the catalog before you compare results across days.
 
@@ -639,7 +639,7 @@ Compare the c = 1 rows with the bandwidth ceilings from Chapter 01 §2.7: the Mo
 | Speculative decoding slower than plain | high concurrency, or low acceptance | measure acceptance (Task 5); use it for latency-bound, low-concurrency traffic only |
 | `kubectl --context spark-root -n llm-serving scale deploy vllm --replicas=0` reverts | KEDA owns the replica count | pause annotation (§4) |
 | SGLang pod CrashLoop with an unknown parser or model | `lmsysorg/sglang:spark` predates the model | use Qwen3/Qwen3-VL in SGLang, or move the 02 image to a newer pinned tag |
-| No metrics for `vllm-<name>` | side Services are not in the ServiceMonitor keep list | widen the regex (§4) |
+| No metrics for `vllm-<name>` | an older checkout: the `llm-workloads` keep regex listed only `vllm` | `git pull`, re-apply `root/95-observability` (02) |
 | `serve-model.sh` waits forever at prefetch | Hugging Face rate limit or no egress | `kubectl --context spark-root -n llm-serving logs job/model-prefetch`; sync `hf-token` from Vault (Chapter 06) |
 
 ---

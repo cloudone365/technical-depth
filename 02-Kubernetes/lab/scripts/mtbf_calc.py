@@ -27,7 +27,7 @@ def main():
     for c in (a.ckpt_s, a.ckpt_s / 10):
         t = math.sqrt(2 * c * m)
         g = 1 - (c / t + (t / 2 + a.restart_s) / m)
-        print(f"  with ckpt cost {c:6.1f}s → interval {t/60:6.1f} min, goodput {max(0, g)*100:5.1f} %")
+        print(f"  with ckpt cost {c:6.3g}s → interval {t/60:6.1f} min, goodput {max(0, g)*100:5.1f} %")
 
 
 if __name__ == "__main__":

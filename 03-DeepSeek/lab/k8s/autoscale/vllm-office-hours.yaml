@@ -27,7 +27,7 @@ spec:
     - type: prometheus
       metadata:
         serverAddress: http://kps-prometheus.observability.svc:9090
-        query: sum(vllm:num_requests_running{namespace="llm-serving"}) + sum(vllm:num_requests_waiting{namespace="llm-serving"})
+        query: sum(vllm:num_requests_running{vnamespace="llm-serving", vservice="vllm"}) + sum(vllm:num_requests_waiting{vnamespace="llm-serving", vservice="vllm"})   # main engine only
         threshold: "16"
         activationThreshold: "0"       # any in-flight request keeps (or brings back) one replica
         ignoreNullValues: "true"       # no vLLM pod → no series → 0, not an error

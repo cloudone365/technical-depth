@@ -12,7 +12,12 @@ spec:
   scaleTargetRef: {name: mock-llm}
   minReplicaCount: 1
   maxReplicaCount: 6
-  cooldownPeriod: 120
+  # cooldownPeriod only applies when scaling to 0; with minReplicaCount 1 the
+  # HPA's scale-down window decides how fast replicas go away.
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown: {stabilizationWindowSeconds: 120}
   triggers:
     - type: prometheus
       metadata:
@@ -32,5 +37,5 @@ spec:
     - type: prometheus
       metadata:
         serverAddress: http://kps-prometheus.observability.svc:9090
-        query: sum(vllm:num_requests_waiting{vcluster="root", vnamespace="llm-serving"})
+        query: sum(vllm:num_requests_waiting{vcluster="root", vnamespace="llm-serving", vservice="vllm"})   # the main engine only, not side engines
         threshold: "16"
