@@ -274,7 +274,7 @@ The pod's 32 Gi, 1.5 CPU and 1 slice appear in `serving-budget` (checked when th
 
 #### What each command does
 
-The four blocks above, in order (kitchen terms from the chapter notes: weights = the recipe book, `model-cache` = the shelf, vLLM = the kitchen).
+The four blocks above, in order. Think of a kitchen: the weights are the recipe book, `model-cache` is the shelf it sits on, and vLLM is the kitchen that cooks the answers.
 
 **Block 1 · Weights onto the shelf (MacBook)**
 
