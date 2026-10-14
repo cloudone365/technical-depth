@@ -6,3 +6,15 @@ datasources:
     access: proxy
     url: http://127.0.0.1:9090
     isDefault: true
+{% if gpu_telemetry_k8s_prometheus_url | length > 0 %}
+  - name: Kubernetes
+    uid: kubernetes
+    type: prometheus
+    access: proxy
+    url: {{ gpu_telemetry_k8s_prometheus_url }}
+    isDefault: false
+{% else %}
+deleteDatasources:            # undo: a data source removed from this file stays in Grafana's DB otherwise
+  - name: Kubernetes
+    orgId: 1
+{% endif %}

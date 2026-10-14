@@ -34,6 +34,21 @@
     group: root
     mode: "0644"
 
+- name: Provision the Spark · Kubernetes dashboard (cluster Prometheus as data source 'Kubernetes')
+  ansible.builtin.copy:
+    src: spark-k8s-dashboard.json
+    dest: "{{ gpu_telemetry_stack_dir }}/grafana/provisioning/dashboards/spark-k8s-dashboard.json"
+    owner: root
+    group: root
+    mode: "0644"
+  when: gpu_telemetry_k8s_prometheus_url | length > 0
+
+- name: Remove the Spark · Kubernetes dashboard when no cluster Prometheus is set
+  ansible.builtin.file:
+    path: "{{ gpu_telemetry_stack_dir }}/grafana/provisioning/dashboards/spark-k8s-dashboard.json"
+    state: absent
+  when: gpu_telemetry_k8s_prometheus_url | length == 0
+
 - name: Validate Prometheus config + rules with promtool (in the image)  # noqa: no-handler (gate before compose up)
   ansible.builtin.command: >-
     docker run --rm --entrypoint promtool
@@ -56,3 +71,12 @@
     method: POST
     status_code: [200]
   when: gpu_telemetry_cfg is changed and gpu_telemetry_compose is not changed
+
+- name: Restart Grafana when its data sources changed (Grafana reads them only at start)
+  community.docker.docker_compose_v2:
+    project_src: "{{ gpu_telemetry_stack_dir }}"
+    services: [grafana]
+    state: restarted
+  when:
+    - gpu_telemetry_compose is not changed
+    - gpu_telemetry_cfg.results | selectattr('changed') | selectattr('item.dest', 'search', 'datasources') | list | length > 0

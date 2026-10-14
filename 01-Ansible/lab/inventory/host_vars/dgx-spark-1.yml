@@ -13,3 +13,8 @@ cx7_interfaces:
     rdma_dev: roceP2p1s0f1
     address: 192.168.101.11/24
     mtu: 9000
+
+# One Grafana (02-Kubernetes Chapter 17 §5.4): uncomment AFTER kps answers on
+# http://192.168.0.100:30090/-/ready, push, then run template '12.1 Telemetry'.
+# Set here (not as a template extra variable) so '26.1 Drift check' agrees.
+# gpu_telemetry_k8s_prometheus_url: http://127.0.0.1:30090

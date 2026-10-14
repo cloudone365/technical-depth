@@ -2,11 +2,15 @@
 """Generate the 'Spark · Kubernetes' Grafana dashboard (Chapter 17).
 
 python3 gen_dashboard.py > spark-k8s-dashboard.json
+python3 gen_dashboard.py --host-grafana > ../../../../../01-Ansible/lab/roles/gpu_telemetry/files/spark-k8s-dashboard.json
+  (copy for the host Grafana :3000: its datasource variable is pinned to the
+   'Kubernetes' data source = this cluster's Prometheus on NodePort 30090)
 Rows: UMA+GPU (host truth) · Tenancy · Serving SLOs · Control plane.
 Colours follow the lab palette: GPU green #76b900, control plane blue #1f6feb,
 storage amber #bf8700, alerts red #cf222e.
 """
 import json
+import sys
 
 PANELS = []
 _y = 0
@@ -93,6 +97,11 @@ ts("APF: rejected / queued", [('sum by (priority_level) (rate(apiserver_flowcont
                               ('sum by (priority_level) (apiserver_flowcontrol_current_inqueue_requests)', "queued {{priority_level}}")], x=16)
 nl()
 
+DS_VAR = {"name": "datasource", "type": "datasource", "query": "prometheus", "current": {}}
+if "--host-grafana" in sys.argv[1:]:
+    # host Grafana has two Prometheus data sources: 'Prometheus' (host) and 'Kubernetes' (kps)
+    DS_VAR.update(regex="/^Kubernetes$/", current={"text": "Kubernetes", "value": "kubernetes"}, hide=2)
+
 print(json.dumps({
     "title": "Spark · Kubernetes",
     "uid": "spark-k8s",
@@ -101,6 +110,6 @@ print(json.dumps({
     "schemaVersion": 39,
     "refresh": "30s",
     "time": {"from": "now-3h", "to": "now"},
-    "templating": {"list": [{"name": "datasource", "type": "datasource", "query": "prometheus", "current": {}}]},
+    "templating": {"list": [DS_VAR]},
     "panels": [dict(p, id=i + 1) for i, p in enumerate(PANELS)],
 }, indent=1))

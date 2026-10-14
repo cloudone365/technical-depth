@@ -452,6 +452,50 @@ kubectl --context spark-root -n platform-tools scale deploy gemm-contention --re
 kubectl --context spark-root delete -f manifests/root/12-cgroups/cpu-throttle.yaml; kill %1
 ```
 
+#### One Grafana for host and clusters (optional)
+
+You now have two Grafanas: the host's on `:3000` (01-Ansible Chapter 12) and this one on `:32000`. To use only one, use the host's: it runs in Docker outside Kubernetes, so it stays up when the cluster is down. It gets this cluster's Prometheus as a second data source, **Kubernetes**, and the dashboard **Spark · Kubernetes** next to *DGX Spark Lab — Overview* in folder *Spark Lab*.
+
+```mermaid
+flowchart LR
+  subgraph HOST["dgx-spark-1 · Docker (01-Ansible)"]
+    G["Grafana :3000<br/>folder Spark Lab"]
+    HP["Prometheus :9090<br/>data source 'Prometheus'"]
+  end
+  subgraph K8S["spark-root · ns observability"]
+    KP["kps-prometheus<br/>NodePort 30090"]
+  end
+  NE["node-exporter :9100<br/>spark_gpu_* · spark_uma_*"]
+  G -->|"DGX Spark Lab — Overview"| HP
+  G -->|"Spark · Kubernetes<br/>data source 'Kubernetes'"| KP
+  HP --> NE
+  KP --> NE
+```
+
+1. **Expose the cluster Prometheus on the node.** The kps values now set `prometheus.service` to NodePort **30090**. Re-run the install (Helm upgrade, no data lost), then check it answers:
+
+   ```bash
+   # ▶ MacBook · 02-Kubernetes/lab
+   scripts/install-addons.sh kps
+   curl -s http://192.168.0.100:30090/-/ready        # Prometheus Server is Ready.
+   ```
+
+2. **Point the host Grafana at it.** In `01-Ansible/lab/inventory/host_vars/dgx-spark-1.yml`, uncomment `gpu_telemetry_k8s_prometheus_url: http://127.0.0.1:30090`, commit and push (Semaphore reads the repo). Then run the template **`12.1 Telemetry`** (break-glass: `ansible-playbook playbooks/12.1-telemetry.yml -l dgx-spark-1,localhost -K` from `01-Ansible/lab`). The role adds the data source, copies the dashboard and restarts Grafana. It lives in the inventory, not in the template's extra variables, so `26.1 Drift check` sees the same setting.
+
+3. **Check:** http://192.168.0.100:3000 → *Dashboards* → *Spark Lab* lists **DGX Spark Lab — Overview** and **Spark · Kubernetes**. The second one's panels have data, including the row **Serving SLOs (vLLM)** once a model has traffic (Chapter 20 §5.6).
+
+| | Kubernetes up | Kubernetes down |
+|---|---|---|
+| DGX Spark Lab — Overview (host Prometheus) | data | data |
+| Spark · Kubernetes (data source Kubernetes) | data | panels show an error: the cluster is down |
+
+Notes:
+
+- Prometheus on 30090 has no login. That's fine on the lab LAN; don't forward that port beyond it.
+- The cluster's alerts (`VLLMQueueBacklog`, `PodsPendingOnGPU`) still go through kps Alertmanager; the host's alerts through the host Alertmanager. Only the screens are merged.
+- `:32000` keeps working. Kubernetes add-ons that ship dashboards as ConfigMaps (the kps built-ins) appear only there; you can leave it unused.
+- Undo: comment the line again, push, run `12.1 Telemetry`; the role removes the data source (`deleteDatasources`) and the dashboard.
+
 ### 5.5 DCGM exporter (when supported)
 
 #### What this lab does (template `20.1 GPU Operator` with `gpu_operator_dcgm_exporter: true`)

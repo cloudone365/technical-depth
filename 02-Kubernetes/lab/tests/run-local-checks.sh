@@ -31,6 +31,7 @@ PY
 )
 echo "== dashboard up to date"
 diff -q <(python3 manifests/root/95-observability/gen_dashboard.py) manifests/root/95-observability/spark-k8s-dashboard.json
+diff -q <(python3 manifests/root/95-observability/gen_dashboard.py --host-grafana) ../../01-Ansible/lab/roles/gpu_telemetry/files/spark-k8s-dashboard.json
 echo "== python";     python3 -m py_compile tests/pod_template_check.py tests/budget_check.py \
                         manifests/root/45-controller/slice_ledger.py manifests/root-llms/40-ingress/mock_llm.py manifests/root/70-gpu/gemm_bench.py \
                         manifests/root-llms/80-distributed/base/allreduce_bench.py manifests/root-llms/90-serving/pd-disagg/pd_proxy.py \

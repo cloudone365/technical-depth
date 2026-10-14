@@ -38,6 +38,9 @@ kubeProxy:
 nodeExporter:
   enabled: false
 prometheus:
+  service:                      # NodePort so the host Grafana :3000 (01-Ansible) can read it: one Grafana for both
+    type: NodePort
+    nodePort: 30090             # http://192.168.0.100:30090 (no auth: lab LAN only)
   prometheusSpec:
     priorityClassName: spark-platform
     retention: 15d
