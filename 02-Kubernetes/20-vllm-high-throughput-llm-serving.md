@@ -308,7 +308,7 @@ The port-forward goes laptop → root API server → the kubelet on dgx-spark-1 
 - **Prints a line every 2 s:** host `MemAvailable`, page cache (`Cached`), and the vLLM pod's cgroup `memory.current` and `memory.max`.
 - **You restart `deploy/vllm`** in another terminal and watch memory leave and come back. With `Recreate`, the old pod's memory is freed before the new pod loads.
 - **Optional experiment:** switch the Deployment to `RollingUpdate`, repeat, and see both copies in memory at once. Then set it back to `Recreate`.
-- **The script only reads.** It runs on the Spark because it reads `/sys/fs/cgroup`, and it uses `kubectl` and `bc` there.
+- **The script only reads.** It runs on the Spark because it reads `/sys/fs/cgroup`, and it uses `kubectl` there.
 
 #### What to look for
 
@@ -324,7 +324,7 @@ The port-forward goes laptop → root API server → the kubelet on dgx-spark-1 
 3. **During a `Recreate` restart:** `MemAvailable` rises when the old pod exits, then falls while the new pod loads. It never drops by two engines' worth.
 4. **With `RollingUpdate`:** `MemAvailable` dips by about two engines' worth (0.40 of the pool) while both pods run.
 
-**If something's off:** `cgroup … not found` or `cat: …/memory.current: No such file` → the pod name is stale after a restart; start the script again with the new pod. `bc: command not found` → install `bc` on the Spark.
+**If something's off:** `cgroup … not found` or `cat: …/memory.current: No such file` → the pod name is stale after a restart; start the script again with the new pod.
 
 #### Run it
 
