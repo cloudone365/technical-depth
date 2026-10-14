@@ -216,11 +216,15 @@ kubectl --context spark-root -n llm-serving describe quota serving-budget       
 kubectl --context spark-root -n llm-serving create job --from=cronjob/vault-sync vs-apps 2>/dev/null || true   # only if Chapter 15 is done
 ```
 
-Name resolution on the MacBook, once:
+Add the names to the MacBook's `/etc/hosts` once. Run this block **on its own**: `sudo` asks for your **MacBook login password** (not the Spark's), and lines pasted after it would be read as password attempts. The `grep` skips it if the names are already there.
 
 ```bash
 # ▶ MacBook · any folder
-echo "192.168.0.115 api.lab.local webui.lab.local" | sudo tee -a /etc/hosts
+grep -q ' api.lab.local' /etc/hosts || echo "192.168.0.115 api.lab.local webui.lab.local" | sudo tee -a /etc/hosts
+```
+
+```bash
+# ▶ MacBook · any folder
 curl -s http://webui.lab.local/health                                              # {"status":true}
 ```
 

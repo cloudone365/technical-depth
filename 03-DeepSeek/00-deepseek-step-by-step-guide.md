@@ -559,9 +559,15 @@ kubectl --context spark-root -n llm-serving rollout status sts/open-webui --time
 kubectl --context spark-root -n llm-serving describe quota serving-budget         # CPU and memory used vs 8 / 90Gi
 ```
 
+Add the names to the MacBook's `/etc/hosts` once. Run this block **on its own**: `sudo` asks for your **MacBook login password** (not the Spark's), and lines pasted after it would be read as password attempts. The `grep` skips it if the names are already there.
+
 ```bash
 # ▶ MacBook · any folder
-echo "192.168.0.115 api.lab.local webui.lab.local" | sudo tee -a /etc/hosts
+grep -q ' api.lab.local' /etc/hosts || echo "192.168.0.115 api.lab.local webui.lab.local" | sudo tee -a /etc/hosts
+```
+
+```bash
+# ▶ MacBook · any folder
 curl -s http://webui.lab.local/health                                              # {"status":true}
 ```
 

@@ -349,7 +349,17 @@ kubectl --context spark-root apply -f manifests/root/30-networking/coredns-coref
 # ▶ MacBook · 02-Kubernetes/lab
 scripts/install-addons.sh traefik                     # on the root, namespace ingress → 192.168.0.115
 kubectl --context spark-root apply -k manifests/root-llms/40-ingress
-echo "192.168.0.115 llm.lab.local gw.lab.local" | sudo tee -a /etc/hosts      # on your MacBook
+```
+
+Add the names to the MacBook's `/etc/hosts` once. Run this block **on its own**: `sudo` asks for your **MacBook login password** (not the Spark's), and lines pasted after it would be read as password attempts. The `grep` skips it if the names are already there.
+
+```bash
+# ▶ MacBook · any folder
+grep -q ' llm.lab.local' /etc/hosts || echo "192.168.0.115 llm.lab.local gw.lab.local" | sudo tee -a /etc/hosts
+```
+
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/verify.sh ingress
 ```
 

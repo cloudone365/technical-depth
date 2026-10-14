@@ -184,7 +184,17 @@ kubectl --context spark-root apply -k manifests/root-llms/10-tenancy       # ser
 kubectl --context spark-root apply -k manifests/root-llms/40-ingress
 kubectl --context spark-root -n llm-serving get pods,ingress,httproute
 kubectl --context spark-root -n llm-serving get httproute llm-gw -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {end}{"\n"}'
-echo "192.168.0.115 llm.lab.local gw.lab.local" | sudo tee -a /etc/hosts     # on your laptop
+```
+
+Add the names to the MacBook's `/etc/hosts` once. Run this block **on its own**: `sudo` asks for your **MacBook login password** (not the Spark's), and lines pasted after it would be read as password attempts. The `grep` skips it if the names are already there.
+
+```bash
+# ▶ MacBook · any folder
+grep -q ' llm.lab.local' /etc/hosts || echo "192.168.0.115 llm.lab.local gw.lab.local" | sudo tee -a /etc/hosts
+```
+
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
 curl -s http://llm.lab.local/v1/models | jq
 ```
 
@@ -223,7 +233,17 @@ Expected: **TTFB ≈ 0.05 s, total ≈ 5 s** (100 tokens at 20 tok/s), and times
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh inject 09                                         # Ingress bf09 + buffering middleware, in llm-serving
-echo "192.168.0.115 bf09.lab.local" | sudo tee -a /etc/hosts          # on your laptop
+```
+
+Add the names to the MacBook's `/etc/hosts` once. Run this block **on its own**: `sudo` asks for your **MacBook login password** (not the Spark's), and lines pasted after it would be read as password attempts. The `grep` skips it if the names are already there.
+
+```bash
+# ▶ MacBook · any folder
+grep -q ' bf09.lab.local' /etc/hosts || echo "192.168.0.115 bf09.lab.local" | sudo tee -a /etc/hosts
+```
+
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
 curl -sN -o /dev/null -w 'TTFB %{time_starttransfer}s  total %{time_total}s\n' \
   http://bf09.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":100}'
 scripts/breakfix.sh reset 09

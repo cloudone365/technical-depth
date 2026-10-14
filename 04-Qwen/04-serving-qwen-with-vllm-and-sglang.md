@@ -356,7 +356,17 @@ spec:
         paths:
           - {path: /v1, pathType: Prefix, backend: {service: {name: vllm-qwen3-4b-instruct, port: {number: 8000}}}}
 EOF
-echo "192.168.0.115 qwen.lab.local agent.qwen.lab.local" | sudo tee -a /etc/hosts
+```
+
+Add the names to the MacBook's `/etc/hosts` once. Run this block **on its own**: `sudo` asks for your **MacBook login password** (not the Spark's), and lines pasted after it would be read as password attempts. The `grep` skips it if the names are already there.
+
+```bash
+# ▶ MacBook · any folder
+grep -q ' qwen.lab.local' /etc/hosts || echo "192.168.0.115 qwen.lab.local agent.qwen.lab.local" | sudo tee -a /etc/hosts
+```
+
+```bash
+# ▶ MacBook · 04-Qwen/lab
 scripts/serve-model.sh qwen3-4b-instruct --side
 curl -sN http://qwen.lab.local/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-8b","stream":true,"max_tokens":64,"chat_template_kwargs":{"enable_thinking":false},

@@ -259,7 +259,13 @@ kubectl --context dev-llms -n llm-sandbox delete -k k8s/models/qwen3-0.6b/sandbo
 scripts/serve-model.sh qwen3-8b                        # the everyday set: main model …
 scripts/serve-model.sh qwen3-4b-instruct --side        # … and the side model, svc/vllm-qwen3-4b-instruct
 kubectl --context spark-root -n llm-serving get deploy -L model
-echo "192.168.0.115 qwen.lab.local agent.qwen.lab.local" | sudo tee -a /etc/hosts   # after the Ingress of Task 3
+```
+
+Add the names to the MacBook's `/etc/hosts` once. Run this block **on its own**: `sudo` asks for your **MacBook login password** (not the Spark's), and lines pasted after it would be read as password attempts. The `grep` skips it if the names are already there.
+
+```bash
+# ▶ MacBook · any folder
+grep -q ' qwen.lab.local' /etc/hosts || echo "192.168.0.115 qwen.lab.local agent.qwen.lab.local" | sudo tee -a /etc/hosts
 ```
 
 Then the parser checks (Task 2), YaRN (Task 4), FP8 KV and speculative decoding (Task 5), SGLang with vLLM parked (Task 6) and the benchmark Job (Task 7).
