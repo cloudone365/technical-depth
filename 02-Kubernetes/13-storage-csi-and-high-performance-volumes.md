@@ -149,9 +149,11 @@ A claim in the LLM stack meets one quota, checked by the root API server when yo
 All commands run from `02-Kubernetes/lab` with `KUBECONFIG` set to the lab file:
 
 ```bash
-cd "02-Kubernetes/lab"
+# ▶ MacBook · 02-Kubernetes/lab
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 ```
+
+Blocks marked `dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab` run a script on the Spark from the repo copy set up in the guide's *Where each command runs*, with the kubeconfig copied there as in [Chapter 02 §5](02-etcd-database-deep-dive.md) (`export KUBECONFIG=~/.kube/spark-lab.yaml`).
 
 ### 5.1 StorageClasses, the WFFC lifecycle, and the quotas
 
@@ -181,7 +183,12 @@ export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 #### Run it
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo mkdir -p /data/k8s            # on the Spark (the 01-Ansible vclusters role already did)
+```
+
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/install-addons.sh storage
 kubectl --context spark-root get sc
 kubectl --context spark-root -n local-path-storage get cm local-path-config -o jsonpath='{.data.config\.json}{"\n"}'
@@ -193,6 +200,7 @@ Expected: `local-path (default)`, `local-nvme`, `local-nvme-retain` on the root;
 Before creating the model cache, let the root API server check it. A server-side dry run runs quota admission without persisting anything:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root-llms/10-tenancy
 kubectl --context spark-root apply -k manifests/root-llms/60-storage --dry-run=server
 kubectl --context spark-root -n llm-serving describe resourcequota serving-budget | grep storage
@@ -203,6 +211,7 @@ Do the arithmetic yourself: the PVC's request must be ≤ what's left of `servin
 A vCluster claim meets two. Ask dev-lab's API server about a claim in `tenant-alpha`, then read both budgets:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab apply -k manifests/dev-lab/00-platform
 kubectl --context dev-lab apply -k manifests/dev-lab/10-tenancy
 kubectl --context dev-lab -n tenant-alpha apply --dry-run=server -f - <<'EOF'
@@ -218,6 +227,7 @@ kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budge
 Expected: the inner layer says no — the LimitRange caps one claim at 50 Gi. At 50 Gi the dry run passes, because dev-lab's API server only knows its own quotas; the root's check happens later, when the syncer creates the copy in `vc-dev-lab`, and a refusal there shows up as a syncer event on a `Pending` PVC (§3.4: 100 + 100 + 5 > 200). Now create the model cache:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root-llms/60-storage
 kubectl --context spark-root -n llm-serving get pvc model-cache
 kubectl --context spark-root -n llm-serving describe pvc model-cache | tail -3
@@ -252,6 +262,7 @@ Expected: `model-cache  Pending  …  local-nvme-retain`, with event `WaitForFir
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving create secret generic hf-token --from-literal=token="$HF_TOKEN" 2>/dev/null || true
 kubectl --context spark-root apply -f manifests/root-llms/60-storage/model-prefetch-job.yaml
 kubectl --context spark-root -n llm-serving logs -f job/model-prefetch
@@ -261,6 +272,7 @@ kubectl --context spark-root -n llm-serving get pvc model-cache
 Follow the binding to the disk:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n llm-serving get pvc model-cache \
   -o jsonpath='{.metadata.annotations.volume\.kubernetes\.io/selected-node}{"\n"}'
 PV=$(kubectl --context spark-root -n llm-serving get pvc model-cache -o jsonpath='{.spec.volumeName}')
@@ -298,6 +310,7 @@ The download time is illustrative. Claim and PV are both root objects here, so t
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab apply -k manifests/dev-lab/00-platform
 kubectl --context dev-lab apply -k manifests/dev-lab/10-tenancy
 kubectl --context dev-lab -n lab-tools apply -f - <<'EOF'
@@ -315,15 +328,28 @@ spec:
   volumes: [{name: d, persistentVolumeClaim: {claimName: throwaway}}]
 EOF
 kubectl --context dev-lab -n lab-tools wait --for=jsonpath='{.status.phase}'=Succeeded pod/writer --timeout=120s
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo ls /data/k8s/vc-dev-lab/throwaway-x-lab-tools-x-dev-lab                 # on the Spark: f
+```
+
+```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab -n lab-tools delete pod writer
 kubectl --context dev-lab -n lab-tools delete pvc throwaway
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sleep 10; sudo ls /data/k8s/vc-dev-lab/throwaway-x-lab-tools-x-dev-lab 2>&1 # gone (Delete)
 ```
 
 Deleting the PVC in dev-lab deletes its root copy; the root PV's reclaim policy then decides what happens to the directory. Do the same with `model-cache` and the directory and the root PV (`Released`) survive. To re-use a Released PV, clear its `claimRef` — a root operation, since the PV is the root's:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root patch pv <pv-name> --type json -p '[{"op":"remove","path":"/spec/claimRef"}]'
 ```
 
@@ -357,6 +383,7 @@ A recreated claim in `llm-serving` can then bind to it again (same class, compat
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root/00-platform
 kubectl --context spark-root apply -f manifests/root/60-storage/fio-job.yaml
 kubectl --context spark-root -n platform-tools logs -f job/fio-ai | grep -E '^\S+: \(groupid|READ:|WRITE:|lat \(usec\): min.*avg|clat percentiles'
@@ -365,6 +392,7 @@ kubectl --context spark-root -n platform-tools logs -f job/fio-ai | grep -E '^\S
 Pull the JSON summary. The job wrote `/scratch/result.all` (human-readable text plus one JSON document; the `sed` cuts out the JSON) into the PVC directory on the host. This PVC is a root object, so the path uses its own namespace and name:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo sed -n '/^{/,/^}/p' /data/k8s/platform-tools/fio-scratch/result.all | jq -r '.jobs[] | [.jobname, (.read.bw_bytes/1e9|tostring+" GB/s rd"), (.write.bw_bytes/1e9|tostring+" GB/s wr"), (.read.iops|floor|tostring+" rIOPS"), ((.read.clat_ns.percentile["99.000000"] // 0)/1000|floor|tostring+" µs p99")] | @tsv'
 ```
 
@@ -394,9 +422,14 @@ Clean up: `kubectl --context spark-root delete -f manifests/root/60-storage/fio-
 `uma-watch.sh` takes a pod's namespace, name and context (for a vCluster pod it finds the host copy first) and prints the host pool next to that pod's cgroup:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 # terminal A (on the Spark): watch the pool while vLLM (Chapter 20) loads
 POD=$(kubectl --context spark-root -n llm-serving get pod -l app=vllm -o jsonpath='{.items[0].metadata.name}')
 scripts/uma-watch.sh llm-serving "$POD" spark-root 2
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 # terminal B: restart vLLM once with a warm cache, once after dropping it
 kubectl --context spark-root -n llm-serving rollout restart deploy/vllm
 sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'; kubectl --context spark-root -n llm-serving rollout restart deploy/vllm
@@ -409,6 +442,7 @@ The restart creates a new pod, so re-run terminal A with the new name once it's 
 ## 6. Verify
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/verify.sh storage
 ```
 

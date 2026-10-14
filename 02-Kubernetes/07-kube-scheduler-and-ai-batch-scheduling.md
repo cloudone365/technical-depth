@@ -149,7 +149,7 @@ Memory is different: it is **shared on purpose**. Serving may use the whole ~90 
 ## 5. Lab
 
 ```bash
-cd "02-Kubernetes/lab"
+# ▶ MacBook · 02-Kubernetes/lab
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 ```
 
@@ -174,6 +174,7 @@ export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/install-addons.sh kueue                                  # on the root (kubectl --context spark-root …)
 kubectl --context spark-root apply -k manifests/root-llms/20-scheduling
 kubectl --context spark-root get resourceflavors,clusterqueues
@@ -205,6 +206,7 @@ Expected: `spark-cq` with `PENDING WORKLOADS 0`, `train` pointing at it, and `ve
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n kube-system get pods -l component=kube-scheduler     # the only scheduler
 kubectl --context spark-root describe node dgx-spark-1 | sed -n '/Allocated resources/,/Events/p'
 kubectl --context dev-lab describe node dgx-spark-1 | sed -n '/Allocated resources/,/Events/p'
@@ -237,7 +239,8 @@ The root's node view counts every pod on the Spark, the model servers in `llm-se
 Preemption needs a *full node*, and inside a vCluster the root quota refuses pods long before the node fills up. So the demo runs at the root, in `platform-tools`. First fill every free slice with preemptible pods:
 
 ```bash
-command -v yq >/dev/null || sudo sh -c 'wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.47.1/yq_linux_$(dpkg --print-architecture) && chmod +x /usr/local/bin/yq'
+# ▶ MacBook · 02-Kubernetes/lab
+command -v yq >/dev/null || brew install yq                     # mikefarah yq (02 guide toolchain)
 yq 'select(.kind=="Deployment")' manifests/root/20-scheduling/preemption-demo.yaml | kubectl --context spark-root apply -f -
 alloc=$(kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}')
 used=$(kubectl --context spark-root get pods -A -o json | jq '[.items[] | select(.status.phase=="Running" and (.metadata.labels.app // "") != "filler") | .spec.containers[].resources.limits["nvidia.com/gpu"] // "0" | tonumber] | add // 0')
@@ -248,6 +251,7 @@ kubectl --context spark-root -n platform-tools get pods -l app=filler           
 Now one serving-priority pod arrives:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 yq 'select(.kind=="Pod")' manifests/root/20-scheduling/preemption-demo.yaml | kubectl --context spark-root apply -f -
 kubectl --context spark-root -n platform-tools get pod urgent -w                      # Pending, then Running a few seconds later
 kubectl --context spark-root -n platform-tools get events --field-selector reason=Preempted
@@ -264,6 +268,7 @@ The filler Deployment immediately recreates its lost pod, which now sits `Pendin
 **Across the cluster boundary.** Keep the node full (the filler is still there), delete `urgent`, and send the serving pod from the **dev-llms** sandbox instead:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n platform-tools delete pod urgent
 kubectl --context dev-llms apply -f - <<'EOF'
 apiVersion: v1
@@ -287,6 +292,7 @@ Expected: a filler pod in the **root's** `platform-tools` is preempted to make r
 Clean up:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-llms -n llm-sandbox delete pod urgent-from-dev-llms
 kubectl --context spark-root delete -f manifests/root/20-scheduling/preemption-demo.yaml --ignore-not-found
 ```
@@ -312,6 +318,7 @@ kubectl --context spark-root delete -f manifests/root/20-scheduling/preemption-d
 dev-lab has no Kueue, and its root budget is exactly 2 slices. Make sure nothing else in dev-lab holds a slice (`scripts/breakfix.sh reset 02`, delete `tenant-beta/gpu-smoke`), then submit two 2-rank jobs that each need both:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget | grep nvidia     # used 0, hard 2
 kubectl --context dev-lab apply -f manifests/dev-lab/20-scheduling/no-kueue-deadlock.yaml
 kubectl --context dev-lab -n lab-tools get pods -l demo=deadlock -o wide
@@ -330,6 +337,7 @@ job-x-1-…   0/1 Pending   job-y-1-…   0/1 Pending
 Both jobs hold a slice and neither can progress. Now ask *who* is holding the rank-1 pods back:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab -n lab-tools describe pod -l demo=deadlock | grep -E '^Name:|exceeded quota|Scheduled' 
 kubectl --context spark-root -n vc-dev-lab get pods | grep -- '-x-lab-tools-x-dev-lab' | grep job-     # only the two rank-0s exist at the root
 ```
@@ -337,6 +345,7 @@ kubectl --context spark-root -n vc-dev-lab get pods | grep -- '-x-lab-tools-x-de
 Not the scheduler — the node still has free slices. The **root quota** refused the rank-1 pods, so they never reached the scheduler. On a datacenter cluster the same deadlock happens when the *node pool* runs out instead of a quota; either way, a pod-at-a-time admitter can't see that half a gang is worthless. **This is the most expensive failure in AI clusters**: at datacenter scale, it's hundreds of GPUs idling. Clean up:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab delete -f manifests/dev-lab/20-scheduling/no-kueue-deadlock.yaml
 ```
 
@@ -364,6 +373,7 @@ kubectl --context dev-lab delete -f manifests/dev-lab/20-scheduling/no-kueue-dea
 `gang-a` and `gang-b` each need 3 pods × (0.5 CPU · 2 Gi · 1 slice) = 1.5 CPU · 6 Gi · 3 slices; `spark-cq` allows 2 CPU · 12 Gi · 3 slices. Either fits, both don't:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -f manifests/root-llms/20-scheduling/gang-demo-jobs.yaml
 kubectl --context spark-root -n batch get workloads
 kubectl --context spark-root get clusterqueue spark-cq -o jsonpath='{.status.flavorsUsage}' | jq
@@ -388,6 +398,7 @@ gang-b   true        <none>
 Try priority inside the queue. While `gang-a` runs, submit a copy of `gang-b` labelled `urgent`. It jumps ahead of the queued `routine` job:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 yq 'select(.metadata.name=="gang-b") | .metadata.name="gang-c" | .metadata.labels["kueue.x-k8s.io/priority-class"]="urgent"' \
   manifests/root-llms/20-scheduling/gang-demo-jobs.yaml | kubectl --context spark-root apply -f -
 kubectl --context spark-root -n batch get workloads -o custom-columns=NAME:.metadata.name,PRIORITY:.spec.priority,QUEUE:.spec.queueName
@@ -419,6 +430,7 @@ Exercise: why didn't Kueue's 3 slices collide with serving? Add up `spark-cq` (3
 Nodes belong to the root: only the platform admin can taint them, and both vClusters see the taint through node sync.
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root taint node dgx-spark-1 spark.lab/dedicated=gpu:PreferNoSchedule
 kubectl --context dev-lab get node dgx-spark-1 -o jsonpath='{.spec.taints}{"\n"}'               # synced into the vCluster
 kubectl --context dev-lab apply -f manifests/dev-lab/20-scheduling/taints-affinity.yaml
@@ -436,6 +448,7 @@ Why `PreferNoSchedule` and not `NoSchedule`? On a one-node lab, `NoSchedule` sto
 ## 6. Verify
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 tests/kueue-gang-test.sh
 ```
 

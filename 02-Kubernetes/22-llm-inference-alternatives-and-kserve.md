@@ -298,7 +298,7 @@ The cost of the operator is visible too: compare `kubectl --context spark-root d
 For a quick single-user comparison on the host (DGX OS ships Docker, which shares containerd with the kubelet but not its accounting):
 
 ```bash
-# ▶ dgx-spark-1 (ssh dgx-spark-1)
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 docker run -d --gpus=all -p 11434:11434 -v ollama:/root/.ollama --name ollama ollama/ollama
 docker exec ollama ollama run qwen2.5:0.5b "One sentence about unified memory."
 python3 scripts/ttft_probe.py --url http://localhost:11434 --model qwen2.5:0.5b -n 5   # Ollama speaks the OpenAI API at /v1

@@ -171,7 +171,7 @@ The root audit log sees what reached the root: a tenant's pod appears as a **cre
 #### Run it
 
 ```bash
-cd "02-Kubernetes/lab"
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo grep -E 'audit-|encryption-provider' /etc/kubernetes/manifests/kube-apiserver.yaml
 kubectl --context spark-root -n default create secret generic enc-test --from-literal=password=hunter2
 sudo ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt \
@@ -184,6 +184,7 @@ Expected: the flags are there, and the stored value begins `k8s:enc:aescbc:v1:ke
 Secrets created **before** encryption was switched on would still be stored in plaintext until they're written again. On this lab encryption was on from the first second, but the habit matters after any key change:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root get secrets -A -o json | kubectl --context spark-root replace -f - >/dev/null && echo re-encrypted
 ```
 
@@ -214,6 +215,7 @@ kubectl --context spark-root get secrets -A -o json | kubectl --context spark-ro
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 for d in 00-platform 10-tenancy 15-admission 16-apf; do kubectl --context dev-lab apply -k manifests/dev-lab/$d; done
 for d in 00-platform 10-tenancy 15-admission; do kubectl --context dev-llms apply -k manifests/dev-llms/$d; done
 for d in 00-platform 10-tenancy 15-admission; do kubectl --context spark-root apply -k manifests/root-llms/$d; done
@@ -241,6 +243,7 @@ kubectl --context dev-lab get validatingadmissionpolicies
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/make-user.sh alice team-alpha          # signed by dev-lab's CA
 scripts/make-user.sh bob   team-beta
 export ALICE=$PWD/.cache/alice.kubeconfig
@@ -256,6 +259,7 @@ Groups      [team-alpha system:authenticated]
 Now point Alice's certificate at the root:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 KUBECONFIG=$ALICE kubectl --server https://192.168.0.100:6443 --insecure-skip-tls-verify get ns
 # error: You must be logged in to the server (Unauthorized)
 ```
@@ -282,6 +286,7 @@ The root doesn't trust dev-lab's CA, so Alice isn't even a user there. That's a 
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab auth can-i --list -n tenant-alpha --as=alice --as-group=team-alpha | head -20
 for v in "create pods -n tenant-alpha" "create pods -n tenant-beta" "update resourcequota -n tenant-alpha" \
          "watch secrets -n tenant-alpha" "list nodes"; do
@@ -302,6 +307,7 @@ list nodes                               yes
 Now as Alice for real:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 KUBECONFIG=$ALICE kubectl -n tenant-beta get pods
 # Error from server (Forbidden): pods is forbidden: User "alice" cannot list resource "pods" in API group "" in the namespace "tenant-beta"
 ```
@@ -309,6 +315,7 @@ KUBECONFIG=$ALICE kubectl -n tenant-beta get pods
 And what can a vCluster's syncer do on the root?
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root auth can-i --list -n vc-dev-lab --as=system:serviceaccount:vc-dev-lab:vc-dev-lab | head
 kubectl --context spark-root auth can-i create pods -n vc-dev-llms --as=system:serviceaccount:vc-dev-lab:vc-dev-lab    # no
 kubectl --context spark-root auth can-i create pods -n llm-serving --as=system:serviceaccount:vc-dev-lab:vc-dev-lab    # no
@@ -333,6 +340,7 @@ kubectl --context spark-root auth can-i create pods -n llm-serving --as=system:s
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/verify.sh admission
 ```
 
@@ -355,6 +363,7 @@ scripts/verify.sh admission
 Read one denial in full, so you can recognize it in a pipeline log:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab create --dry-run=server -f tests/policy/deny-gpu-two-slices.yaml
 ```
 
@@ -395,6 +404,7 @@ The CEL behind it uses optional-field access, so pods without `resources` don't 
 Generate tenant load as Alice (32 parallel LIST loops), and watch as admin in dev-lab *and* at the root:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 # terminal A — Alice misbehaves
 for i in $(seq 32); do (while true; do KUBECONFIG=$ALICE kubectl -n tenant-alpha get pods -o name >/dev/null 2>&1; done &) ; done
 
@@ -431,8 +441,13 @@ Expected: in dev-lab, `current_inqueue_requests{priority_level="spark-tenants"}`
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 KUBECONFIG=$ALICE kubectl -n tenant-alpha run audit-demo --image=registry.k8s.io/pause:3.10 \
   --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65532,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"audit-demo","image":"registry.k8s.io/pause:3.10","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}'
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo jq -c 'select(.objectRef.namespace=="vc-dev-lab" and .objectRef.resource=="pods" and .verb=="create")
   | {t:.requestReceivedTimestamp, user:.user.username, name:.objectRef.name, code:.responseStatus.code}' \
   /var/log/kubernetes/audit/audit.log | tail -3
@@ -449,6 +464,7 @@ The root saw the **syncer** create the pod. To answer "which *person* did it?", 
 ## 6. Verify
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/verify.sh tenancy admission
 ```
 

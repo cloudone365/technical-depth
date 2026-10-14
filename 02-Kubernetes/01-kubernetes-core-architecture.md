@@ -236,7 +236,7 @@ Tasks 1–7 below, in order. Task 1 and every `sudo` / `crictl` line run on the 
 ### Task 1 · Preflight
 
 ```bash
-cd "02-Kubernetes/lab"
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 scripts/preflight.sh
 ```
 
@@ -264,7 +264,7 @@ Expected (abridged):
 ### Task 2 · See the control plane as static pods
 
 ```bash
-ssh dgxadmin@192.168.0.100
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 ls /etc/kubernetes/manifests/
 sudo crictl ps --name 'kube-|etcd' -o table
 sudo ss -ltnp | grep -E ':(6443|10250|10257|10259|2379|2381) '
@@ -274,6 +274,7 @@ kubectl --context spark-root -n kube-system get pods -o wide | grep -E 'apiserve
 Expected: four YAML files; four running containers; each port owned by its own process (`kube-apiserver`, `etcd`, …) and `kubelet` on 10250; and four `…-dgx-spark-1` mirror pods. Delete one of them with `kubectl delete pod` and watch it come straight back — the kubelet owns static pods, not the API server.
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo grep -A3 'audit-policy-file\|encryption-provider' /etc/kubernetes/manifests/kube-apiserver.yaml | head -8
 sudo cat /var/lib/kubelet/config.yaml | grep -A3 -E 'systemReserved|kubeReserved|evictionHard'
 ```
@@ -283,6 +284,7 @@ The flags and reservations from the 01-Ansible kubeadm config are visible exactl
 ### Task 3 · Ask the API server how healthy it is
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root get --raw='/readyz?verbose' | tail -8
 kubectl --context spark-root get --raw='/livez?verbose' | grep -v '^\[+\]' || echo "all livez checks OK"
 kubectl --context spark-root get lease -n kube-system        # scheduler + controller-manager leader leases
@@ -296,18 +298,21 @@ Expected: `readyz check passed`, Leases `kube-scheduler` and `kube-controller-ma
 Terminal A (the tenant's view):
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab -n tenant-beta get events -w --field-selector involvedObject.name=gpu-smoke
 ```
 
 Terminal B (the platform's view):
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n vc-dev-lab get events -w | grep gpu-smoke
 ```
 
 Terminal C:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab apply -k manifests/dev-lab/00-platform && kubectl --context dev-lab apply -k manifests/dev-lab/10-tenancy
 kubectl --context dev-lab apply -f manifests/dev-lab/70-gpu/gpu-smoke.yaml
 kubectl --context dev-lab -n tenant-beta get pod gpu-smoke -w -o wide
@@ -326,6 +331,7 @@ Normal  Started    pod/gpu-smoke-x-tenant-beta-x-dev-lab  Started container smi
 The same events appear in dev-lab under the tenant's name: vCluster copies them up.
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab -n tenant-beta logs gpu-smoke
 ```
 
@@ -340,6 +346,7 @@ NVIDIA GB10, 12.1, 580.xx, [N/A]
 ### Task 5 · Find the same pod one layer down (CRI)
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo crictl pods --name gpu-smoke
 POD=$(sudo crictl pods --name gpu-smoke -q | head -1)
 sudo crictl inspectp "$POD" | jq '.info.runtimeSpec.linux.namespaces, .status.network'
@@ -351,6 +358,7 @@ The node only knows the root name (`gpu-smoke-x-tenant-beta-x-dev-lab`). The **s
 ### Task 6 · …and in the OCI spec: where the GPU came from
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 CID=$(sudo crictl ps -a --pod "$POD" -q | head -1)
 sudo crictl inspect "$CID" | jq -r '.info.runtimeType, (.info.config.envs[]? | select(.key|test("NVIDIA")) | "\(.key)=\(.value)")'
 ```
@@ -360,6 +368,7 @@ Expected: runtime `io.containerd.runc.v2` with the `nvidia` handler, and `NVIDIA
 ### Task 7 · Read the object as each API server stored it
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab get --raw /api/v1/namespaces/tenant-beta/pods/gpu-smoke | jq '.metadata.managedFields[].manager'
 kubectl --context spark-root -n vc-dev-lab get pod -o name | grep gpu-smoke
 kubectl --context spark-root -n vc-dev-lab get pod gpu-smoke-x-tenant-beta-x-dev-lab -o json \
@@ -408,6 +417,7 @@ In dev-lab the managers are `kubectl-client-side-apply` and the syncer (writing 
 One minor version at a time (1.36 → 1.37), control plane first, then kubelets. On a single node the workloads restart with the kubelet; schedule it.
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 # 1. kubeadm itself (the 01-Ansible role holds the packages; unhold for the upgrade)
 sudo apt-mark unhold kubeadm && sudo apt-get install -y kubeadm=1.37.x-1.1 && sudo apt-mark hold kubeadm
 # (new minor = new pkgs.k8s.io repo: set kubeadm_cluster_version in 01-Ansible first, it switches the repo)
@@ -418,6 +428,10 @@ kubectl --context spark-root drain dgx-spark-1 --ignore-daemonsets --delete-empt
 sudo apt-mark unhold kubelet kubectl && sudo apt-get install -y kubelet=1.37.x-1.1 kubectl=1.37.x-1.1 && sudo apt-mark hold kubelet kubectl
 sudo systemctl daemon-reload && sudo systemctl restart kubelet
 kubectl --context spark-root uncordon dgx-spark-1
+```
+
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/verify.sh
 ```
 

@@ -146,7 +146,7 @@ A tenant's Deployment never reaches the root. Its **ReplicaSet and Pods are crea
 ## 5. Lab
 
 ```bash
-cd "02-Kubernetes/lab"
+# ▶ MacBook · 02-Kubernetes/lab
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 ```
 
@@ -176,6 +176,7 @@ The `sudo` lines run on the Spark (`ssh dgxadmin@192.168.0.100`).
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n kube-system get lease kube-controller-manager kube-scheduler \
   -o custom-columns=NAME:.metadata.name,HOLDER:.spec.holderIdentity,RENEWED:.spec.renewTime,DURATION:.spec.leaseDurationSeconds
 watch -n1 "kubectl --context spark-root -n kube-system get lease kube-controller-manager -o jsonpath='{.spec.renewTime}'"
@@ -186,6 +187,7 @@ Expected: `renewTime` advances every ~2 s. If it stops for > 15 s, nothing the r
 Now look at the node, not the API:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 pgrep -a kube-controller | cut -c1-160          # on the Spark
 sudo crictl ps --name 'kube-controller-manager|syncer' -o table
 ```
@@ -193,7 +195,12 @@ sudo crictl ps --name 'kube-controller-manager|syncer' -o table
 Expected: **three** `kube-controller-manager` processes — the root's static pod and one inside each vCluster's control-plane pod (`dev-lab-0`, `dev-llms-0`). Containers are just processes with namespaces; the host sees them all. Compare their flags:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 for p in $(pgrep kube-controller); do echo "== $p"; tr '\0' '\n' < /proc/$p/cmdline | grep -E -- '--(controllers|leader-elect|kubeconfig|cluster-cidr|allocate-node-cidrs)' ; done
+```
+
+```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab -n kube-system get lease
 ```
 
@@ -221,6 +228,7 @@ What to look for: the root's has `--allocate-node-cidrs=true --cluster-cidr=10.4
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab apply -k manifests/dev-lab/30-networking     # echo Deployment (3 replicas) in lab-tools
 kubectl --context dev-lab -n lab-tools get deploy,rs,pod -l app=echo -o wide
 kubectl --context dev-lab -n lab-tools get events -w &                 # leave running
@@ -238,6 +246,7 @@ Expected events: `SuccessfulCreate` from `replicaset-controller` within ~1 s of 
 Now the root's view of the same thing:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n vc-dev-lab get deploy,rs                # nothing for echo: those objects exist only in dev-lab
 kubectl --context spark-root -n vc-dev-lab get pods -o custom-columns=HOST:.metadata.name,VIRTUAL:.metadata.annotations.vcluster\\.loft\\.sh/object-name,OWNER:.metadata.ownerReferences[0].kind \
   | grep -E 'HOST|echo'
@@ -272,6 +281,7 @@ The host pods have no ReplicaSet owner. (The `OWNER` column shows what vCluster 
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab -n tenant-alpha describe resourcequota tenant-budget
 kubectl --context dev-lab apply -f manifests/dev-lab/50-workloads/tokenizer-indexed-job.yaml
 kubectl --context dev-lab -n tenant-alpha get pods -l job-name=tokenize-shards -w     # 2 at a time (parallelism)
@@ -284,15 +294,28 @@ Expected while the job runs: `requests.cpu 400m/500m`, `limits.cpu 400m/500m`, `
 The **admission** plugin blocks a pod that *would* exceed `hard`, and charges `used` inline as it admits. The **controller** recalculates `used` in the background — and is the only thing that *releases* usage when pods go away. Prove it by stopping the root's controller-manager:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo mv /etc/kubernetes/manifests/kube-controller-manager.yaml /etc/kubernetes/        # NOT a sibling file in manifests/: the kubelet would run it
 until ! sudo crictl ps --name kube-controller-manager -q | grep -q .; do sleep 1; done
+```
+
+```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n vc-dev-lab get resourcequota vcluster-budget -o jsonpath='{.status.used.requests\.cpu}{"\n"}'
 kubectl --context dev-lab -n lab-tools scale deploy echo --replicas=1                    # dev-lab's controllers still work
 kubectl --context dev-lab -n lab-tools get pods -l app=echo                              # 1 pod: deleted in dev-lab AND at the root
 kubectl --context spark-root -n vc-dev-lab get resourcequota vcluster-budget -o jsonpath='{.status.used.requests\.cpu}{"\n"}'   # unchanged
 kubectl --context spark-root -n platform-tools delete pod -l app=slice-ledger --wait=false
 kubectl --context spark-root -n platform-tools get pods -l app=slice-ledger               # gone, NOT replaced: the root's RS controller is down
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo mv /etc/kubernetes/kube-controller-manager.yaml /etc/kubernetes/manifests/
+```
+
+```bash
+# ▶ MacBook · any folder
 sleep 30; kubectl --context spark-root -n vc-dev-lab get resourcequota vcluster-budget -o jsonpath='{.status.used.requests\.cpu}{"\n"}'   # drops
 kubectl --context spark-root -n platform-tools get pods -l app=slice-ledger               # back
 kubectl --context dev-lab -n lab-tools scale deploy echo --replicas=3
@@ -307,6 +330,7 @@ What you just saw:
 Check the Indexed Job:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab -n tenant-alpha logs -l job-name=tokenize-shards --prefix | sort
 kubectl --context dev-lab -n tenant-alpha get job tokenize-shards -o jsonpath='{.status.completedIndexes}{"\n"}'
 ```
@@ -335,6 +359,7 @@ kubectl --context dev-lab -n tenant-alpha get job tokenize-shards -o jsonpath='{
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab -n lab-tools get rs -l app=echo -o jsonpath='{.items[0].metadata.ownerReferences}' | jq
 kubectl --context dev-lab -n lab-tools delete deploy echo --cascade=orphan
 kubectl --context dev-lab -n lab-tools get rs,pod -l app=echo        # RS + pods still there, no owner now
@@ -366,6 +391,7 @@ Adoption is a controller feature, and a common surprise when two Deployments sha
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root/45-controller     # already there if you ran scripts/apply-lab.sh root
 kubectl --context spark-root -n platform-tools logs deploy/slice-ledger -f &
 kubectl --context spark-root apply -k manifests/root/70-gpu
@@ -398,6 +424,7 @@ The four `bf02` pods that dev-lab shows as Pending are **not** in the ledger: th
 Now test the three robustness properties:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 # idempotency: no write when nothing changes → log stays quiet across resyncs
 sleep 130; kubectl --context spark-root -n platform-tools logs deploy/slice-ledger --since=2m | grep -c reconciled   # 0
 
@@ -437,6 +464,7 @@ scripts/breakfix.sh reset 02; kill %1
 Everything in §2 applies to vCluster's syncer: it has informers on two API servers, reconciles keys, and writes only differences. Make it reconcile:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab -n lab-tools get pods -l app=echo -w &
 HPOD=$(kubectl --context spark-root -n vc-dev-lab get pods -o name | grep -- '-x-lab-tools-x-dev-lab' | grep echo | head -1)
 kubectl --context spark-root -n vc-dev-lab delete "$HPOD" --wait=false
@@ -447,6 +475,7 @@ Expected: the virtual pod that copy belonged to is deleted in dev-lab too (a pod
 Now see who writes the host copy, and how fast:
 
 ```bash
+# ▶ MacBook · any folder
 kill %1
 kubectl --context spark-root -n vc-dev-lab get pods -o json | jq -r '.items[] | select(.metadata.name|test("echo")) | .metadata.managedFields[].manager' | sort | uniq -c
 kubectl --context spark-root get --raw /metrics | grep -E 'apiserver_flowcontrol_dispatched_requests_total\{.*spark-vcluster-syncers' | head -3

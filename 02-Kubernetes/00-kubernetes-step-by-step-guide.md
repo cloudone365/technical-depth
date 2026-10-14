@@ -26,6 +26,32 @@ This page is the build order for the whole module. Each section below is one cha
 
 **The Spark is your playground.** Everything a chapter does can be undone: `scripts/breakfix.sh reset all` for drills, and for a full rebuild the Semaphore templates `19.2 Reset Kubernetes` (extra variable `reset_confirm: RESET`) → `19.1 Kubernetes` → `20.1 GPU Operator` → `20.2 vClusters`, then `fetch-kubeconfig.sh sema01` again. Semaphore and Vault live outside the Spark, so nothing you break here can take them with it. Breaking things on purpose is part of the course.
 
+## Where each command runs
+
+Every shell block starts with one `# ▶` line that says where to run it:
+
+| Location line | Where | What runs there | How to get there |
+|---|---|---|---|
+| `# ▶ MacBook · 02-Kubernetes/lab` | your MacBook, in this module's lab folder | `kubectl`/`helm` with lab files, `scripts/*.sh` that only call the API (`apply-lab.sh`, `install-addons.sh`, `verify.sh`, `breakfix.sh`, `make-user.sh`, `collect-diag.sh`, …), `tests/*`, the Python calculators | `cd ~/technical-depth/02-Kubernetes/lab` |
+| `# ▶ MacBook · any folder` | your MacBook | `kubectl`/`helm`/`curl`/`ssh` one-liners with no relative paths | a new terminal |
+| `# ▶ dgx-spark-1 (ssh dgx-spark-1)` | the Spark, as `dgxadmin` | `sudo`, `etcdctl`, `crictl`, `nvidia-smi`, `systemctl`, `journalctl`, files under `/etc`, `/var`, `/proc`, `/sys` | `ssh dgx-spark-1` |
+| `# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab` | the Spark, in its checkout of this repo | the lab scripts that read the host: `preflight.sh`, `etcd-drill.sh`, `etcd-sandbox.sh` (Docker on the Spark), `pod-netns.sh`, `svc-trace.sh`, `cgroup-inspect.sh`, `uma-watch.sh` | `ssh dgx-spark-1`, then `cd ~/technical-depth/02-Kubernetes/lab` |
+| `# ▶ dgx-spark-2 (ssh dgx-spark-2)` | the optional second Spark | the **(2×)** tasks | `ssh dgx-spark-2` |
+| `# ▶ inside the pod (kubectl exec -it … -- sh)` | a container shell | commands typed inside a pod | the `kubectl exec` the chapter shows |
+
+Semaphore steps (sema01, 192.168.0.210) are prose that starts with **Semaphore UI:**. On macOS zsh, the `setopt interactivecomments` line from the [01-Ansible guide](../01-Ansible/00-ansible-step-by-step-guide.md#where-each-command-runs) lets you paste blocks that start with `# ▶`.
+
+**Once per MacBook shell:** `export KUBECONFIG=~/technical-depth/01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml` (or put it in `~/.zshrc`). The blocks don't repeat it.
+
+**Once on the Spark: a checkout of this repo** for the scripts that must run there:
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+git clone https://github.com/cloudone365/technical-depth.git ~/technical-depth
+```
+
+Before each session on the Spark, `git -C ~/technical-depth pull`. `kubectl` on the Spark uses `~/.kube/config`, written by `19.1 Kubernetes` (the root's `admin.conf`, context `spark-root`): enough for every root step. The scripts that look up a vCluster pod (`pod-netns.sh … dev-lab`, `svc-trace.sh … dev-lab`) also need the `dev-lab`/`dev-llms` contexts: copy the full lab kubeconfig there and `export KUBECONFIG=~/.kube/spark-lab.yaml` as in [Chapter 02 §5](02-etcd-database-deep-dive.md#5-lab).
+
 ---
 
 ## Before Chapter 01 · Toolchain on your MacBook (20 min)
@@ -33,10 +59,10 @@ This page is the build order for the whole module. Each section below is one cha
 Your MacBook is a `kubectl` client and nothing more. Install the tools, fetch the kubeconfig and prove the lab files are sane ([Chapter 27 §CI](27-hands-on-practice-exercises-workbook.md#ci-the-workbook-for-your-laptop) runs the same checks in CI):
 
 ```bash
-cd "technical-depth/02-Kubernetes/lab"
+# ▶ MacBook · 02-Kubernetes/lab
 source ~/.venvs/spark-ansible/bin/activate              # the 01-Ansible venv: keeps pip packages out of the Mac's global Python
 pip install yamllint shellcheck-py pyyaml
-brew install kubectl helm kubeconform yq prometheus bash  # prometheus = promtool; bash 5 (macOS has 3.2; breakfix.sh needs ≥ 4)
+brew install kubectl helm kubeconform yq prometheus bash watch  # prometheus = promtool; bash 5 (macOS has 3.2; breakfix.sh needs ≥ 4); watch is not on macOS
 # versions: versions.env / the CI workflow
 "../../01-Ansible/lab/tools/fetch-kubeconfig.sh" sema01    # kubeconfig from sema01's state volume → 01-Ansible/lab/.cache/ (re-run after 19.1/20.2)
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
@@ -158,6 +184,7 @@ Blue: control plane. Purple: network. Green: GPU and serving. Orange: observabil
 **On the Spark**, from a checkout of this repo in `02-Kubernetes/lab` (Chapter 01 §5 Task 1–2):
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 scripts/preflight.sh
 ls /etc/kubernetes/manifests/
 sudo crictl ps --name 'kube-|etcd' -o table
@@ -172,6 +199,7 @@ Then follow one pod through the API server, scheduler, kubelet, containerd and t
 **On the Spark.** The 01-Ansible `kubeadm_cluster` role installed an etcd snapshot timer. Prove it, then break Raft where it's safe: in the three-member Docker sandbox, never the root (Chapter 02 §5.1, §5.4, §5.6).
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 scripts/etcd-drill.sh status && scripts/etcd-drill.sh snapshot
 scripts/etcd-sandbox.sh up
 scripts/etcd-sandbox.sh kill-leader
@@ -185,6 +213,7 @@ scripts/etcd-sandbox.sh kill-two
 **On the Spark**, prove the audit policy and Secret encryption the `kubeadm_cluster` role switched on (Chapter 03 §5 Task 1):
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 kubectl --context spark-root get secrets -A -o json | kubectl --context spark-root replace -f - >/dev/null   # re-encrypt old Secrets
 kubectl --context spark-root -n default create secret generic enc-test --from-literal=k=v
 sudo ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt \
@@ -196,6 +225,7 @@ sudo tail -2 /var/log/kubernetes/audit/audit.log
 Then tenancy, admission, fairness and real users (Chapter 03 §5 Task 2–7):
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/apply-lab.sh root                  # platform namespaces, vCluster budgets, syncer APF lane, LLM namespaces + quotas + admission (root-llms), …
 for d in 00-platform 10-tenancy 15-admission 16-apf; do kubectl --context dev-lab apply -k manifests/dev-lab/$d; done
 for d in 00-platform 10-tenancy 15-admission; do kubectl --context dev-llms apply -k manifests/dev-llms/$d; done
@@ -210,6 +240,7 @@ scripts/verify.sh tenancy admission
 Install the root's add-ons and (re)install the vClusters (Chapter 04 §6.1). `install-addons.sh vclusters` does what the Semaphore template `20.2 vClusters` does, with `helm upgrade --install`, so it's safe to re-run:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/install-addons.sh storage
 scripts/install-addons.sh metrics-server
 scripts/install-addons.sh kps
@@ -227,6 +258,7 @@ Then look around, follow one pod through both clusters and spend a budget (Chapt
 Study the whole platform before building it out: the master tables, the capacity plan and the build order with a gate after each stage (Chapter 05 §3–4). The rest of this guide follows that order. Run the gates you can already pass:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/verify.sh platform vclusters
 ```
 
@@ -243,6 +275,7 @@ scripts/verify.sh platform vclusters
 Watch three controller-managers on one node, then run your own controller on the root (Chapter 06 §5):
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab apply -k manifests/dev-lab/30-networking
 kubectl --context spark-root apply -k manifests/root/45-controller
 kubectl --context spark-root -n platform-tools logs deploy/slice-ledger
@@ -255,6 +288,7 @@ kubectl --context spark-root -n platform-tools logs deploy/slice-ledger
 Kueue runs on the root, next to the models. Reproduce the partial-gang deadlock without it in dev-lab, then fix it with gang admission in the root's `batch` namespace (Chapter 07 §5.4–5.5):
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/install-addons.sh kueue                       # on the root
 kubectl --context spark-root apply -k manifests/root-llms/20-scheduling
 scripts/verify.sh llm-budget                          # Kueue spark-cq: 2 12Gi 3 (= batch-budget)
@@ -270,8 +304,13 @@ tests/kueue-gang-test.sh
 ## Chapter 08 · Kubernetes networking deep dive → [document](08-kubernetes-networking-deep-dive.md)
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 pod=$(kubectl --context dev-lab -n lab-tools get pod -l app=echo -o jsonpath='{.items[0].metadata.name}')
 scripts/pod-netns.sh lab-tools "$pod" dev-lab         # finds the pod's real copy on the root
+```
+
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh inject 06                         # fix it, then: scripts/breakfix.sh answer 06
 ```
 
@@ -284,6 +323,7 @@ scripts/breakfix.sh inject 06                         # fix it, then: scripts/br
 A dev-lab Service is programmed by the **root's** kube-proxy (Chapter 09 §5.1):
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 scripts/svc-trace.sh lab-tools echo dev-lab
 ```
 
@@ -294,6 +334,7 @@ scripts/svc-trace.sh lab-tools echo dev-lab
 Turn on query logging and the `lab.local` zone on the root, then measure the ndots tax in dev-lab's own CoreDNS (Chapter 10 §5.2–5.3):
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -f manifests/root/30-networking/coredns-corefile.yaml
 ```
 
@@ -302,6 +343,7 @@ kubectl --context spark-root apply -f manifests/root/30-networking/coredns-coref
 ## Chapter 11 · Ingress controllers & Gateway API → [document](11-ingress-controllers-and-gateway-api.md)
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/install-addons.sh traefik                     # on the root, namespace ingress → 192.168.0.115
 kubectl --context spark-root apply -k manifests/root-llms/40-ingress
 echo "192.168.0.115 llm.lab.local gw.lab.local" | sudo tee -a /etc/hosts      # on your MacBook
@@ -317,6 +359,7 @@ scripts/verify.sh ingress
 ## Chapter 12 · Advanced workload controllers → [document](12-advanced-workload-controllers.md)
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root-llms/50-workloads
 kubectl --context dev-lab apply -f manifests/dev-lab/50-workloads/tokenizer-indexed-job.yaml
 kubectl --context spark-root apply -k manifests/root/50-workloads
@@ -327,6 +370,7 @@ kubectl --context spark-root apply -k manifests/root/50-workloads
 ## Chapter 13 · Storage, CSI & high-performance volumes → [document](13-storage-csi-and-high-performance-volumes.md)
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root-llms/60-storage
 kubectl --context spark-root apply -f manifests/root-llms/60-storage/model-prefetch-job.yaml
 kubectl --context spark-root apply -f manifests/root/60-storage/fio-job.yaml
@@ -339,6 +383,7 @@ kubectl --context spark-root apply -f manifests/root/60-storage/fio-job.yaml
 The tenancy you applied in Chapter 03, now under load. Both budget layers first (Chapter 14 §5.1), then QoS, throttling and the UMA question:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget
 kubectl --context dev-lab -n tenant-alpha describe resourcequota tenant-budget
 kubectl --context spark-root apply -f manifests/root/12-cgroups/qos-trio.yaml -f manifests/root/12-cgroups/cpu-throttle.yaml
@@ -358,6 +403,7 @@ scripts/breakfix.sh inject 02                         # a vCluster budget, spent
 **On the Spark** `nvidia-smi` and the host inventory (Chapter 15 §5.1), then the node as each cluster sees it and a single-slice baseline on the root (§5.2–5.4):
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-llms get node dgx-spark-1 -L spark.lab/gpu,nvidia.com/gpu.product,nvidia.com/gpu.replicas
 kubectl --context spark-root apply -k manifests/root/70-gpu
 kubectl --context spark-root apply -f manifests/root/70-gpu/gemm-solo.yaml
@@ -369,6 +415,7 @@ kubectl --context spark-root -n platform-tools logs -f job/gemm-solo
 ## Chapter 16 · NVIDIA Container Toolkit & GPU virtualization → [document](16-nvidia-container-toolkit-and-gpu-virtualization.md)
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n platform-tools scale deploy gemm-contention --replicas=4      # Chapter 16 §5.3 table
 scripts/verify.sh gpu                                  # gpu-smoke from inside dev-lab
 scripts/breakfix.sh inject 10                          # the GPU leak
@@ -383,6 +430,7 @@ Scale `gemm-contention` back to 0 when the table is done.
 Read the operator's state (Chapter 17 §5.1), then the observability stack (§5.4):
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root get clusterpolicies.nvidia.com -o jsonpath='{.items[0].status.state}{"\n"}'
 kubectl --context spark-root apply -k manifests/root/95-observability
 scripts/verify.sh observability      # Grafana http://192.168.0.100:32000 → "Spark · Kubernetes"
@@ -399,6 +447,7 @@ scripts/verify.sh observability      # Grafana http://192.168.0.100:32000 → "S
 ## Chapter 18 · Distributed AI training & NCCL → [document](18-distributed-ai-training-and-nccl.md)
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root-llms/80-distributed/base
 kubectl --context spark-root -n batch logs -f -l job-name=ddp --prefix
 # (2×) kubectl --context spark-root apply -k manifests/root-llms/80-distributed/two-spark
@@ -411,6 +460,7 @@ kubectl --context spark-root -n batch logs -f -l job-name=ddp --prefix
 **On the Spark**, inventory the CX-7 (`ibdev2netdev`, `rdma link show`, Chapter 19 §5.1). Then size real fabrics:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 python3 scripts/fabric_calc.py --nodes 2 --gpus 1 --radix 2 --link-gbps 200
 python3 scripts/fabric_calc.py --nodes 127 --gpus 8 --radix 64 --link-gbps 400
 ```
@@ -426,6 +476,7 @@ python3 scripts/fabric_calc.py --nodes 127 --gpus 8 --radix 64 --link-gbps 400
 ## Chapter 20 · vLLM high-throughput LLM serving → [document](20-vllm-high-throughput-llm-serving.md)
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root-llms/90-serving/vllm
 kubectl --context spark-root apply -f manifests/root-llms/90-serving/vllm/vllm-bench.yaml
 scripts/install-addons.sh keda && kubectl --context spark-root apply -f manifests/root-llms/90-serving/autoscaling.yaml
@@ -439,6 +490,7 @@ scripts/verify.sh serving
 `serving-budget` (90 Gi) holds Triton's 12 Gi beside vLLM's 32 Gi, and Triton's small models add little to vLLM's 0.20 of the pool, so vLLM keeps running ([Chapter 20 §9](20-vllm-high-throughput-llm-serving.md)). Define the two helpers once anyway; you need them whenever a bigger model would push the sum of util values over ~0.72:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 park()   { kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite; }
 unpark() { kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas-; }
 kubectl --context spark-root apply -k manifests/root-llms/90-serving/triton
@@ -453,6 +505,7 @@ kubectl --context spark-root delete -k manifests/root-llms/90-serving/triton
 vLLM keeps running: SGLang (`--mem-fraction-static=0.20`) beside it is 0.40 of the pool and 64 Gi of the 90 Gi. Run SGLang and the KServe predictor one after the other, because three 32 Gi engines (96 Gi) don't fit `serving-budget`. Measure the prefix cache on a second engine, then KServe (Chapter 22 §5.1–5.4):
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root-llms/90-serving/sglang && kubectl --context spark-root -n llm-serving scale deploy sglang --replicas=1
 kubectl --context spark-root -n llm-serving port-forward svc/sglang 30000 &
 python3 scripts/ttft_probe.py --url http://localhost:30000 --model qwen2.5-0.5b
@@ -467,6 +520,7 @@ scripts/install-addons.sh kserve                        # cert-manager + KServe 
 Prefill + decode need 2 × 20 Gi = 40 Gi (requests = limits). Beside vLLM's 32 Gi and the always-on pods that is still inside `serving-budget`'s 90 Gi (with SGLang and KServe scaled down), so no quota changes. Their memory is 0.15 + 0.15 of the pool, 0.50 with vLLM's 0.20 (≤ 0.72); `park` vLLM first only if you load bigger models and the sum would pass ~0.72.
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root-llms/90-serving/pd-disagg
 # … afterwards
 kubectl --context spark-root delete -k manifests/root-llms/90-serving/pd-disagg
@@ -484,6 +538,7 @@ unpark                                                                         #
 ## Chapter 24 · Hyperscaler silicon & compilers → [document](24-hyperscaler-silicon-and-compilers.md)
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -f manifests/root/70-gpu/compile-compare.yaml   # eager vs compiled
 kubectl --context spark-root -n platform-tools logs -f job/compile-compare
 ```
@@ -493,6 +548,7 @@ kubectl --context spark-root -n platform-tools logs -f job/compile-compare
 ## Chapter 25 · Ultra-scale cluster resilience & fault tolerance → [document](25-ultra-scale-cluster-resilience-and-fault-tolerance.md)
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root-llms/80-distributed/resilient      # kill a pod mid-run → RESUMED
 python3 scripts/mtbf_calc.py --gpus 4096 --ckpt-s 0.05 --restart-s 90
 ```
@@ -508,6 +564,7 @@ Then the SDC drill and quarantine on the root (Chapter 25 §5.4); lift the taint
 ## Chapter 26 · Cluster diagnostics & failure scenarios → [document](26-cluster-diagnostics-and-failure-scenarios.md)
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh list                 # 15 drills across all three clusters; 15 only on purpose
 scripts/breakfix.sh inject NN            # diagnose with §1 and §3 only; hint/answer/reset NN
 scripts/collect-diag.sh
@@ -522,6 +579,7 @@ Then rehearse the vCluster failures `breakfix.sh` doesn't script: syncer down, r
 Work the 20 challenges, then the capstone: delete and recreate dev-lab and the root's lab layers, and rebuild the 02 layer to green in under 60 minutes (Chapter 27 *Capstone*).
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/apply-lab.sh && scripts/verify.sh
 ```
 
@@ -532,6 +590,7 @@ scripts/apply-lab.sh && scripts/verify.sh
 Point `gitops/applications.yaml` at your fork first (Chapter 28 §2.2).
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/install-addons.sh argocd && scripts/argocd-register-vclusters.sh
 kubectl --context spark-root apply -n argocd -f gitops/applications.yaml
 ```

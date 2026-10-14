@@ -147,7 +147,7 @@ Run from `02-Kubernetes/lab` with the lab kubeconfig (`export KUBECONFIG="$PWD/.
 #### Run it
 
 ```bash
-cd "02-Kubernetes/lab"
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/install-addons.sh traefik                        # prints the LB IP at the end
 kubectl --context spark-root -n ingress get pods,svc
 kubectl --context spark-root get gatewayclass,gateway -A
@@ -179,6 +179,7 @@ Expected: `svc/traefik-lab` `LoadBalancer` with `EXTERNAL-IP 192.168.0.115`. Gat
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root-llms/10-tenancy       # serving NetworkPolicy, quotas
 kubectl --context spark-root apply -k manifests/root-llms/40-ingress
 kubectl --context spark-root -n llm-serving get pods,ingress,httproute
@@ -211,6 +212,7 @@ The pods are `mock-llm-…` in `llm-serving`, not `…-x-llm-serving-x-…` in a
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 curl -sN -o /dev/null -w 'TTFB %{time_starttransfer}s  total %{time_total}s\n' \
   http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":100}'
 curl -sN http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":8}' | ts '%.s'   # moreutils ts
@@ -219,6 +221,7 @@ curl -sN http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens
 Expected: **TTFB ≈ 0.05 s, total ≈ 5 s** (100 tokens at 20 tok/s), and timestamps 50 ms apart. Now the broken version:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh inject 09                                         # Ingress bf09 + buffering middleware, in llm-serving
 echo "192.168.0.115 bf09.lab.local" | sudo tee -a /etc/hosts          # on your laptop
 curl -sN -o /dev/null -w 'TTFB %{time_starttransfer}s  total %{time_total}s\n' \
@@ -246,6 +249,7 @@ Expected with the buffering middleware: **TTFB ≈ total ≈ 5 s**. TTFB equal t
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 time curl -sN http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":2000}' | tail -1
 ```
 
@@ -270,6 +274,7 @@ time curl -sN http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_t
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 head -c 40000000 /dev/zero | tr '\0' 'a' | jq -Rs '{messages:[{role:"user",content:.}]}' > /tmp/big.json
 curl -s -o /dev/null -w '%{http_code}\n' http://llm.lab.local/v1/chat/completions --data-binary @/tmp/big.json   # 413
 
@@ -281,6 +286,7 @@ Expected: `413`, then a mix of `200` and `429`. Roughly the burst (40) plus 20/s
 The limit is "per client IP" — but which IP? Look at what Traefik saw:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n ingress logs deploy/traefik-lab --tail=200 | grep -o '"ClientHost":"[^"]*"' | sort | uniq -c
 ```
 
@@ -304,6 +310,7 @@ The lab values don't enable access logs: add `logs: {access: {enabled: true}}` t
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 htpasswd -nbB team-alpha "$(openssl rand -hex 16 | tee /tmp/alpha.key)" > /tmp/users
 kubectl --context spark-root -n llm-serving create secret generic llm-api-users --from-file=users=/tmp/users
 kubectl --context spark-root -n llm-serving annotate ingress llm --overwrite \
@@ -333,6 +340,7 @@ For OpenAI SDKs that only send `Authorization: Bearer`, use LiteLLM (module 03) 
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 for i in $(seq 200); do curl -s http://gw.lab.local/v1/models | jq -r '.data[0].id'; done | sort | uniq -c
 ```
 
@@ -355,6 +363,7 @@ Expected: ≈ `180 mock-llm` / `20 mock-llm-canary`. Promote by editing the weig
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 365 \
   -subj "/CN=llm.lab.local" -addext "subjectAltName=DNS:llm.lab.local" -keyout /tmp/tls.key -out /tmp/tls.crt
 kubectl --context spark-root -n llm-serving create secret tls llm-tls --cert=/tmp/tls.crt --key=/tmp/tls.key
@@ -401,6 +410,7 @@ spec:
 ## 6. Verify
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/verify.sh ingress
 ```
 

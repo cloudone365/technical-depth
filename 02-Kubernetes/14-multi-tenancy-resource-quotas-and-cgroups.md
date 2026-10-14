@@ -201,12 +201,14 @@ With the systemd cgroup driver (containerd `SystemdCgroup = true`, kubelet `cgro
 
 ## 5. Lab
 
-All commands run from `02-Kubernetes/lab` **on the Spark** (the cgroup scripts read `/sys/fs/cgroup`), as your normal user with `KUBECONFIG` set — the cgroup and `/proc` files the scripts read are world-readable:
+Each block's location line says where it runs. The cgroup scripts (`cgroup-inspect.sh`, `uma-watch.sh`) run from `~/technical-depth/02-Kubernetes/lab` **on the Spark** (they read `/sys/fs/cgroup`), as your normal user with `KUBECONFIG` set — the cgroup and `/proc` files they read are world-readable; the rest runs from the MacBook:
 
 ```bash
-cd "02-Kubernetes/lab"
+# ▶ MacBook · 02-Kubernetes/lab
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 ```
+
+Blocks marked `dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab` run a script on the Spark from the repo copy set up in the guide's *Where each command runs*, with the kubeconfig copied there as in [Chapter 02 §5](02-etcd-database-deep-dive.md) (`export KUBECONFIG=~/.kube/spark-lab.yaml`).
 
 ### 5.1 Capacity, allocatable, and the budget layers
 
@@ -247,8 +249,17 @@ export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root get node dgx-spark-1 -o jsonpath='{.status.capacity}{"\n"}{.status.allocatable}{"\n"}' | jq -c '{cpu, memory, "nvidia.com/gpu"}'
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo grep -A3 -E '^(systemReserved|kubeReserved|evictionHard):' /var/lib/kubelet/config.yaml
+```
+
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget
 kubectl --context dev-lab apply -k manifests/dev-lab/00-platform
 kubectl --context dev-lab apply -k manifests/dev-lab/10-tenancy
@@ -260,6 +271,7 @@ Check the arithmetic: capacity memory minus 6 Gi, 2 Gi and 4 Gi is allocatable; 
 **Layer 1 — the tenant quota (inside dev-lab):**
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh inject 01
 kubectl --context dev-lab -n tenant-alpha get deploy bf01-big                     # 2/3
 kubectl --context dev-lab -n tenant-alpha describe rs -l app=bf01 | grep -A2 FailedCreate
@@ -272,6 +284,7 @@ Expected: `exceeded quota: tenant-budget, requested: limits.cpu=250m,requests.cp
 **Layer 2 — the vCluster budget (at the root):**
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh inject 02
 kubectl --context dev-lab -n lab-tools get pods -l app=bf02                      # 2 Running, 4 Pending
 kubectl --context dev-lab -n lab-tools describe pod "$(kubectl --context dev-lab -n lab-tools get pods -l app=bf02 --field-selector=status.phase=Pending -o name | head -1 | cut -d/ -f2)" | tail -4
@@ -284,6 +297,7 @@ Expected: the Pending pod's events come from the vCluster syncer and quote `exce
 **The LLM stack — one layer, then the scheduler:**
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving describe resourcequota serving-budget
 kubectl --context spark-root -n batch describe resourcequota batch-budget
 kubectl --context spark-root describe node dgx-spark-1 | grep -A10 'Allocated resources'
@@ -295,6 +309,7 @@ python3 tests/budget_check.py
 **And BestEffort is gone:**
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab -n lab-tools run be --image=registry.k8s.io/pause:3.10
 kubectl --context dev-lab -n lab-tools get pod be -o jsonpath='{.status.qosClass} {.spec.containers[0].resources}{"\n"}'
 kubectl --context dev-lab -n lab-tools delete pod be
@@ -324,8 +339,13 @@ Expected: `Burstable {"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memor
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root/00-platform
 kubectl --context spark-root apply -f manifests/root/12-cgroups/qos-trio.yaml
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 for p in guaranteed burstable besteffort; do scripts/cgroup-inspect.sh platform-tools qos-$p | sed -n '1,8p'; echo; done
 ```
 
@@ -349,8 +369,17 @@ pod spark-root platform-tools/qos-besteffort → … qos=BestEffort
 Now the same script on a **vCluster** pod: pass the context and it finds the host copy through the syncer's annotations.
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab -n lab-tools run qos-v --image=registry.k8s.io/pause:3.10
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 scripts/cgroup-inspect.sh lab-tools qos-v dev-lab | sed -n '1,6p'
+```
+
+```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab -n lab-tools delete pod qos-v
 ```
 
@@ -364,6 +393,7 @@ cgroup /sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/kubepods-burstable
 Same tree, same rules. Nothing in the path says "dev-lab": the kernel has never heard of vClusters.
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root delete -f manifests/root/12-cgroups/qos-trio.yaml
 ```
 
@@ -385,8 +415,17 @@ kubectl --context spark-root delete -f manifests/root/12-cgroups/qos-trio.yaml
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -f manifests/root/12-cgroups/cpu-throttle.yaml
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 sleep 30; scripts/cgroup-inspect.sh platform-tools cpu-throttle | grep -A3 'cpu.stat'
+```
+
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n platform-tools top pod cpu-throttle 2>/dev/null || true
 kubectl --context spark-root delete -f manifests/root/12-cgroups/cpu-throttle.yaml
 ```
@@ -411,10 +450,19 @@ Expected: `nr_throttled` close to `nr_periods` and `throttled_usec` growing by a
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh inject 04
 sleep 20; kubectl --context dev-lab -n lab-tools get pod bf04-oom
 kubectl --context dev-lab -n lab-tools get pod bf04-oom -o jsonpath='{.status.containerStatuses[0].lastState.terminated}{"\n"}' | jq
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 scripts/cgroup-inspect.sh lab-tools bf04-oom dev-lab | grep -A6 memory.events
+```
+
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh reset 04
 ```
 
@@ -442,8 +490,13 @@ Expected: `"reason":"OOMKilled","exitCode":137`, and `oom_kill` > 0 in `memory.e
 The experiment runs on the root in `platform-tools`: it needs a GPU slice and a 4 Gi limit it's allowed to blow through, and its answer is about the node, not about any tenant.
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -f manifests/root/12-cgroups/uma-cgroup-experiment.yaml
 kubectl --context spark-root -n platform-tools logs -f uma-cgroup-experiment
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 # in parallel, on the Spark:
 scripts/uma-watch.sh platform-tools uma-cgroup-experiment spark-root 1
 ```
@@ -458,6 +511,7 @@ Two possible outcomes:
 **Record your result in the lab log**, with the driver version (`nvidia-smi --query-gpu=driver_version --format=csv,noheader`). Re-run it after every DGX OS or driver upgrade. The rest of this module is written to be safe under either outcome. That's why every serving manifest sets both a pod memory limit *and* an engine memory fraction.
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root delete -f manifests/root/12-cgroups/uma-cgroup-experiment.yaml --ignore-not-found
 ```
 
@@ -481,6 +535,7 @@ kubectl --context spark-root delete -f manifests/root/12-cgroups/uma-cgroup-expe
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh inject 15      # asks for confirmation; self-terminates after 150 s
 kubectl --context spark-root describe node dgx-spark-1 | grep -A8 Conditions
 kubectl --context spark-root get events -A --field-selector reason=Evicted
@@ -493,6 +548,7 @@ kubectl --context spark-root get events -A --field-selector reason=Evicted
 ## 6. Verify
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/verify.sh vclusters llm-budget tenancy
 python3 tests/budget_check.py
 ```

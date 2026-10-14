@@ -188,7 +188,15 @@ kubectl --context spark-root -n llm-serving create secret generic hf-token --fro
   --dry-run=client -o yaml | kubectl --context spark-root apply -f -
 kubectl --context spark-root apply -f manifests/root-llms/60-storage/model-prefetch-job.yaml
 kubectl --context spark-root -n llm-serving wait --for=condition=complete job/model-prefetch --timeout=30m
-ssh dgxadmin@192.168.0.100 "sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'"   # start the load with a clean page cache
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'   # start the load with a clean page cache
+```
+
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root-llms/90-serving/vllm
 kubectl --context spark-root -n llm-serving logs -f deploy/vllm | grep -E 'Loading|weights|KV cache|blocks|CUDA graph|Uvicorn|ERROR'
 ```
@@ -276,7 +284,7 @@ The port-forward goes laptop → root API server → the kubelet on dgx-spark-1 
 On the Spark (the script reads `/sys/fs/cgroup`; the context defaults to `spark-root`, and only a sandbox pod needs `dev-llms` as third argument):
 
 ```bash
-# ▶ dgx-spark-1 (ssh dgx-spark-1)
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 # from 02-Kubernetes/lab in a copy of this repo on the Spark, with the lab kubeconfig exported
 scripts/uma-watch.sh llm-serving "$(kubectl --context spark-root -n llm-serving get pod -l app=vllm -o jsonpath='{.items[0].metadata.name}')" spark-root 2
 ```

@@ -191,7 +191,7 @@ All commands run from `02-Kubernetes/lab` with the lab kubeconfig. Steps that ca
 #### Run it
 
 ```bash
-cd "02-Kubernetes/lab"
+# ▶ MacBook · 02-Kubernetes/lab
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 kubectl --context spark-root apply -k manifests/root/00-platform        # platform-tools namespace
 kubectl --context spark-root apply -k manifests/root/30-networking      # netshoot-host (hostNetwork, NET_ADMIN)
@@ -234,7 +234,13 @@ Expected: the same pod IPs in both listings — the second one with root names (
 `pod-netns.sh <namespace> <pod> [context]` takes the pod's name *as the tenant sees it*. With a vCluster context it finds the root copy through the syncer's annotations, then walks that pod's netns:
 
 ```bash
+# ▶ MacBook · any folder
 ECHO=$(kubectl --context dev-lab -n lab-tools get pod -l app=echo -o jsonpath='{.items[0].metadata.name}')
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+# (repo copy on the Spark: the guide's "Where each command runs"; set ECHO= to the pod name from the MacBook first)
 scripts/pod-netns.sh lab-tools "$ECHO" dev-lab
 ```
 
@@ -292,6 +298,7 @@ Read it top to bottom:
 Ask Hubble first — it shows every flow Cilium handled, with the verdict:
 
 ```bash
+# ▶ MacBook · any folder
 ECHO_IP=$(kubectl --context dev-lab -n lab-tools get pod -l app=echo -o jsonpath='{.items[0].status.podIP}')
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- curl -s "$ECHO_IP:8080"; echo
 kubectl --context spark-root -n kube-system exec ds/cilium -c cilium-agent -- \
@@ -311,6 +318,7 @@ Hubble talks in **root** names and identities: the tenant's `lab-tools/echo` is 
 Now the raw packets, captured inside the echo pod's netns. `netshoot-host` on the root has `hostPID` and `SYS_ADMIN`, so it can enter any pod's network namespace with the `container-pid` from §5.2:
 
 ```bash
+# ▶ MacBook · any folder
 PID=412233        # container-pid printed by pod-netns.sh
 kubectl --context spark-root -n platform-tools exec deploy/netshoot-host -- \
   nsenter -t "$PID" -n tcpdump -ni eth0 tcp port 8080 -c 6 &
@@ -338,6 +346,7 @@ You see the SYN/SYN-ACK/ACK and HTTP between two `10.42.0.x` addresses: no NAT, 
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- ip link show eth0 | grep -o 'mtu [0-9]*'
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- ip route | grep -o 'mtu [0-9]*'
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- ping -c2 -M do -s 1422 "$ECHO_IP"   # 1422+28 = 1450 → OK
@@ -377,6 +386,7 @@ With a 1500-byte management LAN, the route MTU is 1450 even for a neighbour on t
 Apply the tenant policies in dev-lab, the sandbox namespace in dev-llms and the serving tier on the root:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab apply -k manifests/dev-lab/10-tenancy
 kubectl --context dev-llms apply -k manifests/dev-llms/00-platform       # llm-sandbox
 kubectl --context dev-llms apply -k manifests/dev-llms/10-tenancy
@@ -390,6 +400,7 @@ kubectl --context spark-root apply -k manifests/root/05-vclusters        # vclus
 A throwaway client/server in each tenant of dev-lab (socat answers "ok" on :8080; PSA `restricted` needs the security context):
 
 ```bash
+# ▶ MacBook · any folder
 for ns in tenant-alpha tenant-beta; do
   kubectl --context dev-lab -n $ns run probe --image=nicolaka/netshoot:v0.13 --restart=Never \
     --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"probe","image":"nicolaka/netshoot:v0.13","command":["socat","TCP-LISTEN:8080,fork,reuseaddr","SYSTEM:echo ok"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},"resources":{"limits":{"cpu":"50m","memory":"64Mi"}}}]}}'
@@ -406,6 +417,7 @@ kubectl --context dev-llms -n llm-sandbox wait --for=condition=Ready pod/probe
 Now the tests. Each line says which layer should decide:
 
 ```bash
+# ▶ MacBook · any folder
 # inside dev-lab — tenant policies (translated, enforced by Cilium)
 kubectl --context dev-lab -n tenant-alpha exec probe -- nc -z -w3 "$A" 8080 && echo "same-namespace allowed ✔"
 kubectl --context dev-lab -n tenant-beta  exec probe -- nc -z -w3 "$A" 8080 && echo "LEAK" || echo "blocked ✔ (beta → alpha, default-deny-ingress)"
@@ -430,7 +442,12 @@ There's no `mock-llm.llm-serving` name to try from dev-lab: each vCluster has it
 **Where is it enforced?** Not in iptables any more:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo iptables-save | grep -c -i -E 'NWPLCY|POD-FW'                      # 0 — no policy chains
+```
+
+```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n vc-dev-lab get networkpolicy            # default-deny-ingress-x-tenant-alpha-x-dev-lab …
 kubectl --context spark-root -n vc-dev-lab get networkpolicy default-deny-ingress-x-tenant-alpha-x-dev-lab -o jsonpath='{.spec.podSelector}{"\n"}'
 kubectl --context spark-root get ciliumnetworkpolicy -A                 # vcluster-boundary in vc-dev-lab and vc-dev-llms
@@ -446,6 +463,7 @@ One more subtlety: Cilium by default lets the **node itself** (identity `reserve
 Now run the drill:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh inject 06
 curl -s -m5 -H 'Host: llm.lab.local' http://192.168.0.115/v1/models || echo "times out"   # from your laptop or the Spark
 ```
@@ -474,11 +492,20 @@ Clean up the probes: `kubectl --context dev-lab -n tenant-alpha delete pod probe
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 # pods on both nodes: the root scheduler spreads dev-lab's pods across dgx-spark-1 and dgx-spark-2
 kubectl --context dev-lab -n lab-tools scale deploy echo --replicas=4
 kubectl --context dev-lab -n lab-tools get pods -l app=echo -o wide        # some on dgx-spark-2 (10.42.1.x)
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 # capture the *outer* packets on the management NIC (run on dgx-spark-1)
 sudo tcpdump -ni enP7s7 udp port 8472 -c 4 -vv
+```
+
+```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg bpf tunnel list   # podCIDR → node IP
 # overlay vs RDMA throughput: iperf3 between two netshoot pods vs ib_write_bw on the hosts (01-Ansible playbooks/13.2-rdma-perftest.yml)
 kubectl --context dev-lab -n lab-tools scale deploy echo --replicas=3

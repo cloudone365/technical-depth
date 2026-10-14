@@ -165,7 +165,7 @@ Long names are shortened with a hash, so find a host copy through the annotation
 All commands run from `02-Kubernetes/lab` with `KUBECONFIG` set to the lab file:
 
 ```bash
-cd "02-Kubernetes/lab"
+# ▶ MacBook · 02-Kubernetes/lab
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 scripts/install-addons.sh storage          # once: local-path + local-nvme classes on the root
 kubectl --context dev-lab get sc           # the root's classes, seen from inside a vCluster
@@ -192,6 +192,7 @@ kubectl --context dev-lab get sc           # the root's classes, seen from insid
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root-llms/00-platform
 kubectl --context spark-root apply -k manifests/root-llms/10-tenancy
 kubectl --context spark-root apply -k manifests/root-llms/50-workloads
@@ -202,6 +203,7 @@ kubectl --context spark-root -n llm-serving get sts,pod,pvc -o wide
 The StatefulSet, the pod `qdrant-0` and the PVC `data-qdrant-0` sit side by side in one root namespace, under the names you wrote. A workload written inside a vCluster looks different from the root — compare dev-lab's echo Deployment:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n vc-dev-lab get sts,deploy                  # only the StatefulSet 'dev-lab' — the vCluster's own control plane
 kubectl --context spark-root -n vc-dev-lab get pods -o custom-columns=HOST:.metadata.name,VIRTUAL:.metadata.annotations.vcluster\\.loft\\.sh/object-name,IP:.status.podIP \
   | grep -E 'HOST|echo'
@@ -213,6 +215,7 @@ Expected: the same pod IPs on both sides. The pod IP and the node are real; the 
 Write some vectors (port-forward goes through the root's API server to the pod):
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n llm-serving port-forward svc/qdrant 6333 &
 sleep 2
 curl -s -X PUT localhost:6333/collections/spark -H 'Content-Type: application/json' \
@@ -227,11 +230,16 @@ kill %1
 Kill the pod and check that the same identity and data come back:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n llm-serving delete pod qdrant-0
 kubectl --context spark-root -n llm-serving wait --for=condition=Ready pod/qdrant-0 --timeout=120s
 kubectl --context spark-root -n llm-serving port-forward svc/qdrant 6333 & sleep 2
 curl -s localhost:6333/collections/spark | jq '.result.points_count'        # 2
 kill %1
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo ls /data/k8s/retain/llm-serving/data-qdrant-0/collections/   # on the Spark: spark
 ```
 
@@ -257,6 +265,7 @@ Who recreated `qdrant-0`? The root's StatefulSet controller, which saw its pod d
 With one replica, `partition: 1` means *no pod updates*. That's useful for staging a new image spec without rolling it:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n llm-serving patch sts qdrant -p '{"spec":{"updateStrategy":{"rollingUpdate":{"partition":1}}}}'
 kubectl --context spark-root -n llm-serving set image sts/qdrant qdrant=qdrant/qdrant:v1.13.5-unprivileged
 kubectl --context spark-root -n llm-serving get pod qdrant-0 -o jsonpath='{.spec.containers[0].image}{"\n"}'   # still v1.13.4
@@ -289,9 +298,14 @@ The ControllerRevisions behind `currentRevision`/`updateRevision` live in the ro
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root/00-platform
 kubectl --context spark-root apply -k manifests/root/50-workloads
 kubectl --context spark-root -n platform-tools get ds spark-node-probe
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 cat /var/lib/prometheus/node-exporter/k8s_node_probe.prom       # on the Spark
 curl -s localhost:9100/metrics | grep spark_probe_               # host node-exporter picked it up
 ```
@@ -306,6 +320,7 @@ spark_probe_mem_available_bytes{node="dgx-spark-1"} 9.87e+10
 Cordon the node and confirm the probe keeps running (it tolerates everything). On a one-node lab, a cordon stops new pods in **all three clusters**, so uncordon straight away:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root cordon dgx-spark-1
 kubectl --context spark-root -n platform-tools rollout restart ds spark-node-probe
 kubectl --context spark-root -n platform-tools rollout status ds spark-node-probe --timeout=60s
@@ -336,6 +351,7 @@ The DaemonSet pod comes back on a cordoned node because the DaemonSet controller
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab apply -k manifests/dev-lab/00-platform
 kubectl --context dev-lab apply -k manifests/dev-lab/10-tenancy
 kubectl --context dev-lab apply -f manifests/dev-lab/50-workloads/tokenizer-indexed-job.yaml
@@ -345,6 +361,7 @@ kubectl --context dev-lab -n tenant-alpha get pods -l job-name=tokenize-shards -
 While it runs, push it past the tenant budget — parallelism is mutable on a running Job:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab -n tenant-alpha patch job tokenize-shards --type merge -p '{"spec":{"parallelism":3}}'
 kubectl --context dev-lab -n tenant-alpha get events --field-selector involvedObject.kind=Job | grep -i quota | tail -2
 ```
@@ -352,6 +369,7 @@ kubectl --context dev-lab -n tenant-alpha get events --field-selector involvedOb
 Expected: `FailedCreate … exceeded quota: tenant-budget, requested: limits.cpu=200m,requests.cpu=200m, used: limits.cpu=400m,requests.cpu=400m, limited: limits.cpu=500m,requests.cpu=500m`. The refusal comes from **dev-lab's own API server**: the third pod never exists anywhere, so the root sees nothing. The Job keeps running at 2 and retries the third pod as shards finish.
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab -n tenant-alpha wait --for=condition=Complete job/tokenize-shards --timeout=5m
 kubectl --context dev-lab -n tenant-alpha get job tokenize-shards -o jsonpath='{.status.completedIndexes}{"\n"}'   # 0-7
 kubectl --context spark-root -n vc-dev-lab get pods | grep tokenize-shards       # the finished host copies
@@ -361,6 +379,7 @@ kubectl --context dev-lab -n tenant-alpha delete job tokenize-shards
 Rehearse a corrupt shard:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab apply -f manifests/dev-lab/50-workloads/tokenizer-indexed-job.yaml --dry-run=client -o json \
  | jq '.spec.template.spec.containers[0].env[0].value="3"' | kubectl --context dev-lab apply -f -
 kubectl --context dev-lab -n tenant-alpha wait --for=condition=Failed job/tokenize-shards --timeout=5m
@@ -406,6 +425,7 @@ The job is marked `Failed` only after the remaining indexes have finished (one f
 Two kinds of PDB meet at the root's Eviction API: the LLM stack's, which are root objects, and tenants', which a syncer copies down. Write a tenant PDB in dev-lab for its echo Deployment (3 replicas, Chapter 09), then list both kinds on the root:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n llm-serving get pdb
 kubectl --context dev-lab apply -f - <<'EOF'
 apiVersion: policy/v1
@@ -430,6 +450,7 @@ vc-dev-lab    echo-x-lab-tools-x-dev-lab    2               N/A               1
 (`mock-llm` counts pods once Chapter 11's `root-llms/40-ingress` is applied.) The syncer copied the tenant's PDB because [`vclusters/dev-lab.yaml`](lab/vclusters/dev-lab.yaml) sets `sync.toHost.podDisruptionBudgets.enabled: true` (dev-llms too), and rewrote its selector to match the host copies of the pods. Now ask the root what a drain would do:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh inject 11          # (re)applies root-llms/50-workloads and prints the drain command
 kubectl --context spark-root drain dgx-spark-1 --ignore-daemonsets --delete-emptydir-data --dry-run=server 2>&1 | grep -E 'qdrant|dev-lab-0|dev-llms-0|disruption'
 ```
@@ -452,6 +473,7 @@ Three things to read out of that:
 `scripts/breakfix.sh hint 11` / `answer 11` walk the same diagnosis. The runbook for planned maintenance on a single-replica store: **snapshot → scale to 0 (or delete the PDB) → drain → maintain → uncordon → restore**:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n llm-serving port-forward svc/qdrant 6333 & sleep 2
 curl -s -X POST localhost:6333/collections/spark/snapshots | jq -r .result.name
 kill %1

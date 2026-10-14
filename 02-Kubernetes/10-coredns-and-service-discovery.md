@@ -149,7 +149,7 @@ Run from `02-Kubernetes/lab` with the lab kubeconfig (`export KUBECONFIG="$PWD/.
 #### Run it
 
 ```bash
-cd "02-Kubernetes/lab"
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root/30-networking         # netshoot-host
 kubectl --context dev-lab apply -k manifests/dev-lab/30-networking         # dns-default, dns-ndots1, echo, netshoot
 
@@ -193,6 +193,7 @@ Note the `forward` line in dev-lab's Corefile: it tells you whether a tenant's e
 The root's Corefile is kubeadm's ConfigMap; the lab file is kubeadm's default plus `log` and a `lab.local:53` block:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n kube-system get cm coredns -o yaml > /tmp/coredns-before.yaml   # keep kubeadm's version
 kubectl --context spark-root apply -f manifests/root/30-networking/coredns-corefile.yaml
 sleep 35                                                                                        # 'reload' picks it up
@@ -224,6 +225,7 @@ kubectl --context spark-root -n kube-system logs -l k8s-app=kube-dns -f --tail=0
 **Root pod, from the root CoreDNS's query log:**
 
 ```bash
+# ▶ MacBook · any folder
 : > /tmp/coredns.log; sleep 1
 kubectl --context spark-root -n platform-tools exec deploy/netshoot-host -- sh -c 'getent ahosts huggingface.co >/dev/null'
 sleep 2; echo "netshoot-host: $(grep -c 'huggingface' /tmp/coredns.log) queries"
@@ -244,6 +246,7 @@ netshoot-host: 10 queries        # 8 if your host has no 'search lab.local'
 **Tenant pods in dev-lab.** Their queries go to dev-lab's CoreDNS, not the root's, so the root log doesn't see the search-domain walk at all. Count them on the wire instead — the netshoot image has `tcpdump`:
 
 ```bash
+# ▶ MacBook · any folder
 for p in dns-default dns-ndots1; do
   echo "── $p"
   kubectl --context dev-lab -n lab-tools exec $p -- sh -c \
@@ -274,6 +277,7 @@ Eight queries for one lookup with `ndots:5` (three search domains × A + AAAA, t
 Time it too:
 
 ```bash
+# ▶ MacBook · any folder
 for p in dns-default dns-ndots1; do
   kubectl --context dev-lab -n lab-tools exec $p -- sh -c 'time (for i in $(seq 50); do getent ahosts huggingface.co >/dev/null; done)' 2>&1 | grep real | sed "s/^/$p /"
 done
@@ -306,6 +310,7 @@ done
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- dig +short echo.lab-tools.svc.cluster.local
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- dig +short echo-headless.lab-tools.svc.cluster.local
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- dig +short SRV _http._tcp.echo.lab-tools.svc.cluster.local
@@ -322,6 +327,7 @@ Expected: a ClusterIP, three pod IPs, an SRV record pointing at `echo.lab-tools.
 The model servers are on the other side of that boundary: they run in the root's `llm-serving`, so the root's CoreDNS answers them and root names resolve. If you applied `root-llms/40-ingress` (Chapter 08 §5.5), compare:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n llm-serving exec deploy/mock-llm-canary -- \
   python3 -c "import socket;print(socket.gethostbyname('kps-prometheus.observability.svc.cluster.local'))"   # a root ClusterIP
 kubectl --context spark-root -n observability get svc kps-prometheus -o jsonpath='{.spec.clusterIP}{"\n"}'     # the same IP
@@ -349,6 +355,7 @@ kubectl --context spark-root -n llm-serving exec deploy/mock-llm-canary -- cat /
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh inject 07
 # root pods: by name, then by IP
 kubectl --context spark-root -n platform-tools exec deploy/netshoot-host -- curl -s -m3 http://kps-grafana.observability || echo "name lookup failed"
@@ -369,6 +376,7 @@ The second lesson is the blast radius. Root pods lose all name resolution at onc
 Turn query logging off when you're done (it's chatty) — re-apply the lab Corefile without the `log` line, or restore kubeadm's original:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 sed '/^        log$/d' manifests/root/30-networking/coredns-corefile.yaml | kubectl --context spark-root apply -f -
 # or: kubectl --context spark-root apply -f /tmp/coredns-before.yaml   (drops lab.local too)
 ```

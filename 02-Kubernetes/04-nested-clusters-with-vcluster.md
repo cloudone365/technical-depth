@@ -240,6 +240,7 @@ Reading the picture from the outside in:
 The vCluster budgets are defined in [`manifests/root/05-vclusters/quotas.yaml`](lab/manifests/root/05-vclusters/quotas.yaml), the LLM budgets in [`manifests/root-llms/10-tenancy/quotas.yaml`](lab/manifests/root-llms/10-tenancy/quotas.yaml). [`tests/budget_check.py`](lab/tests/budget_check.py) checks both against the kubelet reservations, the GPU Operator's slice count, Kueue's `spark-cq` and the MetalLB pool, and prints this table:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 python3 tests/budget_check.py            # in 02-Kubernetes/lab, on your MacBook; no cluster needed
 ```
 
@@ -394,6 +395,7 @@ Either path gives the same result. The vCluster definitions live once, in the 02
 **A — 01-Ansible, from Semaphore** (project `spark-lab` on sema01): run the templates `19.1 Kubernetes` → `20.1 GPU Operator` → `20.2 vClusters`, each to `failed=0`. They write the kubeconfig with all three contexts to sema01's state volume. Break-glass CLI from the MacBook: the same playbooks with `-l dgx-spark-1,localhost -K`.
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 # after A (or after 05 + 06 for B) — on your MacBook
 cd "01-Ansible/lab"
 tools/fetch-kubeconfig.sh sema01                 # copies kubeconfig-spark-lab.yaml from sema01 to .cache/
@@ -435,6 +437,7 @@ The LLM stack is installed on the root with `scripts/install-addons.sh traefik`,
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root get nodes                    # 1 node: control plane + worker
 kubectl --context dev-lab get nodes -L spark.lab/gpu,nvidia.com/gpu.product
 kubectl --context dev-lab get node dgx-spark-1 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'   # 15
@@ -465,6 +468,7 @@ The node shows 15 slices inside `dev-lab` even though `dev-lab` may only use 2: 
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab apply -k manifests/dev-lab/30-networking
 kubectl --context dev-lab -n lab-tools get pods -o wide
 kubectl --context spark-root -n vc-dev-lab get pods \
@@ -495,6 +499,7 @@ Same pod IPs, same ClusterIPs: the network is the root's (Cilium, kube-proxy). O
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh inject 02              # 6 pods × 1 slice in dev-lab (budget: 2)
 kubectl --context dev-lab -n lab-tools get pods -l app=bf02          # 2 Running, 4 Pending
 kubectl --context dev-lab -n lab-tools describe pod <a-pending-one> | tail -5
@@ -525,6 +530,7 @@ The Pending pods have **no scheduler events** — the root never saw them.
 A vCluster's size is its root quota. No reinstall, no restart. The root's slices are all handed out (platform 2, `llm-serving` 6, `batch` 3), so here `dev-llms` takes one of `llm-serving`'s:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n llm-serving patch resourcequota serving-budget --type merge \
   -p '{"spec":{"hard":{"requests.nvidia.com/gpu":"5"}}}'
 kubectl --context spark-root -n vc-dev-llms patch resourcequota vcluster-budget --type merge \
@@ -579,9 +585,18 @@ Memory works the same way: more memory for a vCluster comes out of the LLM pool 
 A root etcd snapshot does **not** contain a vCluster's objects: they live in SQLite on the vCluster's PVC, which `local-nvme` keeps at `/data/k8s/vc-<name>/<pvc>` on the Spark.
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n vc-dev-lab get pvc                      # data-dev-lab-0
 kubectl --context spark-root -n vc-dev-lab scale statefulset dev-lab --replicas=0
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo tar czf ~/dev-lab-$(date +%F).tgz -C /data/k8s/vc-dev-lab data-dev-lab-0
+```
+
+```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n vc-dev-lab scale statefulset dev-lab --replicas=1
 ```
 
@@ -592,6 +607,7 @@ While the control plane is scaled to 0, tenant pods keep running (they are root 
 ## 7. Verify
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/verify.sh vclusters llm-budget
 ```
 

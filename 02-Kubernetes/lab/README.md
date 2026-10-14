@@ -128,15 +128,27 @@ black = external/user · grey = tenant workload.
 ## Quick start
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 # 0. The 01-Ansible lab has built the root cluster + GPU Operator (+ the vClusters), as Semaphore
 #    templates `19.1 Kubernetes` → `20.1 GPU Operator` → `20.2 vClusters` on sema01. Then, from the repo root:
 "01-Ansible/lab/tools/fetch-kubeconfig.sh" sema01   # kubeconfig from sema01 → 01-Ansible/lab/.cache/
 export KUBECONFIG="$PWD/01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
-cd "02-Kubernetes/lab"
-tests/run-local-checks.sh                   # proves your toolchain, no Spark needed
+```
 
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
+tests/run-local-checks.sh                   # proves your toolchain, no Spark needed
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+# one-time: git clone https://github.com/cloudone365/technical-depth.git ~/technical-depth (see the guide's "Where each command runs")
 # 1. On the Spark
 scripts/preflight.sh                        # host, kubeadm, Cilium, MetalLB, 15 slices, vCluster contexts
+```
+
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/install-addons.sh all               # all on the root: storage, metrics-server, kps, vClusters, Traefik, Kueue, KEDA
 scripts/apply-lab.sh                        # root (incl. root-llms) → dev-lab → dev-llms, layer by layer
 scripts/verify.sh                           # PASS/WARN/FAIL for every layer of every cluster
@@ -145,6 +157,7 @@ scripts/verify.sh                           # PASS/WARN/FAIL for every layer of 
 Then follow the [step-by-step guide](../00-kubernetes-step-by-step-guide.md) from Chapter 01, or jump straight into the drills (Chapter 26):
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh list                    # each scenario names the cluster it breaks
 scripts/breakfix.sh inject 02     # diagnose it, fix it, `scripts/breakfix.sh answer 02` if stuck
 ```
@@ -167,6 +180,7 @@ Every script and every command in the chapters names a context. The rule of thum
 Break things freely. Two ways back:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/breakfix.sh reset all                                         # undo every drill
 ```
 

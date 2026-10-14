@@ -159,11 +159,16 @@ What the syncer copies to the root (pods, Services, PVCs, and the Secrets/Config
 
 ## 5. Lab
 
-All commands run on the Spark, from a checkout of this repo, in `02-Kubernetes/lab`: the `etcdctl` lines need the root's etcd client certificate, which only exists there. The scripts call `kubectl --context spark-root|dev-lab|dev-llms`. The Spark's own `~/.kube/config` (written by 01-Ansible) is `admin.conf` with its context renamed to `spark-root`, which is enough for every root step; for the vCluster steps bring the full lab kubeconfig along:
+The `etcd` blocks run on the Spark, from a checkout of this repo in `02-Kubernetes/lab` (each block's location line says so; the kubectl-only blocks run from the MacBook): the `etcdctl` lines need the root's etcd client certificate, which only exists there. The scripts call `kubectl --context spark-root|dev-lab|dev-llms`. The Spark's own `~/.kube/config` (written by 01-Ansible) is `admin.conf` with its context renamed to `spark-root`, which is enough for every root step; for the vCluster steps bring the full lab kubeconfig along:
 
 ```bash
+# ▶ MacBook · technical-depth (repo root)
 # on your MacBook (after 01-Ansible/lab/tools/fetch-kubeconfig.sh sema01)
 scp "01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml" dgxadmin@192.168.0.100:.kube/spark-lab.yaml
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 # on the Spark
 export KUBECONFIG=~/.kube/spark-lab.yaml
 kubectl config get-contexts -o name          # spark-root, dev-lab, dev-llms
@@ -201,7 +206,7 @@ kubectl config get-contexts -o name          # spark-root, dev-lab, dev-llms
 There's nothing to migrate: kubeadm created etcd at `kubeadm init`. Look at how:
 
 ```bash
-cd "02-Kubernetes/lab"
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 sudo grep -E -- '--(data-dir|listen-client-urls|listen-peer-urls|listen-metrics-urls|initial-cluster|cert-file|trusted-ca-file|snapshot-count)=' \
   /etc/kubernetes/manifests/etcd.yaml
 sudo ls /etc/kubernetes/pki/etcd/
@@ -254,6 +259,7 @@ Things to notice:
 etcd writes small records and fdatasyncs each one. Test exactly that on the filesystem that holds `/var/lib/etcd` (on a Spark that's the one NVMe that also holds `/data/k8s`, where every PVC lives):
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 df -h /var/lib/etcd /data/k8s                         # same device
 sudo mkdir -p /var/lib/fio-etcd
 sudo fio --name=etcd-wal --rw=write --ioengine=sync --fdatasync=1 --bs=2300 --size=22m --directory=/var/lib/fio-etcd
@@ -263,6 +269,7 @@ sudo rm -rf /var/lib/fio-etcd
 Read the `fsync/fdatasync/sync_file_range` section: **99.00th percentile should be well under 10 ms** (a healthy Gen4/Gen5 NVMe gives tens to hundreds of µs). Now run it again while the Chapter 13 benchmark writes 1 MiB blocks into a PVC on the same NVMe:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -f manifests/root/60-storage/fio-job.yaml     # platform-tools, 4 CPUs, 64 Gi scratch PVC
 kubectl --context spark-root -n platform-tools get pods -w                        # start the fio above while it runs
 ```
@@ -294,6 +301,7 @@ The tail latency jumps. That's what happens to the API server — and to both vC
 #### Run it
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 E="sudo ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt \
    --cert=/etc/kubernetes/pki/etcd/healthcheck-client.crt --key=/etc/kubernetes/pki/etcd/healthcheck-client.key"
 $E get /registry --prefix --keys-only | awk -F/ 'NF>2 {print $3}' | sort | uniq -c | sort -rn | head -12
@@ -303,6 +311,7 @@ $E get /registry/pods/vc-dev-lab --prefix --keys-only | head -5        # tenant 
 **Prove encryption on the root.** Create a Secret in a root namespace and read its raw value:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 kubectl --context spark-root -n platform-tools create secret generic demo --from-literal=password=hunter2
 $E get /registry/secrets/platform-tools/demo --print-value-only | head -c 64 | od -c | head -3
 ```
@@ -312,6 +321,7 @@ Expected: the value starts with `k8s:enc:aescbc:v1:key1:` and `hunter2` is nowhe
 **Now follow a tenant's Secret.** A Secret `tenant-alpha/demo` lives in **dev-lab**, so `/registry/secrets/tenant-alpha/demo` doesn't exist in root etcd at all — there is no `tenant-alpha` namespace at the root. Where is it, and is it encrypted there? Create one in dev-lab and mount it into a pod, because vCluster only syncs Secrets that a synced pod uses:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 kubectl --context dev-lab -n lab-tools create secret generic demo --from-literal=password=hunter2
 kubectl --context dev-lab -n lab-tools run secret-user --image=registry.k8s.io/pause:3.10 \
   --overrides='{"spec":{"volumes":[{"name":"s","secret":{"secretName":"demo"}}],"containers":[{"name":"secret-user","image":"registry.k8s.io/pause:3.10","volumeMounts":[{"name":"s","mountPath":"/s"}]}]}}'
@@ -322,6 +332,7 @@ $E get /registry/secrets/vc-dev-lab/demo-x-lab-tools-x-dev-lab --print-value-onl
 The **host copy** is encrypted (`k8s:enc:aescbc:v1:key1:` again): it went through the root API server. Now look at the original, in dev-lab's SQLite database on its PVC:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 kubectl --context spark-root -n vc-dev-lab get pvc data-dev-lab-0
 sudo ls -la /data/k8s/vc-dev-lab/data-dev-lab-0/
 sudo grep -rac hunter2 /data/k8s/vc-dev-lab/data-dev-lab-0/ | grep -v ':0$'
@@ -334,6 +345,7 @@ Answer for Workbook Ex 02: the tenant's Secret is readable in plaintext in dev-l
 **MVCC in action.** Every write gets a new revision, and old revisions stay until compaction:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 for i in 1 2 3; do kubectl --context spark-root -n platform-tools annotate secret demo rev=$i --overwrite >/dev/null; done
 $E get /registry/secrets/platform-tools/demo -w json | jq '.kvs[0] | {create_revision, mod_revision, version}'
 $E get /registry/secrets/platform-tools/demo --rev=$(( $($E get /registry/secrets/platform-tools/demo -w json | jq '.kvs[0].mod_revision') - 1 )) -w json | jq '.kvs[0].version'
@@ -366,6 +378,7 @@ Clean up: `kubectl --context dev-lab -n lab-tools delete pod secret-user && kube
 The sandbox is three etcd containers under Docker. Docker on DGX OS shares `containerd.io` with Kubernetes but uses its own containerd namespace (`moby`), so `sudo crictl ps` won't show them and they never touch the root etcd.
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 scripts/etcd-sandbox.sh up
 scripts/etcd-sandbox.sh kill-leader
 scripts/etcd-sandbox.sh kill-two
@@ -404,6 +417,7 @@ This is why a Kubernetes control plane with 1 of 3 etcd members left serves `kub
 #### Run it
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 scripts/etcd-sandbox.sh fill          # 32 MiB quota → NOSPACE
 scripts/etcd-sandbox.sh recover-space # compact → defrag --cluster → alarm disarm
 ```
@@ -413,6 +427,7 @@ Expected at the end of `fill`: `memberID:… alarm:NOSPACE`, with writes failing
 The same sequence on the root, if `EtcdDbNearQuota` ever fires (`$E` from §5.3):
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 $E endpoint status -w table                          # DB SIZE vs DB SIZE IN USE: the gap is what defrag returns
 rev=$($E endpoint status -w json | jq '.[0].Status.header.revision')
 $E compact "$rev"                                    # drop history older than now (the API server does this every 5 min anyway)
@@ -453,6 +468,7 @@ With one member, `defrag` blocks **the only** member: the root API server stalls
 Make a marker on each side of the snapshot, so you can see exactly what rolls back:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 scripts/etcd-drill.sh snapshot                                  # → /var/lib/etcd-snapshots/etcd-dgx-spark-1-<ts>-drill.db
 kubectl --context spark-root create namespace doomed-by-restore    # root, after the snapshot
 kubectl --context spark-root -n platform-tools create configmap doomed --from-literal=x=1
@@ -473,6 +489,7 @@ While the root API is down, `kubectl --context dev-lab get pods` still works —
 Then check:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root get ns doomed-by-restore                      # NotFound: created after the snapshot
 kubectl --context spark-root -n platform-tools get cm doomed               # NotFound
 kubectl --context spark-root -n platform-tools get secret demo             # still there (created before)
@@ -513,6 +530,7 @@ Workbook Ex 20 asks you to doom a namespace, a ConfigMap and a Kueue LocalQueue.
 A snapshot on the Spark's own NVMe protects you from a bad `kubectl delete`, not from a dead disk or `19.2-reset-kubernetes.yml -e reset_wipe_data=true`. From your MacBook (as the admin user `dgxadmin` with your own key, the same login as the bootstrap playbooks), pull everything a rebuild on *new* hardware needs in one tarball:
 
 ```bash
+# ▶ MacBook · any folder
 mkdir -p ~/spark-backups
 ssh dgxadmin@192.168.0.100 'sudo tar czf - -C / var/lib/etcd-snapshots etc/kubernetes/pki etc/kubernetes/encryption/config.yaml \
   etc/kubernetes/kubeadm-config.yaml' > ~/spark-backups/spark-root-$(date +%F).tgz
@@ -552,6 +570,7 @@ None of §5.6–5.7 covers dev-lab's or dev-llms' objects. Each keeps them in SQ
 **PVC copy (what the lab tests, Chapter 04 §6.7).** Stop the writer, copy the directory, start it again:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 kubectl --context spark-root -n vc-dev-lab scale statefulset dev-lab --replicas=0
 kubectl --context spark-root -n vc-dev-lab wait --for=delete pod/dev-lab-0 --timeout=120s
 sudo tar czf ~/dev-lab-$(date +%F).tgz -C /data/k8s/vc-dev-lab data-dev-lab-0

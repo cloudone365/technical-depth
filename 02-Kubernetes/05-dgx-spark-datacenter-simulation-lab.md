@@ -215,6 +215,7 @@ flowchart LR
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 git clone https://github.com/cloudone365/technical-depth.git && cd "technical-depth/02-Kubernetes/lab"
 pip install yamllint shellcheck-py pyyaml     # plus kubectl, helm, kubeconform, promtool (see CI workflow)
 tests/run-local-checks.sh
@@ -253,10 +254,15 @@ tests/run-local-checks.sh
 In Semaphore (project `spark-lab`): run `19.1 Kubernetes`, then `20.1 GPU Operator` (break-glass CLI: `ansible-playbook playbooks/19.1-kubernetes.yml -l dgx-spark-1,localhost -K`). Then on your MacBook:
 
 ```bash
-cd "../../01-Ansible/lab"
+# ▶ MacBook · 01-Ansible/lab (venv active)
 tools/fetch-kubeconfig.sh sema01                    # kubeconfig from sema01's state volume → .cache/
 export KUBECONFIG=$PWD/.cache/kubeconfig-spark-lab.yaml
-cd "../../02-Kubernetes/lab" && scripts/preflight.sh
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
+# (repo copy on the Spark: the guide's "Where each command runs")
+scripts/preflight.sh
 ```
 
 **Gate:** both task logs end in `failed=0`; `fetch-kubeconfig.sh` lists `spark-root`; preflight `0 failed`. `allocatable nvidia.com/gpu=15`. No control-plane taint.
@@ -282,7 +288,12 @@ cd "../../02-Kubernetes/lab" && scripts/preflight.sh
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root get secrets -A -o json | kubectl --context spark-root replace -f - >/dev/null
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 scripts/etcd-drill.sh status && scripts/etcd-drill.sh snapshot
 systemctl list-timers etcd-snapshot.timer
 ```
@@ -322,6 +333,7 @@ A first run pulls many images and takes a while. Re-running is safe (`helm upgra
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/install-addons.sh all          # all on the root: storage metrics-server kps vclusters traefik kueue keda
 kubectl --context spark-root get pods -A | grep -vE 'Running|Completed|^NAMESPACE' || echo 'root: all pods Running/Completed'
 scripts/verify.sh vclusters
@@ -359,6 +371,7 @@ scripts/verify.sh vclusters
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/apply-lab.sh                   # root (incl. root-llms) → dev-lab → dev-llms
 scripts/verify.sh platform vclusters llm-budget tenancy admission storage
 ```
@@ -393,6 +406,7 @@ scripts/verify.sh platform vclusters llm-budget tenancy admission storage
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/verify.sh gpu                  # gpu-smoke from inside dev-lab
 kubectl --context spark-root apply -f manifests/root/70-gpu/gemm-solo.yaml
 kubectl --context spark-root -n platform-tools logs -f job/gemm-solo
@@ -428,6 +442,7 @@ kubectl --context spark-root -n platform-tools logs -f job/gemm-solo
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -f manifests/root-llms/60-storage/model-prefetch-job.yaml
 kubectl --context spark-root -n llm-serving wait --for=condition=complete job/model-prefetch --timeout=30m
 kubectl --context spark-root apply -k manifests/root-llms/90-serving/vllm
@@ -456,6 +471,7 @@ scripts/verify.sh ingress serving
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 tests/kueue-gang-test.sh
 kubectl --context spark-root apply -k manifests/root-llms/80-distributed/base
 kubectl --context spark-root -n batch logs -f -l job-name=ddp --prefix
@@ -484,6 +500,7 @@ kubectl --context spark-root -n batch logs -f -l job-name=ddp --prefix
 #### Run it
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root/95-observability
 scripts/verify.sh observability
 scripts/collect-diag.sh                     # know how to produce a bundle before you need one
@@ -508,6 +525,7 @@ scripts/breakfix.sh list                    # then do at least three drills (Cha
 ## 6. Verify (full gate)
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 scripts/verify.sh
 ```
 

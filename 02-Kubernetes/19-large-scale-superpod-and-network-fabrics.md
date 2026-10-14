@@ -273,13 +273,25 @@ Then run the NCCL job (Chapter 18 §5.5) and diff the counters before and after.
 #### Run it
 
 ```bash
-# ▶ MacBook · 02-Kubernetes/lab
+# ▶ dgx-spark-2 (ssh dgx-spark-2)
 # take ONE logical half down on dgx-spark-2 for the duration of a run
-ssh dgxadmin@192.168.0.101 'sudo ip link set enP2p1s0f1np1 down'
+sudo ip link set enP2p1s0f1np1 down
+```
+
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root delete -k manifests/root-llms/80-distributed/two-spark --ignore-not-found
 kubectl --context spark-root apply -k manifests/root-llms/80-distributed/two-spark
 kubectl --context spark-root -n batch logs -l job-name=ddp --prefix | grep -E 'NET/IB|busbw|1073741824|WARN' | head
-ssh dgxadmin@192.168.0.101 'sudo ip link set enP2p1s0f1np1 up'
+```
+
+```bash
+# ▶ dgx-spark-2 (ssh dgx-spark-2)
+sudo ip link set enP2p1s0f1np1 up
+```
+
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root delete -k manifests/root-llms/80-distributed/two-spark
 ```
 

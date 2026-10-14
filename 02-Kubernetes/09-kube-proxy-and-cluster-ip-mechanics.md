@@ -101,6 +101,7 @@ Every LoadBalancer Service in a vCluster's host namespace counts against that na
 Check what's running:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n kube-system get cm kube-proxy -o jsonpath='{.data.config\.conf}' | grep -E '^mode|maxPerCore'
 kubectl --context spark-root -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg status | grep -i KubeProxyReplacement
 ```
@@ -130,12 +131,14 @@ There's one conntrack table per kernel. Every vCluster's connections, the root's
 
 ## 5. Lab
 
-Run from `02-Kubernetes/lab` on the Spark (`svc-trace.sh` needs `sudo iptables-save` and `sudo conntrack`), with the lab kubeconfig exported:
+Each block's location line says where it runs: most from the MacBook, and `svc-trace.sh` from `~/technical-depth/02-Kubernetes/lab` on the Spark (it needs `sudo iptables-save` and `sudo conntrack`), with the lab kubeconfig exported:
 
 ```bash
-cd "02-Kubernetes/lab"
+# ▶ MacBook · 02-Kubernetes/lab
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 ```
+
+Blocks marked `dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab` run a script on the Spark from the repo copy set up in the guide's *Where each command runs*, with the kubeconfig copied there as in [Chapter 02 §5](02-etcd-database-deep-dive.md) (`export KUBECONFIG=~/.kube/spark-lab.yaml`).
 
 If DGX OS lacks `conntrack`, either `sudo apt install conntrack` or run the same commands in the root's `netshoot-host` (hostNetwork + NET_ADMIN): `kubectl --context spark-root -n platform-tools exec deploy/netshoot-host -- conntrack -C`.
 
@@ -169,7 +172,12 @@ If DGX OS lacks `conntrack`, either `sudo apt install conntrack` or run the same
 `svc-trace.sh <namespace> <service> [context]` takes the Service as the tenant sees it, then finds the root's chains by its ClusterIP:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context dev-lab apply -k manifests/dev-lab/30-networking
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 scripts/svc-trace.sh lab-tools echo dev-lab
 ```
 
@@ -194,6 +202,7 @@ echo-7xk2p   IPv4          8080    10.42.0.21,10.42.0.22,10.42.0.23   5m
 The EndpointSlice printed first is **dev-lab's** (the tenant's view). The iptables rules were written from the **root's** slice for the synced Service. Compare the two:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n vc-dev-lab get svc echo-x-lab-tools-x-dev-lab -o wide
 kubectl --context spark-root -n vc-dev-lab get endpointslices -l kubernetes.io/service-name=echo-x-lab-tools-x-dev-lab -o wide
 kubectl --context spark-root -n vc-dev-lab get svc echo-x-lab-tools-x-dev-lab -o jsonpath='{.spec.selector}{"\n"}'
@@ -218,6 +227,7 @@ Same ClusterIP, same three pod IPs. The selector on the root copy isn't the tena
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 # new connection per request → ~even
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- sh -c 'for i in $(seq 300); do curl -s echo; echo; done' | sort | uniq -c
 # 30 requests in ONE curl invocation → one keep-alive connection → all on ONE pod
@@ -245,13 +255,22 @@ Expected: ≈100/100/100 for the first loop. For the second, **one** hostname 30
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 POD=$(kubectl --context dev-lab -n lab-tools get pod -l app=echo -o jsonpath='{.items[0].metadata.name}')
 kubectl --context dev-lab -n lab-tools get endpointslices -l kubernetes.io/service-name=echo \
   -o jsonpath='{range .items[0].endpoints[*]}{.targetRef.name}{" ready="}{.conditions.ready}{"\n"}{end}'
 # take it out of the Service: agnhost serve-hostname has no readiness toggle, so change its label
 kubectl --context dev-lab -n lab-tools label pod "$POD" app=echo-quarantine --overwrite
 sleep 5
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 scripts/svc-trace.sh lab-tools echo dev-lab | grep -c 'DNAT'     # a NEW pod replaced it (RS wants 3) → still 3
+```
+
+```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab -n lab-tools get pod "$POD" -o wide      # quarantined pod still running, out of rotation
 kubectl --context dev-lab -n lab-tools delete pod "$POD"
 ```
@@ -281,9 +300,14 @@ This is the **quarantine pattern**: relabel a misbehaving model server to take i
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- dig +short echo.lab-tools.svc.cluster.local
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- dig +short echo-headless.lab-tools.svc.cluster.local
 kubectl --context spark-root -n vc-dev-lab get svc echo-headless-x-lab-tools-x-dev-lab   # CLUSTER-IP None
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo iptables-save -t nat | grep -c echo-headless                                          # 0 → kube-proxy ignores it
 ```
 
@@ -307,6 +331,7 @@ Expected: one ClusterIP for `echo`, three pod IPs for `echo-headless`. The answe
 #### Run it
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo sysctl net.netfilter.nf_conntrack_max net.netfilter.nf_conntrack_count
 ECHO_CIP=$(kubectl --context dev-lab -n lab-tools get svc echo -o jsonpath='{.spec.clusterIP}')
 sudo conntrack -L -d "$ECHO_CIP" 2>/dev/null | head -3
@@ -336,6 +361,7 @@ sudo conntrack -C
 The mock LLM streams 20 tokens/s. Start a long stream inside `llm-serving` on the root, delete the pod serving it, and see what the client gets:
 
 ```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root-llms/40-ingress
 kubectl --context spark-root -n llm-serving exec deploy/mock-llm-canary -- python3 - <<'PY' &
 import json, urllib.request
@@ -380,15 +406,25 @@ terminationGracePeriodSeconds: 120      # > longest expected generation
 #### Run it
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context spark-root -n ingress get svc traefik-lab                               # EXTERNAL-IP 192.168.0.115 — a root Service, MetalLB serves it as is
 kubectl --context spark-root -n metallb-system logs -l app.kubernetes.io/component=speaker --tail=50 | grep -i 192.168.0.115
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
 sudo iptables-save -t nat | grep -E '192.168.0.115|KUBE-EXT' | head
+```
+
+```bash
+# ▶ MacBook · any folder
 # on your laptop, after one request to .115: `ip neigh show 192.168.0.115` (or `arp -n`) lists the Spark's mgmt MAC
 ```
 
 The `KUBE-EXT-*` chain marks the packet for masquerade before jumping to the same `KUBE-SVC-*` a ClusterIP would use. Now call the front door from *inside* dev-lab and ask Hubble who Cilium thinks the caller is:
 
 ```bash
+# ▶ MacBook · any folder
 kubectl --context dev-lab -n lab-tools exec deploy/netshoot -- curl -s -m3 -o /dev/null -w '%{http_code}\n' -H 'Host: llm.lab.local' http://192.168.0.115/v1/models
 kubectl --context spark-root -n kube-system exec ds/cilium -c cilium-agent -- hubble observe --namespace ingress --port 8000 --last 5
 ```

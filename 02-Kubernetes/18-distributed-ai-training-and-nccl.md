@@ -358,7 +358,7 @@ kubectl --context spark-root -n batch exec "$R1" -- sh -c 'for p in $(pgrep -f a
 …and from the host, on the Spark, where the rank runs:
 
 ```bash
-# ▶ dgx-spark-1 (ssh dgx-spark-1)
+# ▶ dgx-spark-1 (ssh dgx-spark-1) · ~/technical-depth/02-Kubernetes/lab
 # from 02-Kubernetes/lab in a copy of this repo on the Spark, with the lab kubeconfig exported
 R1=<rank 1's pod name, as printed on the MacBook>
 scripts/cgroup-inspect.sh batch "${R1#pod/}"      # context defaults to spark-root

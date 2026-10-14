@@ -18,7 +18,7 @@
 At scale, failure is the normal state. With independent failures, cluster MTBF = component MTBF / N:
 
 ```bash
-cd "02-Kubernetes/lab"
+# ▶ MacBook · 02-Kubernetes/lab
 python3 scripts/mtbf_calc.py --gpus 2      --gpu-mtbf-h 50000
 python3 scripts/mtbf_calc.py --gpus 16384  --ckpt-s 60 --restart-s 600
 python3 scripts/mtbf_calc.py --gpus 100000 --ckpt-s 60 --restart-s 600
@@ -276,7 +276,15 @@ Corrupt the stored reference (a stand-in for the GPU computing a different answe
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n batch delete job resilient-train
-ssh dgxadmin@192.168.0.100 "echo '{\"sha\": \"deadbeefdeadbeef\"}' | sudo tee /data/k8s/batch/ckpt/canary.json"
+```
+
+```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+echo '{"sha": "deadbeefdeadbeef"}' | sudo tee /data/k8s/batch/ckpt/canary.json
+```
+
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root-llms/80-distributed/resilient
 kubectl --context spark-root -n batch logs -f job/resilient-train | grep -E 'canary|SDC'
 kubectl --context spark-root -n batch get job resilient-train -o jsonpath='{.status.conditions[?(@.type=="Failed")].reason}{"\n"}'   # PodFailurePolicy
@@ -297,8 +305,12 @@ Both vClusters show the taint because they sync the real node from the root. Nei
 After investigation (DCGM diag / vendor) — and restoring the real reference:
 
 ```bash
+# ▶ dgx-spark-1 (ssh dgx-spark-1)
+sudo rm /data/k8s/batch/ckpt/canary.json
+```
+
+```bash
 # ▶ MacBook · 02-Kubernetes/lab
-ssh dgxadmin@192.168.0.100 'sudo rm /data/k8s/batch/ckpt/canary.json'
 kubectl --context spark-root taint node dgx-spark-1 spark.lab/sdc-
 kubectl --context spark-root annotate node dgx-spark-1 spark.lab/quarantine-reason-
 ```
