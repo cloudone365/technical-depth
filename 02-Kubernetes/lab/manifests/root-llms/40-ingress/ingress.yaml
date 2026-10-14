@@ -7,7 +7,10 @@ metadata:
   namespace: llm-serving
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: web
-    traefik.ingress.kubernetes.io/router.middlewares: llm-serving-llm-body-limit@kubernetescrd,llm-serving-llm-ratelimit@kubernetescrd
+    # No llm-body-limit here: Traefik's buffering middleware holds the whole
+    # response too (measured: TTFB = total), which kills token streaming.
+    # Chapter 11 §5.5 adds it for one test and shows that trade-off.
+    traefik.ingress.kubernetes.io/router.middlewares: llm-serving-llm-ratelimit@kubernetescrd
 spec:
   ingressClassName: traefik
   rules:

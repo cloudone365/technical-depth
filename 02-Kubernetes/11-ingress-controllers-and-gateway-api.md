@@ -39,7 +39,7 @@ flowchart LR
     TR["Traefik v3 · ns ingress<br/>entrypoints web :8000 / websecure :8443<br/>readTimeout 0 · idleTimeout 600s"]
     subgraph MW["Middlewares (per route)"]
       direction TB
-      M1["llm-body-limit<br/>32 MiB request body"]
+      M1["llm-body-limit<br/>32 MiB request body<br/>buffers responses: not on streaming routes"]
       M2["llm-ratelimit<br/>20 r/s avg · burst 40"]
       M3["llm-apikey<br/>basicAuth"]
     end
@@ -164,7 +164,7 @@ Expected: `svc/traefik-lab` `LoadBalancer` with `EXTERNAL-IP 192.168.0.115`. Gat
 
 - **Tenancy** in `llm-serving` and `batch`: `serving-budget` and `batch-budget` quotas, LimitRanges, RBAC, and the NetworkPolicy `allow-ingress-and-same-namespace` that lets Traefik in.
 - **Mock API:** `mock-llm` (2 replicas) and `mock-llm-canary` (1 replica), an OpenAI-compatible stub that streams 20 tokens/s on :8000.
-- **Routes:** Ingress `llm` for `llm.lab.local` with the `llm-body-limit` (32 MiB) and `llm-ratelimit` (20/s, burst 40) middlewares, and HTTPRoute `llm-gw` for `gw.lab.local` with a 90/10 split between `mock-llm` and `mock-llm-canary`.
+- **Routes:** Ingress `llm` for `llm.lab.local` with the `llm-ratelimit` (20/s, burst 40) middleware (`llm-body-limit` is defined but kept off this streaming route, see §5.5), and HTTPRoute `llm-gw` for `gw.lab.local` with a 90/10 split between `mock-llm` and `mock-llm-canary`.
 - **On your laptop:** adds `llm.lab.local` and `gw.lab.local` → `192.168.0.115` to `/etc/hosts`.
 
 #### What to look for
@@ -217,7 +217,7 @@ The pods are `mock-llm-…` in `llm-serving`, not `…-x-llm-serving-x-…` in a
 3. **Through `bf09.lab.local`:** `TTFB` about equal to `total`, both about `5s`.
 4. **After `reset 09`:** `kubectl --context spark-root -n llm-serving get ingress` lists only `llm`.
 
-**If something's off:** a high TTFB through `llm.lab.local` too means buffering somewhere else: another middleware on the route, or a proxy on your laptop (`curl --noproxy '*'`). More in §7.
+**If something's off:** a high TTFB through `llm.lab.local` too means buffering on that route: compare with `gw.lab.local` (no middlewares). If only `llm.lab.local` is slow, list the route's middlewares (`kubectl --context spark-root -n llm-serving get ingress llm -o jsonpath='{.metadata.annotations}'`); an older checkout had `llm-body-limit` there, which buffers responses (§5.5). Otherwise suspect a proxy on your laptop (`curl --noproxy '*'`). More in §7.
 
 #### Run it
 
@@ -279,29 +279,40 @@ time curl -sN http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_t
 
 #### What this lab does (middlewares `llm-body-limit`, `llm-ratelimit`)
 
-- Sends one 40 MB request (above the 32 MiB `maxRequestBodyBytes`), then 200 requests with 50 in parallel against the `average: 20`, `burst: 40` rate limit.
+- **Adds `llm-body-limit` to Ingress `llm` for this step**, sends one 40 MB request (above the 32 MiB `maxRequestBodyBytes`) and times a stream again.
+- **Shows the trade-off:** Traefik's `buffering` middleware has no request-only mode. With it on the route, the stream arrives in one piece, exactly like break/fix 09.
+- **Removes it again** by re-applying `root-llms/40-ingress`, then sends 200 requests with 50 in parallel against the `average: 20`, `burst: 40` rate limit.
 - **Optional:** turn on Traefik access logs in `addons/traefik-values.yaml`, re-run the install script, and read which client IP Traefik saw.
-- Nothing is changed unless you do the optional step.
 
 #### What to look for
 
 1. **Big request:** `413`.
-2. **Burst:** a mix of `200` and `429`, roughly 40 plus 20 per second of the run as `200`.
-3. **Access log (optional):** a single `ClientHost`, the node's address, not your laptop's.
+2. **Stream with the limit on:** `TTFB` ≈ `total` ≈ 5 s. After the re-apply: `TTFB` ≈ 0.05 s again.
+3. **Burst:** a mix of `200` and `429`, roughly 40 plus 20 per second of the run as `200`.
+4. **Access log (optional):** a single `ClientHost`, the node's address, not your laptop's.
 
-**If something's off:** all `200` means the `router.middlewares` annotation on Ingress `llm` doesn't list `llm-serving-llm-ratelimit@kubernetescrd`. More in §7.
+**If something's off:** all `200` in the burst means the `router.middlewares` annotation on Ingress `llm` doesn't list `llm-serving-llm-ratelimit@kubernetescrd`. More in §7.
 
 #### Run it
 
 ```bash
-# ▶ MacBook · any folder
+# ▶ MacBook · 02-Kubernetes/lab
+kubectl --context spark-root -n llm-serving annotate ingress llm --overwrite \
+  traefik.ingress.kubernetes.io/router.middlewares=llm-serving-llm-body-limit@kubernetescrd,llm-serving-llm-ratelimit@kubernetescrd
 head -c 40000000 /dev/zero | tr '\0' 'a' | jq -Rs '{messages:[{role:"user",content:.}]}' > /tmp/big.json
 curl -s -o /dev/null -w '%{http_code}\n' http://llm.lab.local/v1/chat/completions --data-binary @/tmp/big.json   # 413
+curl -sN -o /dev/null -w 'TTFB %{time_starttransfer}s  total %{time_total}s\n' \
+  http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":100}'                       # TTFB ≈ total: buffered
+kubectl --context spark-root apply -k manifests/root-llms/40-ingress                                    # limit off again
+curl -sN -o /dev/null -w 'TTFB %{time_starttransfer}s  total %{time_total}s\n' \
+  http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":100}'                       # TTFB ≈ 0.05 s
 
 seq 200 | xargs -P50 -I{} curl -s -o /dev/null -w '%{http_code}\n' http://llm.lab.local/v1/models | sort | uniq -c
 ```
 
-Expected: `413`, then a mix of `200` and `429`. Roughly the burst (40) plus 20/s get through, and the rest are rejected.
+Expected: `413`, a buffered stream while the limit is on, a streaming one after the re-apply, then a mix of `200` and `429`. Roughly the burst (40) plus 20/s get through, and the rest are rejected.
+
+**Where the request-size limit goes instead.** Traefik's `buffering` middleware reads the whole response before sending it, even when only `maxRequestBodyBytes` is set, so it can't sit on a chat/completions route. Put it on routes that don't stream (file uploads, embeddings, batch endpoints), and cap streaming routes at the model server (vLLM rejects prompts over `--max-model-len`) or in a gateway such as LiteLLM (module 03).
 
 The limit is "per client IP" — but which IP? Look at what Traefik saw:
 
@@ -334,7 +345,7 @@ The lab values don't enable access logs: add `logs: {access: {enabled: true}}` t
 htpasswd -nbB team-alpha "$(openssl rand -hex 16 | tee /tmp/alpha.key)" > /tmp/users
 kubectl --context spark-root -n llm-serving create secret generic llm-api-users --from-file=users=/tmp/users
 kubectl --context spark-root -n llm-serving annotate ingress llm --overwrite \
-  traefik.ingress.kubernetes.io/router.middlewares=llm-serving-llm-body-limit@kubernetescrd,llm-serving-llm-ratelimit@kubernetescrd,llm-serving-llm-apikey@kubernetescrd
+  traefik.ingress.kubernetes.io/router.middlewares=llm-serving-llm-ratelimit@kubernetescrd,llm-serving-llm-apikey@kubernetescrd
 curl -s -o /dev/null -w '%{http_code}\n' http://llm.lab.local/v1/models                               # 401
 curl -s -u "team-alpha:$(cat /tmp/alpha.key)" http://llm.lab.local/v1/models | jq -r '.data[0].id'   # mock-llm
 ```
@@ -456,6 +467,7 @@ scripts/verify.sh ingress
 | 504 / hang for every route, pods Ready | NetworkPolicy drops gateway → backend traffic | `kubectl --context spark-root -n llm-serving get netpol`; `kubectl --context spark-root -n kube-system exec ds/cilium -c cilium-agent -- hubble observe --namespace llm-serving --verdict DROPPED` | drill 06: restore `allow-ingress-and-same-namespace` |
 | Stream arrives all at once | response buffering (middleware, compression, another proxy in front) | TTFB ≈ total (§5.3) | remove response buffering. Set `X-Accel-Buffering: no` for NGINX hops |
 | `413` | body limit | Traefik access log | raise `maxRequestBodyBytes` deliberately |
+| Stream arrives all at once on a route with `llm-body-limit` | Traefik's `buffering` middleware buffers responses too, even with only request limits set | TTFB ≈ total; same request via `gw.lab.local` streams | take `buffering` off streaming routes; limit prompt size at the model server or LiteLLM (§5.5) |
 | `429` for everyone | rate limit keyed on the masqueraded node IP, not the client | Traefik logs `ClientHost` (§5.5) | `externalTrafficPolicy: Local`, or `ipStrategy.depth` / trust `X-Forwarded-For` from a known proxy |
 | HTTPRoute `Accepted=False NotAllowedByListeners` | listener `namespacePolicy` excludes the route's namespace | `kubectl --context spark-root -n llm-serving describe httproute` | `namespacePolicy: All` or `Selector` |
 | `no matches for kind "HTTPRoute"` / `"Middleware"` | applied to the wrong context — the CRDs are only on the root, not in dev-lab or dev-llms | `kubectl config current-context` | `--context spark-root` |

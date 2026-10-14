@@ -51,7 +51,7 @@ ANSWER[08]="EndpointSlice has no endpoints: selector app=mock-lm matches nothing
 TITLE[09]="Streaming arrives in one blob";             CTX[09]=spark-root
 SYMPTOM[09]="curl -N via bf09.lab.local prints nothing for seconds, then every token at once"
 HINT[09]="Compare time-to-first-byte through bf09.lab.local and through llm.lab.local."
-ANSWER[09]="curl -w '%{time_starttransfer}' shows TTFB ≈ total time. The bf09 Ingress has a Traefik 'buffering' middleware with maxResponseBodyBytes — it holds the whole response. Fix: never buffer responses on LLM routes (request-body limits only, as in llm-body-limit)."
+ANSWER[09]="curl -w '%{time_starttransfer}' shows TTFB ≈ total time. The bf09 Ingress has a Traefik 'buffering' middleware with maxResponseBodyBytes — it holds the whole response. Fix: no 'buffering' middleware on streaming LLM routes at all: Traefik buffers the response even when only request limits are set (llm-body-limit too, Chapter 11 §5.5)."
 TITLE[10]="GPU visible to a pod that didn't ask for one"; CTX[10]=dev-lab
 SYMPTOM[10]="bf10-leak (dev-lab) logs list the GB10 although it requests no nvidia.com/gpu — and dev-lab's GPU quota doesn't count it"
 HINT[10]="Which container runtime ran this pod on the root, and what does the image's NVIDIA_VISIBLE_DEVICES say?"

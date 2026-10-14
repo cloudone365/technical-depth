@@ -2,6 +2,10 @@
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata: {name: llm-body-limit, namespace: llm-serving}
+# Request-size limit. Careful: Traefik's buffering middleware buffers the
+# RESPONSE as well, even with only request limits set, so an SSE stream
+# arrives in one piece. Use it on non-streaming routes only (uploads,
+# embeddings, batch), never on chat/completions routes (Chapter 11 §5.5).
 spec:
   buffering:
     maxRequestBodyBytes: 33554432      # 32 MiB: long RAG prompts / base64 images, not whole datasets

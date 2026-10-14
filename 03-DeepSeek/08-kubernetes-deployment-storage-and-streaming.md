@@ -636,7 +636,7 @@ scripts/breakfix.sh answer D08
 #### What to look for
 
 1. **Patch:** `httproute.gateway.networking.k8s.io/litellm patched`.
-2. **Probe:** if your Traefik version buffers responses in that middleware, a `BUFFERED` line and `first answer` ≈ `total`. If not, the stream looks normal; note which.
+2. **Probe:** a `BUFFERED` line and `first answer` ≈ `total`: Traefik's `buffering` middleware holds the response even with only request limits set (measured on this lab's Traefik, 02 Chapter 11 §5.5).
 3. **After re-apply:** a new probe shows no `BUFFERED` line.
 
 **If something's off:** the patch fails with `filters` already present → the route was patched before; re-apply `k8s/apps/litellm.yaml` and try again. More in §7.
@@ -653,7 +653,7 @@ python3 tools/stream_probe.py --url http://api.lab.local --api-key "$KEY" --mode
 kubectl --context spark-root apply -f k8s/apps/litellm.yaml          # remove the filter
 ```
 
-Expected: if your Traefik version buffers responses in that middleware, the probe prints `BUFFERED` and `first answer ≈ total`; users see nothing until the answer is complete. Put request-size limits on a separate non-streaming route, or enforce them in LiteLLM.
+Expected: the probe prints `BUFFERED` and `first answer ≈ total`; users see nothing until the answer is complete. Put request-size limits on a separate non-streaming route, or enforce them in LiteLLM.
 
 ### Task 5.10 · (2×) Share the cache with dgx-spark-2 over NFS/RDMA
 

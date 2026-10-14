@@ -204,7 +204,7 @@ Metric names move between releases; `curl -s localhost:8000/metrics | grep -E '^
 ## 4. Integrations
 
 - **02 vLLM base** ([`vllm.yaml`](../02-Kubernetes/lab/manifests/root-llms/90-serving/vllm/vllm.yaml)): every overlay keeps its probes (startup 30 min for first downloads, readiness required by the `llm-serving` admission policy), `preStop` drain, `Recreate`, `spark-serving` priority, 8 Gi `/dev/shm` and the `model-cache` mount. Changes to probes or lifecycle belong in the base, not in the catalog.
-- **Traefik** (root, namespace `ingress`, `192.168.0.115`): Task 3 adds an Ingress for `qwen.lab.local` that reuses the 02 streaming-safe middlewares (`llm-body-limit`, `llm-ratelimit`). 02's own `llm.lab.local` keeps pointing at `mock-llm`.
+- **Traefik** (root, namespace `ingress`, `192.168.0.115`): Task 3 adds an Ingress for `qwen.lab.local` that reuses 02's `llm-ratelimit` middleware (not `llm-body-limit`, which buffers streams: 02 Chapter 11 §5.5). 02's own `llm.lab.local` keeps pointing at `mock-llm`.
 - **KEDA** ([`autoscaling.yaml`](../02-Kubernetes/lab/manifests/root-llms/90-serving/autoscaling.yaml)): the ScaledObject `vllm` owns the main Deployment's replica count. Park it with `kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite`, bring it back by removing the annotation. Side engines have no ScaledObject.
 - **Prometheus**: the root ServiceMonitor `llm-workloads` keeps Services named `vllm`, `sglang` (and the 02 P/D and KServe names), so the main model and SGLang are scraped with `vcluster="root"`, `vnamespace="llm-serving"`. Side engines (`vllm-<name>`) are not matched by that list: to scrape them, widen the `keep` regex in 02's [`vcluster-workloads.yaml`](../02-Kubernetes/lab/manifests/root/95-observability/vcluster-workloads.yaml) to `vllm(-.*)?|vllm-prefill|…` (telemetry in Chapter 13).
 - **Applications**: LiteLLM, Open WebUI and the RAG tools come from 03-DeepSeek's lab; they address models by served name (`qwen3-8b`) at `http://vllm.llm-serving:8000` or `http://vllm-<name>.llm-serving:8000` — Chapter 12 adds the LiteLLM aliases.
@@ -317,7 +317,7 @@ Chapter 10 tests tool calling systematically with `tools/fc_check.py`.
 
 #### What this lab does (Ingress `qwen` + `serve-model.sh qwen3-4b-instruct --side`)
 
-- **Ingress:** creates `ingress/qwen` in `llm-serving` with two hosts on Traefik (192.168.0.115): `qwen.lab.local` → `svc/vllm`, `agent.qwen.lab.local` → `svc/vllm-qwen3-4b-instruct`. It reuses 02's `llm-body-limit` and `llm-ratelimit` middlewares. 02's `llm.lab.local` route is not touched.
+- **Ingress:** creates `ingress/qwen` in `llm-serving` with two hosts on Traefik (192.168.0.115): `qwen.lab.local` → `svc/vllm`, `agent.qwen.lab.local` → `svc/vllm-qwen3-4b-instruct`. It reuses 02's `llm-ratelimit` middleware; `llm-body-limit` stays off because it buffers streams (02 Chapter 11 §5.5). 02's `llm.lab.local` route is not touched.
 - **`/etc/hosts`:** adds one line on your MacBook (needs `sudo`).
 - **Side model:** a second engine `deploy/svc vllm-qwen3-4b-instruct` next to the main one: Qwen3-4B-Instruct-2507, util 0.12, 20 Gi, `hermes` tool parser, ~8.1 GB download. It has no KEDA ScaledObject.
 
@@ -342,7 +342,7 @@ metadata:
   namespace: llm-serving
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: web
-    traefik.ingress.kubernetes.io/router.middlewares: llm-serving-llm-body-limit@kubernetescrd,llm-serving-llm-ratelimit@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: llm-serving-llm-ratelimit@kubernetescrd   # no llm-body-limit: it buffers streams (02 Ch11 §5.5)
 spec:
   ingressClassName: traefik
   rules:
