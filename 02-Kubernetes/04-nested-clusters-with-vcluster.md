@@ -384,7 +384,7 @@ Inner quotas are ceilings, not reservations: `tenant-alpha` + `tenant-beta` + `l
    kubectl --context spark-root -n vc-dev-lab get pods,pvc,svc
    ```
    `dev-lab-0` is `Running`, PVC `data-dev-lab-0` is `Bound` (5Gi, `local-nvme`), and the LoadBalancer Service has `EXTERNAL-IP 192.168.0.111`. Same in `vc-dev-llms` with `.112`.
-4. **Gate:** `scripts/verify.sh vclusters` prints the 11 `[PASS]` lines shown in §7 and `0 failed`.
+4. **Gate:** `scripts/verify.sh vclusters` passes every line except the two `RuntimeClass nvidia missing` lines: `9 passed, 0 warnings, 2 failed`. That's expected here. RuntimeClass `nvidia` inside each vCluster comes from `dev-lab/00-platform` and `dev-llms/00-platform`, which `scripts/apply-lab.sh` applies (Chapter 05 Task 4–5). After that you get the 11 `[PASS]` lines shown in §7.
 
 **If something's off:** `dev-lab-0` `Pending` → its PVC is waiting for storage; install storage first. `context dev-lab` times out → MetalLB didn't hand out `.111`. More in §8.
 
@@ -409,7 +409,7 @@ scripts/install-addons.sh kps
 scripts/install-addons.sh vclusters
 ```
 
-**Gate:** `kubectl config get-contexts` lists `spark-root`, `dev-lab`, `dev-llms`; `scripts/verify.sh vclusters` all PASS.
+**Gate:** `kubectl config get-contexts` lists `spark-root`, `dev-lab`, `dev-llms`; `scripts/verify.sh vclusters` passes everything except the two `RuntimeClass nvidia missing` lines, which clear after `scripts/apply-lab.sh`.
 
 The LLM stack is installed on the root with `scripts/install-addons.sh traefik`, `kueue`, `keda` (and `kserve` when you need it), one at a time, followed by `scripts/apply-lab.sh` (its `root` part includes `manifests/root-llms`); `scripts/verify.sh llm-budget` checks its quotas (Chapter 05).
 
@@ -605,6 +605,8 @@ While the control plane is scaled to 0, tenant pods keep running (they are root 
 ---
 
 ## 7. Verify
+
+This is the state after `scripts/install-addons.sh kueue` and `scripts/apply-lab.sh` (Chapter 05 Tasks 3–5). Before `apply-lab.sh`, the two `RuntimeClass nvidia` lines fail. Before Kueue is installed, the last line reads `[....] Kueue not installed on the root yet`, which is information, not a failure.
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab

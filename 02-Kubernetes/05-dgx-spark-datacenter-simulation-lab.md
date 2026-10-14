@@ -319,7 +319,7 @@ A first run pulls many images and takes a while. Re-running is safe (`helm upgra
 
 1. **Command exit:** the script stops at the first error. A full run prints `192.168.0.115` after the Traefik step and ends with `deployment "keda-operator" successfully rolled out`.
 2. **Root pods:** the second command prints `root: all pods Running/Completed`.
-3. **vClusters:** `scripts/verify.sh vclusters` shows `dev-lab root budget: 2 4Gi 2` and `dev-llms root budget: 2 4Gi 2`, and ends `0 failed`.
+3. **vClusters:** `scripts/verify.sh vclusters` shows `dev-lab root budget: 2 4Gi 2` and `dev-llms root budget: 2 4Gi 2`. It ends `9 passed, 0 warnings, 2 failed`: the two failures are `dev-lab RuntimeClass nvidia missing` and `dev-llms RuntimeClass nvidia missing`. They're expected at this point. The RuntimeClass is created inside each vCluster by `apply-lab.sh` in Task 4–5.
 4. **Endpoints:**
 
    | Check | Healthy value |
@@ -327,6 +327,8 @@ A first run pulls many images and takes a while. Re-running is safe (`helm upgra
    | `kubectl --context spark-root -n ingress get svc traefik-lab` | `EXTERNAL-IP 192.168.0.115` |
    | http://192.168.0.100:32000 | Grafana login page |
    | `kubectl config get-contexts -o name` | `spark-root`, `dev-lab`, `dev-llms` |
+
+**Built with Semaphore (`20.2`) instead of `install-addons.sh all`?** `20.2` installs storage and the vClusters but not Traefik, Kueue or KEDA. Run `scripts/install-addons.sh traefik`, then `kueue`, then `keda` before Task 4–5; until then `verify.sh llm-budget` prints `[....] Kueue not installed on the root yet`.
 
 **If something's off:** a vCluster never Ready → its PVC is `Pending` because storage wasn't installed first. Traefik without an IP → the MetalLB pool. More in §8 (gate 3).
 
@@ -339,7 +341,7 @@ kubectl --context spark-root get pods -A | grep -vE 'Running|Completed|^NAMESPAC
 scripts/verify.sh vclusters
 ```
 
-**Gate:** no root pods outside `Running/Completed`. Both vClusters answer and show their budgets (`2 4Gi 2`). Traefik has `192.168.0.115`. Grafana answers on :32000.
+**Gate:** no root pods outside `Running/Completed`. Both vClusters answer and show their budgets (`2 4Gi 2`); only the two `RuntimeClass nvidia` lines fail (Task 4–5 clears them). Traefik has `192.168.0.115`. Grafana answers on :32000.
 
 ### Task 4–5 · Tenancy, policies and workloads
 
