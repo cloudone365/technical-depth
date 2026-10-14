@@ -174,7 +174,7 @@ Expected: `svc/traefik-lab` `LoadBalancer` with `EXTERNAL-IP 192.168.0.115`. Gat
 3. **HTTPRoute status:** `Accepted=True ResolvedRefs=True`.
 4. **curl:** `{"object":"list","data":[{"id":"mock-llm",…}]}`.
 
-**If something's off:** a curl that hangs while the pods are Ready is the NetworkPolicy (`get netpol -n llm-serving` must list `allow-ingress-and-same-namespace`). `404` means the `Host` didn't match: check `/etc/hosts`. More in §7.
+**If something's off:** a curl that hangs while the pods are Ready is the NetworkPolicy (`get netpol -n llm-serving` must list `allow-ingress-and-same-namespace`). A plain-text `404 page not found` means no Traefik route matched: the `Host` (check `/etc/hosts`) or the IngressClass (`kubectl --context spark-root get ingressclass` must list `traefik`). Traefik's log repeating `secret 'llm-serving/llm-api-users' not found` is expected until §5.6 creates that Secret: the `llm-apikey` middleware isn't on the route yet. More in §7.
 
 #### Run it
 
