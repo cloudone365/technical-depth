@@ -450,15 +450,16 @@ The node shows 15 slices inside `dev-lab` even though `dev-lab` may only use 2: 
 
 ### 6.3 Follow one pod through both clusters
 
-#### What this lab does (manifests `lab/manifests/dev-lab/30-networking`)
+#### What this lab does (manifests `lab/manifests/dev-lab/00-platform`, `30-networking`)
 
+- **Namespaces first (`00-platform`):** creates `lab-tools`, `tenant-alpha` and `tenant-beta` in dev-lab, the five PriorityClasses and RuntimeClass `nvidia`. `30-networking` puts its pods in `lab-tools`, so it fails with `namespaces "lab-tools" not found` without this step. If you already ran `scripts/apply-lab.sh` (Chapter 05 Task 4–5), it prints `unchanged`.
 - **Creates in dev-lab's `lab-tools`:** `netshoot`, the `echo` Deployment (3 replicas on :8080) with Services `echo` (port 80) and `echo-headless`, and the two `dns-lab` pods used in Chapter 10.
 - **Compares both views:** pod names and IPs in dev-lab and at the root (`vc-dev-lab`), and the ClusterIP of `echo` on both sides.
 - The first run pulls the netshoot and agnhost images, so pods take a minute to get Ready.
 
 #### What to look for
 
-1. **Command exit:** `apply` prints `created` (first run) or `unchanged`.
+1. **Command exit:** both `apply` commands print `created` (first run) or `unchanged`.
 2. **Same pods, two names:** each pod in dev-lab `lab-tools` appears at the root as `<pod>-x-lab-tools-x-dev-lab`, and the `VIRTUAL` column shows the dev-lab name.
 3. **Same IPs:** the pod IPs (`10.42.x.x`) match on both sides.
 4. **Same ClusterIP:** the `echo` Service has one ClusterIP (`10.43.x.x`) in dev-lab and at the root.
@@ -469,6 +470,7 @@ The node shows 15 slices inside `dev-lab` even though `dev-lab` may only use 2: 
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
+kubectl --context dev-lab apply -k manifests/dev-lab/00-platform      # lab-tools namespace, PriorityClasses, RuntimeClass nvidia
 kubectl --context dev-lab apply -k manifests/dev-lab/30-networking
 kubectl --context dev-lab -n lab-tools get pods -o wide
 kubectl --context spark-root -n vc-dev-lab get pods \
