@@ -97,6 +97,45 @@ Everything in this chapter is applied to the root (`--context spark-root`) and r
 The quota is the second check, not the first: `serving-budget` (90 Gi of requests and of limits) holds two of the lab's 32 Gi engines plus the always-on pods, and every GPU container sets memory request = limit, so the scheduler places a model only where its full size is still free; a model that doesn't fit waits Pending instead of squeezing a running one. A set near 0.72 needs pod requests/limits sized from the Chapter 14 §5.5 measurement (is CUDA memory charged to the cgroup?), not from the util value. §9 has the lab's combinations.
 
 
+#### The big idea, in plain words
+
+A language model is a big file of numbers (its weights). On its own it does nothing. vLLM is the program that loads those numbers onto the GPU and answers questions over the network, the way ChatGPT does. Think of a restaurant kitchen:
+
+- **The recipe book** = the model weights. Here the small Qwen 0.5B, about 1 GiB, kept on the `model-cache` shelf.
+- **The front door** = port 8000 (`/v1/chat/completions`). Questions go in, answers come out.
+- **The chef** = the GPU. A good chef cooks many orders at once and starts a new one the moment a pan is free: continuous batching.
+- **The notepad** = the KV cache, where the chef keeps notes on every conversation in progress. A bigger notepad means more conversations at once (about 21 GiB, 1.8 M tokens at util 0.20).
+- **The budget** = `serving-budget`: the kitchen may use 32 Gi of the 90 Gi the Spark sets aside for models, and 1 of its 15 GPU slices.
+
+This chapter opens the kitchen (§5.1), serves a first customer (§5.2), watches its memory (§5.3), restarts it without cutting anyone off (§5.4), times it at rush hour (§5.5), puts it on a dashboard (§5.6) and lets it hire help when the line grows (§5.7). Three numbers matter throughout: **memory used**, **requests waiting** and **time to first token**.
+
+```mermaid
+flowchart TB
+  YOU["You, on the MacBook<br/>kubectl · curl"]
+  subgraph SPARK["DGX Spark · 121 GiB memory shared by CPU and GPU · one GB10"]
+    direction LR
+    W["Model shelf on disk<br/>model-cache · Qwen 0.5B ≈ 1 GiB"]
+    subgraph KITCHEN["vLLM pod = the kitchen · 32 Gi budget · 1 of 15 GPU slices"]
+      direction TB
+      DOOR["Front door · port 8000<br/>/v1/chat/completions"]
+      QUEUE["Waiting line"]
+      CHEF["GPU chef<br/>cooks many orders at once"]
+      NOTES["Notepad = KV cache<br/>≈ 21 GiB · 1.8 M tokens"]
+      DOOR --> QUEUE --> CHEF
+      CHEF <--> NOTES
+    end
+    WATCH["Prometheus + Grafana<br/>speed · queue · memory"]
+    SCALE["KEDA autoscaler<br/>watches the waiting line"]
+  end
+  YOU -->|"1 prefetch Job downloads the weights"| W
+  W -->|"2 loaded into memory once"| CHEF
+  YOU -->|"3 question (port-forward)"| DOOR
+  DOOR -->|"4 answer streams back word by word"| YOU
+  KITCHEN -.->|"5 metrics every 15 s"| WATCH
+  WATCH -.->|"6 queue length"| SCALE
+  SCALE -.->|"7 more or fewer kitchens"| KITCHEN
+```
+
 ### 2.1 One request, step by step
 
 ```mermaid
