@@ -225,7 +225,7 @@ The pods are `mock-llm-…` in `llm-serving`, not `…-x-llm-serving-x-…` in a
 # ▶ MacBook · any folder
 curl -sN -o /dev/null -w 'TTFB %{time_starttransfer}s  total %{time_total}s\n' \
   http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":100}'
-curl -sN http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":8}' | ts '%.s'   # moreutils ts
+curl -sN http://llm.lab.local/v1/chat/completions -d '{"stream":true,"max_tokens":8}' | ts '%.s'   # moreutils ts (brew install moreutils)
 ```
 
 Expected: **TTFB ≈ 0.05 s, total ≈ 5 s** (100 tokens at 20 tok/s), and timestamps 50 ms apart. Now the broken version:
