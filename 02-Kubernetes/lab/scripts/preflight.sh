@@ -22,8 +22,9 @@ else bad "nvidia-smi missing"; fi
 echo "── root cluster (kubeadm)"
 [[ -x /usr/local/bin/k3s ]] && bad "k3s is still installed — remove it (01-Ansible playbooks/19.2-reset-kubernetes.yml -e reset_remove_k3s=true)"
 systemctl is-active --quiet containerd && ok "containerd active" || bad "containerd not active"
-grep -Eq 'default_runtime_name\s*=\s*"nvidia"' /etc/containerd/config.toml 2>/dev/null \
-  && ok "containerd default runtime: nvidia" || warn "containerd default runtime is not nvidia (runtimeClassName: nvidia then required)"
+# nvidia-ctk writes either into config.toml or into a drop-in under conf.d/ (newer toolkits)
+grep -Eqs 'default_runtime_name\s*=\s*"nvidia"' /etc/containerd/config.toml /etc/containerd/conf.d/*.toml \
+  && ok "containerd default runtime: nvidia" || warn "containerd default runtime is not nvidia in /etc/containerd (check: sudo crictl info | grep -i defaultRuntimeName; runtimeClassName: nvidia then required)"
 systemctl is-active --quiet kubelet && ok "kubelet active" || bad "kubelet not active (run 01-Ansible playbooks/19.1-kubernetes.yml)"
 kubeadm version -o short 2>/dev/null | grep -q "${KUBERNETES_VERSION}" \
   && ok "kubeadm ${KUBERNETES_VERSION}" || warn "kubeadm $(kubeadm version -o short 2>/dev/null) ≠ versions.env ${KUBERNETES_VERSION}"
@@ -41,14 +42,17 @@ kr get runtimeclass nvidia >/dev/null 2>&1 && ok "RuntimeClass nvidia present" |
 echo "── vClusters"
 for ctx in "$DEV_CTX" "$DEVLLM_CTX"; do
   if kc "$ctx" get --raw /readyz >/dev/null 2>&1; then ok "vCluster $ctx answers"
+  elif ! "$KUBECTL" config get-contexts -o name 2>/dev/null | grep -qx "$ctx"; then
+    info "context $ctx not in $KUBECONFIG (normal on the Spark: ~/.kube/config has spark-root only). Check the vClusters from the MacBook: scripts/verify.sh vclusters"
   else info "vCluster $ctx not reachable yet (01-Ansible playbooks/20.2-vclusters.yml or scripts/install-addons.sh vclusters)"; fi
 done
 
 echo "── tools and disk"
-command -v helm >/dev/null && ok "helm $(helm version --short 2>/dev/null)" || bad "helm missing — the add-ons are Helm charts (https://helm.sh/docs/intro/install/)"
+# helm and yq are MacBook tools (install-addons.sh and the yq steps run there); on the Spark they're optional
+command -v helm >/dev/null && ok "helm $(helm version --short 2>/dev/null)" || info "helm not on this machine (fine on the Spark: the add-ons are installed from the MacBook)"
 command -v vcluster >/dev/null && ok "vcluster CLI $(vcluster --version 2>/dev/null | awk '{print $NF}')" || info "vcluster CLI not installed (optional: vcluster list / connect / snapshot)"
 free_gib=$(df -BG --output=avail / | tail -1 | tr -dc 0-9)
 [[ "$free_gib" -ge 300 ]] && ok "${free_gib} GiB free on / (models + images)" || warn "only ${free_gib} GiB free on /"
 [[ -d /data/k8s ]] && ok "/data/k8s exists" || warn "/data/k8s missing: sudo mkdir -p /data/k8s"
-yq --version 2>/dev/null | grep -q mikefarah && ok "yq (mikefarah) present" || warn "mikefarah yq missing (used in Chapters 07/12/18): see versions.env YQ_VERSION"
+yq --version 2>/dev/null | grep -q mikefarah && ok "yq (mikefarah) present" || info "mikefarah yq not on this machine (Chapters 07/12/18 use it on the MacBook: brew install yq)"
 summary

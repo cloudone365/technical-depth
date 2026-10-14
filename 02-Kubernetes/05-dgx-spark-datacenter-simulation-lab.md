@@ -245,7 +245,7 @@ tests/run-local-checks.sh
    | MetalLB | `MetalLB pool lab-pool (192.168.0.110–119)` |
    | memory | `MemTotal 121 GiB (unified CPU+GPU pool)` |
 
-3. **vClusters:** before Task 3 the two vCluster lines are `[....] … not reachable yet`. That's expected at this stage.
+3. **vClusters:** on the Spark the two vCluster lines are `[....]` (`not reachable yet` before Task 3, or `context … not in /home/dgxadmin/.kube/config` because the Spark's kubeconfig holds only `spark-root`). Both are information, not failures. `helm` and `yq` show as `[....]` too: they're MacBook tools.
 
 **If something's off:** `k3s is still installed` → template `19.2 Reset Kubernetes` with `reset_remove_k3s=true`. `no nvidia.com/gpu allocatable` → re-run `20.1`. More in §8 (gate 1).
 

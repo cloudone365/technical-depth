@@ -200,7 +200,7 @@ Each numbered step leaves evidence you can read. §5 does exactly that.
 
 #### What this lab does (script `lab/scripts/preflight.sh`, manifests `lab/manifests/dev-lab/00-platform`, `10-tenancy`, `70-gpu/gpu-smoke.yaml`)
 
-- **Preflight (Task 1):** read-only checks, run on the Spark: the host (aarch64, 20 cores, memory, cgroup v2, swap off, the GB10), the root cluster (containerd with `nvidia` as default runtime, kubelet, kubeadm version, `/readyz`, no control-plane taint, Cilium, MetalLB pool, 15 GPU slices, RuntimeClass `nvidia`), both vClusters, and tools and disk (helm, ≥ 300 GiB free on `/`, `/data/k8s`, mikefarah `yq`).
+- **Preflight (Task 1):** read-only checks, run on the Spark: the host (aarch64, 20 cores, memory, cgroup v2, swap off, the GB10), the root cluster (containerd with `nvidia` as default runtime, kubelet, kubeadm version, `/readyz`, no control-plane taint, Cilium, MetalLB pool, 15 GPU slices, RuntimeClass `nvidia`), the vClusters if their contexts are in the Spark's kubeconfig (usually not: check them from the MacBook), and disk (≥ 300 GiB free on `/`, `/data/k8s`). `helm` and `yq` are reported as information only: they belong on the MacBook.
 - **Control-plane inspection (Tasks 2, 3, 5, 6, 7):** reads the static-pod manifests in `/etc/kubernetes/manifests`, the kubelet config, listening ports, leases, CRI and OCI state. Nothing is reconfigured. The one write is the optional `kubectl delete` of a mirror pod in Task 2, which the kubelet puts straight back.
 - **dev-lab objects (Task 4):** creates `tenant-alpha`, `tenant-beta` and `lab-tools` with the five PriorityClasses and RuntimeClass `nvidia` (`00-platform`), then quotas, LimitRanges, RBAC and NetworkPolicies (`10-tenancy`).
 - **One test pod:** `tenant-beta/gpu-smoke` asks for 1 GPU time-slice, 100m CPU and 128Mi, runs `nvidia-smi` once and exits (`restartPolicy: Never`). On the root it runs as `vc-dev-lab/gpu-smoke-x-tenant-beta-x-dev-lab`. The first run pulls `nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04`.
@@ -253,13 +253,16 @@ Expected (abridged):
 [PASS] containerd default runtime: nvidia
 [PASS] kubelet active
 [PASS] kubeadm v1.36.5
-[PASS] root API server /readyz (context spark-root, KUBECONFIG=…/kubeconfig-spark-lab.yaml)
+[PASS] root API server /readyz (context spark-root, KUBECONFIG=/home/dgxadmin/.kube/config)
 [PASS] dgx-spark-1 schedulable (no control-plane taint)
 [PASS] Cilium agent ready
 [PASS] dgx-spark-1 allocatable nvidia.com/gpu=15 (time-slices)
-[PASS] vCluster dev-lab answers
-[PASS] vCluster dev-llms answers
+[....] context dev-lab not in /home/dgxadmin/.kube/config (normal on the Spark: …)
+[....] context dev-llms not in /home/dgxadmin/.kube/config (normal on the Spark: …)
+[....] helm not on this machine (fine on the Spark: …)
 ```
+
+The `[....]` lines are information. On the Spark, `kubectl` uses `~/.kube/config`, which holds only `spark-root`, so preflight can't see the vClusters from there; check them from the MacBook with `scripts/verify.sh vclusters`. `helm` and `yq` are MacBook tools. A `[WARN] containerd default runtime is not nvidia` line needs a look: run `sudo crictl info | grep -i defaultRuntimeName` on the Spark; it should print `"defaultRuntimeName": "nvidia"` (Chapter 16 §3).
 
 ### Task 2 · See the control plane as static pods
 

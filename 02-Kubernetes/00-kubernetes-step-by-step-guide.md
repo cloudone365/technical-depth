@@ -193,7 +193,7 @@ sudo crictl ps --name 'kube-|etcd' -o table
 
 Then follow one pod through the API server, scheduler, kubelet, containerd and the nvidia runtime, in both a vCluster and the root (Chapter 01 §5 Task 4–7).
 
-✅ **Done when** preflight reports 0 failed: kubelet and containerd active, no control-plane taint, Cilium ready, `allocatable nvidia.com/gpu=15`, GB10 compute capability 12.1, and both vClusters answer (`20.2 vClusters` ran in 01-Ansible Chapter 20). You can name the four static pods and who restarts them.
+✅ **Done when** preflight reports 0 failed: kubelet and containerd active, no control-plane taint, Cilium ready, `allocatable nvidia.com/gpu=15`, GB10 compute capability 12.1, and, from the MacBook, `scripts/verify.sh vclusters` shows both vClusters answering (`20.2 vClusters` ran in 01-Ansible Chapter 20). On the Spark, preflight lists the vClusters, `helm` and `yq` as `[....]` information lines: its kubeconfig holds only `spark-root`, and the tools live on the MacBook. You can name the four static pods and who restarts them.
 
 ## Chapter 02 · etcd database deep dive → [document](02-etcd-database-deep-dive.md)
 
