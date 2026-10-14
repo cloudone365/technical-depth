@@ -1,0 +1,51 @@
+# Steady background load on vLLM for watching Grafana (Chapter 20 §5.6).
+# Not part of the kustomization: apply it when you want traffic, delete it when done.
+#   kubectl --context spark-root apply -f manifests/root-llms/90-serving/vllm/vllm-load.yaml
+#   kubectl --context spark-root -n llm-serving set env deploy/vllm-load RATE=8 CONCURRENCY=32   # change the load
+#   kubectl --context spark-root -n llm-serving scale deploy vllm-load --replicas=0               # pause
+#   kubectl --context spark-root delete -f manifests/root-llms/90-serving/vllm/vllm-load.yaml     # remove
+# Each round sends RATE requests/s for ~5 min with vLLM's own benchmark client
+# (in-cluster, /v1/completions), prints a one-line summary, and starts again.
+# Charges 500m CPU and 1.5 Gi to serving-budget; no GPU slice.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: vllm-load, namespace: llm-serving, labels: {app: vllm-load}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: vllm-load}}
+  template:
+    metadata: {labels: {app: vllm-load}}
+    spec:
+      enableServiceLinks: false   # Service 'vllm' would inject VLLM_PORT=tcp://… and the vLLM client refuses to start
+      containers:
+        - name: load
+          image: nvcr.io/nvidia/vllm:25.09-py3   # already on the node (same image as the engine and the bench Job)
+          command: ["bash", "-c"]
+          args:
+            - |
+              while true; do
+                n=$(( RATE * 300 ))
+                echo "=== $(date +%T) rate=${RATE}/s concurrency=${CONCURRENCY} in=${INPUT_LEN} out=${OUTPUT_LEN} prompts=$n"
+                vllm bench serve --backend vllm --endpoint /v1/completions \
+                  --base-url http://vllm:8000 --model "$SERVED_NAME" --tokenizer "$MODEL" \
+                  --dataset-name random --random-input-len "$INPUT_LEN" --random-output-len "$OUTPUT_LEN" \
+                  --request-rate "$RATE" --max-concurrency "$CONCURRENCY" --num-prompts "$n" \
+                  2>&1 | grep -E 'Successful|Output token throughput|Mean TTFT|Mean TPOT' | tr -s ' ' | paste -sd ' ' -
+                sleep 5
+              done
+          env:
+            - {name: RATE, value: "2"}               # new requests per second (Poisson arrivals)
+            - {name: CONCURRENCY, value: "16"}       # at most this many in flight
+            - {name: INPUT_LEN, value: "1024"}       # prompt tokens
+            - {name: OUTPUT_LEN, value: "256"}       # answer tokens
+            - {name: SERVED_NAME, value: qwen2.5-0.5b}
+            - {name: MODEL, value: Qwen/Qwen2.5-0.5B-Instruct}
+            - {name: HF_HOME, value: /models/hf}
+            - {name: HF_HUB_CACHE, value: /models/hf}
+          readinessProbe:                            # required in llm-serving (CEL spark-serving-needs-readiness)
+            exec: {command: ["true"]}
+            periodSeconds: 30
+          resources: {requests: {cpu: 500m, memory: 1Gi}, limits: {memory: 1536Mi}}
+          volumeMounts: [{name: models, mountPath: /models, readOnly: true}]
+      volumes:
+        - {name: models, persistentVolumeClaim: {claimName: model-cache, readOnly: true}}

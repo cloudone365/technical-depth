@@ -536,6 +536,36 @@ curl -s 'localhost:9090/api/v1/query' --data-urlencode 'query=vllm:num_requests_
 
 Expected: one line, `root llm-serving vllm-… ← llm-serving/vllm-…` — on the root the `v` labels repeat the real names. A sandbox engine in dev-llms would print `dev-llms llm-sandbox vllm-… ← vc-dev-llms/vllm-…-x-llm-sandbox-x-dev-llms`: the tenant's name and the root's name for the same series. In Grafana (`http://192.168.0.100:32000`), row *Serving SLOs*: TTFT p95, TPOT p95, queue and KV cache. Force a `VLLMQueueBacklog` alert (more than 32 waiting) by setting `--max-num-seqs=16` in `vllm.yaml` and running the benchmark loop with `--max-concurrency 256`; put both back afterwards.
 
+#### Keep traffic flowing while you watch Grafana
+
+The vLLM Deployment already runs continuously (it restarts by itself if the pod dies). What Grafana needs is steady traffic, otherwise the panels go flat a minute after a benchmark. [`vllm-load.yaml`](lab/manifests/root-llms/90-serving/vllm/vllm-load.yaml) is a small Deployment that keeps sending requests from inside the cluster: rounds of about 5 min at `RATE` new requests per second, at most `CONCURRENCY` in flight, with a one-line summary per round. It charges 500m CPU and 1.5 Gi to `serving-budget` and no GPU slice.
+
+```bash
+# ▶ MacBook · 02-Kubernetes/lab
+kubectl --context spark-root apply -f manifests/root-llms/90-serving/vllm/vllm-load.yaml
+kubectl --context spark-root -n llm-serving logs -f deploy/vllm-load      # one summary line per ~5 min round · Ctrl-C to stop
+```
+
+Change the load while Grafana is open. `set env` restarts only the load pod, never vLLM; each change shows up in the panels within a minute or two:
+
+```bash
+# ▶ MacBook · any folder
+kubectl --context spark-root -n llm-serving set env deploy/vllm-load RATE=8 CONCURRENCY=32        # busier: throughput and TTFT rise
+kubectl --context spark-root -n llm-serving set env deploy/vllm-load INPUT_LEN=4096               # long prompts: TTFT (prefill) rises
+kubectl --context spark-root -n llm-serving set env deploy/vllm-load RATE=40 CONCURRENCY=256      # overload: requests waiting > 0, VLLMQueueBacklog after 5 min
+kubectl --context spark-root -n llm-serving scale deploy vllm-load --replicas=0                   # pause (panels go quiet)
+kubectl --context spark-root delete -f manifests/root-llms/90-serving/vllm/vllm-load.yaml         # remove when done
+```
+
+| Knob | Default | Moves which panel |
+|---|---|---|
+| `RATE` (requests/s) | 2 | throughput, running requests, KV-cache use |
+| `CONCURRENCY` (max in flight) | 16 | above 64 (`--max-num-seqs`): requests waiting, TTFT |
+| `INPUT_LEN` (prompt tokens) | 1024 | TTFT, prompt throughput |
+| `OUTPUT_LEN` (answer tokens) | 256 | TPOT stays, end-to-end time and running requests grow |
+
+Engine settings change vLLM itself and restart it, e.g. `kubectl --context spark-root kustomize manifests/root-llms/90-serving/vllm | sed 's/--max-num-seqs=64/--max-num-seqs=16/' | kubectl --context spark-root apply -f -`; undo with `kubectl --context spark-root apply -k manifests/root-llms/90-serving/vllm`. Delete `vllm-load` before §5.7, whose KEDA lab reads the same queue metric.
+
 ### 5.7 Queue-depth autoscaling (KEDA)
 
 #### What this lab does (script `install-addons.sh keda`, manifest `lab/manifests/root-llms/90-serving/autoscaling.yaml`)
