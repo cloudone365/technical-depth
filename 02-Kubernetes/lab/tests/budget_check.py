@@ -23,7 +23,12 @@ import os
 import re
 import sys
 
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError:
+    sys.exit("PyYAML not found: this python3 is not the lab venv. Run:\n"
+             "  source ~/.venvs/spark-ansible/bin/activate\n"
+             "  pip install pyyaml        # once, if the venv doesn't have it yet")
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ANSIBLE = os.path.join(LAB, "..", "..", "01-Ansible", "lab", "roles")

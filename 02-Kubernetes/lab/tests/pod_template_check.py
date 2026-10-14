@@ -23,7 +23,12 @@ import os
 import subprocess
 import sys
 
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError:
+    sys.exit("PyYAML not found: this python3 is not the lab venv. Run:\n"
+             "  source ~/.venvs/spark-ansible/bin/activate\n"
+             "  pip install pyyaml        # once, if the venv doesn't have it yet")
 
 KUBECTL = os.environ.get("KUBECTL", "kubectl")
 CONTEXTS = {"root": os.environ.get("ROOT_CTX", "spark-root"),
