@@ -431,14 +431,14 @@ Each restart also ends the §5.2 port-forward (its pod is gone). Start it again 
 
 #### What this lab does (5 streams + `rollout restart deploy/vllm`)
 
-- **Starts 5 long streaming requests** (up to 1500 tokens each) through the §5.2 port-forward.
-- **Restarts the vLLM Deployment** 3 s later, while the streams are still running.
+- **Starts 5 long streaming requests** (exactly 1500 tokens each: `min_tokens` + `ignore_eos` stop the model from ending early) through a fresh port-forward.
+- **Restarts the vLLM Deployment** 2 s later, while the streams are still running.
 - **Shows the graceful path:** the old pod leaves the Service endpoints, the `preStop` sleep (15 s) and the 120 s grace period let running generations finish, and only then is the engine stopped.
 
 #### What to look for
 
 1. **Command exit:** `deployment.apps/vllm restarted`.
-2. **Five lines** `data: [DONE]`, one per stream. A missing line means a stream was cut.
+2. **Five lines** `data: [DONE]`, one per stream, printed **after** `deployment.apps/vllm restarted`: the streams were still running when the pod was replaced. A missing line means a stream was cut. If the five lines come before `restarted`, the answers finished before the restart and nothing was tested: `min_tokens` and `ignore_eos` force the full 1500 tokens so they don't (vLLM extensions to the OpenAI API).
 3. **Afterwards:** a new `vllm-…` pod becomes `1/1 Running` after its startup; the port-forward is gone, so start it again (§5.2).
 
 **If something's off:** fewer than five `[DONE]` → a generation took longer than the 120 s grace; lower `max_tokens` or raise `terminationGracePeriodSeconds`. No `[DONE]` at all and `failed to find sandbox … not found` or `lost connection to pod` right away → the port-forward still pointed at a pod from before an earlier restart; run the first block again (fresh port-forward), then the test.
@@ -458,9 +458,9 @@ sleep 2; curl -s localhost:8000/v1/models | jq -r '.data[].id'                  
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 ( for i in $(seq 5); do curl -sN localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
-   -d '{"model":"qwen2.5-0.5b","stream":true,"max_tokens":1500,"messages":[{"role":"user","content":"Count slowly."}]}' \
+   -d '{"model":"qwen2.5-0.5b","stream":true,"max_tokens":1500,"min_tokens":1500,"ignore_eos":true,"messages":[{"role":"user","content":"Count slowly."}]}' \
    | grep -F '[DONE]' & done; wait ) &
-sleep 3; kubectl --context spark-root -n llm-serving rollout restart deploy/vllm; wait $!   # waits for the 5 streams only
+sleep 2; kubectl --context spark-root -n llm-serving rollout restart deploy/vllm; wait $!   # waits for the 5 streams only
 ```
 
 Expected: each stream ends with `data: [DONE]`. The preStop sleep and 120 s grace let running generations finish before SIGTERM. Streams longer than 120 s would still be cut, so size the grace to your longest generation. The grace period travels with the delete: the kubelet gives the container exactly the `terminationGracePeriodSeconds` the API server recorded. Restart the port-forward afterwards (it was bound to the old pod).
