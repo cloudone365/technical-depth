@@ -206,14 +206,14 @@ kubectl --context spark-root -n llm-serving describe resourcequota serving-budge
 #### What this lab does (script `lab/scripts/apply-lab.sh root`, manifests `root-llms/60-storage` and `root-llms/90-serving/vllm`)
 
 - **Setup (the block above):** `apply-lab.sh root` applies the root platform manifests and the LLM stack: namespaces `llm-serving` and `batch`, their quotas, the `model-cache` PVC (StorageClass `local-nvme-retain`), `mock-llm`, Qdrant and the Kueue queue.
-- **Secret `hf-token`** in `llm-serving`, from `$HF_TOKEN` (or the value `none`; the smoke model is public).
+- **Secret `hf-token`** in `llm-serving`, from `$HF_TOKEN`, only if you set it. The smoke model is public, so no token is needed; vLLM reads the Secret as optional.
 - **Job `model-prefetch`:** downloads `Qwen/Qwen2.5-0.5B-Instruct` into `model-cache`. On the Spark the files land under `/data/k8s/retain/llm-serving/model-cache`.
 - **Drops the page cache** on the Spark, so the load starts from a clean memory picture.
 - **Deployment `vllm`** and Service `vllm` (port 8000): one GPU slice, 1.5 CPU, 32 Gi memory (request = limit), `--gpu-memory-utilization=0.20`, `strategy: Recreate`. The first start pulls the NGC vLLM image (many GB) and captures CUDA graphs, so give it several minutes.
 
 #### What to look for
 
-1. **Command exit:** `wait` prints `job.batch/model-prefetch condition met`; `apply -k` prints `secret/hf-token configured`, `service/vllm created` and `deployment.apps/vllm created`.
+1. **Command exit:** `wait` prints `job.batch/model-prefetch condition met`; `apply -k` prints `service/vllm created` and `deployment.apps/vllm created`.
 2. **The vLLM log** shows, in order: `Loading weights`, `Model loading took … GiB`, `Available KV cache memory: … GiB`, `GPU KV cache size: … tokens`, CUDA graph capture, `Uvicorn running on http://0.0.0.0:8000`. Write down your KV-cache size; §3.1 predicts about 21 GiB at 0.20 for this model.
 3. **What was charged:**
 
@@ -230,8 +230,8 @@ kubectl --context spark-root -n llm-serving describe resourcequota serving-budge
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
-kubectl --context spark-root -n llm-serving create secret generic hf-token --from-literal=token="${HF_TOKEN:-none}" \
-  --dry-run=client -o yaml | kubectl --context spark-root apply -f -
+[ -n "${HF_TOKEN:-}" ] && kubectl --context spark-root -n llm-serving create secret generic hf-token --from-literal=token="$HF_TOKEN" \
+  --dry-run=client -o yaml | kubectl --context spark-root apply -f -   # only with a token; an invalid one fails even for public models
 kubectl --context spark-root apply -f manifests/root-llms/60-storage/model-prefetch-job.yaml
 kubectl --context spark-root -n llm-serving wait --for=condition=complete job/model-prefetch --timeout=30m
 ```
@@ -247,7 +247,7 @@ kubectl --context spark-root apply -k manifests/root-llms/90-serving/vllm
 kubectl --context spark-root -n llm-serving logs -f deploy/vllm | grep -E 'Loading|weights|KV cache|blocks|CUDA graph|Uvicorn|ERROR'
 ```
 
-`vllm.yaml` carries an `hf-token` Secret with a placeholder value, so applying it overwrites the token you just created. For the public Qwen smoke model that doesn't matter; for gated models, re-create the Secret after the apply (or remove it from the file and keep tokens in Vault — Chapter 28).
+`vllm.yaml` carries no `hf-token` Secret, so applying it never overwrites your token. Without the Secret, `HF_TOKEN` is simply unset: fine for the public Qwen smoke model. Gated models need the Secret; in production it comes from Vault (Chapter 28).
 
 Expected log landmarks:
 

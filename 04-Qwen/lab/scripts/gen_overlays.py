@@ -3,9 +3,9 @@
 
 Each overlay patches the 02-Kubernetes vLLM Deployment (root-llms/90-serving/vllm):
 image (versions.env VLLM_IMAGE), model, served name, engine flags, memory
-(request = limit). It also drops the base's placeholder hf-token Secret, so an
-apply never overwrites the token synced from Vault, and makes the token optional
-(no Qwen model in the catalog is gated). Entries with `sandbox:` also get
+(request = limit). The base ships no hf-token Secret (an apply never overwrites
+the token synced from Vault) and its token is optional (no Qwen model in the
+catalog is gated). Entries with `sandbox:` also get
 k8s/models/<name>/sandbox/ for the dev-llms vCluster.
 
   python3 scripts/gen_overlays.py           write the overlays
@@ -61,11 +61,9 @@ def dump(head, doc):
 
 
 def kustomization(patch, base, extra=None):
-    drop_secret = "$patch: delete\napiVersion: v1\nkind: Secret\nmetadata: {name: hf-token, namespace: llm-serving}\n"
     doc = {"apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization", "resources": [base], **(extra or {}),
            "patches": [{"target": {"kind": "Deployment", "name": "vllm"},
-                        "patch": yaml.safe_dump(patch, sort_keys=False, width=200)},
-                       {"patch": drop_secret}]}
+                        "patch": yaml.safe_dump(patch, sort_keys=False, width=200)}]}
     return doc
 
 

@@ -279,7 +279,7 @@ GPTQ, AWQ, FP8, NVFP4 and GGUF k-quants worked through, the decode ceiling from 
 ```bash
 # ▶ MacBook · 04-Qwen/lab
 scripts/serve-model.sh qwen3-8b                                        # Task 5.2: BF16 baseline (vllm-bench Job)
-kubectl --context spark-root apply -k ../../03-DeepSeek/lab/k8s/models/qwen2.5-32b-awq   # also re-applies the placeholder hf-token: re-sync it (Chapter 06 Task 5.1)
+kubectl --context spark-root apply -k ../../03-DeepSeek/lab/k8s/models/qwen2.5-32b-awq   # Task 5.2: AWQ via 03's overlay (leaves hf-token alone)
 kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=45m
 scripts/serve-model.sh qwen3-coder-30b-fp8                             # Task 5.3: FP8 MoE
 ```

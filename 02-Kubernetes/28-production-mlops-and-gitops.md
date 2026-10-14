@@ -75,7 +75,7 @@ flowchart LR
 
 The `spark-root-llms-*` apps have the same destination as the root's platform apps — the LLM stack is root namespaces (`llm-serving`, `batch`, `ingress`), so Argo CD writes its objects straight to the root API server, with no vCluster in between. dev-llms gets only its platform, tenancy and admission layers: what runs in its `llm-sandbox` is short-lived trial work, applied by hand.
 
-Not in Git-driven sync on purpose: the vCluster Helm releases (an Application that can prune a whole vCluster is one typo away from deleting it — 01-Ansible `roles/vclusters` or `install-addons.sh vclusters` own them), the add-ons (`install-addons.sh`), and the labs you change by hand while learning (`root/12-cgroups`, `root-llms/80-distributed`, `root-llms/90-serving` — whose `vllm.yaml` also carries a placeholder `hf-token` Secret that GitOps would keep overwriting).
+Not in Git-driven sync on purpose: the vCluster Helm releases (an Application that can prune a whole vCluster is one typo away from deleting it — 01-Ansible `roles/vclusters` or `install-addons.sh vclusters` own them), the add-ons (`install-addons.sh`), and the labs you change by hand while learning (`root/12-cgroups`, `root-llms/80-distributed`, `root-llms/90-serving`). `vllm.yaml` ships no `hf-token` Secret; the token comes from Vault, never from Git.
 
 ### 1.2 How Argo CD reaches a vCluster
 

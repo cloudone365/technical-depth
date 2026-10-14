@@ -46,8 +46,3 @@ patches:
     - op: replace
       path: /spec/template/metadata/labels/model
       value: qwen2.5-math-7b
-- patch: |
-    $patch: delete
-    apiVersion: v1
-    kind: Secret
-    metadata: {name: hf-token, namespace: llm-serving}

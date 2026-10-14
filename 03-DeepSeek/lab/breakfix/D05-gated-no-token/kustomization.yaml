@@ -1,4 +1,4 @@
-# D05: a gated model (Llama 3.1) with the placeholder HF token. Symptom: prefetch
+# D05: a gated model (Llama 3.1) without a valid HF token (no hf-token Secret, or a placeholder). Symptom: prefetch
 # Job / vLLM log shows 401 / GatedRepoError; pod never becomes Ready.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

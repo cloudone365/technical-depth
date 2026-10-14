@@ -13,11 +13,6 @@ labels:
   - pairs: {app: vllm-qwen2-5-7b-tools}
     includeSelectors: true
 patches:
-  - patch: |-
-      $patch: delete
-      apiVersion: v1
-      kind: Secret
-      metadata: {name: hf-token, namespace: llm-serving}
   - target: {kind: ServiceMonitor}
     patch: |-
       - op: replace

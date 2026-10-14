@@ -289,7 +289,7 @@ Keep the output; §6 compares it with what you measure.
 
 - **Baseline:** serves Qwen3-8B in BF16 as the main model, then runs the 02 benchmark Job (`vllm bench serve`, 128 prompts at concurrency 1, 8, 32) against `svc/vllm`.
 - **AWQ:** applies 03's overlay `03-DeepSeek/lab/k8s/models/qwen2.5-32b-awq` as the main `deploy/vllm`: Qwen2.5-32B-Instruct-AWQ, util 0.30, 40 Gi, ~19 GB download, on the 02 base image (vLLM 0.10).
-- **Side effect:** 03's overlay also applies 02's placeholder `hf-token` Secret (`replace-me`). Re-sync the real token from Vault afterwards (Chapter 06 Task 5.1).
+- **Token:** 03's overlay carries no Secret, so your synced `hf-token` stays as it is. The model is public.
 
 #### What to look for
 

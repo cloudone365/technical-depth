@@ -21,7 +21,7 @@ HINT[D04]="Time a long request through LiteLLM vs directly to vLLM. Which hop gi
 ANSWER[D04]="LiteLLM router timeout was lowered to 30 s; R1 chains of thought routinely run minutes. Fix: timeout/request_timeout ≥ 900 in litellm-config AND in every hop (HTTPRoute timeouts.request, client)."
 TITLE[D05]="Gated model never becomes Ready";          BASE[D05]=llama-3.1-8b
 HINT[D05]="kubectl --context spark-root logs job/model-prefetch ; kubectl --context spark-root logs deploy/vllm | grep -i -E '401|gated'"
-ANSWER[D05]="meta-llama models are gated: the hf-token Secret still holds the placeholder. Fix: accept the licence on Hugging Face, store the token in Vault on vault01 (vault kv put kv/spark-lab/hf token=hf_…) and let vault-sync update the Secret hf-token (Chapter 15)."
+ANSWER[D05]="meta-llama models are gated: there is no hf-token Secret (the 02 base ships none) or it still holds a placeholder. Fix: accept the licence on Hugging Face, store the token in Vault on vault01 (vault kv put kv/spark-lab/hf token=hf_…) and let vault-sync update the Secret hf-token (Chapter 15)."
 TITLE[D06]="R1 loops forever at temperature 0";        BASE[D06]=""
 HINT[D06]="Compare completion_tokens and finish_reason at temperature 0 vs 0.6."
 ANSWER[D06]="Greedy decoding makes R1-style models repeat inside <think> until max_tokens (finish_reason=length). DeepSeek recommends temperature 0.5–0.7 (0.6), top_p 0.95, no system prompt tricks. Fix the client default."
@@ -38,7 +38,9 @@ case $cmd in
   answer) echo "${ANSWER[$id]}" ;;
   inject)
     case $id in
-      D01|D02|D03|D05|D07) k apply -k "$DS_DIR/breakfix/$id"-* ;;
+      D05) k -n $NS delete secret hf-token --ignore-not-found   # no token: the gated download must fail
+           k apply -k "$DS_DIR/breakfix/$id"-* ;;
+      D01|D02|D03|D07) k apply -k "$DS_DIR/breakfix/$id"-* ;;
       D04) k -n $NS patch cm litellm-config --type merge -p "$(k -n $NS get cm litellm-config -o json | python3 -c 'import json,sys; c=json.load(sys.stdin)["data"]["config.yaml"]; print(json.dumps({"data":{"config.yaml":c.replace("timeout: 900","timeout: 30").replace("request_timeout: 900","request_timeout: 30")}}))')" && k -n $NS rollout restart deploy/litellm ;;
       D06) info "run: python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math --limit 5 --temperature 0 --max-tokens 8192" ;;
       D08) info "run: python3 tools/eval_harness.py --url http://localhost:8000 --model deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --suites json --limit 2" ;;

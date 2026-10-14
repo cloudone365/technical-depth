@@ -26,7 +26,7 @@ spec:
             - {name: HF_HOME, value: /models/hf}
             - {name: HF_HUB_CACHE, value: /models/hf}   # = hf download --cache-dir (model-prefetch)
             - name: HF_TOKEN
-              valueFrom: {secretKeyRef: {name: hf-token, key: token}}
+              valueFrom: {secretKeyRef: {name: hf-token, key: token, optional: true}}
           ports: [{name: http, containerPort: 30000}]
           startupProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, failureThreshold: 180}
           readinessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 5}

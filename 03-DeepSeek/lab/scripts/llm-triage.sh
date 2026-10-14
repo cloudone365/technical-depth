@@ -69,7 +69,8 @@ if want secrets; then
     v=$(k -n "$NS" get secret "$1" -o jsonpath="{.data.$2}" 2>/dev/null | base64 -d 2>/dev/null)
     if [[ -z $v ]]; then warn "secret $1 missing"; elif [[ $v == "$3" ]]; then warn "secret $1 still holds the placeholder → $4"; else ok "secret $1 set"; fi
   }
-  chk hf-token token replace-me "gated models fail (D05); sync from Vault (Chapter 15)"
+  if k -n "$NS" get secret hf-token >/dev/null 2>&1; then chk hf-token token replace-me "gated models fail (D05); sync from Vault (Chapter 15)"
+  else info "no hf-token Secret: fine for public models; gated ones need it (D05, Chapter 15)"; fi
   chk litellm-master-key key sk-lab-change-me "rotate via Vault (Chapter 15)"
   chk open-webui-secret secret-key change-me-32-random-bytes "set a random key (Chapter 12)"
   m=$(k -n "$NS" get secret litellm-master-key -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null)

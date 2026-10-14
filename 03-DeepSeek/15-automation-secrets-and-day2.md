@@ -152,7 +152,7 @@ sequenceDiagram
 | `serving-budget` holds the model's pod memory + the apps; record the current model | `preflight`, `serve` | no (reads, assert) |
 | tools and eval-data ConfigMaps | `tools` | only if tool files changed |
 | delete and recreate the prefetch Job | `prefetch` | **yes**: Job templates are immutable; fast when cached. `-e deepseek_skip_prefetch=true` skips it |
-| apply `k8s/models/<name>`; wait for Ready with the right `model` label | `serve` | if the model changed, and after every sync: the overlay carries 02's placeholder `hf-token` Secret, which differs from the synced one. The wait is skipped in check mode |
+| apply `k8s/models/<name>`; wait for Ready with the right `model` label | `serve` | only if the model changed: the overlay carries no Secret, so it never touches the synced `hf-token`. The wait is skipped in check mode |
 | apps | `apps` | after every sync: `k8s/apps` carries the placeholder `litellm-master-key` and `open-webui-secret` (§3.3) |
 | RAG ingest | `rag` | **yes**: a new collection by design; a failed gate fails the play |
 | `scripts/verify.sh` | `verify` | never (`changed_when: false`); any `[FAIL]` fails the play |
@@ -220,7 +220,7 @@ The objects that make step 2 possible, created once by [`vault-k8s-auth-setup.sh
 
 This is a separate door from Semaphore's: the AppRole `semaphore` (01-Ansible Chapter 18) reads `kv/spark-lab/*` for playbooks; the Kubernetes role reads only what the LLM stack needs, and only from that one ServiceAccount.
 
-**What the sync doesn't cover.** The manifests still carry placeholder Secrets: `hf-token` in 02's `vllm.yaml` (and therefore in every model overlay), `litellm-master-key` and `open-webui-secret` in `k8s/apps`. Every `apply` of those writes the placeholder back until the next sync, at most 15 minutes later; run the sync right after a deployment (Task 5.3 shows how). `litellm-db` (the PostgreSQL password) isn't synced at all: rotating it needs an `ALTER USER` in the database at the same moment, so in the lab it stays a namespace-internal value. Under Argo CD the placeholders become a real conflict (§3.7).
+**What the sync doesn't cover.** `k8s/apps` still carries placeholder Secrets: `litellm-master-key` and `open-webui-secret`. Every `apply` of it writes the placeholders back until the next sync, at most 15 minutes later; run the sync right after an apps deployment (Task 5.3 shows how). `hf-token` has no such problem: 02's `vllm.yaml` and the model overlays ship no Secret and read it as optional, and the sync creates it if it's missing. `litellm-db` (the PostgreSQL password) isn't synced at all: rotating it needs an `ALTER USER` in the database at the same moment, so in the lab it stays a namespace-internal value. Under Argo CD the placeholders become a real conflict (§3.7).
 
 ### 3.4 Alternatives to the CronJob
 
@@ -281,7 +281,7 @@ All use `automated: {prune: true, selfHeal: true}` and server-side apply; Argo C
 Rules that keep the tools from fighting:
 
 - **One tool per object.** With the Applications synced, don't run the playbook's `serve` or `apps` tags or `serve-model.sh` against the same objects: `selfHeal` reverts them. Pause the Application for drills (Task 5.9).
-- **Secrets stay out of Git-driven sync.** With `selfHeal`, Argo CD would write the placeholder Secrets back over the values `vault-sync` wrote, every few minutes. Before enabling `deepseek-10-serving` and `deepseek-20-apps`, remove the placeholder Secrets from what they render (a `$patch: delete` as in `k8s/multi/`) or add `ignoreDifferences` for their `data`.
+- **Secrets stay out of Git-driven sync.** With `selfHeal`, Argo CD would write the placeholder Secrets back over the values `vault-sync` wrote, every few minutes. `deepseek-10-serving` renders no Secret (the 02 base ships none). Before enabling `deepseek-20-apps`, remove its placeholder Secrets from what it renders (a `$patch: delete`) or add `ignoreDifferences` for their `data`.
 - **Big models need their weights first.** Run the prefetch (playbook `--tags prefetch`) before merging a pointer change, or the sync waits on a download inside the pod.
 
 ---
@@ -522,13 +522,13 @@ Expected: the check run prints `Show the change` with the current model, the new
 #### What this lab does (template `15.1 Deploy DeepSeek`)
 
 - **Full run (r1-7b):** asserts, then tool ConfigMaps, a fresh `model-prefetch` Job (downloads the weights on the first run), the `r1-7b` overlay with a wait until vLLM is Ready with the right `model` label, the apps (bge-m3, LiteLLM + PostgreSQL, Open WebUI), the gated RAG ingest, and `scripts/verify.sh`. Everything goes through the Kubernetes API on spark-root; nothing logs in to the Spark over SSH.
-- **No secret values:** the task log shows model and object names only. The apply writes the placeholder Secrets back, so run the sync afterwards.
+- **No secret values:** the task log shows model and object names only. The `apps` apply writes the placeholder Secrets back, so run the sync afterwards. The model overlay carries no Secret.
 - **Switch and rollback:** `--tags serve` changes only the served model.
 
 #### What to look for
 
 1. **Semaphore run:** `failed=0`; the `Result` task shows the last lines of `verify.sh`, ending `… passed, … warnings, 0 failed`.
-2. **Second full run** with `deepseek_skip_prefetch=true` and `--skip-tags rag`: `changed=` 0 to 2. Prefetch and RAG, the tasks that change every time, are skipped; the `serve` and `apps` tasks report `changed` when they write the placeholder Secrets back over the synced ones, so sync again.
+2. **Second full run** with `deepseek_skip_prefetch=true` and `--skip-tags rag`: `changed=` 0 or 1. Prefetch and RAG, the tasks that change every time, are skipped; the `apps` task reports `changed` when it writes the placeholder Secrets back over the synced ones, so sync again. `serve` stays `ok`.
 3. **Switch run:** `Show the change` prints `vLLM: r1-7b → r1-32b-fp8 (rollback: --tags serve -e deepseek_model=r1-7b)`, and `get deploy vllm -L model` shows `r1-32b-fp8`; after the rollback run, `r1-7b`.
 
 **If something's off:** `Invalid kube-config file` → the kubeconfig isn't in sema01's state folder (run `19.1 Kubernetes` first). A run stuck at "Wait for vLLM to become Ready" for long → `describe pod -l app=vllm`; it gives up after 45 min. More in §7.
@@ -537,12 +537,12 @@ Expected: the check run prints `Show the change` with the current model, the new
 
 **Semaphore UI:** in project `spark-lab`, **Task Templates → New Template**, type *Ansible Playbook*, with the fields from §3.2 (name `15.1 Deploy DeepSeek`, playbook `03-DeepSeek/lab/ansible/15.1-deploy-deepseek.yml`, inventory `spark-lab`, repository `technical-depth`, variable group `vault-approle`). Add a survey variable `deepseek_model` (default `r1-7b`). Save, then **Run** with `r1-7b`.
 
-Expected: the task log ends with the `Result` task showing the last lines of `verify.sh` and `failed=0`. Then run the sync (Task 5.3's one-liner), because the apply wrote placeholder Secrets. Record the wall time of the first run (download-bound) and of a second run with CLI args `["-e", "deepseek_skip_prefetch=true", "--skip-tags", "rag"]`:
+Expected: the task log ends with the `Result` task showing the last lines of `verify.sh` and `failed=0`. Then run the sync (Task 5.3's one-liner), because the `apps` apply wrote placeholder Secrets. Record the wall time of the first run (download-bound) and of a second run with CLI args `["-e", "deepseek_skip_prefetch=true", "--skip-tags", "rag"]`:
 
 | Run | Wall time (record yours) | `changed=` |
 |---|---|---|
 | first (downloads) | | |
-| second (no prefetch, no rag) | | expect 0–2 |
+| second (no prefetch, no rag) | | expect 0–1 |
 
 Switch the model and back. **Semaphore UI:** run the template with survey value `r1-32b-fp8` and CLI args `["--tags", "serve", "-e", "deepseek_skip_prefetch=true"]`. `--tags serve` never runs the prefetch; if the weights aren't cached yet, use `["--tags", "prefetch,serve"]`. The log's `Show the change` line names the rollback; run it the same way with `r1-7b`.
 
@@ -676,9 +676,9 @@ kubectl --context spark-root apply -n argocd -f gitops/applications.yaml        
 
 #### What this lab does (script `lab/scripts/breakfix.sh`, `lab/breakfix/D05-gated-no-token`)
 
-- **Inject:** applies the `llama-3.1-8b` overlay. It carries 02's placeholder `hf-token` Secret, which overwrites the synced token, and Llama 3.1 is a gated repository.
+- **Inject:** deletes Secret `hf-token` (the sync creates it again in the fix step) and applies the `llama-3.1-8b` overlay. Llama 3.1 is a gated repository, so the download fails without a valid token.
 - **Fix:** accept the licence on huggingface.co, store a token with access in vault01, run the sync (`vs-d05`), then serve the model again.
-- **Reset:** re-applies the `llama-3.1-8b` overlay, so Llama keeps serving. Switch back with `scripts/serve-model.sh r1-7b`, then sync once more (that apply writes the placeholder again).
+- **Reset:** re-applies the `llama-3.1-8b` overlay, so Llama keeps serving. Switch back with `scripts/serve-model.sh r1-7b`.
 
 #### What to look for
 
@@ -686,13 +686,13 @@ kubectl --context spark-root apply -n argocd -f gitops/applications.yaml        
 2. **The sync:** `synced kv/data/spark-lab/hf → secret/hf-token (token)`.
 3. **`serve-model.sh llama-3.1-8b`:** `[PASS] weights cached`, `[PASS] vLLM ready with llama-3.1-8b`, `0 failed`.
 
-**If something's off:** still `401/403` after the sync → the token's account hasn't accepted the Meta licence, or `serve-model.sh` re-applied the placeholder before the pod started; sync again and restart `deploy/vllm`. More in §7.
+**If something's off:** the pod gets Ready right after inject → the weights may already be in `model-cache` from an earlier run, so vLLM loaded them without asking the Hub. Still `401/403` after the sync → the token's account hasn't accepted the Meta licence; fix that, then restart `deploy/vllm`. More in §7.
 
 #### Run it
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-scripts/breakfix.sh inject D05        # llama-3.1-8b with the placeholder token
+scripts/breakfix.sh inject D05        # deletes hf-token, serves llama-3.1-8b (gated): the download fails
 scripts/breakfix.sh hint D05
 ```
 
@@ -737,7 +737,7 @@ scripts/breakfix.sh reset D05
 | `403` on PATCH of a workload | workload not listed in the Role | add it to `resourceNames` |
 | Secret updated, app still uses the old value | consumer not listed under `restart` | add it; or the app caches the value: restart it |
 | `KeyError: 'master_key'` | the field has another name in vault01 | `vault kv get kv/spark-lab/deepseek/litellm`; match `SYNC_MAP` |
-| gated model 401/403 right after a deployment | the apply wrote the placeholder `hf-token` back | run the sync now (Task 5.3) |
+| gated model 401/403 right after a deployment | no `hf-token` Secret yet, or a token without the licence | run the sync now (Task 5.3); accept the licence on huggingface.co |
 | `couldn't resolve module/action 'kubernetes.core.k8s'` | collection missing | `ansible-galaxy collection install -r requirements.yml -p ./collections` in `01-Ansible/lab`; in Semaphore, the image from 01-Ansible Chapter 04 §4 |
 | `Invalid kube-config file` / `No such file` | kubeconfig not in the state folder | Semaphore: run `19.1 Kubernetes` / `20.2 vClusters` first; MacBook: `tools/fetch-kubeconfig.sh sema01` (01-Ansible Chapter 04 §8.4) |
 | play hangs at "Wait for vLLM" | model too big, OOM loop, or a download inside the pod | `kubectl --context spark-root -n llm-serving describe pod -l app=vllm`; the task gives up after 45 min |

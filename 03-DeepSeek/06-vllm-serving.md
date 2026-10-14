@@ -106,7 +106,7 @@ sequenceDiagram
 ```
 
 - **Steps 1–4** print `[PASS] weights cached`. A failure here is a download problem: `kubectl --context spark-root -n llm-serving logs job/model-prefetch` (a gated model without a token is drill D05).
-- **Steps 6–7 are the only change to the Deployment.** KEDA's ScaledObject `vllm` is not touched, so replicas stay at 1 (§3.4). The overlay also re-applies the base's placeholder Secret `hf-token` (§4).
+- **Steps 6–7 are the only change to the Deployment.** KEDA's ScaledObject `vllm` is not touched, so replicas stay at 1 (§3.4). The overlay carries no Secret: `HF_TOKEN` comes from `hf-token` if it exists (§4).
 - **Steps 8–9** are the few minutes of 503 in the Risk line. A refused pod shows as a ReplicaSet event `exceeded quota: serving-budget`, a pod that doesn't fit the node as `Pending` with `Insufficient memory` (§7).
 - **Step 11** writes `Available KV cache memory` and `GPU KV cache size` to the vLLM log (Task 5.3). Drills D02 and D03 fail here.
 - **Steps 14–15** print `[PASS] answer: 144  (reasoning chars: N)`. With drill D01 injected, N is 0.
@@ -174,7 +174,7 @@ kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscali
 ## 4. Integrations
 
 - **02-Kubernetes**: the base Deployment and benchmark Job ([Chapter 20](../02-Kubernetes/20-vllm-high-throughput-llm-serving.md)), the `model-cache` PVC ([Chapter 13](../02-Kubernetes/13-storage-csi-and-high-performance-volumes.md)), the `serving-budget` quota and the LLM memory pool ([Chapter 14](../02-Kubernetes/14-multi-tenancy-resource-quotas-and-cgroups.md)), the `dev-llms` sandbox ([Chapter 04](../02-Kubernetes/04-nested-clusters-with-vcluster.md)).
-- **Secrets**: the Hugging Face token lives in Vault on vault01 at `kv/spark-lab/hf` (field `token`) and is synced into the Secret `hf-token` in `llm-serving` ([Chapter 15](15-automation-secrets-and-day2.md)); never in a file in the repo. The 02 base carries an `hf-token` Secret with a placeholder, so every `kubectl apply -k` of an overlay resets it; the sync job puts the real value back, or you re-sync by hand (Task 5.2).
+- **Secrets**: the Hugging Face token lives in Vault on vault01 at `kv/spark-lab/hf` (field `token`) and is synced into the Secret `hf-token` in `llm-serving` ([Chapter 15](15-automation-secrets-and-day2.md)); never in a file in the repo. The 02 base ships no `hf-token` Secret and reads it as optional, so an `apply -k` of an overlay never touches the token. Without the Secret, public models still work; gated ones need it (Task 5.2).
 - **Automation**: [`ansible/15.1-deploy-deepseek.yml`](lab/ansible/15.1-deploy-deepseek.yml) reads the same `models.yaml`, so the Semaphore template on sema01 and a manual `serve-model.sh` deploy the same thing ([Chapter 15](15-automation-secrets-and-day2.md)).
 - **Kubernetes packaging**: [Chapter 08](08-kubernetes-deployment-storage-and-streaming.md) covers weight caching and streaming through Traefik; [Chapter 09](09-autoscaling-and-queueing.md) covers KEDA, KServe and Kueue.
 - **Telemetry**: [Chapter 16](16-telemetry.md) dashboards and alerts select on the pod label `model`.
@@ -240,7 +240,7 @@ If you change the base or write your own overlay, try it in the sandbox first. `
 
 - **On vault01:** stores your Hugging Face token at `kv/spark-lab/hf`, field `token`.
 - **On the MacBook:** reads it back with the Vault CLI and writes it into the Secret `hf-token` in `llm-serving` on the root (create or update). The token goes through a pipe, not a file.
-- **Who uses it:** the `model-prefetch` Job reads `hf-token` (optional) when it downloads weights. Only gated models (`llama-3.1-8b`) need it.
+- **Who uses it:** the `model-prefetch` Job and vLLM read `hf-token` (optional). Only gated models (`llama-3.1-8b`) need it.
 
 #### What to look for
 
@@ -252,7 +252,7 @@ If you change the base or write your own overlay, try it in the sandbox first. `
    kubectl --context spark-root -n llm-serving get secret hf-token -o jsonpath='{.data.token}' | base64 -d | cut -c1-3   # hf_
    ```
 
-**If something's off:** `permission denied` from Vault → your token lacks the lab policy, or `VAULT_ADDR` is wrong. The Secret is back to the placeholder after an `apply -k` of an overlay → expected; re-run the sync (or let the `vault-sync` CronJob do it). More in §7.
+**If something's off:** `permission denied` from Vault → your token lacks the lab policy, or `VAULT_ADDR` is wrong. The check prints something other than `hf_` → the value in Vault is wrong; fix it there and re-run the sync. More in §7.
 
 #### Run it
 
@@ -558,7 +558,7 @@ scripts/verify.sh platform serving
 | `kubectl scale deploy vllm --replicas=0` doesn't stick | KEDA scales it back | pause annotation (§3.4) |
 | `KeyError: 'reasoning_content'` in a client | parser off, or the client reads the wrong field | parser on; read `reasoning_content` for thinking, `content` for the answer |
 | Fine with curl, garbage through a client | client sends a system prompt and `temperature: 0` to an R1 model | R1 sampling (§3.3) |
-| `403 … gated repo` in the prefetch Job (drill D05) | no token, or the placeholder after an `apply -k` | Task 5.2; accept the licence on Hugging Face |
+| `403 … gated repo` in the prefetch Job (drill D05) | no `hf-token` Secret, or a token without the licence | Task 5.2; accept the licence on Hugging Face |
 | 404 `model … does not exist` (drill D08) | client uses the HF repo id | use the catalog name or a LiteLLM alias |
 | `DRIFT k8s/models/…` in CI | someone edited an overlay by hand, or the catalog without regenerating | edit `models.yaml`, run `gen_overlays.py`, commit both |
 

@@ -678,7 +678,7 @@ ansible-playbook "$PB" --check -e deepseek_model=r1-32b                  # 0.70 
 kubectl --context spark-root -n llm-serving get deploy vllm -L model             # the model label follows each run
 kubectl --context spark-root apply -f k8s/ops/
 python3 tools/catalog_drift.py pin --only r1-7b
-scripts/breakfix.sh inject D05        # llama-3.1-8b with the placeholder token
+scripts/breakfix.sh inject D05        # deletes hf-token, serves llama-3.1-8b (gated): the download fails
 ```
 
 ✅ **Done when** `kv/spark-lab/hf` and `kv/spark-lab/deepseek/{litellm,webui}` exist and nothing secret is in the repository or a task log, a second sync reports all `unchanged`, a rotated master key gives 401 for the old and 200 for the new, `15.1 Deploy DeepSeek` ends `failed=0` with `verify.sh` all PASS, both playbook guards refuse before touching the cluster, five CronJobs run, and a tampered snapshot copy fails `weights_verify.py`.

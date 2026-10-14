@@ -63,8 +63,3 @@ patches:
     - op: replace
       path: /spec/template/spec/volumes/1/emptyDir/sizeLimit
       value: 512Mi
-- patch: |
-    $patch: delete
-    apiVersion: v1
-    kind: Secret
-    metadata: {name: hf-token, namespace: llm-serving}

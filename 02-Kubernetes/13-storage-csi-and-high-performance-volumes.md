@@ -269,7 +269,7 @@ Expected: `model-cache  Pending  …  local-nvme-retain`, with event `WaitForFir
 
 #### What this lab does (manifest `lab/manifests/root-llms/60-storage/model-prefetch-job.yaml`)
 
-- **Secret:** creates `hf-token` in `llm-serving` from `$HF_TOKEN` (optional for the default model).
+- **Secret:** creates `hf-token` in `llm-serving` from `$HF_TOKEN`, only if you set it. The default model is public, so no token is needed.
 - **Job `model-prefetch`:** downloads `Qwen/Qwen2.5-0.5B-Instruct@main` into `model-cache` at `/models/hf`. This first pod is what makes the root scheduler pick a node, so the PVC binds now.
 - **Disk:** the provisioner creates `/data/k8s/retain/llm-serving/model-cache` on dgx-spark-1.
 - The download takes seconds to minutes, depending on your link.
@@ -293,7 +293,7 @@ Expected: `model-cache  Pending  …  local-nvme-retain`, with event `WaitForFir
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
-kubectl --context spark-root -n llm-serving create secret generic hf-token --from-literal=token="$HF_TOKEN" 2>/dev/null || true
+[ -n "${HF_TOKEN:-}" ] && kubectl --context spark-root -n llm-serving create secret generic hf-token --from-literal=token="$HF_TOKEN" 2>/dev/null || true
 kubectl --context spark-root apply -f manifests/root-llms/60-storage/model-prefetch-job.yaml
 kubectl --context spark-root -n llm-serving logs -f job/model-prefetch --pod-running-timeout=3m   # waits for the PVC to bind and the image to pull
 kubectl --context spark-root -n llm-serving get pvc model-cache

@@ -71,7 +71,7 @@ flowchart TD
 | GPU | `nvidia-smi` (memory reads N/A), `sudo dmesg \| grep -i xid` | [02 Chapter 26 §3.8](../02-Kubernetes/26-cluster-diagnostics-and-failure-scenarios.md) Xid table |
 | training | `kubectl --context spark-root -n batch get workloads,jobs` | `describe workload`, ClusterQueue `spark-cq` usage |
 | day-2 | `kubectl --context spark-root -n llm-serving get cronjobs,jobs` | Job logs, [Chapter 15](15-automation-secrets-and-day2.md) runbook |
-| secrets | Secret present and not a placeholder (`llm-triage.sh secrets`) | `vault-sync` logs; vault01 `vault status` |
+| secrets | Secret not a placeholder; `hf-token` present when a gated model serves (`llm-triage.sh secrets`) | `vault-sync` logs; vault01 `vault status` |
 
 ---
 
@@ -87,7 +87,7 @@ flowchart TD
 | D02 | overlay [`D02-util-too-high`](lab/breakfix/D02-util-too-high/kustomization.yaml) on `r1-7b` | vLLM won't start (free memory below requested) or the pod is OOMKilled at its memory limit (28 Gi for `r1-7b`) | `--gpu-memory-utilization=0.95` on unified memory | util back to the catalog value; Σ util of all engines ≲ 0.72 | [05](05-model-catalog-and-memory-math.md), [06](06-vllm-serving.md) |
 | D03 | overlay [`D03-context-too-long`](lab/breakfix/D03-context-too-long/kustomization.yaml) on `r1-32b` | startup fails: KV cache can't hold one maximum-length sequence | `--max-model-len=131072` on the BF16 32B at 0.70 | lower `--max-model-len`, FP8 weights or `--kv-cache-dtype fp8` | [05](05-model-catalog-and-memory-math.md) |
 | D04 | LiteLLM `timeout`/`request_timeout` patched to 30 s | long answers through the gateway stop at ~30 s; direct to vLLM they finish | shortest timeout on the path wins | ≥ 900 s on every hop: LiteLLM, HTTPRoute `timeouts.request`, client | [08](08-kubernetes-deployment-storage-and-streaming.md), [12](12-open-webui-and-litellm-gateway.md) |
-| D05 | overlay [`D05-gated-no-token`](lab/breakfix/D05-gated-no-token/kustomization.yaml) (`llama-3.1-8b`) | pod never Ready; prefetch Job / vLLM log shows 401 / `GatedRepoError` | `hf-token` still holds the placeholder | accept the licence on Hugging Face, store the token at `kv/spark-lab/hf` (field `token`), let `vault-sync` update Secret `hf-token` | [15](15-automation-secrets-and-day2.md) |
+| D05 | overlay [`D05-gated-no-token`](lab/breakfix/D05-gated-no-token/kustomization.yaml) (`llama-3.1-8b`) | pod never Ready; prefetch Job / vLLM log shows 401 / `GatedRepoError` | no `hf-token` Secret (the 02 base ships none), or it holds a placeholder | accept the licence on Hugging Face, store the token at `kv/spark-lab/hf` (field `token`), let `vault-sync` update Secret `hf-token` | [15](15-automation-secrets-and-day2.md) |
 | D06 | prints an `eval_harness.py` command with `--temperature 0` | R1 loops inside `<think>`, `finish_reason=length`, accuracy drops | greedy decoding on an R1-style model | temperature 0.6, top-p 0.95, fix the client default | [03](03-r1-reasoning-and-grpo.md), [18](18-choosing-models-deepseek-vs-others.md) |
 | D07 | overlay [`D07-no-tool-parser`](lab/breakfix/D07-no-tool-parser/kustomization.yaml) on `qwen2.5-7b-tools` | agent gets HTTP 400 (`"auto" tool choice requires …`) or prose that describes a tool call | `--enable-auto-tool-choice` and `--tool-call-parser` removed | restore both flags (`hermes` for Qwen2.5, `llama3_json` for Llama 3.1) | [14](14-tool-calling-and-agents.md) |
 
@@ -141,7 +141,7 @@ flowchart TD
 |---|---|---|
 | `serving` | Deployment Ready, restarts and last termination reason, util and max-model-len from the args, reasoning parser on R1/QwQ models, tool flags on `*tools*` models, served names, running/waiting/preemptions/truncation from `/metrics`, recent errors in the log | D01, D02, D06, D07, [Chapter 05](05-model-catalog-and-memory-math.md) |
 | `gateway` | LiteLLM Ready, router timeout ≥ 900 s, LiteLLM DB, HTTPRoute timeouts | D04, [Chapter 12](12-open-webui-and-litellm-gateway.md) |
-| `secrets` | `hf-token`, `litellm-master-key`, `open-webui-secret` present and not placeholders; managed by `vault-sync` | D05, [Chapter 15](15-automation-secrets-and-day2.md) |
+| `secrets` | `litellm-master-key`, `open-webui-secret` present and not placeholders; `hf-token` not a placeholder (a missing one is only an info line: public models don't need it); managed by `vault-sync` | D05, [Chapter 15](15-automation-secrets-and-day2.md) |
 | `day2` | failed Jobs, last success of each CronJob | [Chapter 15](15-automation-secrets-and-day2.md) |
 | `host` | `MemAvailable`, page cache, GPU temperature/power/clock events, Xid lines (only when run on the Spark) | [Chapter 08](08-kubernetes-deployment-storage-and-streaming.md), 02 Chapter 26 |
 
@@ -164,7 +164,7 @@ It is read-only: it never restarts, scales or patches anything.
 
 #### What this lab does (scripts `lab/scripts/serve-model.sh`, `lab/scripts/llm-triage.sh`)
 
-- **Puts the stack in a known state:** r1-7b in `deploy/vllm`, and the Chapter 12 apps applied (bge-m3, LiteLLM + PostgreSQL, Open WebUI). Both applies write placeholder Secrets, so the block runs Chapter 15's `vault-sync` once before the triage.
+- **Puts the stack in a known state:** r1-7b in `deploy/vllm`, and the Chapter 12 apps applied (bge-m3, LiteLLM + PostgreSQL, Open WebUI). The apps apply writes placeholder Secrets (the model overlay carries none), so the block runs Chapter 15's `vault-sync` once before the triage.
 - **Runs the triage once** and saves it to `results/triage-known-good.txt`. The triage is read-only: it never restarts, scales or patches anything.
 - **On the Spark:** the host facts the triage's `host` section would read (it skips them on the MacBook).
 
@@ -176,7 +176,7 @@ It is read-only: it never restarts, scales or patches anything.
    |---|---|
    | serving | `[PASS] vLLM Ready`, `[PASS] reasoning parser on`, `util 0.20   max-model-len …` |
    | gateway | `[PASS] LiteLLM Ready`, `[PASS] router timeout 900s`, `[PASS] LiteLLM DB present` |
-   | secrets | `[PASS] secret … set` for the three Secrets and `[PASS] litellm-master-key managed by vault-sync` (a `[WARN] … placeholder` if the sync didn't run) |
+   | secrets | `[PASS] secret … set` for the three Secrets and `[PASS] litellm-master-key managed by vault-sync` (if the sync didn't run: `[WARN] … placeholder` for the apps Secrets and `no hf-token Secret: fine for public models; gated ones need it (D05, Chapter 15)`) |
    | day-2 | `[PASS] no failed Jobs in llm-serving` |
    | host | `not on the Spark … skipped` from the MacBook |
 
@@ -191,7 +191,7 @@ It is read-only: it never restarts, scales or patches anything.
 scripts/serve-model.sh r1-7b
 kubectl --context spark-root apply -k k8s/apps
 kubectl --context spark-root -n llm-serving delete job vs-triage --ignore-not-found
-kubectl --context spark-root -n llm-serving create job --from=cronjob/vault-sync vs-triage   # the apply wrote placeholder Secrets
+kubectl --context spark-root -n llm-serving create job --from=cronjob/vault-sync vs-triage   # the apps apply wrote placeholder Secrets
 kubectl --context spark-root -n llm-serving wait --for=condition=complete job/vs-triage --timeout=5m
 mkdir -p results
 scripts/llm-triage.sh | tee results/triage-known-good.txt
@@ -227,7 +227,7 @@ sudo dmesg | grep -ci xid
    | D02 | pod not Ready or `OOMKilled`; vLLM log about free memory |
    | D03 | startup error: KV cache can't hold one max-length sequence |
    | D04 | triage `[FAIL] router timeout 30s < 900`; the probe through LiteLLM ends with an error after about 30 s, the direct one finishes |
-   | D05 | triage `[WARN] secret hf-token still holds the placeholder`; `401`/`GatedRepoError` |
+   | D05 | `401`/`GatedRepoError`; triage shows `no hf-token Secret …` or `[WARN] secret hf-token still holds the placeholder` if the token is the cause |
    | D06 | `finish_reason=length` and long completions at temperature 0 |
    | D07 | triage `[FAIL] tool model without --enable-auto-tool-choice` |
 

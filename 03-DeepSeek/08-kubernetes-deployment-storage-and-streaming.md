@@ -332,7 +332,7 @@ kubectl --context spark-root get ns llm-serving batch ingress observability
 #### What to look for
 
 1. **Root kustomization:** `ConfigMap/deepseek-tools`, `ConfigMap/deepseek-evaldata`, `ConfigMap/deepseek-catalog` and `ConfigMap/deepseek-train`.
-2. **Per overlay:** `3 objects` (Secret `hf-token`, Deployment, Service) for every `k8s/models/*`. The ServiceMonitor `llm-workloads` that scrapes vLLM is not in the overlay: it lives in `observability` (02 `root/95-observability`).
+2. **Per overlay:** `2 objects` (Deployment, Service) for every `k8s/models/*`. No Secret: `hf-token` comes from Vault (Chapter 15). The ServiceMonitor `llm-workloads` that scrapes vLLM is not in the overlay: it lives in `observability` (02 `root/95-observability`).
 3. **The diff** touches only args, the `MODEL`/`SERVED_NAME` env values, memory request and limit (`28Gi` vs `58Gi`) and the `model` labels.
 4. **Overlay check:** `14 overlays checked, 0 drifted`.
 
@@ -348,7 +348,7 @@ diff <(kubectl kustomize k8s/models/r1-7b) <(kubectl kustomize k8s/models/r1-32b
 python3 scripts/gen_overlays.py --check
 ```
 
-Expected: four ConfigMaps from the root kustomization (three in `llm-serving`, `deepseek-train` in `batch`); three objects per model overlay (Secret `hf-token`, Deployment, Service from the base). The diff shows only args, env values, memory request and limit, and `model` labels. Anything else means somebody edited a generated file, and `--check` reports it.
+Expected: four ConfigMaps from the root kustomization (three in `llm-serving`, `deepseek-train` in `batch`); two objects per model overlay (Deployment and Service from the base). The diff shows only args, env values, memory request and limit, and `model` labels. Anything else means somebody edited a generated file, and `--check` reports it.
 
 ### Task 5.2 · The three validation layers, and a failure only the third one catches
 

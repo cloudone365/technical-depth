@@ -12,13 +12,11 @@
 #      always-on helpers (Qdrant, mock LLM).
 #      Whether CUDA memory
 #      is charged to this limit is measured in Chapter 14 §5.5 — size as if it is.
-apiVersion: v1
-kind: Secret
-metadata: {name: hf-token, namespace: llm-serving}
-type: Opaque
-stringData:
-  token: "replace-me"                  # or sync from Vault (01-Ansible Chapter 18)
----
+#
+# HF_TOKEN comes from Secret hf-token if it exists (optional). The base ships no
+# Secret on purpose: a placeholder token would overwrite a real one on every
+# apply, and the Hub rejects an invalid token even for public models. Create it
+# only for gated models (Chapter 20 §5.1) or let vault-sync write it (03 Ch15).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -55,7 +53,7 @@ spec:
             - {name: SERVED_NAME, value: qwen2.5-0.5b}
             - {name: HF_HOME, value: /models/hf}
             - name: HF_TOKEN
-              valueFrom: {secretKeyRef: {name: hf-token, key: token}}
+              valueFrom: {secretKeyRef: {name: hf-token, key: token, optional: true}}
             # last on purpose: 03/04 overlays patch env/0, env/1 and env/3 (HF_TOKEN) by index
             - {name: HF_HUB_CACHE, value: /models/hf}   # = hf download --cache-dir (model-prefetch)
           ports: [{name: http, containerPort: 8000}]

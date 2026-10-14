@@ -48,8 +48,3 @@ patches:
     - op: replace
       path: /spec/template/metadata/labels/model
       value: qwen3-coder-30b-fp8
-- patch: |
-    $patch: delete
-    apiVersion: v1
-    kind: Secret
-    metadata: {name: hf-token, namespace: llm-serving}

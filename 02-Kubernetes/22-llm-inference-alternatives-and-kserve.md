@@ -223,7 +223,7 @@ Record `shared prefix median`, `unique prefix median` and the speed-up.
 3. **Probe:** shared-prefix median clearly below unique-prefix median, speed-up well above `1.0x`. Put the numbers next to vLLM's in §5.6.
 4. **Metrics:** `sglang:cache_hit_rate` above 0 after the probe; `sglang:num_running_reqs` back at 0 when idle.
 
-**If something's off:** `0/1` with `exceeded quota: serving-budget` → two other engines still hold the budget (`kubectl --context spark-root -n llm-serving get pods`). `CreateContainerConfigError` about `hf-token` → the Secret from Chapter 20's `vllm` layer is missing. `exec format error` → wrong image tag for arm64/sm_121. More in §7.
+**If something's off:** `0/1` with `exceeded quota: serving-budget` → two other engines still hold the budget (`kubectl --context spark-root -n llm-serving get pods`). `401`/`403` from Hugging Face → a gated model without a valid `hf-token` Secret (Chapter 20 §5.1). `exec format error` → wrong image tag for arm64/sm_121. More in §7.
 
 #### Run it
 

@@ -65,7 +65,7 @@ LiteLLM and Open WebUI (Chapter 12) reach the same Services inside the cluster, 
 
 ### 3.1 Catalog → overlay → Deployment
 
-[`models.yaml`](lab/models.yaml) is the single source of truth. For each entry, [`gen_overlays.py`](lab/scripts/gen_overlays.py) writes `k8s/models/<name>/kustomization.yaml`, a kustomize overlay of the 02 base that replaces the image, the engine arguments, the `MODEL`/`SERVED_NAME` environment, and the memory request and limit (equal), and drops the base's placeholder `hf-token` Secret so an apply never overwrites the token synced from Vault (`kv/spark-lab/hf`, Chapter 06). The model's `name` becomes vLLM's `--served-model-name`, which is what clients put in `"model"`.
+[`models.yaml`](lab/models.yaml) is the single source of truth. For each entry, [`gen_overlays.py`](lab/scripts/gen_overlays.py) writes `k8s/models/<name>/kustomization.yaml`, a kustomize overlay of the 02 base that replaces the image, the engine arguments, the `MODEL`/`SERVED_NAME` environment, and the memory request and limit (equal). The base ships no `hf-token` Secret, so an apply never overwrites the token synced from Vault (`kv/spark-lab/hf`, Chapter 06). The model's `name` becomes vLLM's `--served-model-name`, which is what clients put in `"model"`.
 
 | Catalog name | Hugging Face model | util | mem | max_len | Engine flags beyond the base |
 |---|---|---|---|---|---|
@@ -488,7 +488,7 @@ Speculative decoding changes the per-stream token rate, which the probe does not
 3. **Swap back:** `deployment "vllm" successfully rolled out` after the annotation is removed.
 4. **Radix sketch:** `prefix tokens reused: …/… = 90%` or close to it.
 
-**If something's off:** SGLang pod `CreateContainerConfigError` → the base Deployment needs Secret `hf-token` (not optional there); sync it from Vault (Chapter 06 Task 5.1). CrashLoop with an unknown model or parser → the `spark` image predates it (§7).
+**If something's off:** SGLang `401`/`403` from Hugging Face → the Secret `hf-token` holds an invalid token; sync it from Vault (Chapter 06 Task 5.1). CrashLoop with an unknown model or parser → the `spark` image predates it (§7).
 
 #### Run it
 
