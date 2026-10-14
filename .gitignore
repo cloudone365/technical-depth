@@ -6,3 +6,4 @@ diag-*.tar.gz
 03-DeepSeek/lab/observability/rules.extracted.yaml
 04-Qwen/lab/out/
 04-Qwen/lab/results/
+.ansible/
