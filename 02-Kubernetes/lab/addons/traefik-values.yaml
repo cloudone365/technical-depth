@@ -12,6 +12,14 @@
 # MetalLB gives its LoadBalancer Service 192.168.0.115.
 deployment:
   replicas: 1
+# The chart names its IngressClass after the release (traefik-lab) unless told
+# otherwise; the lab's Ingresses ask for ingressClassName: traefik, and Traefik
+# ignores an Ingress whose class it doesn't own (curl then gets a plain
+# "404 page not found"). Pin the name.
+ingressClass:
+  enabled: true
+  isDefaultClass: true
+  name: traefik
 providers:
   kubernetesCRD:
     enabled: true
