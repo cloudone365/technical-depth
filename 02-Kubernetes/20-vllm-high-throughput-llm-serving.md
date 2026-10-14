@@ -36,26 +36,31 @@ And there are **two budgets**, both of which must hold:
 
 ```mermaid
 flowchart LR
-  CL["clients<br/>llm.lab.local → 192.168.0.115"] --> TR
+  MAC["MacBook<br/>curl localhost:8000"] -->|"kubectl port-forward svc/vllm 8000<br/>(the Chapter 20 labs)"| APIS
+  LAN["clients on the LAN<br/>llm.lab.local → 192.168.0.115"] --> TR
   subgraph ROOT["root cluster spark-root (one API server, one scheduler)"]
     direction LR
-    TR["Traefik · ns ingress<br/>/v1 · streaming-safe"] --> SVC["Service vllm:8000<br/>ns llm-serving"]
+    APIS["kube-apiserver :6443<br/>→ kubelet on dgx-spark-1"]
+    TR["Traefik · ns ingress<br/>Ingress llm → mock-llm<br/>(no route to vllm in this chapter)"] --> MOCK["Service mock-llm<br/>ns llm-serving"]
+    SVC["Service vllm:8000<br/>ns llm-serving"]
     subgraph POD["Deployment vllm · priority spark-serving · quota serving-budget · request = limit 32 Gi"]
       direction TB
       API["OpenAI API server<br/>/v1/chat/completions · /metrics · /health"]
-      SCH["scheduler<br/>continuous batching"]
+      SCH["scheduler<br/>queue → continuous batching"]
       ENG["model executor<br/>CUDA graphs · sm_121"]
       KV[("paged KV cache<br/>blocks in UMA")]
       API --> SCH --> ENG --> KV
     end
+    APIS -->|"stream to the pod's port"| API
     SVC --> API
+    BENCH["Job vllm-bench (§5.5)<br/>in llm-serving"] -->|"http://vllm:8000"| SVC
     PVC[("PVC model-cache<br/>/models/hf")] --> ENG
     PRE["Job model-prefetch"] --> PVC
-    KEDA["KEDA ScaledObject · ns keda<br/>num_requests_waiting"]
+    KEDA["KEDA operator · ns keda<br/>ScaledObjects in llm-serving<br/>vllm: max 1 (metric only) · mock-llm: 1–6"]
     PROM["Prometheus kps · ns observability<br/>ServiceMonitor llm-workloads"]
     GPU["GB10 · 1 of 15 slices"]
-    KEDA -->|"query kps-prometheus:9090"| PROM
-    KEDA -.->|"replicas"| POD
+    KEDA -->|"query kps-prometheus:9090<br/>vllm:num_requests_waiting"| PROM
+    KEDA -.->|"HPA replicas"| POD
     PROM -->|"scrape /metrics<br/>+ vcluster=root labels"| SVC
     ENG --> GPU
   end
@@ -67,14 +72,17 @@ flowchart LR
   classDef ext fill:#24292f,stroke:#000,color:#fff
   classDef tenant fill:#eaeef2,stroke:#57606a,color:#000
   class ENG,GPU gpu
-  class TR,SVC net
+  class TR,SVC,MOCK net
+  class APIS ctrl
   class KV,PVC store
   class PROM,KEDA obs
-  class CL ext
-  class API,SCH,PRE tenant
+  class MAC,LAN ext
+  class API,SCH,PRE,BENCH tenant
   style POD fill:#f4fbe8,stroke:#76b900,stroke-width:2px
   style ROOT fill:#e6f4f5,stroke:#0e7c86
 ```
+
+**How requests reach vLLM in this chapter.** There is no Traefik route to `vllm` here: `llm.lab.local` still goes to `mock-llm` (Chapter 11), and the KEDA lab in §5.7 needs it there. The labs call vLLM through `kubectl port-forward svc/vllm 8000` (§5.2), which tunnels laptop → root API server → kubelet → pod; the benchmark Job in §5.5 calls the Service from inside the cluster. A Traefik route to a real model comes with the model modules: `qwen.lab.local` (04-Qwen Chapter 04) and `api.lab.local` through LiteLLM (03-DeepSeek Chapter 12).
 
 Everything in this chapter is applied to the root (`--context spark-root`) and runs there under its real name: the vLLM pod is `vllm-…` in `llm-serving`, with no syncer in between. The root scheduler hands it a time-slice, the root's kube-proxy routes the Service, the root's Prometheus scrapes it, and KEDA (namespace `keda`, also on the root) queries that Prometheus directly at `http://kps-prometheus.observability.svc:9090`. If you want to try a changed manifest before it touches the running models, apply it to the `dev-llms` sandbox first (namespace `llm-sandbox`, a ~0.5B model at util 0.02, Chapter 04).
 
@@ -87,6 +95,44 @@ Everything in this chapter is applied to the root (`--context spark-root`) and r
 | R1-Distill-32B BF16, alone | 0.70 | 0.70 | 84 GiB |
 
 The quota is the second check, not the first: `serving-budget` (90 Gi of requests and of limits) holds two of the lab's 32 Gi engines plus the always-on pods, and every GPU container sets memory request = limit, so the scheduler places a model only where its full size is still free; a model that doesn't fit waits Pending instead of squeezing a running one. A set near 0.72 needs pod requests/limits sized from the Chapter 14 §5.5 measurement (is CUDA memory charged to the cgroup?), not from the util value. §9 has the lab's combinations.
+
+
+### 2.1 One request, step by step
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as curl on the MacBook
+  participant K as kubectl port-forward<br/>(root API server → kubelet)
+  participant A as vLLM API server<br/>(OpenAI endpoints)
+  participant S as vLLM scheduler
+  participant E as model executor<br/>(GB10 slice)
+  participant KV as paged KV cache<br/>(UMA blocks)
+  C->>K: POST /v1/chat/completions {"stream":true}
+  K->>A: same bytes, into the pod's port 8000
+  A->>A: chat template + tokenize the prompt
+  A->>S: new request (vllm:num_requests_waiting +1)
+  Note over S: waits until enough free KV blocks<br/>and a free batch seat (max-num-seqs 64)
+  S->>KV: allocate blocks for the prompt (reuse cached prefix blocks)
+  S->>E: prefill: whole prompt in one step
+  E->>KV: write the prompt's keys/values
+  E-->>A: first token
+  A-->>C: data: {…delta "Unified"…} (TTFT ends here)
+  loop every decode step, one token for every running request
+    S->>E: batch = all running requests (new ones join here)
+    E->>KV: read past K/V, append one block slot
+    E-->>A: next token
+    A-->>C: data: {…delta…} (inter-token latency)
+  end
+  E-->>A: stop token or max_tokens reached
+  A-->>C: data: [DONE]
+  S->>KV: free this request's blocks
+```
+
+- **Steps 1–2 are only the lab's path.** Port-forward is a debugging tunnel through the API server; production traffic goes client → Traefik → Service → pod, as in Chapter 11.
+- **Step 4 is what KEDA scales on.** `vllm:num_requests_waiting` counts requests in the queue; `vllm:num_requests_running` counts those in the batch (§3.3).
+- **Steps 6–9 are TTFT**: queueing plus prefill. Steps 11–14 repeat once per output token; their spacing is the inter-token latency the benchmark reports (§5.5).
+- **When the KV cache is full**, new requests wait at step 5, and under pressure vLLM preempts a running request, frees its blocks and recomputes it later (`vllm:num_preemptions`). That's why `--gpu-memory-utilization`, `--max-model-len` and `--max-num-seqs` decide throughput (§3.1).
 
 ---
 
