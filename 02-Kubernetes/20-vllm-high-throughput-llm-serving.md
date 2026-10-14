@@ -519,7 +519,7 @@ Now repeat with `gemm-contention` at 2 replicas **on the root** (`kubectl --cont
 
 1. **`/metrics`** prints `vllm:num_requests_running`, `vllm:num_requests_waiting` and a KV-cache line (`kv_cache_usage_perc`, or `gpu_cache_usage_perc` on older releases), all with numbers.
 2. **The Prometheus query** prints exactly one line: `root llm-serving vllm-… ← llm-serving/vllm-…`.
-3. **Grafana** (http://192.168.0.100:32000), row *Serving SLOs*: TTFT p95, TPOT p95, queue and KV-cache panels have data after a benchmark run.
+3. **Grafana**: dashboard **Spark · Kubernetes** (direct link http://192.168.0.100:32000/d/spark-k8s, or *Dashboards* → search `Spark`). It has four rows; the third is **Serving SLOs (vLLM)** with TTFT p95, Time per output token p95 and Queue & KV cache. They have data a few minutes after traffic starts (the p95 lines use a 5-minute window).
 
 **If something's off:** the query prints nothing → Prometheus hasn't scraped `vllm` yet (wait one scrape interval) or the ServiceMonitor is missing (`kubectl --context spark-root -n observability get servicemonitors`). `curl` to `localhost:9090` fails → start the port-forward in this terminal. More in Chapter 17 §7.
 
@@ -534,7 +534,7 @@ curl -s 'localhost:9090/api/v1/query' --data-urlencode 'query=vllm:num_requests_
   | jq -r '.data.result[].metric | "\(.vcluster) \(.vnamespace) \(.vpod)  ←  \(.namespace)/\(.pod)"'
 ```
 
-Expected: one line, `root llm-serving vllm-… ← llm-serving/vllm-…` — on the root the `v` labels repeat the real names. A sandbox engine in dev-llms would print `dev-llms llm-sandbox vllm-… ← vc-dev-llms/vllm-…-x-llm-sandbox-x-dev-llms`: the tenant's name and the root's name for the same series. In Grafana (`http://192.168.0.100:32000`), row *Serving SLOs*: TTFT p95, TPOT p95, queue and KV cache. Force a `VLLMQueueBacklog` alert (more than 32 waiting) by setting `--max-num-seqs=16` in `vllm.yaml` and running the benchmark loop with `--max-concurrency 256`; put both back afterwards.
+Expected: one line, `root llm-serving vllm-… ← llm-serving/vllm-…` — on the root the `v` labels repeat the real names. A sandbox engine in dev-llms would print `dev-llms llm-sandbox vllm-… ← vc-dev-llms/vllm-…-x-llm-sandbox-x-dev-llms`: the tenant's name and the root's name for the same series. In Grafana, dashboard **Spark · Kubernetes** (`http://192.168.0.100:32000/d/spark-k8s`), third row **Serving SLOs (vLLM)**: TTFT p95, TPOT p95, queue and KV cache. Force a `VLLMQueueBacklog` alert (more than 32 waiting) by setting `--max-num-seqs=16` in `vllm.yaml` and running the benchmark loop with `--max-concurrency 256`; put both back afterwards.
 
 #### Keep traffic flowing while you watch Grafana
 
@@ -633,6 +633,8 @@ scripts/verify.sh llm-budget storage serving observability
 |---|---|---|---|
 | `ValueError: … memory … is less than the model` / CUDA OOM at startup | fraction too small for weights + activations, **or** UMA already used by others (any cluster, or the page cache) | log line with requested vs available. `free -g` on the Spark | raise the fraction carefully, drop page cache, scale down neighbours (`kubectl --context spark-root get pods -A -o wide`), quantise |
 | `EngineCore failed to start` … `ValueError: VLLM_PORT 'tcp://10.43.…:8000' appears to be a URI` | Kubernetes injects `<SERVICE>_PORT` variables for every Service in the namespace; Service `vllm` becomes `VLLM_PORT=tcp://…`, which vLLM reads as its own setting | `kubectl --context spark-root -n llm-serving exec deploy/vllm -- env \| grep VLLM_PORT` (while it restarts) | `enableServiceLinks: false` in the pod spec (in the lab files since 2026-10-14): `git pull`, re-apply `root-llms/90-serving/vllm` |
+| Dashboard **Spark · Kubernetes** or its row **Serving SLOs (vLLM)** not in Grafana | the dashboard is a ConfigMap from `root/95-observability` (Chapter 17); if that folder wasn't applied, Grafana has nothing to load | `kubectl --context spark-root -n observability get cm spark-k8s-dashboard` · `kubectl --context spark-root -n observability get prometheusrule spark-k8s` | `kubectl --context spark-root apply -k manifests/root/95-observability` from `02-Kubernetes/lab`; the Grafana sidecar loads it within a minute. Open `http://192.168.0.100:32000/d/spark-k8s` |
+| Row **Serving SLOs (vLLM)** there, but TTFT/TPOT panels say *No data* | the p95 lines are recording rules over a 5-minute window of vLLM histograms: no traffic → no data | Prometheus: `spark:vllm_ttft_p95_seconds` and `vllm:num_requests_running` | start `vllm-load` (§5.6), wait 3–5 min, set the time range to *Last 15 minutes* |
 | `No available memory for the cache blocks` | weights fit, no room for KV | startup log | raise the fraction, or lower `--max-model-len` |
 | Deployment shows 0/1, `exceeded quota: serving-budget` in the ReplicaSet events | other engines already hold most of the 90 Gi in `llm-serving` | `kubectl --context spark-root -n llm-serving describe resourcequota serving-budget` | park an engine (§9) |
 | Pod `Pending`, event `Insufficient memory` | the LLM memory pool is taken: other engines plus running batch pods (all request = limit) | `kubectl --context spark-root describe node dgx-spark-1 \| grep -A9 'Allocated resources'`, `kubectl --context spark-root -n batch get pods` | wait for the batch job, park an engine (§9), or lower the engine's request/limit to the measured peak |
