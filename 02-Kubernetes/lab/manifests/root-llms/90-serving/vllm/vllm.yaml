@@ -54,9 +54,10 @@ spec:
             - {name: MODEL, value: Qwen/Qwen2.5-0.5B-Instruct}
             - {name: SERVED_NAME, value: qwen2.5-0.5b}
             - {name: HF_HOME, value: /models/hf}
-            - {name: HF_HUB_CACHE, value: /models/hf}   # = hf download --cache-dir (model-prefetch)
             - name: HF_TOKEN
               valueFrom: {secretKeyRef: {name: hf-token, key: token}}
+            # last on purpose: 03/04 overlays patch env/0, env/1 and env/3 (HF_TOKEN) by index
+            - {name: HF_HUB_CACHE, value: /models/hf}   # = hf download --cache-dir (model-prefetch)
           ports: [{name: http, containerPort: 8000}]
           startupProbe:                # first start downloads weights: allow 30 min
             httpGet: {path: /health, port: http}
