@@ -21,6 +21,7 @@ spec:
       nodeSelector: {kubernetes.io/hostname: dgx-spark-2}
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+      enableServiceLinks: false   # Service 'vllm' would inject VLLM_PORT=tcp://… and vLLM refuses to start
       containers:
         - name: vllm
           image: nvcr.io/nvidia/vllm:25.09-py3
@@ -60,6 +61,7 @@ spec:
       nodeSelector: {kubernetes.io/hostname: dgx-spark-1}
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+      enableServiceLinks: false   # Service 'vllm' would inject VLLM_PORT=tcp://… and vLLM refuses to start
       containers:
         - name: train
           image: nvcr.io/nvidia/vllm:25.09-py3

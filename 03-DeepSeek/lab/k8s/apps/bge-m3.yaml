@@ -12,6 +12,7 @@ spec:
     metadata: {labels: {app: bge-m3}}
     spec:
       priorityClassName: spark-serving
+      enableServiceLinks: false   # Service 'vllm' would inject VLLM_PORT=tcp://… and vLLM refuses to start
       containers:
         - name: vllm
           image: nvcr.io/nvidia/vllm:25.09-py3

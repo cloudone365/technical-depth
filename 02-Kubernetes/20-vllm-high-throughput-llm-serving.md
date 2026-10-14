@@ -213,7 +213,7 @@ kubectl --context spark-root -n llm-serving describe resourcequota serving-budge
 
 #### What to look for
 
-1. **Command exit:** `wait` prints `job.batch/model-prefetch condition met`; `apply -k` prints `service/vllm created` and `deployment.apps/vllm created`.
+1. **Command exit:** `wait` prints `job.batch/model-prefetch condition met`; `apply -k` prints `service/vllm created` and `deployment.apps/vllm created`. A `Warning: would violate PodSecurity "restricted:latest"` line is expected: `llm-serving` enforces `baseline` and only warns on `restricted`, and the NGC engine runs as root.
 2. **The vLLM log** shows, in order: `Loading weights`, `Model loading took … GiB`, `Available KV cache memory: … GiB`, `GPU KV cache size: … tokens`, CUDA graph capture, `Uvicorn running on http://0.0.0.0:8000`. Write down your KV-cache size; §3.1 predicts about 21 GiB at 0.20 for this model.
 3. **What was charged:**
 
@@ -502,6 +502,7 @@ scripts/verify.sh llm-budget storage serving observability
 | Symptom | Cause | Diagnose | Fix |
 |---|---|---|---|
 | `ValueError: … memory … is less than the model` / CUDA OOM at startup | fraction too small for weights + activations, **or** UMA already used by others (any cluster, or the page cache) | log line with requested vs available. `free -g` on the Spark | raise the fraction carefully, drop page cache, scale down neighbours (`kubectl --context spark-root get pods -A -o wide`), quantise |
+| `EngineCore failed to start` … `ValueError: VLLM_PORT 'tcp://10.43.…:8000' appears to be a URI` | Kubernetes injects `<SERVICE>_PORT` variables for every Service in the namespace; Service `vllm` becomes `VLLM_PORT=tcp://…`, which vLLM reads as its own setting | `kubectl --context spark-root -n llm-serving exec deploy/vllm -- env \| grep VLLM_PORT` (while it restarts) | `enableServiceLinks: false` in the pod spec (in the lab files since 2026-10-14): `git pull`, re-apply `root-llms/90-serving/vllm` |
 | `No available memory for the cache blocks` | weights fit, no room for KV | startup log | raise the fraction, or lower `--max-model-len` |
 | Deployment shows 0/1, `exceeded quota: serving-budget` in the ReplicaSet events | other engines already hold most of the 90 Gi in `llm-serving` | `kubectl --context spark-root -n llm-serving describe resourcequota serving-budget` | park an engine (§9) |
 | Pod `Pending`, event `Insufficient memory` | the LLM memory pool is taken: other engines plus running batch pods (all request = limit) | `kubectl --context spark-root describe node dgx-spark-1 \| grep -A9 'Allocated resources'`, `kubectl --context spark-root -n batch get pods` | wait for the batch job, park an engine (§9), or lower the engine's request/limit to the measured peak |

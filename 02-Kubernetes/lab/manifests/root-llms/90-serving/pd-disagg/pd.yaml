@@ -18,6 +18,7 @@ spec:
   template:
     metadata: {labels: {app: vllm-prefill, pd-role: prefill}}
     spec:
+      enableServiceLinks: false   # Service 'vllm' would inject VLLM_PORT=tcp://… and vLLM refuses to start
       containers:
         - name: vllm
           image: nvcr.io/nvidia/vllm:25.09-py3
@@ -55,6 +56,7 @@ spec:
   template:
     metadata: {labels: {app: vllm-decode, pd-role: decode}}
     spec:
+      enableServiceLinks: false   # Service 'vllm' would inject VLLM_PORT=tcp://… and vLLM refuses to start
       containers:
         - name: vllm
           image: nvcr.io/nvidia/vllm:25.09-py3
@@ -106,6 +108,7 @@ spec:
     metadata: {labels: {app: pd-proxy}}
     spec:
       securityContext: {runAsNonRoot: true, runAsUser: 65534, seccompProfile: {type: RuntimeDefault}}
+      enableServiceLinks: false   # Service 'vllm' would inject VLLM_PORT=tcp://… and vLLM refuses to start
       containers:
         - name: proxy
           image: python:3.12-slim

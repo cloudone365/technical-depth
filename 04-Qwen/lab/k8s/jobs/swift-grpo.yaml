@@ -33,6 +33,7 @@ spec:
     spec:
       restartPolicy: Never
       priorityClassName: spark-batch
+      enableServiceLinks: false   # Service 'vllm' would inject VLLM_PORT=tcp://… and vLLM refuses to start
       containers:
         - name: swift
           image: nvcr.io/nvidia/pytorch:26.08-py3

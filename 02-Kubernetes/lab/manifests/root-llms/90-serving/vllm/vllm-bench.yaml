@@ -10,6 +10,7 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      enableServiceLinks: false   # Service 'vllm' would inject VLLM_PORT=tcp://… and vLLM refuses to start
       containers:
         - name: bench
           image: nvcr.io/nvidia/vllm:25.09-py3
