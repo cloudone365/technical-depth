@@ -545,7 +545,7 @@ Current official Qwen GGUFs carry the template already; prefer them.
 #### What to look for
 
 1. **Rollout:** `deployment "trtllm" successfully rolled out` within 45 minutes.
-2. **Log:** an NVFP4 / quantization line, the KV cache size, and `Uvicorn running`.
+2. **Log:** an NVFP4 / quantization line, the KV cache size, and `Application startup complete` (older releases: `Uvicorn running`).
 3. **Benchmark:** the 02 Job against `http://trtllm:8000` with the served name from `GET /v1/models`; record it in your table.
 4. **Afterwards:** `serve-model.sh qwen3-8b` and `--side qwen3-4b-instruct` both end with `0 failed`.
 

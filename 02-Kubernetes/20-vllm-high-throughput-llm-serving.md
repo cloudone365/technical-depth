@@ -214,7 +214,7 @@ kubectl --context spark-root -n llm-serving describe resourcequota serving-budge
 #### What to look for
 
 1. **Command exit:** `wait` prints `job.batch/model-prefetch condition met`; `apply -k` prints `service/vllm created` and `deployment.apps/vllm created`. A `Warning: would violate PodSecurity "restricted:latest"` line is expected: `llm-serving` enforces `baseline` and only warns on `restricted`, and the NGC engine runs as root.
-2. **The vLLM log** shows, in order: `Loading weights`, `Model loading took … GiB`, `Available KV cache memory: … GiB`, `GPU KV cache size: … tokens`, CUDA graph capture, `Uvicorn running on http://0.0.0.0:8000`. Write down your KV-cache size; §3.1 predicts about 21 GiB at 0.20 for this model.
+2. **The vLLM log** shows, in order: `Loading weights`, `Model loading took … GiB`, `Available KV cache memory: … GiB`, `GPU KV cache size: … tokens`, CUDA graph capture, then the API server line: `Starting vLLM API server … on http://0.0.0.0:8000` and `Application startup complete` (older releases print `Uvicorn running on http://0.0.0.0:8000`). Write down your KV-cache size; §3.1 predicts about 21 GiB at 0.20 for this model.
 3. **What was charged:**
 
    | Check | Healthy value |
@@ -244,7 +244,7 @@ sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'   # start the load with a c
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -k manifests/root-llms/90-serving/vllm
-kubectl --context spark-root -n llm-serving logs -f deploy/vllm | grep -E 'Loading|weights|KV cache|blocks|CUDA graph|Uvicorn|ERROR'
+kubectl --context spark-root -n llm-serving logs -f deploy/vllm | grep -E 'Loading|weights|KV cache|blocks|CUDA graph|API server|startup complete|Uvicorn|ERROR'
 ```
 
 `vllm.yaml` carries no `hf-token` Secret, so applying it never overwrites your token. Without the Secret, `HF_TOKEN` is simply unset: fine for the public Qwen smoke model. Gated models need the Secret; in production it comes from Vault (Chapter 28).
@@ -257,7 +257,8 @@ INFO … Model loading took 0.93 GiB and 3.1 seconds
 INFO … Available KV cache memory: 21.2 GiB
 INFO … GPU KV cache size: 1,850,000 tokens
 INFO … Capturing CUDA graphs … took 12 seconds
-INFO:     Uvicorn running on http://0.0.0.0:8000
+INFO … Starting vLLM API server 0 on http://0.0.0.0:8000
+INFO:     Application startup complete.
 ```
 
 (Numbers are illustrative. Note yours.) Then look at what the quota and the scheduler charged:

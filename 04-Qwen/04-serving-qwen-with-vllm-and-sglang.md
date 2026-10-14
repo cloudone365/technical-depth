@@ -259,7 +259,7 @@ kubectl --context spark-root -n llm-serving get deploy -o custom-columns=NAME:.m
    |---|---|
    | `GPU KV cache size` | about 45K tokens, close to your Chapter 01 Task 6 estimate |
    | `Maximum concurrency for 32,768 tokens per request` | a bit above 1× |
-   | `Uvicorn running on` | present: the API server is up |
+   | `Starting vLLM API server` / `Application startup complete` (older: `Uvicorn running on`) | present: the API server is up |
 
 4. **Image and args:** image `nvcr.io/nvidia/vllm:26.08-py3`; args include `--served-model-name=$(SERVED_NAME)`, `--gpu-memory-utilization=0.2`, `--reasoning-parser=qwen3`, `--tool-call-parser=hermes`.
 
@@ -272,7 +272,7 @@ kubectl --context spark-root -n llm-serving get deploy -o custom-columns=NAME:.m
 scripts/serve-model.sh qwen3-0.6b --sandbox
 kubectl --context dev-llms -n llm-sandbox get pods
 scripts/serve-model.sh qwen3-8b
-kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -E 'Model loading took|Available KV cache memory|GPU KV cache size|Maximum concurrency|Uvicorn'
+kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -E 'Model loading took|Available KV cache memory|GPU KV cache size|Maximum concurrency|API server|startup complete|Uvicorn'
 kubectl --context spark-root -n llm-serving get deploy vllm -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}{.spec.template.spec.containers[0].args}{"\n"}'
 ```
 

@@ -568,7 +568,7 @@ Each GB10 holds half the K/V, and the chunks travel over RDMA (`NCCL INFO NET/IB
 
 1. **Nodes:** `get nodes` lists `dgx-spark-1` and `dgx-spark-2` as `Ready`; `mount | grep /mnt/models` on dgx-spark-2 shows the NFS mount.
 2. **Pods:** `vllm-70b-0` on dgx-spark-1 and `vllm-70b-0-1` on dgx-spark-2, both `Running`.
-3. **Leader log:** NCCL `NET/IB` / `Using network IB`, `tensor_parallel_size=2`, and finally Uvicorn listening.
+3. **Leader log:** NCCL `NET/IB` / `Using network IB`, `tensor_parallel_size=2`, and finally `Application startup complete`.
 4. **API:** `/v1/models` on 192.168.100.11:8000 lists the model. Record tok/s at concurrency 1 and 16.
 5. **Clean-up:** the LWS is deleted before Task 9.
 
@@ -599,7 +599,7 @@ python3 -m pip install --user "huggingface_hub[cli]"
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root apply -f k8s/multinode/lws-vllm-70b.yaml
 kubectl --context spark-root -n llm-multinode get pods -o wide -w        # vllm-70b-0 on dgx-spark-1, vllm-70b-0-1 on dgx-spark-2 · Ctrl-C to stop
-kubectl --context spark-root -n llm-multinode logs -f vllm-70b-0 | grep -E 'NCCL INFO (NET/IB|Using network)|tensor_parallel|Uvicorn'
+kubectl --context spark-root -n llm-multinode logs -f vllm-70b-0 | grep -E 'NCCL INFO (NET/IB|Using network)|tensor_parallel|API server|startup complete|Uvicorn'
 ```
 
 | `lws-vllm-70b.yaml` | Setting |
