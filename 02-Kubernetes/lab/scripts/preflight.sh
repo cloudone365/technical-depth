@@ -23,7 +23,7 @@ echo "── root cluster (kubeadm)"
 [[ -x /usr/local/bin/k3s ]] && bad "k3s is still installed — remove it (01-Ansible playbooks/19.2-reset-kubernetes.yml -e reset_remove_k3s=true)"
 systemctl is-active --quiet containerd && ok "containerd active" || bad "containerd not active"
 # nvidia-ctk writes either into config.toml or into a drop-in under conf.d/ (newer toolkits)
-grep -Eqs 'default_runtime_name\s*=\s*"nvidia"' /etc/containerd/config.toml /etc/containerd/conf.d/*.toml \
+grep -rEqs --include=*.toml 'default_runtime_name\s*=\s*"nvidia"' /etc/containerd \
   && ok "containerd default runtime: nvidia" || warn "containerd default runtime is not nvidia in /etc/containerd (check: sudo crictl info | grep -i defaultRuntimeName; runtimeClassName: nvidia then required)"
 systemctl is-active --quiet kubelet && ok "kubelet active" || bad "kubelet not active (run 01-Ansible playbooks/19.1-kubernetes.yml)"
 kubeadm version -o short 2>/dev/null | grep -q "${KUBERNETES_VERSION}" \

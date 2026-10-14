@@ -162,7 +162,7 @@ export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
 nvidia-ctk --version
 sudo nvidia-ctk cdi list
-grep -nE 'default_runtime_name|runtimes.\W?nvidia|BinaryName|SystemdCgroup' /etc/containerd/config.toml
+grep -rnE --include='*.toml' 'default_runtime_name|runtimes.\W?nvidia|BinaryName|SystemdCgroup' /etc/containerd/
 grep -nE 'accept-nvidia-visible-devices|mode' /etc/nvidia-container-runtime/config.toml
 cat /etc/crictl.yaml
 sudo crictl info | jq '.config.containerd.defaultRuntimeName // .config.containerd.default_runtime_name'
@@ -170,6 +170,8 @@ sudo ctr namespaces ls        # k8s.io (kubelet) and moby (Docker) on one contai
 ```
 
 Expected: CDI devices `nvidia.com/gpu=0`, `nvidia.com/gpu=GPU-<uuid>`, `nvidia.com/gpu=all`; an `nvidia` runtime whose `BinaryName` is `/usr/bin/nvidia-container-runtime`; `SystemdCgroup = true`; and `nvidia` as the default runtime. The exact TOML section names depend on the containerd major version DGX OS ships, which is why the `grep` matches the keys, not the headers.
+
+**Two files, one answer.** Newer `nvidia-ctk` releases don't edit `config.toml`; they write `/etc/containerd/conf.d/99-nvidia.toml`, which `config.toml` imports. Then the grep shows `default_runtime_name = "runc"` in `config.toml` *and* `default_runtime_name = "nvidia"` in `99-nvidia.toml`. The drop-in is loaded last and wins. `crictl info` prints the merged result, so trust it over either file.
 
 Run a container through CDI without Kubernetes (Docker 25+ understands CDI):
 
@@ -335,21 +337,21 @@ The pod names no RuntimeClass and requests no GPU, so its sandbox runs on contai
 
 ### 5.5 (Optional) Harden the runtime
 
-#### What this lab does (edit of `/etc/containerd/config.toml` on dgx-spark-1)
+#### What this lab does (edit of containerd's default runtime on dgx-spark-1)
 
-- **Backs up** `/etc/containerd/config.toml` to `config.toml.pre-hardening`.
+- **Finds the file that sets the default:** `/etc/containerd/conf.d/99-nvidia.toml` when `nvidia-ctk` wrote a drop-in (it overrides `config.toml`), otherwise `/etc/containerd/config.toml`. Backs it up with a `.pre-hardening` suffix.
 - **Changes one line:** containerd's `default_runtime_name` from `"nvidia"` to `"runc"`, then restarts containerd. Running containers keep running; Docker reconnects.
 - **Retests:** injects break/fix 10 again (the leak should be gone) and runs `gpu-smoke` (it should still work, because it names `runtimeClassName: nvidia`).
 - **This is a lasting change** to the node. Many lab manifests rely on the default runtime and must get `runtimeClassName: nvidia` afterwards (see below). Undo by restoring the backup.
 
 #### What to look for
 
-1. **Command exit:** `grep` shows `default_runtime_name = "runc"`; `systemctl restart containerd` returns without error; `crictl info` now prints `runc`.
+1. **Command exit:** `grep` shows no `default_runtime_name = "nvidia"` left in any `*.toml`; `systemctl restart containerd` returns without error; `crictl info` now prints `runc`.
 2. **`bf10-leak` log:** no GPU listed (`nvidia-smi` not found, or no devices).
 3. **`gpu-smoke` log:** still `GPU 0: NVIDIA GB10 (UUID: GPU-…)`.
 4. **The node stays healthy:** `kubectl --context spark-root get node dgx-spark-1` shows `Ready` after the restart.
 
-**If something's off:** `crictl info` still prints `nvidia` → the `sed` pattern did not match your containerd's TOML layout; edit the line by hand. Node `NotReady` → `sudo journalctl -u containerd -n 50`, and restore `config.toml.pre-hardening`. More in §7.
+**If something's off:** `crictl info` still prints `nvidia` → another `*.toml` under `/etc/containerd` still sets it (the grep shows which), or the `sed` pattern didn't match your layout; edit the line by hand. Node `NotReady` → `sudo journalctl -u containerd -n 50`, and restore the `.pre-hardening` copy. More in §7.
 
 #### Run it
 
@@ -357,9 +359,10 @@ Switch containerd's default back to `runc`, so only pods that name `runtimeClass
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
-sudo cp /etc/containerd/config.toml /etc/containerd/config.toml.pre-hardening
-sudo sed -i -E 's/(default_runtime_name\s*=\s*)"nvidia"/\1"runc"/' /etc/containerd/config.toml
-grep -n default_runtime_name /etc/containerd/config.toml
+f=/etc/containerd/conf.d/99-nvidia.toml; [ -f "$f" ] || f=/etc/containerd/config.toml   # the drop-in wins when it exists
+sudo cp "$f" "$f.pre-hardening"             # .pre-hardening isn't *.toml, so containerd doesn't load it
+sudo sed -i -E 's/(default_runtime_name\s*=\s*)"nvidia"/\1"runc"/' "$f"
+grep -rn --include='*.toml' default_runtime_name /etc/containerd/
 sudo systemctl restart containerd           # running containers keep running; Docker reconnects
 sudo crictl info | jq '.config.containerd.defaultRuntimeName // .config.containerd.default_runtime_name'
 # for rebuilds: inventory or -e kubeadm_cluster_default_runtime_nvidia=false (01-Ansible playbooks/19.1-kubernetes.yml)
@@ -373,7 +376,7 @@ kubectl --context dev-lab apply -f manifests/dev-lab/70-gpu/gpu-smoke.yaml && sl
 kubectl --context dev-lab -n tenant-beta delete pod gpu-smoke
 ```
 
-After hardening, **every GPU pod must set `runtimeClassName: nvidia`**, in whichever cluster it's written. `gpu-smoke.yaml` does. The other lab manifests (the GEMM benchmarks, the UMA experiment, the node probe, the serving and training manifests in `root-llms`) rely on the default runtime, so add the field to them. The GPU Operator's own pods are fine because the operator sets it. To undo: restore `config.toml.pre-hardening` and restart containerd.
+After hardening, **every GPU pod must set `runtimeClassName: nvidia`**, in whichever cluster it's written. `gpu-smoke.yaml` does. The other lab manifests (the GEMM benchmarks, the UMA experiment, the node probe, the serving and training manifests in `root-llms`) rely on the default runtime, so add the field to them. The GPU Operator's own pods are fine because the operator sets it. To undo: copy the `.pre-hardening` file back over the one you edited (`99-nvidia.toml` or `config.toml`) and restart containerd.
 
 ---
 
@@ -412,7 +415,7 @@ scripts/verify.sh gpu
 | kubelet: `container runtime is down` / CRI errors after a DGX OS update | the update restored containerd's stock config with the CRI plugin disabled | `grep disabled_plugins /etc/containerd/config.toml` | re-run 01-Ansible `playbooks/19.1-kubernetes.yml` (it regenerates the config and re-registers the runtime) |
 | `unresolvable CDI devices nvidia.com/gpu=…` | stale CDI spec after a driver upgrade | `nvidia-ctk cdi list` vs `nvidia-smi -L` UUID | `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` (01-Ansible does this) |
 | `runtimeclass "nvidia" not found` in a vCluster | the vCluster has no RuntimeClass copy | `kubectl --context <v> get runtimeclass` | `kubectl --context <v> apply -k manifests/<v>/00-platform` |
-| `no runtime for "nvidia" is configured` on the root | runtime not registered in `/etc/containerd/config.toml` | `grep -n nvidia /etc/containerd/config.toml` | `sudo nvidia-ctk runtime configure --runtime=containerd` + restart containerd, or re-run playbook 05 |
+| `no runtime for "nvidia" is configured` on the root | runtime not registered in containerd (`config.toml` or `conf.d/99-nvidia.toml`) | `grep -rn --include='*.toml' nvidia /etc/containerd/` | `sudo nvidia-ctk runtime configure --runtime=containerd` + restart containerd, or re-run playbook 05 |
 | allocatable `nvidia.com/gpu: 1` instead of 15 | time-slicing ConfigMap not applied or wrong key | `kubectl --context spark-root -n gpu-operator get cm time-slicing-config -o yaml`, device-plugin logs | fix and restart the device-plugin DaemonSet (or re-run playbook 06) |
 | Pod Pending in a vCluster, no scheduler events, slices free on the node | that vCluster's root GPU quota is spent | `kubectl --context spark-root -n vc-<v> describe resourcequota vcluster-budget` | by design (break/fix 02); move slices between vClusters in `manifests/root/05-vclusters/quotas.yaml` |
 | Model pod never appears in `llm-serving`; ReplicaSet event `exceeded quota: serving-budget` | the namespace's 6 slices are in use | `kubectl --context spark-root -n llm-serving describe resourcequota serving-budget` | scale another model down, or move slices in `manifests/root-llms/10-tenancy/quotas.yaml` (keep `tests/budget_check.py` green) |
