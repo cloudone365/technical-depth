@@ -378,7 +378,7 @@ Use `whole-gpu` for a benchmark or a big single-model run, when you want no one 
 
 1. **Command exit:** `install-addons.sh kps` ends after `deploy/kps-grafana` rolls out; `apply -k` prints `created` lines; `get prometheus,alertmanager,servicemonitors,prometheusrules` lists one Prometheus, one Alertmanager, and the lab's ServiceMonitors and rules.
 2. **Targets** (first `curl`): every `job` shows `up`, including `spark-host-exporters`. With Traefik and a model server running, the second `curl` lists entries with `vcluster` `root` and the value `1`. Empty is fine before Chapters 11 and 20.
-3. **KEDA address:** the ScaledObject's `serverAddress` is `http://kps-prometheus.observability.svc:9090`, and the `promq` pod prints the start of a JSON answer (`{"status":"success",…`). No ScaledObject yet is fine before Chapter 20 §5.7.
+3. **KEDA address:** the ScaledObject's `serverAddress` is `http://kps-prometheus.observability.svc:9090`, and the `promq` pod prints the start of a JSON answer (`{"status":"success",…`). No ScaledObject yet is fine before Chapter 20 §5.7. The pod is gone again before `kubectl` attaches, so you may also see `warning: couldn't attach to pod/promq, falling back to streaming logs … no running task found` and a "recorded in container logs" banner; both are harmless when the JSON line is there.
 4. **Grafana:** http://192.168.0.100:32000, user `admin`, password `change-me` unless you changed it (do). Dashboard **Spark · Kubernetes**: GPU utilization and slices in use rise with `gemm-contention`; the throttling panel shows `cpu-throttle`.
 5. **Alerts** after 10–12 minutes:
 
