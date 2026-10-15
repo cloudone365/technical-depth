@@ -272,6 +272,17 @@ I… Started Metrics Service at 0.0.0.0:8002
 
 If the rollout never starts, look for `exceeded quota: serving-budget` (other engines hold more than ~78 Gi of the 90) or, on a Pending pod, `Insufficient memory` (a batch job holds the rest of the shared LLM memory pool) in `kubectl --context spark-root -n llm-serving get events`; park an engine (Chapter 20 §9). With two 32 Gi engines up, or vLLM + P/D, Triton and the perf Job in §5.3 still fit (80.4 and 88.6 Gi).
 
+#### What each command does
+
+| Command | What it does | Why |
+|---|---|---|
+| `cd "02-Kubernetes/lab"` · `export KUBECONFIG=…/kubeconfig-spark-lab.yaml` | moves into the lab folder and tells kubectl which file holds the cluster addresses and credentials (`spark-root`, `dev-lab`, `dev-llms`) | every path (`manifests/…`) is relative to this folder; the export lasts for this terminal only |
+| `describe resourcequota serving-budget \| grep …` | shows what `llm-serving` already uses of its 8 CPU · 90 Gi · 6 slices | Triton needs 1 CPU, 12 Gi and 1 slice: check there is room, especially with vLLM running |
+| `apply -k manifests/root-llms/90-serving/triton` | creates the ConfigMaps with the models (`triton-preprocess`, `triton-scorer`, `triton-pipeline`), Deployment and Service `triton`, and Job `triton-perf` (paused) | one command builds the food court; `-k` applies the folder with kustomize |
+| `rollout status deploy/triton --timeout=15m` | waits until the Triton pod is Ready | the first start pulls the ≈ 15 GB image |
+| `logs deploy/triton -c layout` | log of the init container `layout`, which copies the ConfigMap files into the `/repo` layout before Triton starts | proves the menu board is set up: `preprocess/`, `scorer/`, `pipeline/` |
+| `logs deploy/triton \| grep -E 'successfully loaded\|READY\|Started'` | keeps only the lines about models loaded and servers started | three models `READY`; HTTP 8000, gRPC 8001, metrics 8002 started |
+
 ### 5.2 Talk to it
 
 #### What this lab does (port-forward to Service `triton`, `nvidia-smi` on the Spark)
@@ -315,6 +326,18 @@ kubectl --context spark-root -n llm-serving get pods -o custom-columns=UID:.meta
 ```
 
 Expected: `triton_python_backend_stub` processes whose cgroup contains `pod<uid>` (dashes become underscores under the systemd cgroup driver) with the UID of `triton-…`. The pod runs directly on the root, so the UID the API server shows is the one the kernel's cgroup path carries. (For a pod in a vCluster, such as the `dev-llms` sandbox, you would look up the translated pod in `vc-dev-llms` instead: the vCluster's API server has its own UID for the virtual pod.)
+
+#### What each command does
+
+| Command | What it does | Why |
+|---|---|---|
+| `port-forward svc/triton 8000 8002 &` | tunnel from the Mac to Triton for requests (8000) and metrics (8002), in the background | no Ingress to Triton; like vLLM's tunnel it breaks when the pod restarts |
+| `curl … /v2/health/ready -w '%{http_code}'` | asks "are you ready?" and prints only the HTTP status | `200` = all models loaded |
+| `curl -X POST … /v2/repository/index` | lists every model and its state | `pipeline`, `preprocess`, `scorer`, all `READY` |
+| `curl … /v2/models/pipeline/config \| jq '…step[].model_name'` | prints the ensemble's steps | the combo meal's route: `preprocess` then `scorer` |
+| `curl -X POST … /v2/models/pipeline/infer -d '{…}'` | sends two texts (`shape [2,1]`, `BYTES`) to `pipeline` | two scores back (`SCORE`, `[2,1]`): CPU stall then GPU stall, end to end |
+| `ssh … nvidia-smi --query-compute-apps=pid …` loop | for each GPU process: its name (`/proc/<pid>/comm`) and the pod ID in its cgroup path (`pod<uid>`) | expect `triton_python_backend_stub` (the scorer's cooks), plus vLLM's process if it runs |
+| `get pods -o custom-columns=UID:…,NAME:… \| grep triton` | the Triton pod's UID next to its name | match it with the UID from `nvidia-smi`: this pod owns those GPU processes |
 
 ### 5.3 Load test and batching efficiency
 
@@ -364,6 +387,22 @@ kubectl --context spark-root -n llm-serving rollout restart deploy/triton && kub
 
 The restart ends the §5.2 port-forward (it was bound to the old pod): start it again (`kubectl --context spark-root -n llm-serving port-forward svc/triton 8000 8002 &`) before you read `before` once more. The default `RollingUpdate` strategy briefly runs a second Triton pod, so the restart needs another 12 Gi and one slice free in `serving-budget`; with two 32 Gi engines up, park one first. Then repeat. Batch size falls towards 1, and throughput at high concurrency falls with it. That's the latency/throughput trade dynamic batching makes. The re-apply creates `triton-perf` suspended again, ready for the next run.
 
+#### What each command does
+
+| Command | What it does | Why |
+|---|---|---|
+| `before=$(curl … /metrics \| awk '…scorer…' \| paste …)` | stores the scorer's `nv_inference_count` (items served) and `nv_inference_exec_count` (times the model ran) | snapshot before the test |
+| `patch job triton-perf -p '{"spec":{"suspend":false}}'` | un-pauses the Job: its pod runs `perf_analyzer` against `triton:8001` (gRPC) at 1, 3, 5 … 31 users | rush hour from inside the cluster, so the tunnel doesn't slow it down |
+| `logs -f job/triton-perf … \| grep -E 'Concurrency\|Throughput\|p99 latency'` | follows the test and keeps one result block per user count | throughput rises until the GPU or the Python stub saturates; the timeout covers the first SDK image pull |
+| `after=$(curl … same …)` | the same two counters again | snapshot after the test |
+| `echo "$before \| $after" \| awk '{… ($4-$1)/($5-$2)}'` | (items after − before) ÷ (runs after − before) | average batch size = dishes ÷ pans; well above 1 proves dynamic batching |
+| PromQL `sum(rate(nv_inference_count…)) / sum(rate(nv_inference_exec_count…))` | the same ratio from Prometheus | also drawn in Grafana, row **Serving (Triton)** |
+| `delete job triton-perf` | removes the finished test Job | a Job runs once; the next `apply` re-creates it paused |
+| `apply -k …/triton` | pushes your edited `config.pbtxt` into the `triton-scorer` ConfigMap and re-creates `triton-perf` | sends the new config to the cluster |
+| `rollout restart deploy/triton && rollout status …` | restarts Triton and waits for Ready | the init container copies the repository only at start: without a restart Triton keeps the old config |
+
+Order: snapshot, test, snapshot, ratio. For each experiment (batching off, §5.4's one cook): edit `config.pbtxt` → delete Job → apply → restart → test again. Put the settings back afterwards.
+
 ### 5.4 Instance groups
 
 #### What this lab does (edit `model_repository/scorer/config.pbtxt`)
@@ -381,6 +420,10 @@ The restart ends the §5.2 port-forward (it was bound to the old pod): start it 
 #### Run it
 
 Change `count: 2` → `count: 1` for `scorer`, re-apply and restart as above, and repeat §5.3. With one instance, compute can't overlap with the Python stub's CPU work, and p99 latency rises at the same concurrency.
+
+#### What each command does
+
+No new commands: edit `count: 2` → `count: 1` for `scorer` in `model_repository/scorer/config.pbtxt`, then the §5.3 sequence delete Job → apply → restart → test. With one cook, GPU work can't overlap the Python CPU work, so p99 latency rises at the same number of users.
 
 ### 5.5 gRPC: east-west and through the gateway
 
@@ -417,12 +460,25 @@ docker run --rm --add-host triton.lab.local:192.168.0.115 nvcr.io/nvidia/tritons
 
 Compare p99 latency between the two: the difference is the gateway hop (laptop → MetalLB `.115` → Traefik pod → Triton pod, all on the same Spark).
 
+#### What each command does
+
+| Command | What it does | Why |
+|---|---|---|
+| `run grpc-test --rm -it --image=…py3-sdk -- perf_analyzer -u triton:8001 -i grpc …` | a temporary pod in `llm-serving` sends gRPC requests (4 users) to Service `triton:8001`; `--rm` deletes it afterwards | east-west, pod to pod: works without any gateway |
+| `docker run --add-host triton.lab.local:192.168.0.115 … -u triton.lab.local:80 -i grpc …` | the same tool in Docker on the Mac, to Traefik at 192.168.0.115:80 under the name `triton.lab.local` (`--add-host` = an `/etc/hosts` line inside the container) | north-south, through the gateway; needs the `GRPCRoute` from Chapter 11 §5.9 |
+
 ### 5.6 Clean up
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root delete -k manifests/root-llms/90-serving/triton
 ```
+
+#### What each command does
+
+| Command | What it does | Why |
+|---|---|---|
+| `delete -k manifests/root-llms/90-serving/triton` | deletes everything §5.1 created: Deployment, Service, ConfigMaps, Job | frees 1 CPU, 12 Gi and 1 slice in `serving-budget`; also stop the tunnel: `pkill -f 'port-forward svc/triton'` |
 
 ---
 
