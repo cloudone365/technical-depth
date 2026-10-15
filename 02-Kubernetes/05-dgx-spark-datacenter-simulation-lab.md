@@ -520,7 +520,7 @@ kubectl --context spark-root -n batch logs -f -l job-name=ddp --prefix
 
 #### What this lab does (manifests `lab/manifests/root/95-observability`, scripts `verify.sh observability`, `collect-diag.sh`, `breakfix.sh`)
 
-- **Observability objects:** a Service and EndpointSlice for the host's node_exporter on `:9100` with a ServiceMonitor, ServiceMonitors `vcluster-workloads` and `llm-workloads`, the alert rules (`SparkUMAPressure`, `VClusterQuotaNearlyExhausted`, `PodsPendingOnGPU`, `VLLMQueueBacklog`, `EtcdSlowFsync`, `EtcdDbNearQuota` and others), and dashboard ConfigMap `spark-k8s-dashboard` that Grafana's sidecar loads.
+- **Observability objects:** a Service and Endpoints object for the host's node_exporter on `:9100` with a ServiceMonitor, ServiceMonitors `vcluster-workloads` and `llm-workloads`, the alert rules (`SparkUMAPressure`, `VClusterQuotaNearlyExhausted`, `PodsPendingOnGPU`, `VLLMQueueBacklog`, `EtcdSlowFsync`, `EtcdDbNearQuota` and others), and dashboard ConfigMap `spark-k8s-dashboard` that Grafana's sidecar loads.
 - **`verify.sh observability`:** asks Prometheus how many targets are `up` and how many model-server targets carry a `vcluster` label, and checks the dashboard ConfigMap.
 - **`collect-diag.sh`:** read-only; writes `diag-<timestamp>.tar.gz` in the current folder with nodes, objects, describes and logs from all three API servers.
 - **`breakfix.sh list`:** prints the scenarios; nothing is injected until you run `inject`.

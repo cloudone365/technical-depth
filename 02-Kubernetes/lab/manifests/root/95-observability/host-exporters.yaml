@@ -1,7 +1,7 @@
 # Scrape exporters that run on the Spark host, outside Kubernetes (Chapter 17):
 #   :9100  prometheus-node-exporter + textfile GPU/UMA/CX-7 metrics (01-Ansible Chapter 12)
 #   :9400  dcgm-exporter, only if enabled (see addons/dcgm-exporter-values.md)
-# A selector-less Service + EndpointSlice points at the node IPs.
+# A selector-less Service + Endpoints object points at the node IPs.
 apiVersion: v1
 kind: Service
 metadata:
@@ -13,21 +13,25 @@ spec:
   ports:
     - {name: node, port: 9100}
 ---
-apiVersion: discovery.k8s.io/v1
-kind: EndpointSlice
+# An Endpoints object, not only an EndpointSlice: the Prometheus Operator discovers
+# ServiceMonitor targets through Endpoints by default, and Kubernetes mirrors
+# Endpoints -> EndpointSlice but never the other way. With a hand-made
+# EndpointSlice alone the target never appears and the host row shows "No data".
+# (kubectl may warn that v1 Endpoints is deprecated; it still works.)
+apiVersion: v1
+kind: Endpoints
 metadata:
-  name: spark-host-exporters-1
+  name: spark-host-exporters
   namespace: observability
-  labels:
-    kubernetes.io/service-name: spark-host-exporters
-addressType: IPv4
-ports:
-  - {name: node, port: 9100, protocol: TCP}
-endpoints:
-  - addresses: ["192.168.0.100"]
-    nodeName: dgx-spark-1
-  # - addresses: ["192.168.0.101"]      # uncomment when dgx-spark-2 joins
-  #   nodeName: dgx-spark-2
+  labels: {app: spark-host-exporters}
+subsets:
+  - addresses:
+      - ip: 192.168.0.100
+        nodeName: dgx-spark-1
+      # - ip: 192.168.0.101                # uncomment when dgx-spark-2 joins
+      #   nodeName: dgx-spark-2
+    ports:
+      - {name: node, port: 9100, protocol: TCP}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
