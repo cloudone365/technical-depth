@@ -5,7 +5,7 @@ python3 gen_dashboard.py > spark-k8s-dashboard.json
 python3 gen_dashboard.py --host-grafana > ../../../../../01-Ansible/lab/roles/gpu_telemetry/files/spark-k8s-dashboard.json
   (copy for the host Grafana :3000: its datasource variable is pinned to the
    'Kubernetes' data source = this cluster's Prometheus on NodePort 30090)
-Rows: UMA+GPU (host truth) · Tenancy · Serving SLOs · Control plane.
+Rows: UMA+GPU (host truth) · Tenancy · Serving SLOs (vLLM) · Serving (Triton) · Control plane.
 Colours follow the lab palette: GPU green #76b900, control plane blue #1f6feb,
 storage amber #bf8700, alerts red #cf222e.
 """
@@ -87,6 +87,16 @@ ts("TTFT p95", [("spark:vllm_ttft_p95_seconds", "{{vcluster}}/{{vnamespace}}")],
 ts("Time per output token p95", [("spark:vllm_tpot_p95_seconds", "{{vcluster}}/{{vnamespace}}")], "s", x=8)
 ts("Queue & KV cache", [("sum(vllm:num_requests_running)", "running"), ("sum(vllm:num_requests_waiting)", "waiting"),
                         ("max(vllm:kv_cache_usage_perc or vllm:gpu_cache_usage_perc)*100", "KV cache %")], x=16)
+nl()
+row("Serving (Triton)")
+TR = 'vcluster="root"'
+ts("Triton requests/s per model", [(f"sum by (model) (rate(nv_inference_request_success{{{TR}}}[1m]))", "{{model}}")], "reqps", w=6, x=0)
+ts("Average batch size (dynamic batching)", [(f"sum by (model) (rate(nv_inference_count{{{TR}}}[5m])) / sum by (model) (rate(nv_inference_exec_count{{{TR}}}[5m]))", "{{model}}")],
+   w=6, x=6, color="#76b900")
+ts("Queue time per request", [(f"sum by (model) (rate(nv_inference_queue_duration_us{{{TR}}}[1m])) / sum by (model) (rate(nv_inference_request_success{{{TR}}}[1m])) / 1000", "{{model}}")],
+   "ms", w=6, x=12)
+ts("Compute time per request", [(f"sum by (model) (rate(nv_inference_compute_infer_duration_us{{{TR}}}[1m])) / sum by (model) (rate(nv_inference_request_success{{{TR}}}[1m])) / 1000", "{{model}}")],
+   "ms", w=6, x=18)
 nl()
 row("Control plane")
 ts("etcd WAL fsync p99", [("histogram_quantile(0.99, sum by (le) (rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m])))", "p99")],

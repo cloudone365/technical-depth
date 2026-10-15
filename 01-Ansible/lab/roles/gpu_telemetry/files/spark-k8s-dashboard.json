@@ -666,7 +666,7 @@
   },
   {
    "type": "row",
-   "title": "Control plane",
+   "title": "Serving (Triton)",
    "gridPos": {
     "h": 1,
     "w": 24,
@@ -678,12 +678,156 @@
   },
   {
    "type": "timeseries",
+   "title": "Triton requests/s per model",
+   "gridPos": {
+    "h": 7,
+    "w": 6,
+    "x": 0,
+    "y": 29
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "sum by (model) (rate(nv_inference_request_success{vcluster=\"root\"}[1m]))",
+     "legendFormat": "{{model}}",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "reqps",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 12
+     }
+    },
+    "overrides": []
+   },
+   "id": 20
+  },
+  {
+   "type": "timeseries",
+   "title": "Average batch size (dynamic batching)",
+   "gridPos": {
+    "h": 7,
+    "w": 6,
+    "x": 6,
+    "y": 29
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "sum by (model) (rate(nv_inference_count{vcluster=\"root\"}[5m])) / sum by (model) (rate(nv_inference_exec_count{vcluster=\"root\"}[5m]))",
+     "legendFormat": "{{model}}",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 12
+     },
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#76b900"
+     }
+    },
+    "overrides": []
+   },
+   "id": 21
+  },
+  {
+   "type": "timeseries",
+   "title": "Queue time per request",
+   "gridPos": {
+    "h": 7,
+    "w": 6,
+    "x": 12,
+    "y": 29
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "sum by (model) (rate(nv_inference_queue_duration_us{vcluster=\"root\"}[1m])) / sum by (model) (rate(nv_inference_request_success{vcluster=\"root\"}[1m])) / 1000",
+     "legendFormat": "{{model}}",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 12
+     }
+    },
+    "overrides": []
+   },
+   "id": 22
+  },
+  {
+   "type": "timeseries",
+   "title": "Compute time per request",
+   "gridPos": {
+    "h": 7,
+    "w": 6,
+    "x": 18,
+    "y": 29
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "targets": [
+    {
+     "expr": "sum by (model) (rate(nv_inference_compute_infer_duration_us{vcluster=\"root\"}[1m])) / sum by (model) (rate(nv_inference_request_success{vcluster=\"root\"}[1m])) / 1000",
+     "legendFormat": "{{model}}",
+     "refId": "A"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 12
+     }
+    },
+    "overrides": []
+   },
+   "id": 23
+  },
+  {
+   "type": "row",
+   "title": "Control plane",
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 36
+   },
+   "collapsed": false,
+   "id": 24
+  },
+  {
+   "type": "timeseries",
    "title": "etcd WAL fsync p99",
    "gridPos": {
     "h": 7,
     "w": 8,
     "x": 0,
-    "y": 29
+    "y": 37
    },
    "datasource": {
     "type": "prometheus",
@@ -726,7 +870,7 @@
     },
     "overrides": []
    },
-   "id": 20
+   "id": 25
   },
   {
    "type": "timeseries",
@@ -735,7 +879,7 @@
     "h": 7,
     "w": 8,
     "x": 8,
-    "y": 29
+    "y": 37
    },
    "datasource": {
     "type": "prometheus",
@@ -762,7 +906,7 @@
     },
     "overrides": []
    },
-   "id": 21
+   "id": 26
   },
   {
    "type": "timeseries",
@@ -771,7 +915,7 @@
     "h": 7,
     "w": 8,
     "x": 16,
-    "y": 29
+    "y": 37
    },
    "datasource": {
     "type": "prometheus",
@@ -799,7 +943,7 @@
     },
     "overrides": []
    },
-   "id": 22
+   "id": 27
   }
  ]
 }

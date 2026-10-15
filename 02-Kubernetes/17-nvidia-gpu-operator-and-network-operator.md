@@ -193,6 +193,7 @@ Queries then read like the tenant thinks: `vllm:num_requests_waiting{vcluster="d
 | Unified memory & GB10 (host exporters) | UMA available · GPU temp · power · Xid 24 h · slices in use · pending GPU pods · UMA vs page cache · utilisation · clocks/throttle |
 | Tenancy | vCluster CPU used / hard (root quotas) · vCluster memory used / hard (root quotas) — every root ResourceQuota, so `serving-budget` and `batch-budget` appear next to the `vc-*` budgets · top-5 throttled containers |
 | Serving SLOs (vLLM) | TTFT p95 · TPOT p95 (by `vcluster/vnamespace`) · queue and KV cache |
+| Serving (Triton) | requests/s, average batch size (`nv_inference_count / nv_inference_exec_count`), queue time and compute time per request, per model (Chapter 21) |
 | Control plane | etcd fsync p99 · API p99 (mutating) · APF rejected/queued (shows the root's `spark-vcluster-syncers` lane) |
 
 The dashboard is *generated* by [`gen_dashboard.py`](lab/manifests/root/95-observability/gen_dashboard.py), and CI fails if the JSON drifts from the generator.

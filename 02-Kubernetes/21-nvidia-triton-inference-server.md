@@ -331,7 +331,7 @@ Expected: `triton_python_backend_stub` processes whose cgroup contains `pod<uid>
 2. **Throughput** rises with concurrency until the GPU or the Python stub saturates.
 3. **Average batch size**, with the lab config: well above 1.
 4. **With `max_queue_delay_microseconds: 0`:** average batch size falls towards 1, and throughput at high concurrency falls with it.
-5. **Prometheus** gives the same ratio with the PromQL below, if kps is installed (Chapter 17 §5.4).
+5. **Prometheus** gives the same ratio with the PromQL below, if kps is installed (Chapter 17 §5.4). **Grafana** draws it too: dashboard **Spark · Kubernetes** (`http://192.168.0.100:3000/d/spark-k8s`), row **Serving (Triton)**, with requests/s, average batch size (the `scorer` line climbs towards 16–32 under load), queue time (≈ the 2 ms batching wait) and compute time per request, per model.
 
 **If something's off:** the awk line prints `nan`, `inf` or an error → the port-forward on 8002 was not running when `before` or `after` was read; restart it and repeat. The Job stays at 0 pods → quota: `kubectl --context spark-root -n llm-serving describe job triton-perf`. More in §7.
 
