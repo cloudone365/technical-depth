@@ -79,6 +79,56 @@ flowchart LR
 
 There is no Ingress or HTTPRoute to Triton: the labs reach it through `kubectl port-forward` (§5.2, §5.3), from pods in `llm-serving` (`triton-perf`, `grpc-test`), and in §5.5 through the `GRPCRoute` you add in Chapter 11 §5.9.
 
+#### The big idea, in plain words
+
+Chapter 20's vLLM is a **ramen shop**: it makes one dish, one large language model, and its whole kitchen is built for that (continuous batching, the KV cache). **Triton is a food court**: many stalls (models) under one roof, with one front door, one cashier and one set of inspectors. Each stall brings its own equipment (a *backend*: Python, PyTorch, ONNX, TensorRT, TensorRT-LLM, even vLLM), and one order can go from stall to stall (an *ensemble*).
+
+In this chapter's food court:
+
+- **The menu board** = the model repository `/repo`: one folder per model with its `config.pbtxt`, built from the ConfigMaps `triton-preprocess`, `triton-scorer`, `triton-pipeline`.
+- **Two stalls** = the two models. `preprocess` chops the text into numbers on the CPU; `scorer` turns those numbers into a score on the GPU (the GB10 slice).
+- **The combo meal** = the ensemble `pipeline`: you order once, the tray goes from `preprocess` to `scorer` and comes back with the answer.
+- **The front door** = port 8000 (HTTP, `/v2/models/pipeline/infer`), with a side door for regulars on 8001 (gRPC).
+- **Filling the tray** = dynamic batching: a cook waits up to 2 ms for more orders and cooks them together (the scorer aims for trays of 16 or 32). One pan for many orders is cheaper than one pan each.
+- **Two cooks per stall** = instance groups (`count: 2`): while one cook plates, the other is already cooking. §5.4 tries one.
+- **The inspector's counters** = metrics on 8002: `nv_inference_count` (dishes served) and `nv_inference_exec_count` (times a pan was used). Dishes ÷ pans = average tray size, the proof that batching works.
+- **The budget** = the same `serving-budget` as vLLM: Triton gets 1 CPU, 12 Gi and 1 GPU slice, so it fits next to vLLM's kitchen (48.4 of 90 Gi together).
+
+This chapter opens the food court (§5.1), places a first order (§5.2), runs a rush hour and counts the trays (§5.3), changes the number of cooks (§5.4), lets regulars in through the side door via the gateway (§5.5) and closes up (§5.6).
+
+```mermaid
+flowchart TB
+  YOU["You, on the MacBook<br/>curl · perf_analyzer"]
+  subgraph SPARK["DGX Spark · ns llm-serving · one GB10"]
+    direction LR
+    MENU["Menu board = model repository /repo<br/>ConfigMaps → init container"]
+    subgraph COURT["Triton pod = the food court · 1 CPU · 12 Gi · 1 of 15 GPU slices"]
+      direction TB
+      DOOR["Front door · HTTP 8000<br/>side door · gRPC 8001"]
+      CASH["Cashier = scheduler<br/>takes the order for 'pipeline'"]
+      S1["Stall 1 · preprocess (CPU)<br/>2 cooks · waits ≤ 2 ms to fill a tray"]
+      S2["Stall 2 · scorer (GPU)<br/>2 cooks · trays of 16 or 32"]
+      DOOR --> CASH --> S1
+      S1 -->|"tray of numbers (IDS)"| S2
+      S2 -->|"score"| CASH
+    end
+    INSP["Inspector · metrics 8002<br/>dishes ÷ pans = tray size"]
+  end
+  MENU -->|"1 menu loaded at start"| COURT
+  YOU -->|"2 order: two texts"| DOOR
+  CASH -->|"3 two scores back"| YOU
+  COURT -.->|"4 counters every 15 s"| INSP
+  INSP -.->|"Prometheus · Grafana"| YOU
+```
+
+| | vLLM (Chapter 20) | Triton (this chapter) |
+|---|---|---|
+| Picture | a ramen shop | a food court |
+| Serves | one large language model | many models of any kind, and chains of them |
+| Batching | continuous: new chats join the pot every step | dynamic: wait a few ms, then cook a full tray |
+| API | OpenAI-style `/v1/chat/completions` | KServe v2 `/v2/models/<name>/infer`, HTTP and gRPC |
+| Use it when | you chat with or benchmark an LLM | a request needs several models, or you serve non-LLM models |
+
 ### 2.1 One ensemble request, step by step
 
 ```mermaid
