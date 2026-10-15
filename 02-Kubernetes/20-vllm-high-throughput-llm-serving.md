@@ -546,7 +546,7 @@ kubectl --context spark-root apply -f manifests/root-llms/90-serving/vllm/vllm-l
 kubectl --context spark-root -n llm-serving logs -f deploy/vllm-load      # one summary line per ~5 min round · Ctrl-C to stop
 ```
 
-Change the load while Grafana is open. `set env` restarts only the load pod, never vLLM; each change shows up in the panels within a minute or two:
+Change the load while Grafana is open. The lines below are a menu of experiments in rising order, not a script: run one, watch the panels for 3–5 minutes, then run the next. `set env` changes only the variables you name and keeps the others (after line 2 the load is RATE 8, CONCURRENCY 32 *and* 4096-token prompts). It restarts only the load pod, never vLLM. `--replicas=1` resumes with the last values, so reset first if you don't want the overload back:
 
 ```bash
 # ▶ MacBook · any folder
@@ -554,6 +554,8 @@ kubectl --context spark-root -n llm-serving set env deploy/vllm-load RATE=8 CONC
 kubectl --context spark-root -n llm-serving set env deploy/vllm-load INPUT_LEN=4096               # long prompts: TTFT (prefill) rises
 kubectl --context spark-root -n llm-serving set env deploy/vllm-load RATE=40 CONCURRENCY=256      # overload: requests waiting > 0, VLLMQueueBacklog after 5 min
 kubectl --context spark-root -n llm-serving scale deploy vllm-load --replicas=0                   # pause (panels go quiet)
+kubectl --context spark-root -n llm-serving set env deploy/vllm-load RATE=2 CONCURRENCY=16 INPUT_LEN=1024 OUTPUT_LEN=256   # back to the defaults
+kubectl --context spark-root -n llm-serving scale deploy vllm-load --replicas=1                   # resume
 kubectl --context spark-root delete -f manifests/root-llms/90-serving/vllm/vllm-load.yaml         # remove when done
 ```
 
