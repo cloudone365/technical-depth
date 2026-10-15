@@ -6,6 +6,17 @@
   roles:
     - role: gpu_operator
   post_tasks:
+    - name: Remove the test pod of an earlier run (a finished pod with the same name would be reused, not re-run)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ gpu_operator_kubeconfig }}"
+        context: "{{ gpu_operator_context }}"
+        state: absent
+        kind: Pod
+        name: cuda-smoke
+        namespace: default
+        wait: true
+        wait_timeout: 60
+
     - name: Launch a GPU test pod
       kubernetes.core.k8s:
         kubeconfig: "{{ gpu_operator_kubeconfig }}"

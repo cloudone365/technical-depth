@@ -259,7 +259,7 @@ gpu_operator_timeslice_replicas: 15
     label: "{{ item.metadata.name }}"
 ```
 
-The playbook adds one post-task: a `cuda-smoke` pod in the root's `default` namespace that runs `nvidia-smi -L` with `nvidia.com/gpu: 1` and image `nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04`. It is informational (`failed_when: false`); the validator gate is the real check.
+The playbook adds two post-tasks: it deletes the `cuda-smoke` pod of an earlier run, then starts a fresh `cuda-smoke` pod in the root's `default` namespace that runs `nvidia-smi -L` with `nvidia.com/gpu: 1` and image `nvcr.io/nvidia/cuda:13.0.1-base-ubuntu24.04`. It is informational (`failed_when: false`); the validator gate is the real check.
 
 Key automation moves:
 
@@ -286,7 +286,7 @@ Key automation moves:
 #### What to look for
 
 1. **Semaphore run:** `failed=0`. The task "Assert every node advertises time-sliced GPUs" prints `dgx-spark-1 advertises 15 GPU slices`. On a re-run the Helm release and the ConfigMap stay as they are.
-2. **The smoke pod is only informational** (`failed_when: false`), so check it by eye: `kubectl --context spark-root logs cuda-smoke` prints `GPU 0: NVIDIA GB10 (UUID: GPU-…)`. A re-run doesn't start it again; delete the pod first (`kubectl --context spark-root delete pod cuda-smoke`) to repeat the test.
+2. **The smoke pod is only informational** (`failed_when: false`), so check it by eye: `kubectl --context spark-root logs cuda-smoke` prints `GPU 0: NVIDIA GB10 (UUID: GPU-…)`. Every run deletes the old pod first and tests again, so the age of `cuda-smoke` shows when the template last ran.
 3. **The node and the release**, with the commands under "Run it":
 
    | Line/Field | Healthy value |
