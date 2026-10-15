@@ -343,7 +343,7 @@ Expected: the Pending pod's events come from the vCluster syncer and quote `exce
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving describe resourcequota serving-budget
 kubectl --context spark-root -n batch describe resourcequota batch-budget
-kubectl --context spark-root describe node dgx-spark-1 | grep -A10 'Allocated resources'
+kubectl --context spark-root describe node dgx-spark-1 | sed -n '/Allocated resources/,/Events/p'
 python3 tests/budget_check.py
 ```
 
@@ -624,7 +624,7 @@ python3 tests/budget_check.py
 | Some replicas never appear | inner quota exhausted | ReplicaSet `FailedCreate` events in the vCluster | raise the quota / shrink requests (drill 01) |
 | Pod Pending in a vCluster, **no** scheduler events | root `vcluster-budget` spent | pod events (from the syncer); `kubectl --context spark-root -n vc-<name> describe resourcequota vcluster-budget` | free capacity, Kueue, or move budget between vClusters (drill 02, Chapter 04 §6.5) |
 | A pod is rejected with `maximum memory usage per Container is 4Gi` | root LimitRange `max` on `vc-dev-lab` / `vc-dev-llms` | `kubectl --context spark-root -n vc-<name> get limitrange vcluster-defaults -o yaml` | by design; raise `max` with the budget |
-| Model server `Pending` with `Insufficient memory`, `serving-budget` not used up | the shared LLM pool is reserved by other model servers and training pods (request = limit) | `kubectl --context spark-root describe node dgx-spark-1 \| grep -A10 'Allocated resources'`; `kubectl --context spark-root -n llm-serving describe resourcequota serving-budget` | stop or shrink a model (memory request and `--gpu-memory-utilization` together), or let it wait — training yields to serving |
+| Model server `Pending` with `Insufficient memory`, `serving-budget` not used up | the shared LLM pool is reserved by other model servers and training pods (request = limit) | `kubectl --context spark-root describe node dgx-spark-1 \| sed -n '/Allocated resources/,/Events/p'`; `kubectl --context spark-root -n llm-serving describe resourcequota serving-budget` | stop or shrink a model (memory request and `--gpu-memory-utilization` together), or let it wait — training yields to serving |
 | Job 5× slower than on the laptop, no errors | CPU throttling | `cgroup-inspect.sh <ns> <pod> <context>` → `nr_throttled` | raise the CPU limit or remove it (keep the request). Match thread count (`OMP_NUM_THREADS`, `torch.set_num_threads`) to the limit |
 | `OOMKilled` (137) | container exceeded `memory.max` | `lastState.terminated`, `memory.events` | raise the limit to measured peak + 20 %, or fix the leak |
 | `cgroup for pod uid … not found` | wrong context, or not run on the node hosting the pod | pass the vCluster context; `kubectl --context spark-root get pod -o wide` | run on that node |

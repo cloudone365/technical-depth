@@ -580,7 +580,7 @@ FP8 *training* at DeepSeek's scale needs Hopper or datacenter Blackwell kernels 
 | `_grouped_mm … not supported` | PyTorch build or architecture limits | the probe reports it and continues |
 | vLLM MoE throughput low, `Using default MoE config` | no tuned fused-MoE config for GB10 | tune with vLLM's MoE benchmark script for your shapes and mount the JSON |
 | Probe OOM at large cache | the naive path materialises K/V for the whole cache | lower `--decode-bench` or `--batch`; the naive path is a deliberate worst case |
-| `r1-32b` pod `Pending`, `exceeded quota: serving-budget` or `Insufficient memory` | other apps or engines still hold part of the pool | park them (Task 7); `kubectl --context spark-root describe node dgx-spark-1 \| grep -A9 'Allocated resources'` |
+| `r1-32b` pod `Pending`, `exceeded quota: serving-budget` or `Insufficient memory` | other apps or engines still hold part of the pool | park them (Task 7); `kubectl --context spark-root describe node dgx-spark-1 \| sed -n '/Allocated resources/,/Events/p'` |
 
 ---
 

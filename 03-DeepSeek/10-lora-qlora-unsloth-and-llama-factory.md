@@ -564,7 +564,7 @@ The rollout replaces the pod, so the port-forward from Task 5.8 dies; the block 
 | You see | Cause | Fix |
 |---|---|---|
 | workload never admitted | the window isn't open (everyday `spark-cq` is 2 CPU · 12 Gi) | Task 5.4; `kubectl --context spark-root -n batch describe workloads` names the resource |
-| admitted, pod `Pending`, `Insufficient memory` | a model server still holds the pool | park it; `kubectl --context spark-root describe node dgx-spark-1 \| grep -A9 'Allocated resources'` |
+| admitted, pod `Pending`, `Insufficient memory` | a model server still holds the pool | park it; `kubectl --context spark-root describe node dgx-spark-1 \| sed -n '/Allocated resources/,/Events/p'` |
 | Job `OOMKilled` | 48 Gi below the real footprint (you raised rank, seq or model) | re-run `lora_calc.py` with your settings; lower batch and raise grad-accum; never above 80 Gi |
 | loss is NaN | fp16 overflow or lr too high | bf16 (default); lr 1e-4 |
 | `pip` downloads `torch-…-aarch64.whl` | a dependency pulled a new torch over NVIDIA's | `--no-deps` for unsloth/unsloth_zoo; pin as in §3.4 |

@@ -305,7 +305,7 @@ INFO:     Application startup complete.
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving describe resourcequota serving-budget | grep -E 'memory|requests.cpu|gpu'
-kubectl --context spark-root describe node dgx-spark-1 | grep -A9 'Allocated resources'
+kubectl --context spark-root describe node dgx-spark-1 | sed -n '/Allocated resources/,/Events/p'
 kubectl --context spark-root -n llm-serving get pods -o wide | grep vllm
 ```
 
@@ -333,7 +333,7 @@ The four blocks above, in order. Think of a kitchen: the weights are the recipe 
 **Block 4 · Check the bill (MacBook)**
 
 7. **`kubectl … describe resourcequota serving-budget | grep …`**: the namespace budget. vLLM's 32 Gi, 1.5 CPU and 1 slice now sit on top of the helpers (mock-llm, Qdrant): GPU `1/6`, memory about 34 of 90 Gi. Enforced by the API server when it admits the pod.
-8. **`kubectl … describe node dgx-spark-1 | grep -A9 'Allocated resources'`**: what the scheduler has promised all pods on the whole machine, vLLM's 32 Gi and 1500m included. The quota is per namespace; this is the node. With request = limit, the 32 Gi set aside is the most vLLM may use.
+8. **`kubectl … describe node dgx-spark-1 | sed -n '/Allocated resources/,/Events/p'`**: what the scheduler has promised all pods on the whole machine, vLLM's 32 Gi and 1500m included. The quota is per namespace; this is the node. With request = limit, the 32 Gi set aside is the most vLLM may use.
 9. **`kubectl … get pods -o wide | grep vllm`**: one `vllm-…` pod, `1/1 Running`, on `dgx-spark-1`, with its pod IP. `1/1` = the readiness probe passes, so Service `vllm` sends it traffic.
 
 The setup block at the top of §5 (`cd`, `export KUBECONFIG`, `apply-lab.sh root`) is only needed in a fresh terminal: it points `kubectl` at the lab kubeconfig and makes sure the LLM namespaces, quotas and the `model-cache` PVC exist.
@@ -637,7 +637,7 @@ scripts/verify.sh llm-budget storage serving observability
 | Row **Serving SLOs (vLLM)** there, but TTFT/TPOT panels say *No data* | the p95 lines are recording rules over a 5-minute window of vLLM histograms: no traffic → no data | Prometheus: `spark:vllm_ttft_p95_seconds` and `vllm:num_requests_running` | start `vllm-load` (§5.6), wait 3–5 min, set the time range to *Last 15 minutes* |
 | `No available memory for the cache blocks` | weights fit, no room for KV | startup log | raise the fraction, or lower `--max-model-len` |
 | Deployment shows 0/1, `exceeded quota: serving-budget` in the ReplicaSet events | other engines already hold most of the 90 Gi in `llm-serving` | `kubectl --context spark-root -n llm-serving describe resourcequota serving-budget` | park an engine (§9) |
-| Pod `Pending`, event `Insufficient memory` | the LLM memory pool is taken: other engines plus running batch pods (all request = limit) | `kubectl --context spark-root describe node dgx-spark-1 \| grep -A9 'Allocated resources'`, `kubectl --context spark-root -n batch get pods` | wait for the batch job, park an engine (§9), or lower the engine's request/limit to the measured peak |
+| Pod `Pending`, event `Insufficient memory` | the LLM memory pool is taken: other engines plus running batch pods (all request = limit) | `kubectl --context spark-root describe node dgx-spark-1 \| sed -n '/Allocated resources/,/Events/p'`, `kubectl --context spark-root -n batch get pods` | wait for the batch job, park an engine (§9), or lower the engine's request/limit to the measured peak |
 | PVC `model-cache` refused: `exceeded quota … requests.storage` | the PVC, plus Qdrant's 20 Gi and any other claims in `llm-serving`, asks for more than `serving-budget` (1 Ti) | `kubectl --context spark-root -n llm-serving describe resourcequota serving-budget` | request a size that fits |
 | Pod `OOMKilled` (137) | pod memory limit < CPU-side peak (tokenizer, CUDA graphs, host buffers, CUDA memory if charged) | `kubectl --context spark-root -n llm-serving describe pod`, Chapter 14 §5.5 result | raise request and limit together to measured peak + 20 % — and check §9 still adds up |
 | Restarts during first start | liveness fires before load completes | events `Liveness probe failed` | startupProbe (as in the lab) |
@@ -709,7 +709,7 @@ kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscali
   || kubectl --context spark-root -n llm-serving scale deploy vllm --replicas=1
 ```
 
-Two things the table doesn't show. First, **batch** draws on the same ~90 GiB: Kueue admits a training job against `spark-cq` (up to 12 Gi), but its pods still need free memory on the node. With vLLM + P/D running (74.6 Gi) a 12 Gi job fits; with more serving than ~78 Gi its pods wait Pending until an engine is parked — training waits for serving, never the reverse. Read the real state with `kubectl --context spark-root describe node dgx-spark-1 | grep -A9 'Allocated resources'` before starting a batch job next to running engines. Second, quotas and requests count *declared* bytes, the GB10 counts *real* bytes: an engine's `--gpu-memory-utilization` share of 121.7 GiB is taken from the same pool as every other pod, and no quota sees the `platform-tools` benchmarks, a sandbox model in dev-llms or a `docker run` on the host. Keep the util sum ≲ 0.72 yourself.
+Two things the table doesn't show. First, **batch** draws on the same ~90 GiB: Kueue admits a training job against `spark-cq` (up to 12 Gi), but its pods still need free memory on the node. With vLLM + P/D running (74.6 Gi) a 12 Gi job fits; with more serving than ~78 Gi its pods wait Pending until an engine is parked — training waits for serving, never the reverse. Read the real state with `kubectl --context spark-root describe node dgx-spark-1 | sed -n '/Allocated resources/,/Events/p'` before starting a batch job next to running engines. Second, quotas and requests count *declared* bytes, the GB10 counts *real* bytes: an engine's `--gpu-memory-utilization` share of 121.7 GiB is taken from the same pool as every other pod, and no quota sees the `platform-tools` benchmarks, a sandbox model in dev-llms or a `docker run` on the host. Keep the util sum ≲ 0.72 yourself.
 
 ---
 

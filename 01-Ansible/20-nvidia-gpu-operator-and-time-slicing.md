@@ -124,7 +124,7 @@ sequenceDiagram
 
 - **Steps 1–4 are the root path.** The 7th `ts-demo` pod never exists: the quota refusal lands on the ReplicaSet as `FailedCreate` (§4.2, `describe rs -l app=ts-demo`).
 - **Steps 5–9 are the vCluster path.** The tenant API server accepts all three pods; the root refuses the 3rd host copy at steps 8–9. That's why the Pending pod in `dev-llms` has the syncer's quota error and no scheduler event (§4.2, `describe pod` in `dev-llms`).
-- **Step 11 is where the 15 counts.** The device plugin advertises 15 because of `time-slicing-config`; `kubectl --context spark-root describe node dgx-spark-1 | grep -A8 'Allocated resources'` shows how many are taken (§6, `Insufficient nvidia.com/gpu`).
+- **Step 11 is where the 15 counts.** The device plugin advertises 15 because of `time-slicing-config`; `kubectl --context spark-root describe node dgx-spark-1 | sed -n '/Allocated resources/,/Events/p'` shows how many are taken (§6, `Insufficient nvidia.com/gpu`).
 - **Steps 13–16 give no isolation.** Every slice gets the same GPU; memory and compute are shared. On the Spark, `nvidia-smi` lists one process per `ts-demo` pod on one GB10 (§4.2).
 
 ---
@@ -335,7 +335,7 @@ Expected: allocatable `"15"`, `nvidia.com/gpu.replicas: "15"` and a `nvidia.com/
 3. **The vCluster sees more than it may use:** `dev-llms` reports allocatable `15` on dgx-spark-1, while the root's `vcluster-budget` in `vc-dev-llms` allows `2`.
 4. **`ts-sbx`:** 2 `Running`, 1 `Pending`. The Pending pod's events quote `exceeded quota: vcluster-budget` and `requests.nvidia.com/gpu`, and there is **no** `FailedScheduling` event. On the root, `vc-dev-llms` holds only 2 copies named `ts-sbx-…-x-default-x-dev-llms`.
 
-**If something's off:** fewer than 6 `ts-demo` pods → other pods in `llm-serving` hold slices or memory (`describe resourcequota serving-budget`). All pods `Pending` with `Insufficient nvidia.com/gpu` → the node's 15 slices are taken elsewhere (`describe node … | grep -A8 'Allocated resources'`). More in §6.
+**If something's off:** fewer than 6 `ts-demo` pods → other pods in `llm-serving` hold slices or memory (`describe resourcequota serving-budget`). All pods `Pending` with `Insufficient nvidia.com/gpu` → the node's 15 slices are taken elsewhere (`describe node … | sed -n '/Allocated resources/,/Events/p'`). More in §6.
 
 #### Run it
 
@@ -435,7 +435,7 @@ In `llm-serving` the Secret exists once, in the root's etcd, where Chapter 19's 
 | `toolkit-validation` fails | Container logs; `sudo grep -rn --include='*.toml' default_runtime_name /etc/containerd` on the node (`config.toml` or `conf.d/99-nvidia.toml`) | containerd has no `nvidia` runtime (DGX OS update replaced `config.toml`?). Re-run the template `19.1 Kubernetes`; its `nvidia-ctk runtime configure` task restores it |
 | Template fails: `Could not find … kubeconfig-spark-lab.yaml` | the state volume has no kubeconfig (`SPARK_LAB_CACHE` unset, or 19.1 ran from the MacBook) | Chapter 04 §4 Verify; run `19.1 Kubernetes` from Semaphore first |
 | Allocatable `nvidia.com/gpu` = 1, not 15 | `kubectl --context spark-root -n gpu-operator get cm time-slicing-config -o yaml`; device-plugin logs | ConfigMap name/key must match `devicePlugin.config.name/default`; restart the device-plugin DS |
-| Root pod `Pending: Insufficient nvidia.com/gpu` | `kubectl --context spark-root describe node dgx-spark-1 \| grep -A8 'Allocated resources'` | All 15 slices in use (count the `vc-*`, `llm-serving` and `batch` pods too), or `failRequestsGreaterThanOne` rejected a request for > 1 |
+| Root pod `Pending: Insufficient nvidia.com/gpu` | `kubectl --context spark-root describe node dgx-spark-1 \| sed -n '/Allocated resources/,/Events/p'` | All 15 slices in use (count the `vc-*`, `llm-serving` and `batch` pods too), or `failRequestsGreaterThanOne` rejected a request for > 1 |
 | vCluster pod `Pending`, no scheduler events | `kubectl --context <vc> describe pod …` events; `kubectl --context spark-root -n vc-<vc> describe quota vcluster-budget` | Root budget spent (§4.2). Free slices in that vCluster or raise its quota (02-Kubernetes Chapter 04 §6.5) |
 | `llm-serving` Deployment short of replicas, no Pending pod | `kubectl --context spark-root -n llm-serving describe rs -l app=<app>`; `describe quota serving-budget` | `FailedCreate … exceeded quota: serving-budget`: the 6 slices or 90 Gi are spent. Scale another model down (02-Kubernetes Chapter 20 §2) |
 | Tenant pod rejected: "at most 1 nvidia.com/gpu" | Message from the API server that admitted the pod (the vCluster's, or the root's for `llm-serving`/`batch`) | The 02 lab's CEL policy `spark-gpu-slice-limits`: a slice is not more GPU, request 1 |

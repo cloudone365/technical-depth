@@ -316,7 +316,7 @@ python3 scripts/ttft_probe.py --url http://localhost:8080 --model qwen-small -n 
 
 What KServe generated for you: a Deployment with a storage-initializer init container (it downloads `hf://Qwen/Qwen2.5-0.5B-Instruct` to `/mnt/models`), a Service and — depending on min/max replicas — an HPA. Compare it with your hand-written Chapter 20 manifest. Deleting the `InferenceService` removes all of it. Look at the pods once more: `kubectl --context spark-root -n llm-serving get pods | grep qwen-small` — there's the predictor pod, an ordinary pod in `serving-budget`; the `InferenceService` itself is only an object in the API server.
 
-The cost of the operator is visible too: compare `kubectl --context spark-root describe node dgx-spark-1 | grep -A9 'Allocated resources'` before and after the install. cert-manager's and KServe's controllers have no quota; they are charged to the root's platform headroom, not to `serving-budget`.
+The cost of the operator is visible too: compare `kubectl --context spark-root describe node dgx-spark-1 | sed -n '/Allocated resources/,/Events/p'` before and after the install. cert-manager's and KServe's controllers have no quota; they are charged to the root's platform headroom, not to `serving-budget`.
 
 ### 5.5 (Optional) GGUF with Ollama, outside Kubernetes
 
@@ -398,7 +398,7 @@ kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscali
 | `InferenceService` not Ready: storage-initializer error | HF download blocked / no token for gated models | `kubectl --context spark-root -n llm-serving logs <pod> -c storage-initializer` | HF token secret + `serviceAccount` with the secret. Or `pvc://model-cache/…` storageUri |
 | predictor Deployment denied: `serving workloads must define a readinessProbe` | a ServingRuntime without a readiness probe (yours, or one you edited) and `llm-serving` enforces one | `kubectl --context spark-root -n llm-serving get events` | keep the `readinessProbe` (`/health` on 8080) on the `ServingRuntime` container, as `vllm-spark` has |
 | KServe webhook errors on apply | cert-manager not ready | `kubectl --context spark-root -n cert-manager get pods` | wait for cert-manager, then re-apply |
-| cert-manager/KServe pods Pending, `Insufficient cpu` or `Insufficient memory` | the node is full: engines, batch jobs and platform pods hold the allocatable resources | `kubectl --context spark-root describe node dgx-spark-1 \| grep -A9 'Allocated resources'` | park an engine (Chapter 20 §9) or wait for the batch job |
+| cert-manager/KServe pods Pending, `Insufficient cpu` or `Insufficient memory` | the node is full: engines, batch jobs and platform pods hold the allocatable resources | `kubectl --context spark-root describe node dgx-spark-1 \| sed -n '/Allocated resources/,/Events/p'` | park an engine (Chapter 20 §9) or wait for the batch job |
 | Ollama slow under concurrency | single-request-optimised engine | ttft_probe with parallel clients | use vLLM/SGLang for shared services |
 
 ---

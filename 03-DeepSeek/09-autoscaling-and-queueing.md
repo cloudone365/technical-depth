@@ -222,7 +222,7 @@ Expected: `READY True`, `ACTIVE True` inside the window. After it ends and 15 mi
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root -n llm-serving get deploy vllm -w   # Ctrl-C to stop
-kubectl --context spark-root describe node dgx-spark-1 | grep -A9 'Allocated resources'
+kubectl --context spark-root describe node dgx-spark-1 | sed -n '/Allocated resources/,/Events/p'
 ```
 
 ### Task 5.2 · Measure the cold start you just paid for
@@ -238,7 +238,7 @@ kubectl --context spark-root describe node dgx-spark-1 | grep -A9 'Allocated res
 2. **Order of magnitude:** minutes, not seconds. Weights come from page cache or NVMe; most of the time is engine init and CUDA-graph capture (Chapter 08 §3.6).
 3. **After the second patch:** `get scaledobject vllm -o jsonpath='{.spec.minReplicaCount}'` prints `0`.
 
-**If something's off:** the pod stays `Pending` → the pool is full (a training Job or another engine); `kubectl --context spark-root describe node dgx-spark-1 | grep -A9 'Allocated resources'`. More in §7.
+**If something's off:** the pod stays `Pending` → the pool is full (a training Job or another engine); `kubectl --context spark-root describe node dgx-spark-1 | sed -n '/Allocated resources/,/Events/p'`. More in §7.
 
 #### Run it
 

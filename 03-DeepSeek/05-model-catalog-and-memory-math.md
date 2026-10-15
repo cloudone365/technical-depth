@@ -376,7 +376,7 @@ Then check the cluster's view: the pod's memory request and limit are the catalo
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root -n llm-serving get deploy vllm \
   -o jsonpath='{.spec.template.spec.containers[0].resources}{"\n"}'
-kubectl --context spark-root describe node dgx-spark-1 | grep -A9 'Allocated resources'
+kubectl --context spark-root describe node dgx-spark-1 | sed -n '/Allocated resources/,/Events/p'
 kubectl --context spark-root -n llm-serving describe resourcequota serving-budget | grep -E 'memory'
 ```
 
@@ -583,7 +583,7 @@ Then configure your editor's OpenAI-compatible provider (Continue, Cline, …): 
 | `insufficient memory … gpu_memory_utilization` at start (drill D02) | the fraction asks for memory others hold: another engine, a batch job, or the page cache | lower util; drop the page cache on dgx-spark-1; park other engines |
 | KV tokens much lower than predicted | large `--max-num-seqs` × `--max-num-batched-tokens` activation peak | lower those, or account for them in `--overhead-gib` |
 | vLLM pod `OOMKilled` (137) | pod limit below the CPU-side peak (tokenizer, CUDA graphs, host buffers, CUDA memory if charged) | raise request and limit together to measured peak + 20 %, then re-check §3.4 |
-| Pod Pending, `Insufficient memory` | the pool is taken by other engines and batch pods (all request = limit) | `kubectl --context spark-root describe node dgx-spark-1 \| grep -A9 'Allocated resources'`; park an engine or wait for the batch job |
+| Pod Pending, `Insufficient memory` | the pool is taken by other engines and batch pods (all request = limit) | `kubectl --context spark-root describe node dgx-spark-1 \| sed -n '/Allocated resources/,/Events/p'`; park an engine or wait for the batch job |
 | `exceeded quota: serving-budget` | Σ pod memory in `llm-serving` over 90 Gi (typically `r1-32b` next to the app stack, or a 32B plus a 7B plus RAG) | park a model, bge-m3 or the app stack (§3.4, Task 5.5) |
 | Node `MemoryPressure` although every pod fits | Σ util over 0.72, a sandbox model in dev-llms, a `docker run` on the host, or the page cache | `free -g` on the Spark; keep the util sum ≲ 0.72 yourself (no quota sees host processes) |
 | AWQ model fails: `awq_marlin not supported` | kernel not built for sm_121 in this image | `--quantization=awq`, or an FP8 variant of the model |

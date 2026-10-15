@@ -189,7 +189,7 @@ device=NVIDIA GB10 cc=(12, 1) torch=2.9.0a0+…
 compile time: default 35s, max-autotune 180s
 ```
 
-While it runs, compare the two views of the GPU: `kubectl --context spark-root describe node dgx-spark-1 | grep -A8 'Allocated resources'` counts the slice you just took, and `kubectl --context dev-llms describe node dgx-spark-1 | grep -A8 'Allocated resources'` shows the same node as a vCluster tenant sees it — real allocatable and real labels, synced from the root. Its `Allocated resources` only adds up the pods dev-llms' own API server knows, so the benchmark's slice is not in it.
+While it runs, compare the two views of the GPU: `kubectl --context spark-root describe node dgx-spark-1 | sed -n '/Allocated resources/,/Events/p'` counts the slice you just took, and `kubectl --context dev-llms describe node dgx-spark-1 | sed -n '/Allocated resources/,/Events/p'` shows the same node as a vCluster tenant sees it — real allocatable and real labels, synced from the root. Its `Allocated resources` only adds up the pods dev-llms' own API server knows, so the benchmark's slice is not in it.
 
 ### 5.2 See the generated kernels
 

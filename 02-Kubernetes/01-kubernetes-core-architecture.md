@@ -138,7 +138,7 @@ The 01-Ansible kubeadm config sets `systemReserved: {cpu: 2, memory: 6Gi}`, `kub
 
 System-reserved is 6 Gi because 01-Ansible's `04.3 Baseline` (role `spark_baseline`, `spark_baseline_headless: true`) switches DGX OS to `multi-user.target`: no graphical session holds memory.
 
-Unlike k3s, the control plane is *not* inside kube-reserved: the static pods request ~0.65 CPU and a few hundred MiB themselves (apiserver 250m, controller-manager 200m, scheduler 100m, etcd 100m + 100Mi) out of allocatable. `kubectl --context spark-root describe node dgx-spark-1 | grep -A12 'Allocated resources'` shows them alongside the model servers and the vCluster pods.
+Unlike k3s, the control plane is *not* inside kube-reserved: the static pods request ~0.65 CPU and a few hundred MiB themselves (apiserver 250m, controller-manager 200m, scheduler 100m, etcd 100m + 100Mi) out of allocatable. `kubectl --context spark-root describe node dgx-spark-1 | sed -n '/Allocated resources/,/Events/p'` shows them alongside the model servers and the vCluster pods.
 
 ### 3.4 Three API servers, one node
 
@@ -399,7 +399,7 @@ In dev-lab the managers are `kubectl-client-side-apply` and the syncer (writing 
 
 | Symptom | Likely cause | Diagnose | Fix |
 |---|---|---|---|
-| Pod `Pending`, event `0/1 nodes are available: 1 Insufficient nvidia.com/gpu` | All 15 time-slices taken | `kubectl --context spark-root describe node dgx-spark-1 \| grep -A10 'Allocated resources'` | Free a slice, queue with Kueue (Chapter 07) |
+| Pod `Pending`, event `0/1 nodes are available: 1 Insufficient nvidia.com/gpu` | All 15 time-slices taken | `kubectl --context spark-root describe node dgx-spark-1 \| sed -n '/Allocated resources/,/Events/p'` | Free a slice, queue with Kueue (Chapter 07) |
 | Pod `Pending` in a vCluster, **no** scheduler events | the root quota of that vCluster is spent | `kubectl --context spark-root -n vc-dev-lab describe resourcequota vcluster-budget` | Chapter 04 §8; break/fix 02 |
 | Pod `Pending` on the root, **no events at all** | scheduler not running / not leader | `kubectl --context spark-root get lease -n kube-system kube-scheduler -o yaml` (renewTime stale?), `sudo crictl logs $(sudo crictl ps -q --name kube-scheduler)` | fix the manifest in `/etc/kubernetes/manifests/kube-scheduler.yaml`; the kubelet restarts it |
 | `kubectl` hangs / `connection refused :6443` | API server static pod crash-looping (bad flag, cert, etcd down) | `sudo crictl ps -a --name kube-apiserver`, `sudo crictl logs <id>`, `journalctl -u kubelet -n 50` | revert the last edit of `kube-apiserver.yaml`; check etcd first |

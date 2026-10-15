@@ -405,7 +405,7 @@ sudo ls -l /data/k8s/retain/llm-serving/model-cache/hf/models--Qwen--Qwen3-8B/sn
 DROP_CACHES=1 scripts/serve-model.sh qwen3-8b
 kubectl --context spark-root -n llm-serving get pods -l app=vllm -o wide
 kubectl --context spark-root -n llm-serving describe resourcequota serving-budget | grep -E 'memory|gpu'
-kubectl --context spark-root describe node dgx-spark-1 | grep -A9 'Allocated resources'
+kubectl --context spark-root describe node dgx-spark-1 | sed -n '/Allocated resources/,/Events/p'
 ```
 
 The script prints each stage: budget check, prefetch, page cache dropped, rollout, the smoke answer with the number of reasoning characters (Qwen3-8B thinks by default). `DROP_CACHES=1` runs `sudo -n` over `ssh dgx-spark-1`, so it needs passwordless sudo for that command; otherwise drop the cache on the Spark yourself, or run the 01-Ansible playbook `playbooks/29.2-uma-relief.yml` with `uma_drop_caches=true` from Semaphore:

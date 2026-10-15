@@ -433,7 +433,7 @@ A 7B policy with LoRA fits the window too; full fine-tuning of a 7B with GRPO do
 | You see | Cause | Fix |
 |---|---|---|
 | Workload `Pending`, `couldn't assign flavors … insufficient quota` | the training window isn't open, or something already uses `spark-cq` | Task 3; `kubectl --context spark-root -n batch get workloads` |
-| Pod `Pending`, `Insufficient memory` | vLLM or another engine still holds the pool | pause the ScaledObject and park the other servers; check `kubectl --context spark-root describe node dgx-spark-1 \| grep -A9 'Allocated resources'` |
+| Pod `Pending`, `Insufficient memory` | vLLM or another engine still holds the pool | pause the ScaledObject and park the other servers; check `kubectl --context spark-root describe node dgx-spark-1 \| sed -n '/Allocated resources/,/Events/p'` |
 | All rewards 0, no learning | the model never produces the format (reward too sparse) | SFT cold start first ([Chapter 10](10-lora-qlora-unsloth-and-llama-factory.md)), or partial-credit format rewards |
 | Reward rises, real accuracy doesn't | reward hacking (e.g. format satisfied with an empty think) | tighten the regex, add length or quality checks, evaluate separately |
 | `std(r) = 0`, no gradient | all G samples got the same reward | larger G, higher temperature, a harder or easier prompt mix |

@@ -719,7 +719,7 @@ Compare with the local NVMe read from Task 5.4 (**record yours**).
 | `error: … is immutable` on a Job | Job templates can't be patched | `kubectl --context spark-root -n <ns> delete job <name>`, then apply |
 | Deployment `0/1`, `FailedCreate … violates PodSecurity` | pod-level admission | run `pod_template_check.py` on it; fix securityContext or move namespace |
 | `exceeded quota: serving-budget` on the ReplicaSet | other engines hold most of the 90 Gi | `describe resourcequota serving-budget`; park an engine (02 Chapter 20 §9) |
-| pod `Pending`, `Insufficient memory` | the LLM pool is taken (engines plus batch pods, all request = limit) | `kubectl --context spark-root describe node dgx-spark-1 \| grep -A9 'Allocated resources'` |
+| pod `Pending`, `Insufficient memory` | the LLM pool is taken (engines plus batch pods, all request = limit) | `kubectl --context spark-root describe node dgx-spark-1 \| sed -n '/Allocated resources/,/Events/p'` |
 | a ConfigMap change doesn't reach a Job | ConfigMaps mount at pod start | re-run the Job (`disableNameSuffixHash` keeps names stable) |
 | PVC `Pending` | `WaitForFirstConsumer`, no pod yet | normal; it binds with the first pod |
 | two pods downloading, `.incomplete` files | servers started before the prefetch | always prefetch first (`serve-model.sh` does) |

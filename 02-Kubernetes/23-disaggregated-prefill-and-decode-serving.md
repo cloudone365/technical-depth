@@ -185,7 +185,7 @@ Check that the quota and the node have room for 40 Gi more:
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root -n llm-serving describe resourcequota serving-budget | grep -E 'memory|requests.cpu|gpu'
-kubectl --context spark-root describe node dgx-spark-1 | grep -A9 'Allocated resources'
+kubectl --context spark-root describe node dgx-spark-1 | sed -n '/Allocated resources/,/Events/p'
 kubectl --context spark-root apply -k manifests/root-llms/90-serving/pd-disagg
 kubectl --context spark-root -n llm-serving rollout status deploy/vllm-prefill --timeout=30m
 kubectl --context spark-root -n llm-serving rollout status deploy/vllm-decode --timeout=30m
@@ -347,7 +347,7 @@ Then add to the prefill Deployment `nodeSelector: {kubernetes.io/hostname: dgx-s
 | Symptom | Cause | Diagnose | Fix |
 |---|---|---|---|
 | `vllm-decode` 0/1, `exceeded quota: serving-budget` | another engine besides vLLM (SGLang, KServe, Triton) still in `llm-serving`: P + D + vLLM + it > 90 Gi | `kubectl --context spark-root -n llm-serving describe resourcequota serving-budget` | park it (§5.1, Chapter 20 §9) |
-| a P/D pod Pending, `Insufficient memory` | the shared LLM memory pool is taken (other engines, batch jobs; all request = limit) | `kubectl --context spark-root describe node dgx-spark-1 \| grep -A9 'Allocated resources'` | wait for the batch job, or park another engine |
+| a P/D pod Pending, `Insufficient memory` | the shared LLM memory pool is taken (other engines, batch jobs; all request = limit) | `kubectl --context spark-root describe node dgx-spark-1 \| sed -n '/Allocated resources/,/Events/p'` | wait for the batch job, or park another engine |
 | decode recomputes the prompt (slow, no NIXL logs) | `kv_transfer_params` not forwarded, or prefill returned none | proxy logic, prefill response JSON | proxy must copy `kv_transfer_params` from the prefill response |
 | `NIXL handshake failed / timeout` | side-channel host/port unreachable | `VLLM_NIXL_SIDE_CHANNEL_HOST` = pod IP, containerPort 5600, NetworkPolicy; `hubble observe --namespace llm-serving --port 5600 --verdict DROPPED` | allow 5600 between the two Deployments (same namespace is allowed in the lab) |
 | UCX errors `no usable transports` | UCX can't find RDMA/cuda transports | `UCX_LOG_LEVEL=info` | set `UCX_TLS`, give pods RDMA devices + `IPC_LOCK` |

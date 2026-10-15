@@ -553,7 +553,7 @@ scripts/verify.sh platform serving
 | `Model architectures [...] are not supported` | model newer than the image's vLLM | a newer NGC vLLM image with arm64/sm_121 support; pin it in `versions.env` and the base |
 | Pod stuck in startup > 30 min, then restarted | first download inside the pod, or slow CUDA-graph compile | prefetch first (`serve-model.sh` does it); the startupProbe allows 30 min |
 | Deployment 0/1, ReplicaSet event `exceeded quota: serving-budget` | Σ pod memory in `llm-serving` over 90 Gi | park another engine (§3.4); for `r1-32b` park bge-m3 and the app stack too ([Chapter 05 §3.4](05-model-catalog-and-memory-math.md)) |
-| Pod Pending, `Insufficient memory` | a batch job or other engines hold the pool (request = limit everywhere) | `kubectl --context spark-root describe node dgx-spark-1 \| grep -A9 'Allocated resources'`; wait for the batch job or park an engine |
+| Pod Pending, `Insufficient memory` | a batch job or other engines hold the pool (request = limit everywhere) | `kubectl --context spark-root describe node dgx-spark-1 \| sed -n '/Allocated resources/,/Events/p'`; wait for the batch job or park an engine |
 | Apply refused by an admission policy | `:latest` tag, missing readinessProbe, or an `NVIDIA_VISIBLE_DEVICES` env in a custom overlay | pinned tag; keep the base's probes; let the device plugin assign the GPU |
 | `kubectl scale deploy vllm --replicas=0` doesn't stick | KEDA scales it back | pause annotation (§3.4) |
 | `KeyError: 'reasoning_content'` in a client | parser off, or the client reads the wrong field | parser on; read `reasoning_content` for thinking, `content` for the answer |
