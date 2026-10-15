@@ -202,7 +202,7 @@ Every document carries its chapter number. Work through them in order with the [
 | CX-7 | `192.168.100.0/24` + `192.168.101.0/24`, MTU 9000 |
 | Pods / Services / DNS | `10.42.0.0/16` / `10.43.0.0/16` / `10.43.0.10` (Cilium VXLAN, kube-proxy iptables) |
 | LoadBalancer IPs | MetalLB `192.168.0.110–119`: dev-lab API `.111`, dev-llms API `.112`, LLM gateway (Traefik on the root) `.115` |
-| Entry points | root API `:6443` · Grafana `:32000` · Hubble UI `:31235` · LLM gateway `192.168.0.115:80` |
+| Entry points | root API `:6443` · Grafana `:3000` (host, also shows the clusters) · kps Grafana `:32000` · Hubble UI `:31235` · LLM gateway `192.168.0.115:80` |
 | GPU | GB10, compute capability 12.1, 15 time-slices, no MIG |
 | Versions | [`lab/versions.env`](lab/versions.env) (Kubernetes v1.36.5, Cilium 1.20.2, vCluster 0.37.1, GPU Operator v26.7.1, Kueue v0.13.4, Traefik chart 34.4.1, kps 70.4.2, NGC 25.09 images) |
 

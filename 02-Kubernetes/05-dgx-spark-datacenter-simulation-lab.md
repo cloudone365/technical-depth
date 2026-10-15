@@ -165,9 +165,10 @@ sequenceDiagram
 | dev-lab API (`dev-lab`) | `https://192.168.0.111:443` | MetalLB IP of the vCluster's Service; same kubeconfig |
 | dev-llms API (`dev-llms`) | `https://192.168.0.112:443` | same |
 | LLM gateway (Traefik on the root) | `192.168.0.115:80`, `:443` | hosts `llm.lab.local`, `gw.lab.local` in your MacBook's `/etc/hosts` |
-| Grafana (kps) | `http://192.168.0.100:32000` | admin / `adminPassword` in the kps values (keep the real one in vault01 KV) |
+| Grafana (kps, in the cluster) | `http://192.168.0.100:32000` | admin / `adminPassword` in the kps values (keep the real one in vault01 KV); install check only once the host Grafana has the cluster dashboards |
+| kps Prometheus | `http://192.168.0.100:30090` | read by the host Grafana; no login, lab LAN only |
 | Hubble UI | `http://192.168.0.100:31235` | Cilium flow visibility |
-| Host Grafana (01-Ansible) | `http://192.168.0.100:3000` | node/GPU view that survives a Kubernetes outage |
+| Host Grafana (01-Ansible) — **the one you open** | `http://192.168.0.100:3000` → folder *Spark Lab* | host dashboard plus the cluster dashboards (data source **Kubernetes** = kps Prometheus on NodePort `30090`, Chapter 17 §5.4); stays up during a Kubernetes outage |
 | Pod CIDR / Service CIDR / DNS | 10.42.0.0/16 · 10.43.0.0/16 · 10.43.0.10 | set in the kubeadm config; vCluster Services get root ClusterIPs |
 | MetalLB pool | 192.168.0.110–119 | reserve in your router's DHCP |
 | CX-7 | 192.168.100.0/24, 192.168.101.0/24 | only with dgx-spark-2 |
@@ -527,11 +528,11 @@ kubectl --context spark-root -n batch logs -f -l job-name=ddp --prefix
 #### What to look for
 
 1. **`verify.sh observability`:** `[PASS] Prometheus: N targets up` with N of 5 or more, the model-server line, `[PASS] Grafana dashboard ConfigMap`, and `0 failed`.
-2. **Grafana** (http://192.168.0.100:32000): dashboard *Spark · Kubernetes* has data in every row, including series with `vcluster="root", vnamespace="llm-serving"`.
+2. **Grafana** (http://192.168.0.100:3000 → *Spark Lab*, after Chapter 17 §5.4 *One Grafana*; before that the cluster's own :32000): dashboard *Spark · Kubernetes* has data in every row, including series with `vcluster="root", vnamespace="llm-serving"`.
 3. **Diag bundle:** the script ends `[PASS] wrote diag-<timestamp>.tar.gz (<size>)`; `tar tzf` on it shows `diag-…/root/`, `diag-…/dev-lab/` and `diag-…/dev-llms/`. Run on the Spark, it also adds host files (`meminfo.txt`, `nvidia-smi-q.txt`, journals).
 4. **Drills:** after each one, `scripts/breakfix.sh reset <NN>` and a clean `scripts/verify.sh`.
 
-**If something's off:** `[WARN] Prometheus: only N targets up` → open http://192.168.0.100:32000 → Explore, query `up == 0` to see which target is down. `[....] no model-server targets yet` → vLLM or Traefik isn't deployed (Task 7).
+**If something's off:** `[WARN] Prometheus: only N targets up` → open http://192.168.0.100:3000 → Explore, data source **Kubernetes**, query `up == 0` to see which target is down. `[....] no model-server targets yet` → vLLM or Traefik isn't deployed (Task 7).
 
 #### Run it
 

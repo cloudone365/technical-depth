@@ -290,7 +290,7 @@ kubectl --context spark-root -n observability get prometheusrule -o name
 kubectl --context spark-root -n observability get cm -l grafana_dashboard=1 -o name
 ```
 
-Open Grafana (`http://192.168.0.100:32000`) → the LLM serving dashboard, and set the model variable (or add `model_name=~"qwen.*"` to a panel) to the Qwen engine.
+Open Grafana (`http://192.168.0.100:3000` → *Spark Lab*) → **Spark · LLM serving (DeepSeek)**, and set the model variable (or add `model_name=~"qwen.*"` to a panel) to the Qwen engine.
 
 ### 5.2 Check that every source is scraped, with a Qwen model serving
 

@@ -142,7 +142,7 @@ Part I is theory with CPU proofs and can be read before the platform exists. Fro
 | Kubernetes | kubeadm root (`spark-root`), Cilium, MetalLB `192.168.0.110-119`, GPU Operator, kube-prometheus-stack, local-path (`local-nvme`, `local-nvme-retain`), Traefik `192.168.0.115`, Kueue, KEDA, KServe; vClusters `dev-llms` (LLM sandbox) and `dev-lab` |
 | Namespaces | `llm-serving` (PSA baseline, `serving-budget`), `batch` (privileged, Kueue `train` → `spark-cq`), `ingress`, `observability`, `llm-multinode` (two-Spark) |
 | Budgets | LLM pool ~90 GiB; everyday serving 8 CPU · 90 Gi · 6 slices, batch 2 CPU · 12 Gi · 3 slices; training window serving 2 CPU · 10 Gi, batch 8 CPU · 80 Gi ([02 Chapter 14](../02-Kubernetes/14-multi-tenancy-resource-quotas-and-cgroups.md)) |
-| Entry points | `api.lab.local` (LiteLLM), `webui.lab.local` (Open WebUI), Grafana `http://192.168.0.100:32000` |
+| Entry points | `api.lab.local` (LiteLLM), `webui.lab.local` (Open WebUI), Grafana `http://192.168.0.100:3000` → *Spark Lab* |
 | Versions | [`lab/versions.env`](lab/versions.env) (NGC vLLM and PyTorch images, SGLang, TensorRT-LLM, llama.cpp, LiteLLM, Open WebUI, Qdrant, TRL/PEFT/Transformers); platform versions from 02 |
 
 ## 4. How this module is verified

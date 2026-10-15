@@ -450,8 +450,10 @@ Read the operator's state (Chapter 17 §5.1), then the observability stack (§5.
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root get clusterpolicies.nvidia.com -o jsonpath='{.items[0].status.state}{"\n"}'
 kubectl --context spark-root apply -k manifests/root/95-observability
-scripts/verify.sh observability      # Grafana http://192.168.0.100:32000 → "Spark · Kubernetes"
+scripts/verify.sh observability      # cluster Grafana http://192.168.0.100:32000 → "Spark · Kubernetes"
 ```
+
+Then make the host Grafana the only one you open (Chapter 17 §5.4 *One Grafana for host and clusters*): `scripts/install-addons.sh kps` (Prometheus on NodePort 30090), uncomment `gpu_telemetry_k8s_prometheus_url` in `01-Ansible/lab/inventory/host_vars/dgx-spark-1.yml`, push, run `12.1 Telemetry`. From then on: `http://192.168.0.100:3000` → *Spark Lab*.
 
 (2×) The Network Operator and RDMA pod networking (Chapter 17 §5.6).
 

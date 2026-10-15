@@ -51,7 +51,7 @@ flowchart LR
   P --> R2["02 platform rules<br/>SparkUMAPressure · VLLMKVCacheFull …"]
   R --> AM["Alertmanager"]
   R2 --> AM
-  P --> GF["Grafana :32000<br/>Spark · LLM serving (DeepSeek)"]
+  P --> GF["Grafana :3000 (host)<br/>data source Kubernetes<br/>Spark · LLM serving (DeepSeek)"]
   GEN["gen_dashboard.py<br/>CI: JSON must match"] -.-> GF
   P --> KEDA["KEDA ScaledObject vllm<br/>num_requests_waiting"]
   classDef obs fill:#fb8500,stroke:#9a5000,color:#000
@@ -80,7 +80,7 @@ sequenceDiagram
   participant V as vllm :8000<br/>(llm-serving)
   participant P as kps-prometheus :9090<br/>(observability)
   participant AM as kps-alertmanager :9093
-  participant G as Grafana :32000
+  participant G as Grafana :3000<br/>(data source Kubernetes)
   C->>V: POST /v1/chat/completions max_tokens 256
   V-->>C: finish_reason length
   V->>V: vllm:request_success_total finished_reason length +1
@@ -185,7 +185,7 @@ The power metric is the GPU's share only, so tokens/J is an upper bound for the 
 
 ## 4. Integrations
 
-- **02-Kubernetes**: kube-prometheus-stack (`kps` in `observability`, Grafana NodePort 32000), the ServiceMonitors in `95-observability`, the host exporters and the platform dashboard. [02 Chapter 20](../02-Kubernetes/20-vllm-high-throughput-llm-serving.md) explains the `llm-workloads` labels.
+- **02-Kubernetes**: kube-prometheus-stack (`kps` in `observability`, its Prometheus on NodePort 30090 read by the host Grafana `:3000`, 02 Chapter 17 §5.4), the ServiceMonitors in `95-observability`, the host exporters and the platform dashboard. [02 Chapter 20](../02-Kubernetes/20-vllm-high-throughput-llm-serving.md) explains the `llm-workloads` labels.
 - **01-Ansible**: installs the GPU textfile collector and turns on the DCGM exporter when `gpu_operator_dcgm_exporter=true` ([01-Ansible Chapter 12](../01-Ansible/12-gpu-telemetry-and-alerting.md), [Chapter 20](../01-Ansible/20-nvidia-gpu-operator-and-time-slicing.md)). Both run from Semaphore on sema01.
 - **[Chapter 09](09-autoscaling-and-queueing.md)**: KEDA scales vLLM on the same `num_requests_*` series the dashboard shows, through `http://kps-prometheus.observability.svc:9090`.
 - **[Chapter 15](15-automation-secrets-and-day2.md)**: the day-2 panels and alerts watch its CronJobs.
@@ -208,7 +208,7 @@ The power metric is the GPU's share only, so tokens/J is an upper bound for the 
 1. **`dashboard in sync`**.
 2. **Groups:** `spark-reasoning spark-gb10 spark-day2`.
 3. **Label:** `{"grafana_dashboard":"1"}`.
-4. **Grafana** at `http://192.168.0.100:32000` lists **Spark · LLM serving (DeepSeek)** with 21 panels in 6 rows (the JSON holds 27 entries: the 6 rows count as panels).
+4. **Grafana** at `http://192.168.0.100:3000` → *Spark Lab* lists **Spark · LLM serving (DeepSeek)** (direct link `/d/spark-llm-serving`) with 21 panels in 6 rows (the JSON holds 27 entries: the 6 rows count as panels).
 
 **If something's off:** a `diff` message instead of `dashboard in sync` means someone edited the JSON by hand; regenerate it. The dashboard missing in Grafana means the label didn't arrive or the sidecar watches another namespace. More in §7.
 
@@ -222,7 +222,7 @@ kubectl --context spark-root -n observability get prometheusrule spark-reasoning
 kubectl --context spark-root -n observability get cm deepseek-serving-dashboard -o jsonpath='{.metadata.labels}'; echo
 ```
 
-Expected: `dashboard in sync`, groups `spark-reasoning spark-gb10 spark-day2`, and the label `grafana_dashboard: "1"` so the Grafana sidecar loads it. Open Grafana at `http://192.168.0.100:32000` → **Spark · LLM serving (DeepSeek)**.
+Expected: `dashboard in sync`, groups `spark-reasoning spark-gb10 spark-day2`, and the label `grafana_dashboard: "1"` so the Grafana sidecar loads it. Open Grafana at `http://192.168.0.100:3000` → *Spark Lab* → **Spark · LLM serving (DeepSeek)**. The host copy comes from `01-Ansible/lab/roles/gpu_telemetry/files/spark-llm-serving-dashboard.json` (`gen_dashboard.py --host-grafana`); after changing the generator, regenerate both files and run `12.1 Telemetry`. The cluster Grafana `:32000` loads the ConfigMap as before.
 
 ### Task 5.2 · Check that every source is scraped
 

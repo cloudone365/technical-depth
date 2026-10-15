@@ -3,8 +3,11 @@
 Per served model (`model_name` label from vLLM): throughput, latency, KV cache,
 preemptions, finish reasons (reasoning truncation), speculative decoding.
   python3 gen_dashboard.py > deepseek-serving-dashboard.json
+  python3 gen_dashboard.py --host-grafana > ../../../01-Ansible/lab/roles/gpu_telemetry/files/spark-llm-serving-dashboard.json
+    (copy for the host Grafana :3000, pinned to its data source 'Kubernetes'; 02 Chapter 17 §5.4)
 """
 import json
+import sys
 
 P, Y = [], [0]
 
@@ -73,11 +76,15 @@ Y[0] += 8
 panel("Hours since last successful CronJob run", [('(time() - kube_cronjob_status_last_successful_time{namespace="llm-serving"}) / 3600', "{{cronjob}}")], "h", x=0, w=24)
 Y[0] += 8
 
+DS_VAR = {"name": "datasource", "type": "datasource", "query": "prometheus", "current": {}}
+if "--host-grafana" in sys.argv[1:]:
+    DS_VAR.update(regex="/^Kubernetes$/", current={"text": "Kubernetes", "value": "kubernetes"}, hide=2)
+
 print(json.dumps({
     "title": "Spark · LLM serving (DeepSeek)", "uid": "spark-llm-serving", "tags": ["dgx-spark", "vllm", "deepseek"],
     "schemaVersion": 39, "refresh": "30s", "time": {"from": "now-3h", "to": "now"},
     "templating": {"list": [
-        {"name": "datasource", "type": "datasource", "query": "prometheus", "current": {}},
+        DS_VAR,
         {"name": "model", "type": "query", "datasource": {"type": "prometheus", "uid": "${datasource}"},
          "query": "label_values(vllm:num_requests_running, model_name)", "includeAll": True, "multi": True,
          "current": {"text": "All", "value": "$__all"}, "allValue": ".*"}]},

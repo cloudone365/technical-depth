@@ -415,7 +415,7 @@ kubectl --context spark-root -n batch run promq --rm -i --restart=Never --image=
   -- curl -s 'http://kps-prometheus.observability.svc:9090/api/v1/query?query=up' | head -c 200; echo
 ```
 
-Open Grafana at `http://192.168.0.100:32000` → dashboard **Spark · Kubernetes**. Generate some signal and watch each row respond:
+Open Grafana at `http://192.168.0.100:32000` → dashboard **Spark · Kubernetes** (after *One Grafana for host and clusters* below, the same dashboard is at `:3000` → *Spark Lab*). Generate some signal and watch each row respond:
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
@@ -452,9 +452,9 @@ kubectl --context spark-root -n platform-tools scale deploy gemm-contention --re
 kubectl --context spark-root delete -f manifests/root/12-cgroups/cpu-throttle.yaml; kill %1
 ```
 
-#### One Grafana for host and clusters (optional)
+#### One Grafana for host and clusters
 
-You now have two Grafanas: the host's on `:3000` (01-Ansible Chapter 12) and this one on `:32000`. To use only one, use the host's: it runs in Docker outside Kubernetes, so it stays up when the cluster is down. It gets this cluster's Prometheus as a second data source, **Kubernetes**, and the dashboard **Spark · Kubernetes** next to *DGX Spark Lab — Overview* in folder *Spark Lab*.
+You now have two Grafanas: the host's on `:3000` (01-Ansible Chapter 12) and this one on `:32000`. The lab uses one: the host's. It runs in Docker outside Kubernetes, so it stays up when the cluster is down. It gets this cluster's Prometheus as a second data source, **Kubernetes**, and the cluster dashboards **Spark · Kubernetes** and **Spark · LLM serving (DeepSeek)** (03 Chapter 16) next to *DGX Spark Lab — Overview* in folder *Spark Lab*. **From here on, every chapter opens Grafana at `http://192.168.0.100:3000` → *Spark Lab*.**
 
 ```mermaid
 flowchart LR
@@ -482,7 +482,7 @@ flowchart LR
 
 2. **Point the host Grafana at it.** In `01-Ansible/lab/inventory/host_vars/dgx-spark-1.yml`, uncomment `gpu_telemetry_k8s_prometheus_url: http://127.0.0.1:30090`, commit and push (Semaphore reads the repo). Then run the template **`12.1 Telemetry`** (break-glass: `ansible-playbook playbooks/12.1-telemetry.yml -l dgx-spark-1,localhost -K` from `01-Ansible/lab`). The role adds the data source, copies the dashboard and restarts Grafana. It lives in the inventory, not in the template's extra variables, so `26.1 Drift check` sees the same setting.
 
-3. **Check:** http://192.168.0.100:3000 → *Dashboards* → *Spark Lab* lists **DGX Spark Lab — Overview** and **Spark · Kubernetes**. The second one's panels have data, including the row **Serving SLOs (vLLM)** once a model has traffic (Chapter 20 §5.6).
+3. **Check:** http://192.168.0.100:3000 → *Dashboards* → *Spark Lab* lists **DGX Spark Lab — Overview**, **Spark · Kubernetes** and **Spark · LLM serving (DeepSeek)**. Direct link: http://192.168.0.100:3000/d/spark-k8s. The second one's panels have data, including the row **Serving SLOs (vLLM)** once a model has traffic (Chapter 20 §5.6).
 
 | | Kubernetes up | Kubernetes down |
 |---|---|---|
@@ -493,7 +493,7 @@ Notes:
 
 - Prometheus on 30090 has no login. That's fine on the lab LAN; don't forward that port beyond it.
 - The cluster's alerts (`VLLMQueueBacklog`, `PodsPendingOnGPU`) still go through kps Alertmanager; the host's alerts through the host Alertmanager. Only the screens are merged.
-- `:32000` keeps working. Kubernetes add-ons that ship dashboards as ConfigMaps (the kps built-ins) appear only there; you can leave it unused.
+- `:32000` keeps working and shows the same lab dashboards (the ConfigMaps still load there). The kps built-ins ("Kubernetes / Compute Resources / …") appear only there; you can leave it unused.
 - Undo: comment the line again, push, run `12.1 Telemetry`; the role removes the data source (`deleteDatasources`) and the dashboard.
 
 ### 5.5 DCGM exporter (when supported)

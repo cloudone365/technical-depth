@@ -17,6 +17,10 @@ gpu_telemetry_retention: 30d
 
 # One Grafana for host AND clusters (02-Kubernetes Chapter 17 §5.4): after kps is installed with its
 # Prometheus on NodePort 30090, set this to http://127.0.0.1:30090. Adds the data source 'Kubernetes'
-# and the dashboard 'Spark · Kubernetes' to this Grafana (:3000). Empty = host only (default).
+# and the cluster dashboards below to this Grafana (:3000). Empty = host only (default).
 # If Kubernetes is down, only the Kubernetes panels go blank; the host panels keep working.
 gpu_telemetry_k8s_prometheus_url: ""
+# Generated copies (02 and 03 gen_dashboard.py --host-grafana), pinned to data source 'Kubernetes'
+gpu_telemetry_k8s_dashboards:
+  - spark-k8s-dashboard.json            # Spark · Kubernetes (02 Chapter 17)
+  - spark-llm-serving-dashboard.json    # Spark · LLM serving (DeepSeek) (03 Chapter 16; also used by 04-Qwen)
