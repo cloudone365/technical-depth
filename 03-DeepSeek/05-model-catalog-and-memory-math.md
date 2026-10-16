@@ -245,6 +245,15 @@ kubectl --context spark-root apply -k .        # tools, eval data and the catalo
 mkdir -p results
 ```
 
+#### What each command does
+
+| Command | What it does | Why |
+|---|---|---|
+| `export KUBECONFIG=…/kubeconfig-spark-lab.yaml` | points kubectl at the lab's three clusters | every `--context spark-root` command needs it; lasts for this terminal only |
+| `describe resourcequota serving-budget` | how much of `llm-serving`'s 8 CPU · 90 Gi · 6 slices is used | the 32B models need up to 87 Gi: see the room before you start |
+| `apply -k .` | loads the lab's Python tools (`deepseek-tools`), eval data (`deepseek-evaldata`) and the catalog as ConfigMaps | later Jobs run these tools in pods without building images |
+| `mkdir -p results` | a folder for test results | Task 5.5 writes its JSON reports there |
+
 ### Task 5.1 · Size a model from its config (CPU)
 
 #### What this lab does (script `lab/tools/model_math.py`)
@@ -285,6 +294,16 @@ kubectl --context spark-root -n llm-serving exec deploy/vllm -- sh -c \
 python3 tools/model_math.py --config /tmp/r1-7b-config.json --util 0.20 --ctx 32768
 ```
 
+#### What each command does
+
+| Command | What it does | Why |
+|---|---|---|
+| `model_math.py --list` | the models the calculator knows | the names to use next |
+| `model_math.py deepseek-r1-distill-qwen-32b --util 0.70 --ctx 16384` | predicts weights, the KV cache left over, how many 16K chats fit, and a verdict | the core skill: will it fit before you download 64 GB? |
+| `model_math.py --compare …` (4 models) | KV-cache bytes per token side by side | why some models hold far more chats in the same memory (GQA, MLA) |
+| `kubectl … exec deploy/vllm -- sh -c 'cat …/config.json' > /tmp/r1-7b-config.json` | copies R1-7B's real `config.json` out of the vLLM pod's model cache | sizing from the model's own file, not a preset; needs R1-7B downloaded once (`scripts/serve-model.sh r1-7b`) |
+| `model_math.py --config /tmp/r1-7b-config.json --util 0.20 --ctx 32768` | the same prediction from that file | must match the preset: 56 KiB per token |
+
 ### Task 5.2 · Sweep formats and contexts (CPU)
 
 #### What this lab does (script `lab/tools/model_math.py`, format sweep)
@@ -322,6 +341,14 @@ python3 tools/model_math.py deepseek-coder-v2-lite --util 0.45 --ctx 32768
 ```
 
 Compare the output with §3.2. Then answer, before you download anything: which formats let a 32B model run next to `r1-7b` and bge-m3 within Σ util ≲ 0.72? (FP8 at 0.45 or AWQ at 0.30, plus 0.20 and 0.06; then check the pod memory against §3.4, where FP8 fails the quota with the app stack.)
+
+#### What each command does
+
+| Command | What it does | Why |
+|---|---|---|
+| `for d in bf16 fp8 awq q4_k_m … --dtype $d … \| grep …` | the same 32B in four number formats, keeping the weights, KV and verdict lines | quantisation shrinks the weights (≈ 64 → 32 → 17 GB) and frees memory for chats |
+| `… --dtype fp8 --kv-dtype fp8 --ctx 32768` | 8-bit weights and an 8-bit KV cache at 32K context | halving the KV cache doubles the context or the number of chats |
+| `qwen2.5-32b --dtype awq …` · `deepseek-coder-v2-lite …` | sizes the two other models of Tasks 5.5 and 5.6 | checks they fit before you serve them |
 
 ### Task 5.3 · Prediction vs vLLM vs host
 
@@ -380,6 +407,17 @@ kubectl --context spark-root describe node dgx-spark-1 | sed -n '/Allocated reso
 kubectl --context spark-root -n llm-serving describe resourcequota serving-budget | grep -E 'memory'
 ```
 
+#### What each command does
+
+| Command | Where | What it does | Why |
+|---|---|---|---|
+| `scripts/serve-model.sh r1-32b-fp8` | MacBook | downloads (≈ 32 GB the first time), deploys and smoke-tests the 32B FP8 model in `vllm` | a real model to check the prediction against |
+| `logs deploy/vllm \| grep 'Model loading took\|…KV cache…\|Maximum concurrency'` | MacBook | vLLM's own numbers: weights loaded, KV memory and tokens, maximum chats | compare with Task 5.2's prediction: within a few percent |
+| `free -g` · `grep … /proc/meminfo` | dgx-spark-1 | the host's view of the shared pool | the third opinion: what Linux sees left |
+| `get deploy vllm -o jsonpath='{…resources}'` | MacBook | the pod's requests and limits (58 Gi for this model) | what Kubernetes promised the pod |
+| `describe node dgx-spark-1 \| sed -n '/Allocated resources/,/Events/p'` | MacBook | the total promised on the Spark | what is left for other pods |
+| `describe resourcequota serving-budget \| grep memory` | MacBook | the namespace's used memory | the budget view of the same pod |
+
 ### Task 5.4 · Watch the pool during a load
 
 #### What this lab does (script `02-Kubernetes/lab/scripts/uma-watch.sh`, run on the Spark)
@@ -412,6 +450,13 @@ kubectl --context spark-root -n llm-serving rollout restart deploy/vllm
 ```
 
 Restart `uma-watch.sh` on the new pod. Watch `MemAvailable` fall in two steps (weights, then KV pre-allocation) and the page cache rise as the safetensors files are read. Compare the pod's cgroup usage with its 58 Gi limit: that is the measurement that tells you whether CUDA memory is charged to the pod.
+
+#### What each command does
+
+| Command | Where | What it does | Why |
+|---|---|---|---|
+| `scripts/uma-watch.sh llm-serving <vllm pod> spark-root 2` | dgx-spark-1, in `02-Kubernetes/lab` | host available memory, page cache and the pod's memory every 2 s | leave it running and watch the next command |
+| `rollout restart deploy/vllm` | MacBook, second terminal | unloads and reloads the model | memory leaves, the page cache fills from the disk reads, then ≈ 58 Gi come back: 02 Chapter 20 §5.3 with a big model |
 
 ### Task 5.5 · Compare the two 32B models on the same tests
 
@@ -471,6 +516,21 @@ scripts/serve-model.sh r1-32b
 ```
 
 Re-run the maths suite and compare with `r1-32b-fp8`. [Chapter 02](02-fp8-training-and-kernels.md) explains what FP8 W8A8 changes numerically. Afterwards serve `r1-7b` again and scale the parked workloads back to the replica counts you noted. Qdrant and the mock LLM stay up throughout: 87 + ~2.4 Gi fits the quota.
+
+#### What each command does
+
+| Command | What it does | Why |
+|---|---|---|
+| `for m in r1-32b-fp8 qwen2.5-32b-awq; do scripts/serve-model.sh $m` | switches the served model each round | same server, same tests: only the model differs |
+| `port-forward svc/vllm 8000 … & pf=$!` | tunnel to vLLM, remembering its process id | `kill $pf` closes exactly this tunnel after the round |
+| `temp=…` | 0.6 for R1, 0.7 for Qwen | each model at its recommended temperature |
+| `eval_harness.py --suites math json --concurrency 8 --out results/$m.json` | maths word problems and a JSON-output test, 8 at a time; scores, tokens and time saved | quality and speed per model |
+| `eval_harness.py --report …` | side-by-side table of both results | is the reasoning model worth its extra tokens? |
+| `get pods -n batch` | must be empty: no training jobs | they share the same memory pool |
+| `get deploy,statefulset -n llm-serving` | notes what runs | to restore it afterwards |
+| `scale … bge-m3 litellm --replicas=0` · `scale statefulset open-webui litellm-db --replicas=0` | parks the app stack, if deployed (Chapters 12–13) | `r1-32b` (≈ 87 Gi) runs alone |
+| `describe resourcequota … \| grep limits.memory` | checks that only the vLLM pod and ≈ 3 Gi remain | proof there is room before the big load |
+| `scripts/serve-model.sh r1-32b` | serves the BF16 32B | the best single-Spark quality |
 
 ### Task 5.6 · Coder-V2-Lite: FIM, then a sandboxed code and maths evaluation
 
@@ -534,6 +594,15 @@ done
 
 **Record yours.** A common pattern: the coder model is fastest with solid code scores, the reasoning model is strongest on maths and slowest, the instruct model sits in between.
 
+#### What each command does
+
+| Command | What it does | Why |
+|---|---|---|
+| `scripts/serve-model.sh coder-v2-lite` | serves DeepSeek's code model | |
+| the Python block | sends a fill-in-the-middle prompt: code before and after a gap (`<｜fim▁hole｜>`), the model writes the middle | how editor autocomplete works; proves the model supports it |
+| `kill %1` | closes the tunnel | |
+| loop: `serve-model.sh $m` → `delete job eval` → `yq … eval.yaml \| kubectl apply -f -` → `wait --for=condition=complete` → `logs job/eval \| grep …` | for three models: serve it, write its name and the `code math` suites into the eval Job, run the tests in a pod, wait, print the scores | generated code runs in a locked-down pod, never on your MacBook; in-cluster also avoids the slow port-forward |
+
 ### Task 5.7 · Use the coder from an editor
 
 #### What this lab does (LiteLLM alias `coder`, editor settings)
@@ -559,6 +628,12 @@ Add a `coder` alias to LiteLLM ([Chapter 12](12-open-webui-and-litellm-gateway.m
 ```
 
 Then configure your editor's OpenAI-compatible provider (Continue, Cline, …): base URL `http://api.lab.local/v1` (LiteLLM's HTTPRoute on Traefik, `192.168.0.115`), model `coder`, and your LiteLLM key. Chat goes to `/v1/chat/completions`, autocomplete to `/v1/completions` with the FIM prompt.
+
+#### What each command does
+
+No shell commands: add the `coder` alias to the LiteLLM config (Chapter 12), then point the editor's OpenAI-compatible provider at `http://api.lab.local/v1` with model `coder` and your LiteLLM key. Chat uses `/v1/chat/completions`, autocomplete `/v1/completions` with the FIM prompt.
+
+**Order to keep in mind:** Tasks 5.1–5.2 run on the MacBook only and download nothing; 5.3–5.6 each download and serve a model (15–64 GB the first time); the full `r1-32b` needs everything else parked; 5.1's config copy needs `r1-7b` downloaded once, and 5.7 needs Chapter 12.
 
 ---
 
