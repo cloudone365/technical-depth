@@ -323,6 +323,35 @@ python3 tools/model_math.py --config /tmp/r1-7b-config.json --util 0.20 --ctx 32
 python3 tools/model_math.py deepseek-r1-distill-qwen-7b --util 0.20 --ctx 32768     # the preset: same 56 KiB per token
 ```
 
+#### Reading the output, in plain words
+
+Think of the model as a **cookbook** and the Spark as a **kitchen with one big shelf**. The tool checks, before you download the book, whether it fits on the shelf and how many customers you can serve from it at once. It downloads nothing: it only does arithmetic from the book's table of contents (the `config.json`). Both runs print the same lines, R1-Distill-Qwen-7B at util 0.20:
+
+```text
+architecture     : gqa, 28 layers, dim 3584
+parameters       :     7.62 B total,     7.62 B active per token
+weights (   bf16) :     14.2 GiB
+KV/token (bf16)  :     56.0 KiB   (MHA-equivalent 392.0 KiB)
+budget           : 0.20 × 121.7 GiB × 1 Spark(s) = 24.3 GiB (− 3.0 GiB activations/graphs)
+KV cache         :      7.2 GiB → 133,977 tokens = 4 concurrent sequences at 32,768 context
+verdict          : ✓ fits (set --gpu-memory-utilization 0.20)
+decode ceiling   : ≈   18 tok/s single stream (15.2 GB active weights + KV of 4K context per token at 273 GB/s)
+```
+
+| Line | In the kitchen | What the number means |
+|---|---|---|
+| `parameters 7.62 B, all active` | the size of the book | 7.6 billion numbers, every one used for every token (a dense model, not a mixture of experts) |
+| `weights 14.2 GiB` | the book on the shelf | 7.62 B × 2 bytes (bf16) |
+| `budget 24.3 GiB` | the shelf you are allowed | the Spark's 121.7 GiB shared pool × util 0.20: the same slot Qwen 0.5B used in 02 Chapter 20 |
+| `− 3.0 GiB` | the chef's scratch space | working memory for activations and CUDA graphs |
+| `KV/token 56 KiB` | the notepad line per word | the notes the model keeps on every token of a conversation (the KV cache); GQA keeps them 7× smaller than old-style attention (the 392 KiB) |
+| `KV cache 7.2 GiB → 133,977 tokens` | room left for notepads | 24.3 − 3 − 14.2 = 7.2 GiB, enough notes for ≈ 134 K tokens |
+| `= 4 concurrent sequences at 32,768` | customers at once | four conversations may each grow to 32 K tokens; shorter chats mean more customers |
+| `verdict ✓ fits` | the book fits the shelf | weights + scratch ≤ budget, so this model runs in `serving-budget` at util 0.20 |
+| `decode ceiling ≈ 18 tok/s` | how fast one customer is served | every new token re-reads the whole 15.2 GB book; the GB10's memory delivers 273 GB/s, so 273 ÷ 15.2 ≈ 18 tokens/s for one user. Qwen 0.5B reached 164 in 02 Chapter 20 §5.5 because its book is 14× thinner |
+
+Two things decide everything in this chapter: **does it fit** (book + scratch ≤ shelf) and **how fast is one user** (memory speed ÷ book size). Task 5.2 trades them: a thinner book (FP8, AWQ, 4-bit) leaves more room for notepads and reads faster.
+
 Once a model has been served (`scripts/serve-model.sh r1-7b`, Chapter 06), the same file can be read from the cache inside the vLLM pod; at Chapter 05 only the Qwen 0.5B of 02 Chapter 20 is there:
 
 ```bash
