@@ -254,6 +254,35 @@ mkdir -p results
 | `apply -k .` | loads the lab's Python tools (`deepseek-tools`), eval data (`deepseek-evaldata`) and the catalog as ConfigMaps | later Jobs run these tools in pods without building images |
 | `mkdir -p results` | a folder for test results | Task 5.5 writes its JSON reports there |
 
+**How `kubectl --context spark-root apply -k .` works.** `-k` means kustomize: kubectl reads the `kustomization.yaml` in this folder (`.` = `03-DeepSeek/lab`, so run it from there), builds the objects it describes, and `apply` creates them or updates them (safe to repeat). This recipe deploys no app; its `configMapGenerator` packs lab files into four ConfigMaps:
+
+| ConfigMap | Namespace | Files | Used by |
+|---|---|---|---|
+| `deepseek-tools` | `llm-serving` | `tools/model_math.py`, `eval_harness.py`, `rag_demo.py`, … | eval Jobs (Task 5.6) and later chapters |
+| `deepseek-evaldata` | `llm-serving` | `data/math_word.jsonl`, `code_tasks.jsonl`, `json_tasks.jsonl`, `rag_gold.jsonl` | the test questions of `eval_harness.py` |
+| `deepseek-catalog` | `llm-serving` | `models.yaml` | the model catalog |
+| `deepseek-train` | `batch` | `grpo_tiny.py`, `sft_lora.py`, `fsdp_finetune.py`, … | training Jobs in later chapters |
+
+```mermaid
+flowchart LR
+  K["kustomization.yaml<br/>configMapGenerator"] -->|"kustomize reads tools/, data/, models.yaml"| CM["4 ConfigMaps<br/>deepseek-tools · -evaldata · -catalog · -train"]
+  CM -->|"kubectl apply → API server spark-root"| NS["ns llm-serving / batch"]
+  NS -->|"mounted as a folder"| JOB["Job pod (stock image)<br/>python3 /tools/eval_harness.py"]
+  classDef k8s fill:#dbe9ff,stroke:#1f6feb,stroke-width:2px,color:#000
+  classDef ext fill:#f6f8fa,stroke:#57606a,color:#000
+  class CM,NS,JOB k8s
+  class K ext
+```
+
+Why ConfigMaps: a Job needs the lab's scripts inside its pod. Instead of building an image for every change, the pod uses a stock image and mounts the scripts; edit a tool, run `apply -k .` again, and the next Job uses it. `disableNameSuffixHash: true` keeps the names fixed (`deepseek-tools`, not `deepseek-tools-7k2f9…`) so the Job files can name them. It is the same `-k` as `apply -k manifests/root-llms/90-serving/vllm` in 02, which builds a Deployment and a Service instead.
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+kubectl --context spark-root kustomize . | grep -E '^kind|^  name|^  namespace'      # what it builds, nothing sent
+kubectl --context spark-root apply -k . --dry-run=server                            # what apply would change
+kubectl --context spark-root -n llm-serving get configmap deepseek-tools -o jsonpath='{.data}' | jq 'keys'   # after apply: the files inside
+```
+
 ### Task 5.1 · Size a model from its config (CPU)
 
 #### What this lab does (script `lab/tools/model_math.py`)
