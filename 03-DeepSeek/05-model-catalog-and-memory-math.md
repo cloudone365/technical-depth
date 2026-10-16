@@ -289,7 +289,7 @@ kubectl --context spark-root -n llm-serving get configmap deepseek-tools -o json
 
 - **Where:** on the MacBook, standard library only. Read-only.
 - **Three preset runs:** lists the models the tool knows, sizes R1-Distill-Qwen-32B at util 0.70 and 16K context, and compares KV per token for four models.
-- **From a real config:** copies `config.json` of R1-Distill-Qwen-7B out of the running vLLM pod's model cache to `/tmp/r1-7b-config.json` and sizes the model from that file at the catalog's util 0.20 and 32K context. Needs a vLLM pod that has served `r1-7b` before.
+- **From a real config:** fetches `config.json` of R1-Distill-Qwen-7B (about 1 KB, from Hugging Face) to `/tmp/r1-7b-config.json` and sizes the model from that file at the catalog's util 0.20 and 32K context. After `r1-7b` has been served, the same file can be read from the vLLM pod's model cache.
 
 #### What to look for
 
@@ -303,7 +303,7 @@ kubectl --context spark-root -n llm-serving get configmap deepseek-tools -o json
    | `verdict` | `✓ fits (set --gpu-memory-utilization 0.70)` |
 3. **From config:** the 7B's numbers match the preset `deepseek-r1-distill-qwen-7b` (56 KiB per token).
 
-**If something's off:** the `kubectl exec … cat` finds no file → that model was never downloaded into `model-cache`; run `scripts/serve-model.sh r1-7b` once. More in §7.
+**If something's off:** the `kubectl exec … cat` finds no file (and `model_math.py` then says *not a readable config.json*) → that model was never downloaded into `model-cache`: use the `curl` line, or run `scripts/serve-model.sh r1-7b` once. More in §7.
 
 #### Run it
 
@@ -314,13 +314,22 @@ python3 tools/model_math.py deepseek-r1-distill-qwen-32b --util 0.70 --ctx 16384
 python3 tools/model_math.py --compare deepseek-r1-distill-qwen-7b deepseek-v2-lite llama-3.1-8b deepseek-r1-distill-qwen-32b
 ```
 
-Check that the tool's pool size is 121.7 GiB (the `budget` line prints `util × <pool> GiB`). Then size a model from a downloaded config instead of a preset (after any `serve-model.sh` run has filled the cache):
+Check that the tool's pool size is 121.7 GiB (the `budget` line prints `util × <pool> GiB`). Then size a model from its real `config.json` instead of a preset. The file is about 1 KB, so fetch it straight from Hugging Face; no weights are downloaded:
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
+curl -sL https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B/resolve/main/config.json -o /tmp/r1-7b-config.json
+python3 tools/model_math.py --config /tmp/r1-7b-config.json --util 0.20 --ctx 32768
+python3 tools/model_math.py deepseek-r1-distill-qwen-7b --util 0.20 --ctx 32768     # the preset: same 56 KiB per token
+```
+
+Once a model has been served (`scripts/serve-model.sh r1-7b`, Chapter 06), the same file can be read from the cache inside the vLLM pod; at Chapter 05 only the Qwen 0.5B of 02 Chapter 20 is there:
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+kubectl --context spark-root -n llm-serving exec deploy/vllm -- ls /models/hf          # which models are cached
 kubectl --context spark-root -n llm-serving exec deploy/vllm -- sh -c \
   'cat /models/hf/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-7B/snapshots/*/config.json' > /tmp/r1-7b-config.json
-python3 tools/model_math.py --config /tmp/r1-7b-config.json --util 0.20 --ctx 32768
 ```
 
 #### What each command does
@@ -330,7 +339,8 @@ python3 tools/model_math.py --config /tmp/r1-7b-config.json --util 0.20 --ctx 32
 | `model_math.py --list` | the models the calculator knows | the names to use next |
 | `model_math.py deepseek-r1-distill-qwen-32b --util 0.70 --ctx 16384` | predicts weights, the KV cache left over, how many 16K chats fit, and a verdict | the core skill: will it fit before you download 64 GB? |
 | `model_math.py --compare …` (4 models) | KV-cache bytes per token side by side | why some models hold far more chats in the same memory (GQA, MLA) |
-| `kubectl … exec deploy/vllm -- sh -c 'cat …/config.json' > /tmp/r1-7b-config.json` | copies R1-7B's real `config.json` out of the vLLM pod's model cache | sizing from the model's own file, not a preset; needs R1-7B downloaded once (`scripts/serve-model.sh r1-7b`) |
+| `curl -sL https://huggingface.co/…/config.json -o /tmp/r1-7b-config.json` | downloads only R1-7B's `config.json` (≈ 1 KB, no weights) | sizing from the model's own file, not a preset |
+| `kubectl … exec deploy/vllm -- sh -c 'cat …/config.json'` | the same file from the vLLM pod's model cache | works only after the model was served once (`scripts/serve-model.sh r1-7b`); `ls /models/hf` shows what is cached |
 | `model_math.py --config /tmp/r1-7b-config.json --util 0.20 --ctx 32768` | the same prediction from that file | must match the preset: 56 KiB per token |
 
 ### Task 5.2 · Sweep formats and contexts (CPU)

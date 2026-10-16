@@ -207,7 +207,12 @@ def main():
                   f"{mha_equivalent_kv(p)/1024:8.1f}KiB")
         return 0
     if a.config:
-        p, name = from_hf_config(json.load(open(a.config))), a.config
+        try:
+            cfg = json.load(open(a.config))
+        except (OSError, json.JSONDecodeError) as e:
+            ap.error(f"{a.config}: not a readable config.json ({e.__class__.__name__}); "
+                     "empty usually means the copy from the pod found no file: that model isn't in model-cache yet")
+        p, name = from_hf_config(cfg), a.config
     elif a.model in PRESETS:
         p, name = resolve(a.model), a.model
     else:
