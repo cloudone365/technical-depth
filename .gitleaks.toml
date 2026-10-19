@@ -1,0 +1,20 @@
+# gitleaks config: default rules plus an allowlist for documentation placeholders.
+# Anything matching here is NOT a leak; everything else in the default ruleset is.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Documentation placeholders and example values"
+regexTarget = "line"   # test the whole line, not just the captured secret
+regexes = [
+  '''AKIAIOSFODNN7EXAMPLE''',                 # AWS's official doc example key
+  '''wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY''',
+  '''\$\{[A-Z_]+:\?[^}]*\}''',               # ${VAR:?set in your shell} patterns
+  '''<[a-z-]+ token from [a-z0-9]+>''',       # <admin token from vault01>
+  '''key: `[0-9.]+-[a-z-]+\.yml`''',          # "the fake nodes trust your key: `09.1-fleet-sim.yml`" (a filename)
+  '''-u "[a-z-]+:\$\(cat [^)]+\)"''',          # curl -u "user:$(cat /tmp/x.key)" — read from a file at run time
+]
+paths = [
+  '''03-DeepSeek/lab/results/''',
+  '''04-Qwen/lab/results/''',
+]

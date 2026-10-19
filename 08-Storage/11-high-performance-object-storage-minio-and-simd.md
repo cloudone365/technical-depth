@@ -123,7 +123,7 @@ Save this script as `deploy_minio_cluster.sh`:
 set -euo pipefail
 
 export MINIO_ROOT_USER="minio_admin"
-export MINIO_ROOT_PASSWORD="SuperSecretExascalePassword2026!"
+export MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:?set in your shell, never in this file}"
 export MINIO_STORAGE_CLASS_STANDARD="EC:4" # 12 Data + 4 Parity
 
 # Launch distributed cluster across 4 storage servers (4 NVMe drives per node = 16 drives)
