@@ -193,6 +193,10 @@ def main():
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
     if a.list:
+        # preset = the name you pass to this tool; kind = attention/MLP family (gqa, mla-moe, gqa-moe);
+        # total = all parameters (sets weight memory); active = parameters read per token (sets speed);
+        # hf = the Hugging Face repo (what models.yaml / serve-model.sh download).
+        print(f"{'preset':32} {'kind':8} {'total':>14} {'active/token':>14}  hf repo")
         for k in PRESETS:
             p = resolve(k)
             t, act = params(p)
