@@ -439,7 +439,7 @@ Compare the output with §3.2. Then answer, before you download anything: which 
    | `GPU KV cache size: … tokens` | KV GiB ÷ 256 KiB exactly; 65–82K | 65,648 |
    | `Maximum concurrency for 32768 tokens` | tokens ÷ 32,768: 2–2.5× | 2.0× |
 
-   Re-run the prediction with the measured overhead and it lands on the log: `python3 tools/model_math.py deepseek-r1-distill-qwen-32b --dtype fp8 --util 0.45 --max-len 32768 --overhead-gib 6.6`. To get more concurrency: `--max-num-seqs=16` (smaller activation peak), `--kv-cache-dtype fp8` (half the KV per token), or util 0.50.
+   Re-run the prediction with the measured overhead and it lands on the log: `python3 tools/model_math.py deepseek-r1-distill-qwen-32b --dtype fp8 --util 0.45 --ctx 32768 --overhead-gib 6.6`. To get more concurrency: `--max-num-seqs=16` (smaller activation peak), `--kv-cache-dtype fp8` (half the KV per token), or util 0.50.
 3. **Host:** `MemTotal` about 121.7 GiB; `MemAvailable` well below the idle ~119 GiB while the model is loaded.
 4. **Cluster:** the Deployment's `resources` show `requests.memory` and `limits.memory` both `58Gi`; the node's `Allocated resources` and the `serving-budget` quota include those 58 Gi.
 
