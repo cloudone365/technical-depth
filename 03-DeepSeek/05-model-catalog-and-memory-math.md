@@ -429,14 +429,17 @@ Compare the output with §3.2. Then answer, before you download anything: which 
 
 #### What to look for
 
-1. **`serve-model.sh`:** `[PASS] answer: 144 …` and `0 failed`.
+1. **`serve-model.sh`:** `[PASS] answer contains 144 …` and `0 failed` (R1 explains even when told "number only"; the check looks for 144 anywhere in the answer).
 2. **vLLM log vs prediction:**
 
-   | Line | Healthy value |
-   |---|---|
-   | `Model loading took … GiB` | about 31 GiB |
-   | `Available KV cache memory` | about 20 GiB, usually a little less |
-   | `GPU KV cache size: … tokens` | about 82K, within ~15 % once `--overhead-gib` is calibrated |
+   | Line | Healthy value | Seen on a Spark (vLLM 0.11) |
+   |---|---|---|
+   | `Model loading took … GiB` | 30.5–32.5 GiB (RedHatAI keeps embeddings and `lm_head` in bf16, so ≈ 1.7 GiB above the pure-FP8 figure) | 32.2 GiB in 187 s |
+   | `Available KV cache memory` | 16–20 GiB: the 3 GiB default overhead is low for a 64-layer model at `--max-num-seqs=32`; the real figure is 54.8 − weights − KV | 16.0 GiB (overhead 6.6 GiB) |
+   | `GPU KV cache size: … tokens` | KV GiB ÷ 256 KiB exactly; 65–82K | 65,648 |
+   | `Maximum concurrency for 32768 tokens` | tokens ÷ 32,768: 2–2.5× | 2.0× |
+
+   Re-run the prediction with the measured overhead and it lands on the log: `python3 tools/model_math.py deepseek-r1-distill-qwen-32b --dtype fp8 --util 0.45 --max-len 32768 --overhead-gib 6.6`. To get more concurrency: `--max-num-seqs=16` (smaller activation peak), `--kv-cache-dtype fp8` (half the KV per token), or util 0.50.
 3. **Host:** `MemTotal` about 121.7 GiB; `MemAvailable` well below the idle ~119 GiB while the model is loaded.
 4. **Cluster:** the Deployment's `resources` show `requests.memory` and `limits.memory` both `58Gi`; the node's `Allocated resources` and the `serving-budget` quota include those 58 Gi.
 

@@ -37,7 +37,8 @@ info "waiting for vLLM ($name) — first start compiles CUDA graphs"
 k -n $NS rollout status deploy/vllm --timeout=45m && ok "vLLM ready with $name" || { bad "rollout failed: kubectl --context spark-root -n $NS logs deploy/vllm"; exit 1; }
 out=$(k -n $NS exec deploy/vllm -- curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
   -d "{\"model\":\"$name\",\"messages\":[{\"role\":\"user\",\"content\":\"What is 12*12? Answer with the number only.\"}],\"max_tokens\":1024}")
-content=$(python3 -c 'import json,sys; m=json.loads(sys.stdin.read())["choices"][0]["message"]; print((m.get("content") or "").strip()[:80]); print(len(m.get("reasoning_content") or ""))' <<<"$out" 2>/dev/null)
-ans=$(head -1 <<<"$content"); rlen=$(tail -1 <<<"$content")
-[[ $ans == *144* ]] && ok "answer: $ans  (reasoning chars: $rlen)" || bad "unexpected answer: ${out:0:300}"
+# Reasoning models often ignore "number only" and explain; look for 144 anywhere in the answer.
+content=$(python3 -c 'import json,sys; m=json.loads(sys.stdin.read())["choices"][0]["message"]; c=(m.get("content") or "").strip(); print("144" in c); print(c.replace("\n"," ")[:80]); print(len(m.get("reasoning_content") or ""))' <<<"$out" 2>/dev/null)
+hit=$(sed -n 1p <<<"$content"); ans=$(sed -n 2p <<<"$content"); rlen=$(sed -n 3p <<<"$content")
+[[ $hit == True ]] && ok "answer contains 144: ${ans}…  (reasoning chars: $rlen)" || bad "unexpected answer: ${out:0:300}"
 summary
