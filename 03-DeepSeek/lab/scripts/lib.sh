@@ -9,6 +9,7 @@ K8S_LAB="$LAB_DIR"
 # shellcheck source=../versions.env
 source "$DS_DIR/versions.env"
 NS=llm-serving
+python3 -c 'import yaml' 2>/dev/null || { echo "[FAIL] python3 cannot import yaml: python3 -m pip install pyyaml (needed to read models.yaml)" >&2; exit 2; }
 model_field() {   # model_field <name> <field>  (from models.yaml)
   python3 - "$DS_DIR/models.yaml" "$1" "$2" <<'PY'
 import sys, yaml

@@ -425,6 +425,7 @@ Compare the output with §3.2. Then answer, before you download anything: which 
 - **Serves `r1-32b-fp8`** in Deployment `vllm` (`llm-serving`): util **0.45**, **58 Gi** (request = limit), 32K context, from `models.yaml`. First run downloads ~34 GB.
 - **Reads three views of memory:** what vLLM logs (weights, KV memory, KV tokens), what the Spark's kernel reports (`free -g`, `/proc/meminfo`), and what Kubernetes charged (pod resources, node allocation, quota).
 - **Read-only** apart from the model switch.
+- **Needs PyYAML on the MacBook** (the script reads `models.yaml`): `python3 -m pip install pyyaml` once; `scripts/serve-model.sh list` is the check.
 
 #### What to look for
 
@@ -729,6 +730,7 @@ No shell commands: add the `coder` alias to the LiteLLM config (Chapter 12), the
 | Pod Pending, `Insufficient memory` | the pool is taken by other engines and batch pods (all request = limit) | `kubectl --context spark-root describe node dgx-spark-1 \| sed -n '/Allocated resources/,/Events/p'`; park an engine or wait for the batch job |
 | `exceeded quota: serving-budget` | Σ pod memory in `llm-serving` over 90 Gi (typically `r1-32b` next to the app stack, or a 32B plus a 7B plus RAG) | park a model, bge-m3 or the app stack (§3.4, Task 5.5) |
 | Node `MemoryPressure` although every pod fits | Σ util over 0.72, a sandbox model in dev-llms, a `docker run` on the host, or the page cache | `free -g` on the Spark; keep the util sum ≲ 0.72 yourself (no quota sees host processes) |
+| `ModuleNotFoundError: No module named 'yaml'` from `serve-model.sh` (MacBook) | the script reads `models.yaml` with PyYAML, which is not in macOS's Python | `python3 -m pip install pyyaml` (`--user` or `brew install pyyaml` on Homebrew Python); nothing reached the Spark |
 | AWQ model fails: `awq_marlin not supported` | kernel not built for sm_121 in this image | `--quantization=awq`, or an FP8 variant of the model |
 | R1 scores low on JSON | reasoning leaks into `content`, or it wraps JSON in prose | reasoning parser on (drill D01); route JSON to Qwen |
 | R1 maths items time out | long chains at concurrency 8 | raise `--max-tokens`; lower concurrency |
