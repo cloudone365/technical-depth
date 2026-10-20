@@ -156,6 +156,8 @@ Real concurrency is higher than the "full-length" column, because most requests 
 | `mixtral-8x7b-fp8` | 47 GB → 43.8 | 128.0 KiB | 0.55 | 66.9 GiB | 20.2 GiB | 165K | 5.0 at 32K | 70Gi |
 | `nemotron-nano-8b` | 16 GB → 14.9 | 128.0 KiB | 0.20 | 24.3 GiB | 6.4 GiB | 53K | 1.6 at 32K | 28Gi |
 
+**Why these numbers differ a little from §3.2.** The two tables use different weight inputs. §3.2 and `model_math.py` compute the book from arithmetic (parameters × bytes per weight: 7.62 B × 2 = 14.2 GiB for `r1-7b`); this table uses the `weights:` field of `models.yaml`, the on-disk size of the Hugging Face repo rounded to whole GB (15 GB → 14.0 GiB), which also holds whatever the publisher kept in bf16 (RedHatAI's FP8 32B: 34 GB on disk, 31.7 GiB, against 30.5 by arithmetic). Sequence counts here are at each model's own `max_len`, where §3.2 shows 16K. The real ordering is formula (§3.2) < disk size (this table) < vLLM's `Model loading took` (Task 5.3: 32.2 GiB for the FP8 32B, plus ~6.6 GiB of activations and graphs rather than 3): each step counts something the previous one ignores. Predict with the formula, refine with the disk size, confirm with the log, then calibrate `--overhead-gib`.
+
 Two patterns stand out. MLA (`v2-lite`, `coder-v2-lite`) holds 5–8× more tokens than a GQA model with the same KV budget. And at 32K, the 7–8B models at util 0.20 and every 32B get only a few full-length sequences: GQA KV at 128–256 KiB per token is expensive. That is fine for interactive use, where most requests are far shorter; for long-context batch work raise util (within §3.4) or use FP8 KV (`--kv-cache-dtype fp8`), the cheapest way to double the token count.
 
 ### 3.4 What runs together
