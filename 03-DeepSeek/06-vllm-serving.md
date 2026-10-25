@@ -458,7 +458,7 @@ kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/nul
 sleep 2
 for c in 1 8 32; do
   echo "concurrency $c:"
-  python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites json --limit 32 \
+  python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math --limit 40 \
     --concurrency $c --max-tokens 2048 | grep 'tok/s'
 done
 kill %1
