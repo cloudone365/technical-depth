@@ -438,51 +438,128 @@ df -h /data
 #### What this lab does (Job `02-Kubernetes/lab/manifests/root/60-storage/fio-job.yaml`, then vLLM restarts)
 
 - **fio:** a 64 Gi `local-nvme` scratch PVC and Job `fio-ai` in `platform-tools`: four 45-second profiles on a 16 GB file (sequential 1M read and write, random 128k read, random 4k read).
-- **Restarts vLLM twice:** once with the weights still in page cache (warm), once right after dropping the page cache on the Spark (cold), timing `rollout status` each time. The model stays `r1-7b`.
+- **A raw read of the checkpoint** inside the vLLM pod, cold (page cache dropped) and warm: what the disk and the page cache deliver without vLLM.
+- **Restarts vLLM twice:** once with the weights in page cache (warm), once right after dropping it (cold), timing `rollout status` and reading the loader's log lines. The model stays `r1-7b`.
+- **Separates the disk from the loader:** if the raw read takes seconds and the loader a minute, warm or cold, the loader is the bottleneck.
 
 #### What to look for
 
 1. **fio:** a `weights-seqread-1m: (groupid=…)` block and its `READ:` bandwidth line; record it for §3.6's formula.
-2. **Restart timings:**
+2. **Raw read and restarts:**
 
-   | Row | Healthy value | Seen on a Spark (nvcr vLLM 25.09, r1-7b) |
+   | Row | Healthy value | Seen on a Spark (nvcr vLLM 25.09 = vLLM 0.10.1.1, r1-7b, 15 GB) |
    |---|---|---|
-   | `Loading weights took` (warm) | the formula says seconds; on the GB10 expect about a minute | 73.7 s |
-   | `Loading weights took` (cold) | about the same as warm | 76.0 s |
+   | raw `cat`, cold | 15 GB ÷ NVMe speed: a few seconds | 6.1 s (≈ 2.5 GB/s) |
+   | raw `cat`, warm | well under a second | 0.6 s (≈ 25 GB/s) |
+   | `Loading weights took`, warm | §3.6 says seconds; on the GB10 about a minute | 73.7 s, retest 81.2 s |
+   | `Loading weights took`, cold | about the same as warm | 76.0 s, retest 75.9 s |
    | `Graph capturing finished` | seconds | 7 s |
    | `rollout status` wall time | 2–3 min | 2:18 warm, 2:28 cold |
 
-   Warm and cold differ by ~2 s, so the disk is not what sets the load time: vLLM's weight loader moves the checkpoint at about 190 MB/s whether the bytes come from the page cache or the NVMe (the FP8 32B in Chapter 05 Task 5.3 took 187 s for 32 GiB, the same rate). §3.6's formula is the floor the hardware allows; the loader path (safetensors read, copy into GPU allocations) is the real cost here, and the rest of the wall time is pod start, KV allocation and the readiness probe.
+   Warm and cold restarts differ by noise, while the raw read is 10–100× faster than the loader. The disk and the page cache are not what sets the load time: vLLM's weight loader moves the checkpoint at about 190 MB/s whatever the source (the FP8 32B in Chapter 05 Task 5.3 took 187 s for 32 GiB, the same rate). §3.6's formula is the floor the hardware allows; the loader path (safetensors parsed tensor by tensor, each copied into GPU allocations) is the real cost, and the rest of the wall time is pod start, KV allocation and the readiness probe. Restart cost on this Spark: about 2.5 min for a 7B, 4 min for a 32B.
 3. **`rollout status`** ends with `successfully rolled out` within the 30 min timeout.
+4. **No faster loader in this image:** vLLM 0.10.1.1 has no `--safetensors-load-strategy`, and neither `fastsafetensors` nor `runai_model_streamer` is installed, so `--load-format` offers nothing quicker than the default.
 
-**If something's off:** warm restart no faster than cold → the page cache was already evicted; check `free -g` on the Spark. Clean up the fio Job and PVC with `kubectl --context spark-root delete -f manifests/root/60-storage/fio-job.yaml` from `02-Kubernetes/lab`. More in §7.
+**If something's off:** warm `cat` as slow as cold → the page cache was evicted between the two reads; check `free -g` on the Spark. A fio Job or `vllm-load` still running skews every number: run the pre-check first. More in §7.
 
 #### Run it
+
+**Pre-check: nothing else on the disk or the engine.**
+
+```bash
+# ▶ MacBook · any folder
+kubectl --context spark-root -n platform-tools get job,pvc | grep -i fio                  # empty, unless you're about to run fio
+kubectl --context spark-root -n llm-serving get pods -l app=vllm                          # one vllm pod, 1/1 Running, serving r1-7b
+kubectl --context spark-root get pods -A | grep -E 'prefetch|eval|fio|bench|load' | grep -v Completed   # empty: no downloads, evals or load generator
+```
+
+If the last line shows `vllm-load` (02 Chapter 20 §5.6), delete it from `02-Kubernetes/lab`: `kubectl --context spark-root delete -f manifests/root-llms/90-serving/vllm/vllm-load.yaml`.
+
+**Step 1 · fio: the NVMe on its own.**
 
 ```bash
 # ▶ MacBook · 02-Kubernetes/lab
 kubectl --context spark-root apply -f manifests/root/60-storage/fio-job.yaml
 kubectl --context spark-root -n platform-tools logs -f job/fio-ai | grep -E '^\S+:|READ:|WRITE:'
+kubectl --context spark-root delete -f manifests/root/60-storage/fio-job.yaml             # clean up: Job + 64 Gi scratch PVC
 ```
 
-Record the `weights-seqread-1m` bandwidth: it is the denominator of the cold-load estimate in §3.6.
+Record the `weights-seqread-1m` bandwidth: it is the denominator of the cold-load estimate in §3.6. Delete the Job before the restarts so fio doesn't compete for the NVMe.
+
+**Step 2 · three shortcuts for this terminal.** `drop` empties the Spark's page cache over ssh and asks for your sudo password there.
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-kubectl --context spark-root -n llm-serving rollout restart deploy/vllm
-time kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=30m
-kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -E 'Loading weights took|Model loading took|Graph capturing finished'
+k() { kubectl --context spark-root -n llm-serving "$@"; }
+drop() { ssh -t dgx-spark-1 "sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches' && free -g | awk 'NR==1||/Mem/'"; }
+W='/models/hf/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-7B/snapshots/*/*.safetensors'
 ```
 
-Run it once with a warm page cache, then again right after the `drop_caches` command from §3.7:
+**Step 3 · raw read: disk and page cache without vLLM.**
 
-| | Wall time | Weight load (log) | Graph capture (log) |
-|---|---|---|---|
-| first serve (download + load, Task 5.3) | | | |
-| restart, warm page cache | | | |
-| restart after `drop_caches` (cold) | | | |
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+drop                                                    # buff/cache drops to a few GiB
+k exec deploy/vllm -- sh -c "time cat $W >/dev/null"    # cold: from the NVMe
+k exec deploy/vllm -- sh -c "time cat $W >/dev/null"    # warm: from the page cache
+```
 
-**Record yours.** If warm and cold come out about equal, as above, the bottleneck is the loader, not storage. To see that the disk itself is fast, time a raw read of the same files inside the pod: `kubectl --context spark-root -n llm-serving exec deploy/vllm -- sh -c 'time cat /models/hf/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-7B/snapshots/*/*.safetensors >/dev/null'` (seconds, not a minute). Measured on the Spark: 6.1 s cold from the NVMe (≈ 2.5 GB/s) and 0.6 s warm from the page cache (≈ 25 GB/s), against 76–81 s for vLLM's loader on the same 15 GB: the loader is ~13× slower than the disk.
+**Step 4 · warm restart** (the cache is full from step 3's second read).
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+k rollout restart deploy/vllm
+time k rollout status deploy/vllm --timeout=30m
+k logs deploy/vllm | grep -E 'Loading weights took|Model loading took|Graph capturing finished'
+```
+
+**Step 5 · cold restart.**
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+drop
+k rollout restart deploy/vllm
+time k rollout status deploy/vllm --timeout=30m
+k logs deploy/vllm | grep -E 'Loading weights took|Model loading took|Graph capturing finished'
+```
+
+Optional, while step 4 or 5 is loading: `top -b -d 5 -n 12 | grep -E 'VLLM|python' | head -24` on the Spark shows what the loader process does with the CPU.
+
+**Step 6 · is a faster loader available in this image?**
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+k exec deploy/vllm -- python3 -c "import vllm; print('vllm', vllm.__version__)"
+k exec deploy/vllm -- vllm serve --help 2>/dev/null | grep -E 'safetensors-load-strategy|load-format'
+k exec deploy/vllm -- python3 -c "import importlib.util as u; [print(m, 'yes' if u.find_spec(m) else 'no') for m in ('fastsafetensors','runai_model_streamer')]"
+```
+
+With `--safetensors-load-strategy` listed (newer vLLM) or either library `yes`, test it with one extra arg in the model's overlay (`--safetensors-load-strategy=eager`, `--load-format=fastsafetensors` or `--load-format=runai_streamer`) and repeat steps 4–5. With none of them, as on 25.09, the load time is a fixed cost of the image.
+
+**Retest:** steps 3–5 again, in the same terminal (or redefine step 2's shortcuts in a new one). One run of each is noisy by ±5 s; two runs show the pattern.
+
+**Clean up:** the fio Job and PVC are already gone after step 1 (`kubectl --context spark-root -n platform-tools get job,pvc | grep -i fio` prints nothing). The restarts leave `r1-7b` serving as before; nothing else to undo. The shortcuts disappear with the terminal.
+
+| | Raw `cat` | Wall time | Weight load (log) | Graph capture (log) |
+|---|---|---|---|---|
+| cold | | | | |
+| warm | | | | |
+
+**Record yours.**
+
+#### What each command does
+
+| Command | What it does | Why |
+|---|---|---|
+| `get … \| grep -E 'prefetch\|eval\|fio\|bench\|load'` | lists anything else reading the disk or calling the engine | other traffic skews both the raw read and the load time |
+| `apply -f fio-job.yaml` · `logs -f job/fio-ai` | runs four fio profiles on a scratch PVC on the same NVMe | the disk's own speed, the floor for any load |
+| `delete -f fio-job.yaml` | removes the Job and its 64 Gi PVC | fio must not run during the restarts |
+| `k()` · `drop()` · `W=` | shorthand for the namespace, the cache drop over ssh, and the checkpoint files | keeps the test lines short and identical between runs |
+| `drop` | `sync; echo 3 > /proc/sys/vm/drop_caches` on the Spark, then `free -g` | empties the page cache: the next read comes from the NVMe |
+| `exec … time cat $W >/dev/null` | reads the 15 GB checkpoint inside the pod and throws it away | disk (cold) and RAM (warm) speed with vLLM out of the picture |
+| `rollout restart` · `time rollout status` | replaces the vLLM pod and times until it is Ready | the restart cost a user sees |
+| `logs … grep 'Loading weights took\|…'` | vLLM's own timings for the weight load, total model load and graph capture | splits the restart into loader, model and engine-init time |
+| `vllm.__version__` · `serve --help` · `find_spec` | version, loader flags, fast-loader libraries | whether a faster loading path exists in this image |
 
 ### Task 5.5 · Watch the page cache compete for UMA
 
