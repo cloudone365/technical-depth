@@ -482,7 +482,7 @@ Run it once with a warm page cache, then again right after the `drop_caches` com
 | restart, warm page cache | | | |
 | restart after `drop_caches` (cold) | | | |
 
-**Record yours.** If warm and cold come out about equal, as above, the bottleneck is the loader, not storage. To see that the disk itself is fast, time a raw read of the same files inside the pod: `kubectl --context spark-root -n llm-serving exec deploy/vllm -- sh -c 'time cat /models/hf/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-7B/snapshots/*/*.safetensors >/dev/null'` (seconds, not a minute).
+**Record yours.** If warm and cold come out about equal, as above, the bottleneck is the loader, not storage. To see that the disk itself is fast, time a raw read of the same files inside the pod: `kubectl --context spark-root -n llm-serving exec deploy/vllm -- sh -c 'time cat /models/hf/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-7B/snapshots/*/*.safetensors >/dev/null'` (seconds, not a minute). Measured on the Spark: 6.1 s cold from the NVMe (≈ 2.5 GB/s) and 0.6 s warm from the page cache (≈ 25 GB/s), against 76–81 s for vLLM's loader on the same 15 GB: the loader is ~13× slower than the disk.
 
 ### Task 5.5 · Watch the page cache compete for UMA
 
