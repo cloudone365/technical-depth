@@ -8,7 +8,8 @@
 #                                          everyday quotas, training jobs against the training window; the
 #                                          everyday quotas are put back at the end.
 if (( BASH_VERSINFO[0] < 4 )); then
-  echo "$0 needs bash >= 4 (this is bash $BASH_VERSION). macOS ships 3.2: brew install bash, then open a new terminal." >&2
+  echo "$0 needs bash >= 4 (this is bash $BASH_VERSION at $BASH). macOS ships 3.2: brew install bash; if it is installed, Homebrew is not first in PATH:" >&2
+  echo "  echo 'eval \"\$(/opt/homebrew/bin/brew shellenv)\"' >> ~/.zprofile && exec zsh -l   (or run: /opt/homebrew/bin/bash $0)" >&2
   exit 1
 fi
 set -euo pipefail
