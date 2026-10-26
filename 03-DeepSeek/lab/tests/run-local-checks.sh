@@ -65,7 +65,8 @@ expect "faster" python3 tools/mla_attention_demo.py --decode-bench 256 --batch 1
 expect "WITH aux-loss-free" python3 tools/moe_router_demo.py --steps 40
 expect "Block scales" python3 tools/fp8_blockscale.py --n 512
 expect "identical" python3 tools/ring_attention_demo.py --world 2 --seq 512
-expect "identical" torchrun --nproc-per-node 2 tools/ring_attention_demo.py --seq 512
+# --standalone + --local_addr: rendezvous on 127.0.0.1, not the machine's FQDN (macOS can resolve it to an unreachable *.ip6.arpa name)
+expect "identical" torchrun --standalone --local_addr 127.0.0.1 --nproc-per-node 2 tools/ring_attention_demo.py --seq 512
 expect "eplb-lite" python3 tools/eplb_sim.py --experts 64 --gpus 8 --redundant 8
 python3 tools/spec_decode_calc.py --sweep >/dev/null
 expect "padded" python3 tools/grouped_gemm_bench.py --iters 2

@@ -288,7 +288,7 @@ The first prints `✗ does not fit — weights alone need 624.9 GiB`. The IQ1_S 
 # ▶ MacBook · 03-DeepSeek/lab
 python3 tools/ring_attention_demo.py --world 2 --seq 1024
 python3 tools/ring_attention_demo.py --world 4 --seq 1024 --port 29544
-torchrun --nproc-per-node 2 tools/ring_attention_demo.py --seq 1024        # same code under torchrun
+torchrun --standalone --local_addr 127.0.0.1 --nproc-per-node 2 tools/ring_attention_demo.py --seq 1024   # same code under torchrun, rendezvous on localhost
 ```
 
 ```text
@@ -747,6 +747,7 @@ kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscali
 |---|---|---|
 | `AssertionError` in `eplb_sim.py` | experts + redundant not divisible by GPUs | choose `--redundant` so `(experts + redundant) % gpus == 0` |
 | upstream `eplb.py` import error | it needs torch | install PyTorch for CPU |
+| `torchrun` on a laptop hangs 5–10 min, then `DistNetworkError … timed out … 1.0.0…0.ip6.arpa` | torchrun's rendezvous uses the machine's FQDN; macOS (often behind a home router's DNS) can resolve it to an unreachable reverse-DNS name | `--standalone --local_addr 127.0.0.1` (as in §5), or give the Mac a plain name: `sudo scutil --set HostName <name>` |
 | rebalancing helps little | loads nearly uniform, or the skew is batch-to-batch noise | measure over longer windows; placement needs stable skew |
 | `ValueError: … max_model_len … larger than the maximum number of tokens that can be stored in KV cache` | window × KV per token > budget (drill D03) | lower `--max-model-len`, FP8 KV, a smaller model, or more util within the 0.72 rule |
 | other users' tokens stall during a long prompt | prefill hogs the GPU | chunked prefill; smaller `--max-num-batched-tokens` |
