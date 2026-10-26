@@ -445,11 +445,14 @@ df -h /data
 1. **fio:** a `weights-seqread-1m: (groupid=…)` block and its `READ:` bandwidth line; record it for §3.6's formula.
 2. **Restart timings:**
 
-   | Row | Healthy value |
-   |---|---|
-   | `Loading weights took` (warm) | seconds |
-   | `Loading weights took` (cold) | close to 15 GB ÷ your seq-read bandwidth |
-   | `Graph capturing finished` | the largest part of both restarts |
+   | Row | Healthy value | Seen on a Spark (nvcr vLLM 25.09, r1-7b) |
+   |---|---|---|
+   | `Loading weights took` (warm) | the formula says seconds; on the GB10 expect about a minute | 73.7 s |
+   | `Loading weights took` (cold) | about the same as warm | 76.0 s |
+   | `Graph capturing finished` | seconds | 7 s |
+   | `rollout status` wall time | 2–3 min | 2:18 warm, 2:28 cold |
+
+   Warm and cold differ by ~2 s, so the disk is not what sets the load time: vLLM's weight loader moves the checkpoint at about 190 MB/s whether the bytes come from the page cache or the NVMe (the FP8 32B in Chapter 05 Task 5.3 took 187 s for 32 GiB, the same rate). §3.6's formula is the floor the hardware allows; the loader path (safetensors read, copy into GPU allocations) is the real cost here, and the rest of the wall time is pod start, KV allocation and the readiness probe.
 3. **`rollout status`** ends with `successfully rolled out` within the 30 min timeout.
 
 **If something's off:** warm restart no faster than cold → the page cache was already evicted; check `free -g` on the Spark. Clean up the fio Job and PVC with `kubectl --context spark-root delete -f manifests/root/60-storage/fio-job.yaml` from `02-Kubernetes/lab`. More in §7.
@@ -479,7 +482,7 @@ Run it once with a warm page cache, then again right after the `drop_caches` com
 | restart, warm page cache | | | |
 | restart after `drop_caches` (cold) | | | |
 
-**Record yours.** Both restart rows should be dominated by graph capture, not weight loading.
+**Record yours.** If warm and cold come out about equal, as above, the bottleneck is the loader, not storage. To see that the disk itself is fast, time a raw read of the same files inside the pod: `kubectl --context spark-root -n llm-serving exec deploy/vllm -- sh -c 'time cat /models/hf/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-7B/snapshots/*/*.safetensors >/dev/null'` (seconds, not a minute).
 
 ### Task 5.5 · Watch the page cache compete for UMA
 
