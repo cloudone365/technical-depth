@@ -34,6 +34,8 @@ spec:
             - {name: AIOHTTP_CLIENT_TIMEOUT, value: "900"}     # long reasoning answers (Chapter 08)
             - name: WEBUI_SECRET_KEY                           # stable across restarts → sessions survive
               valueFrom: {secretKeyRef: {name: open-webui-secret, key: secret-key}}
+            - name: RAG_OPENAI_API_KEY                         # embeddings go through LiteLLM too, and LiteLLM wants a key:
+              valueFrom: {secretKeyRef: {name: litellm-master-key, key: key}}   # without it every upload fails "embeddings generated 0" (Task 5.7)
           ports: [{name: http, containerPort: 8080}]
           readinessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, initialDelaySeconds: 20}
           resources: {requests: {cpu: 250m, memory: 1Gi}, limits: {memory: 4Gi}}

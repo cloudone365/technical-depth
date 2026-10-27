@@ -413,7 +413,7 @@ kubectl --context spark-root -n llm-serving rollout status sts/open-webui
 Then in the browser:
 
 1. Open `http://webui.lab.local` and sign up. The first account becomes **admin**.
-2. **Admin Panel → Settings → Connections**: paste the new key into the LiteLLM connection (env values only seeded the first start).
+2. **Admin Panel → Settings → Connections**: paste the new key into the LiteLLM connection (env values only seeded the first start). Then **Admin Panel → Settings → Documents → Embedding**: engine *OpenAI*, URL `http://litellm.llm-serving:4000/v1`, the same key, model `embeddings`, **Save**. Uploads (Task 5.7) use this second key; without one, every upload fails.
 3. **Admin Panel → Settings → General → Authentication**: switch **Enable New Sign Ups** on (Open WebUI turns it off by itself once the first account exists) and check **Default User Role** is `pending`; **Save**.
 4. In a private window, sign up a second user. Expected: an "account activation pending" screen.
 5. As admin: **Admin Panel → Users** → set the new user to *user*.
@@ -435,7 +435,7 @@ A `kubectl apply -k k8s/apps` later puts the master key back in the StatefulSet;
 2. **The cited answer:** **900 s**, with a citation of the uploaded file.
 3. **The bge-m3 count** is above 0.
 
-**If something's off:** thinking shown as answer text means the backend has no reasoning parser (drill D01). An upload that fails with an `embedding` error means bge-m3 isn't Ready or the alias is missing. More in §7.
+**If something's off:** thinking shown as answer text means the backend has no reasoning parser (drill D01). An upload that fails with `list index out of range`, and `embeddings generated 0 for N items` in the `open-webui-0` log, means the embedding call was refused: no key in **Admin Panel → Settings → Documents → Embedding** (Task 5.6 step 2). Test the route itself with `curl $API/v1/embeddings` and the Open WebUI key: `1024` dimensions back means only the Documents setting is missing. An `embedding` error with the key set means bge-m3 isn't Ready or the alias is missing. More in §7.
 
 #### Run it
 
