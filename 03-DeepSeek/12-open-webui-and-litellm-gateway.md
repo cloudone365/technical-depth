@@ -395,7 +395,7 @@ Expected: the request succeeds, the headers show attempted fallbacks, and the re
 2. **Models in the picker:** `reasoning`, `reasoning-fast` (and `embeddings` until you hide it), nothing else.
 3. **Second user:** sees "account activation pending" until you set the role to *user*.
 
-**If something's off:** an empty model picker means the old key is still in Settings → Connections (env values only seed the first start). More in §7.
+**If something's off:** an empty model picker means the old key is still in Admin Panel → Settings → Connections (env values only seed the first start). No **Sign up** link in the private window means new sign-ups are off: Open WebUI disables them after the first account; switch them on in Admin Panel → Settings → General. More in §7.
 
 #### Run it
 
@@ -414,9 +414,10 @@ Then in the browser:
 
 1. Open `http://webui.lab.local` and sign up. The first account becomes **admin**.
 2. **Admin Panel → Settings → Connections**: paste the new key into the LiteLLM connection (env values only seeded the first start).
-3. In a private window, sign up a second user. Expected: an "account activation pending" screen.
-4. As admin: **Admin Panel → Users** → set the new user to *user*.
-5. **Workspace → Models**: hide `embeddings` from chat; restrict `reasoning` to a group if you want to ration the 32B model.
+3. **Admin Panel → Settings → General → Authentication**: switch **Enable New Sign Ups** on (Open WebUI turns it off by itself once the first account exists) and check **Default User Role** is `pending`; **Save**.
+4. In a private window, sign up a second user. Expected: an "account activation pending" screen.
+5. As admin: **Admin Panel → Users** → set the new user to *user*.
+6. **Workspace → Models**: hide `embeddings` from chat; restrict `reasoning` to a group if you want to ration the 32B model.
 
 A `kubectl apply -k k8s/apps` later puts the master key back in the StatefulSet; keep the patch in an overlay of your own, or in Git if you run the apps through Argo CD (Chapter 15).
 
