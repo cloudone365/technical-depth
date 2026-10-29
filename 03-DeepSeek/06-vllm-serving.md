@@ -437,7 +437,7 @@ Check it against [Chapter 05 §3.4](05-model-catalog-and-memory-math.md): with b
 
 #### What this lab does (`eval_harness.py` sweep, then Job `vllm-bench` from 02-Kubernetes)
 
-- **Quick sweep:** 8 JSON items at 1, 8 and 32 requests in flight against the served `r1-7b` through a port-forward. Nothing is written to disk (no `--out`).
+- **Quick sweep:** the 40 maths problems at 1, 8 and 32 requests in flight against the served `r1-7b` through a port-forward. Nothing is written to disk (no `--out`). (The `json` suite has only 8 items, so it can never put 32 requests in flight.)
 - **Deeper load test:** Job `vllm-bench` in `llm-serving` runs `vllm bench serve` in the NGC vLLM image against `http://vllm:8000` with 128 random prompts (1,024 tokens in, 256 out) at concurrency 1, 8 and 32. It reads the tokenizer from `model-cache` and uses 1.5 Gi at most. The `sed` points it at `r1-7b`.
 - Repeat for each model you serve and fill one row per model.
 
@@ -480,7 +480,7 @@ Keep one table per model you serve (**record yours**):
 
 | Model | tok/s c=1 | tok/s c=8 | tok/s c=32 | p50 TTFT | p50 latency | KV cache tokens (log) |
 |---|---|---|---|---|---|---|
-| r1-7b | | | | | | |
+| r1-7b (measured 2026-10-24, vLLM 25.09) | 13 | 108 | 238 | | | ~134K |
 | r1-32b-fp8 | | | | | | |
 | coder-v2-lite | | | | | | |
 
