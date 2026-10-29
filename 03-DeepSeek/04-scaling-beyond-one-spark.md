@@ -1,6 +1,6 @@
 # Chapter 04 · Scaling beyond one Spark: long context, EPLB, 3FS & V3 671B
 
-> **03-DeepSeek · Part I — Architecture · Chapter 04 of 19** · ← [Chapter 03 · R1 reasoning & GRPO](03-r1-reasoning-and-grpo.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 05 · Model catalog & memory math](05-model-catalog-and-memory-math.md) →
+> **03-DeepSeek · Part I — Architecture · Chapter 04 of 20** · ← [Chapter 03 · R1 reasoning & GRPO](03-r1-reasoning-and-grpo.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 05 · Model catalog & memory math](05-model-catalog-and-memory-math.md) →
 
 | | |
 |---|---|

@@ -1,6 +1,6 @@
 # Chapter 00 · DeepSeek Step-by-Step Guide
 
-> **03-DeepSeek · Chapter 00 of 19** · Start here · [Module overview](README.md) · [Chapter 01 · DeepSeek architecture: MLA, DeepSeekMoE & MTP](01-deepseek-architecture-mla-moe-mtp.md) →
+> **03-DeepSeek · Chapter 00 of 20** · Start here · [Module overview](README.md) · [Chapter 01 · DeepSeek architecture: MLA, DeepSeekMoE & MTP](01-deepseek-architecture-mla-moe-mtp.md) →
 
 This page is the build order for the whole module. Each section below is one chapter: it links the document that explains it, says what to run, and how you know the chapter is done. A section carries its document's chapter number: Chapter 13 is `13-….md`. The commands here are the key ones from each chapter's lab; the chapter has the full task list, the expected output and the troubleshooting table.
 
@@ -136,6 +136,8 @@ Times are rough working times on one Spark, not counting reading or first-time d
 | | **Part VII** | **Choosing models** | | | |
 | ☐ | 18 | [DeepSeek vs other model families](18-choosing-models-deepseek-vs-others.md) | Controlled pairs, two families at once, local vs hosted | 4–6 h | Alias table backed by your numbers |
 | ☐ | 19 | [Hands-on workbook](19-hands-on-workbook.md) | 30 exercises, the release gate, the capstone | 3–5 days | Capstone report saved |
+| | **Part VIII** | **Going faster** | | | |
+| ☐ | 20 | [The fast lane](20-fast-lane-more-tokens-per-second.md) | MoE + 4-bit beside vLLM (done: 74.6 tok/s), a 120B alone, a newer vLLM with NVFP4 + MTP | 1 + 1.5 + 2 h | One table, your numbers, engines compared with the same sweep |
 
 ## Overview
 
@@ -780,3 +782,18 @@ tests/run-local-checks.sh && scripts/verify.sh && scripts/llm-triage.sh
 For the capstone, rebuild with the Semaphore template `15.1 Deploy DeepSeek` (Chapter 15) and use the training window exactly as [above](#the-shared-pool-and-the-training-window).
 
 ✅ **Done when** CI is green on your pull request, every **record yours** in your notebook is filled in, the gate has shown at least one PASS and one deliberate FAIL, the quotas are at everyday values after every training window (`spark-cq` 2 CPU · 12 Gi · 3 slices), and the capstone report is saved next to the results.
+
+## Chapter 20 · The fast lane → [document](20-fast-lane-more-tokens-per-second.md)
+
+One user's speed on a GB10 is 273 GB/s ÷ bytes read per token. Three steps change that denominator and the engine, each measured with the Chapter 06 sweep and kept beside the everyday setup: gpt-oss-20b (MoE, MXFP4) on llama.cpp as alias `fast` (13 → 74.6 tok/s, done), gpt-oss-120b alone, and a newer vLLM image with NVFP4 kernels and multi-token prediction tried as `vllm-next` before it is promoted.
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+kubectl --context spark-root apply -f k8s/llamacpp/gpt-oss-20b.yaml
+kubectl --context spark-root -n llm-serving rollout status deploy/llama-gptoss --timeout=30m
+pkill -f 'port-forward svc/'; kubectl --context spark-root -n llm-serving port-forward svc/llama-gptoss 8080 >/dev/null & sleep 2
+python3 tools/eval_harness.py --url http://localhost:8080 --model gpt-oss-20b --suites math --limit 8 --concurrency 1 --max-tokens 2048 | grep -E 'math|tok/s'
+pkill -f 'port-forward svc/llama-gptoss'
+```
+
+✅ **Done when** the §3 table of Chapter 20 holds your numbers for every engine you ran, `fast` answers through LiteLLM and Open WebUI, and the lab is back to r1-7b + quota 90 Gi after each step.

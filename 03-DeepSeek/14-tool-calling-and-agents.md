@@ -1,6 +1,6 @@
 # Chapter 14 · Tool Calling & Agents
 
-> **03-DeepSeek · Part V — Applications · Chapter 14 of 19** · ← [Chapter 13 · RAG with Qdrant & BGE-M3](13-rag-with-qdrant-and-bge.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 15 · Automation, secrets & day-2](15-automation-secrets-and-day2.md) →
+> **03-DeepSeek · Part V — Applications · Chapter 14 of 20** · ← [Chapter 13 · RAG with Qdrant & BGE-M3](13-rag-with-qdrant-and-bge.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 15 · Automation, secrets & day-2](15-automation-secrets-and-day2.md) →
 
 | | |
 |---|---|

@@ -1,6 +1,6 @@
 # Chapter 18 · Choosing Models: DeepSeek vs Llama, Qwen, Mistral, o1/Claude & Multi-Ecosystem
 
-> **03-DeepSeek · Part VII — Choosing models · Chapter 18 of 19** · ← [Chapter 17 · Troubleshooting playbook](17-troubleshooting-playbook.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 19 · Hands-on workbook](19-hands-on-workbook.md) →
+> **03-DeepSeek · Part VII — Choosing models · Chapter 18 of 20** · ← [Chapter 17 · Troubleshooting playbook](17-troubleshooting-playbook.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 19 · Hands-on workbook](19-hands-on-workbook.md) →
 
 | | |
 |---|---|

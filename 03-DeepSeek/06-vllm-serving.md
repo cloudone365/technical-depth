@@ -1,6 +1,6 @@
 # Chapter 06 · Serving DeepSeek with vLLM
 
-> **03-DeepSeek · Part III — Serving · Chapter 06 of 19** · ← [Chapter 05 · Model catalog & memory math](05-model-catalog-and-memory-math.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 07 · Alternative engines](07-alternative-engines-sglang-llamacpp-trtllm.md) →
+> **03-DeepSeek · Part III — Serving · Chapter 06 of 20** · ← [Chapter 05 · Model catalog & memory math](05-model-catalog-and-memory-math.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 07 · Alternative engines](07-alternative-engines-sglang-llamacpp-trtllm.md) →
 
 | | |
 |---|---|
@@ -529,84 +529,9 @@ D03 uses the BF16 32B, an exclusive run: park bge-m3, the app stack and any seco
 
 ---
 
-### Task 5.8 · Step 3 of the fast lane: a newer vLLM with NVFP4 and multi-token prediction
+### Task 5.8 · A newer vLLM image (moved)
 
-#### What this lab does (overlay `lab/k8s/upgrade/vllm-next`, catalog entry `qwen3.6-35b-nvfp4`)
-
-- **Changes the engine, not the model's bytes:** steps 1–2 of the fast lane (Chapter 07 Task 5.6b) cut bytes per token with MoE + 4-bit models on llama.cpp. This step gives the GPU kernels that use those bytes better: **native NVFP4** tensor-core maths (no unpacking to 16-bit) and **multi-token prediction** (MTP: the model proposes 2–3 tokens per step, verified in one pass), plus a newer loader and FP8 KV. Published results on a Spark for the same model: 49 tok/s on an NVFP4-capable vLLM, 120 on a dedicated Rust engine; llama.cpp got 75 on a 20B MoE.
-- **Runs the candidate image NEXT TO the current `vllm`** (r1-7b on 25.09) as Deployment and Service `vllm-next`, the `k8s/multi` pattern, on `RedHatAI/Qwen3.6-35B-A3B-NVFP4` (35B total, 3B active, MTP head): util 0.30, 40 Gi. Nothing in the lab changes until step D.
-- **Measures it the same way** (Task 5.6 sweep), first plain, then with MTP on.
-- **Step D promotes the image** for the whole lab only once it has earned it: `VLLM_IMAGE` in both `versions.env` files and the 02 base; then the expected values of Chapters 05–08 need a retest.
-
-#### What to look for
-
-1. **Step A:** the tag has an `arm64` manifest, `vllm --version` prints a version newer than 0.10.1, and `--help` lists `--speculative-config` and an NVFP4 / `modelopt_fp4` quantization choice.
-2. **Step B:** `vllm-next` rolls out; its log names the quantization (nvfp4 / modelopt) and the KV size; the smoke answer makes sense.
-3. **Step C:** c=1 tok/s above llama.cpp's 75 for gpt-oss-20b, and higher again with MTP (acceptance rate in the log); c=8 / c=32 far above llama.cpp's 141 / 119 (vLLM batches better).
-4. **Quota and pool:** `serving-budget` ≈ 87 of 90 Gi with llama-gptoss paused; Σ util 0.56.
-
-**If something's off:** `no matching manifest for linux/arm64` → pick a newer tag from NGC's vLLM page (DGX Spark support is in the release notes) and change it in `versions.env` and the overlay. `Model architectures [...] are not supported` → the model is newer than this vLLM; try the next tag or an older Qwen3.5 NVFP4 build. `quantization method nvfp4 is not supported` → the image has no FP4 kernels for sm_121; this tag is not step 3 material. OOM at start → park `llama-gptoss` and bge-m3 for the test. MTP errors → run without `--speculative-config` first; the method name differs per model family (`mtp`, `qwen3_next_mtp`): the vLLM recipe page for the model gives the right one.
-
-#### Run it
-
-**Step A · verify the candidate image (on the Spark, where arm64 is native).**
-
-```bash
-# ▶ dgx-spark-1 (ssh dgx-spark-1)
-IMG=nvcr.io/nvidia/vllm:26.01-py3                                   # VLLM_NEXT_IMAGE in versions.env; try the newest tag NGC lists if this one is gone
-docker manifest inspect $IMG | grep -A2 '"architecture": "arm64"'   # must print an arm64 entry
-docker pull $IMG                                                     # several GB; containerd pulls it again for the pod
-docker run --rm --gpus all $IMG vllm --version
-docker run --rm --gpus all $IMG vllm serve --help | grep -iE 'speculative-config|nvfp4|modelopt|load-format|safetensors-load' | head
-```
-
-**Step B · run it next to the current engine.**
-
-```bash
-# ▶ MacBook · 03-DeepSeek/lab
-kubectl --context spark-root -n llm-serving scale deploy llama-gptoss --replicas=0        # free 24 Gi of quota for the test (back to 1 afterwards)
-kubectl --context spark-root apply -k k8s/upgrade/vllm-next
-kubectl --context spark-root -n llm-serving rollout status deploy/vllm-next --timeout=45m  # first start: ~20 GB download + load
-kubectl --context spark-root -n llm-serving logs deploy/vllm-next | grep -iE 'version|quantization|Model loading took|KV cache size|not supported|error' | head
-kubectl --context spark-root -n llm-serving exec deploy/vllm-next -- curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
-  -d '{"model":"qwen3.6-35b-nvfp4","max_tokens":200,"messages":[{"role":"user","content":"Is 91 prime? One line."}]}' | jq '{model, answer: .choices[0].message.content}'
-```
-
-**Step C · measure: plain, then with MTP.**
-
-```bash
-# ▶ MacBook · 03-DeepSeek/lab
-pkill -f 'port-forward svc/'; kubectl --context spark-root -n llm-serving port-forward svc/vllm-next 8000 >/dev/null & sleep 2
-run() { python3 tools/eval_harness.py --url http://localhost:8000 --model qwen3.6-35b-nvfp4 --suites math --limit $2 --concurrency $1 --max-tokens 2048 | grep -E 'math|tok/s'; }
-echo "c=1";  run 1 8
-echo "c=8";  run 8 40
-echo "c=32"; run 32 40
-pkill -f 'port-forward svc/vllm-next'
-```
-
-Then MTP: add the speculative config to the catalog entry's `args` (`models.yaml`), regenerate, re-apply, and repeat the sweep:
-
-```bash
-# ▶ MacBook · 03-DeepSeek/lab
-#   args: [--reasoning-parser=qwen3, --max-num-seqs=32, '--speculative-config={"method":"mtp","num_speculative_tokens":2}']
-python3 scripts/gen_overlays.py && kubectl --context spark-root apply -k k8s/upgrade/vllm-next
-kubectl --context spark-root -n llm-serving rollout status deploy/vllm-next --timeout=30m
-kubectl --context spark-root -n llm-serving logs deploy/vllm-next | grep -iE 'spec|draft|accept' | head -5
-# sweep again (same three lines as above); then, while it runs, the acceptance rate:
-kubectl --context spark-root -n llm-serving logs deploy/vllm-next --since=2m | grep -oE 'Draft acceptance rate: [0-9.]+|Acceptance rate: [0-9.]+' | tail -3
-```
-
-Record (one line per engine, same sweep):
-
-| Engine · model | c=1 | c=8 | c=32 | notes |
-|---|---|---|---|---|
-| vLLM 25.09 · r1-7b BF16 | 13 | 108 | 238 | baseline |
-| llama.cpp b6500 · gpt-oss-20b MXFP4 | 74.6 | 141 | 119 | step 1 |
-| vLLM next · qwen3.6-35b-nvfp4 | | | | step 3, plain |
-| vLLM next · qwen3.6-35b-nvfp4 + MTP | | | | step 3, MTP |
-
-**Step D · promote, or not.** If step C beats llama.cpp at c=1 and vLLM 25.09 at c=32, make it the lab's engine: set `VLLM_IMAGE` to the new tag in `02-Kubernetes/lab/versions.env` and `03-DeepSeek/lab/versions.env`, the `image:` in `02 …/90-serving/vllm/vllm.yaml`, delete the `images:` block from `k8s/upgrade/vllm-next/kustomization.yaml`, then `scripts/serve-model.sh r1-7b` and re-run Chapter 05 Task 5.3 and Chapter 08 Task 5.4: the loader time and overhead numbers in those chapters were measured on 25.09 and will change. Give LiteLLM an alias for the new model (`k8s/apps/litellm.yaml`, e.g. `fast-vllm` → `vllm-next.llm-serving:8000`) if you keep both engines. If it doesn't earn it: `kubectl --context spark-root delete -k k8s/upgrade/vllm-next`, `scale deploy llama-gptoss --replicas=1`, and note why in the table.
-
+Trying a newer NGC vLLM image (NVFP4 kernels, multi-token prediction) next to the current engine is step 3 of [Chapter 20 · The fast lane](20-fast-lane-more-tokens-per-second.md); the overlay is `k8s/upgrade/vllm-next`.
 
 ## 6. Verify
 

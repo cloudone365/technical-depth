@@ -1,6 +1,6 @@
 # Chapter 16 · Telemetry: DCGM, Prometheus & Grafana
 
-> **03-DeepSeek · Part VI — Operations · Chapter 16 of 19** · ← [Chapter 15 · Automation, secrets & day-2](15-automation-secrets-and-day2.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 17 · Troubleshooting playbook](17-troubleshooting-playbook.md) →
+> **03-DeepSeek · Part VI — Operations · Chapter 16 of 20** · ← [Chapter 15 · Automation, secrets & day-2](15-automation-secrets-and-day2.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 17 · Troubleshooting playbook](17-troubleshooting-playbook.md) →
 
 | | |
 |---|---|

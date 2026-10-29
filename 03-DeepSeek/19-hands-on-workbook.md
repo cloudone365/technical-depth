@@ -1,6 +1,6 @@
 # Chapter 19 · Hands-on Workbook
 
-> **03-DeepSeek · Part VII — Choosing models · Chapter 19 of 19** · ← [Chapter 18 · Choosing models](18-choosing-models-deepseek-vs-others.md) · [All chapters](00-deepseek-step-by-step-guide.md)
+> **03-DeepSeek · Part VII — Choosing models · Chapter 19 of 20** · ← [Chapter 18 · Choosing models](18-choosing-models-deepseek-vs-others.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 20 · The fast lane](20-fast-lane-more-tokens-per-second.md) →
 
 | | |
 |---|---|

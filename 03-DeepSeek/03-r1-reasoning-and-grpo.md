@@ -1,6 +1,6 @@
 # Chapter 03 · R1 reasoning & GRPO
 
-> **03-DeepSeek · Part I — Architecture · Chapter 03 of 19** · ← [Chapter 02 · FP8 training, FlashMLA & DeepGEMM](02-fp8-training-and-kernels.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 04 · Scaling beyond one Spark](04-scaling-beyond-one-spark.md) →
+> **03-DeepSeek · Part I — Architecture · Chapter 03 of 20** · ← [Chapter 02 · FP8 training, FlashMLA & DeepGEMM](02-fp8-training-and-kernels.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 04 · Scaling beyond one Spark](04-scaling-beyond-one-spark.md) →
 
 | | |
 |---|---|

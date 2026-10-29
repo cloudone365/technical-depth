@@ -1,6 +1,6 @@
 # Chapter 17 · Troubleshooting Playbook
 
-> **03-DeepSeek · Part VI — Operations · Chapter 17 of 19** · ← [Chapter 16 · Telemetry](16-telemetry.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 18 · Choosing models](18-choosing-models-deepseek-vs-others.md) →
+> **03-DeepSeek · Part VI — Operations · Chapter 17 of 20** · ← [Chapter 16 · Telemetry](16-telemetry.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 18 · Choosing models](18-choosing-models-deepseek-vs-others.md) →
 
 | | |
 |---|---|

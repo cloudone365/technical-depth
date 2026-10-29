@@ -1,6 +1,6 @@
 # Chapter 05 · Model Catalog & Memory Math on GB10
 
-> **03-DeepSeek · Part II — Models on a Spark · Chapter 05 of 19** · ← [Chapter 04 · Scaling beyond one Spark](04-scaling-beyond-one-spark.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 06 · Serving DeepSeek with vLLM](06-vllm-serving.md) →
+> **03-DeepSeek · Part II — Models on a Spark · Chapter 05 of 20** · ← [Chapter 04 · Scaling beyond one Spark](04-scaling-beyond-one-spark.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 06 · Serving DeepSeek with vLLM](06-vllm-serving.md) →
 
 | | |
 |---|---|

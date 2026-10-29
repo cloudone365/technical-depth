@@ -1,6 +1,6 @@
 # Chapter 02 · FP8 training, FlashMLA & DeepGEMM
 
-> **03-DeepSeek · Part I — Architecture · Chapter 02 of 19** · ← [Chapter 01 · DeepSeek architecture: MLA, DeepSeekMoE & MTP](01-deepseek-architecture-mla-moe-mtp.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 03 · R1 reasoning & GRPO](03-r1-reasoning-and-grpo.md) →
+> **03-DeepSeek · Part I — Architecture · Chapter 02 of 20** · ← [Chapter 01 · DeepSeek architecture: MLA, DeepSeekMoE & MTP](01-deepseek-architecture-mla-moe-mtp.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 03 · R1 reasoning & GRPO](03-r1-reasoning-and-grpo.md) →
 
 | | |
 |---|---|

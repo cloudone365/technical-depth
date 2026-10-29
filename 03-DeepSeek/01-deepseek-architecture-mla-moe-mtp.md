@@ -1,6 +1,6 @@
 # Chapter 01 · DeepSeek architecture: MLA, DeepSeekMoE & MTP
 
-> **03-DeepSeek · Part I — Architecture · Chapter 01 of 19** · ← [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 02 · FP8 training, FlashMLA & DeepGEMM](02-fp8-training-and-kernels.md) →
+> **03-DeepSeek · Part I — Architecture · Chapter 01 of 20** · ← [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 02 · FP8 training, FlashMLA & DeepGEMM](02-fp8-training-and-kernels.md) →
 
 | | |
 |---|---|

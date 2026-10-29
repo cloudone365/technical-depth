@@ -1,0 +1,42 @@
+# Step 2 of the fast lane (Chapter 20): OpenAI's gpt-oss-120b, a mixture-of-experts model
+# (~117B total, ~5.1B active per token) in native MXFP4, served by llama.cpp built for sm_121
+# (Chapter 07 Task 5.4 image). ~63 GB of weights, so it runs ALONE: park vllm and llama-gptoss
+# first, and raise serving-budget to 100Gi for the run (80 Gi here + ~16 Gi of apps > 90 Gi).
+# Each token reads ~3 GB; NVIDIA measured 55 tok/s with llama.cpp on a Spark. -c is the total
+# context split across --parallel slots (8 x 8K).
+#   kubectl --context spark-root apply -f k8s/llamacpp/gpt-oss-120b.yaml   → svc/llama-gptoss-120b:8080
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llama-gptoss-120b, namespace: llm-serving, labels: {app: llama-gptoss-120b}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: llama-gptoss-120b}}
+  template:
+    metadata: {labels: {app: llama-gptoss-120b}}
+    spec:
+      priorityClassName: spark-serving
+      containers:
+        - name: llama
+          image: spark-local/llama.cpp:server-sm121
+          imagePullPolicy: Never              # imported into the root's containerd (Task 5.4)
+          args: ["-hf", "ggml-org/gpt-oss-120b-GGUF", "--alias", "gpt-oss-120b",
+                 "-ngl", "999", "-c", "65536", "--parallel", "8", "--jinja", "-fa", "on",
+                 "--host", "0.0.0.0", "--port", "8080", "--metrics"]
+          env: [{name: LLAMA_CACHE, value: /models/gguf}]
+          ports: [{name: http, containerPort: 8080}]
+          startupProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, failureThreshold: 120}
+          readinessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 5}
+          resources:
+            requests: {cpu: "4", memory: 80Gi, nvidia.com/gpu: "1"}   # request = limit (shared LLM pool)
+            limits: {memory: 80Gi, nvidia.com/gpu: "1"}
+          volumeMounts: [{name: models, mountPath: /models}]
+      volumes:
+        - {name: models, persistentVolumeClaim: {claimName: model-cache}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: llama-gptoss-120b, namespace: llm-serving}
+spec:
+  selector: {app: llama-gptoss-120b}
+  ports: [{name: http, port: 8080, targetPort: http}]

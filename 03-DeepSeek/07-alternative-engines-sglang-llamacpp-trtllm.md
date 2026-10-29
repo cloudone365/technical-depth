@@ -1,6 +1,6 @@
 # Chapter 07 · Alternative Engines: SGLang, llama.cpp & TensorRT-LLM
 
-> **03-DeepSeek · Part III — Serving · Chapter 07 of 19** · ← [Chapter 06 · Serving DeepSeek with vLLM](06-vllm-serving.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 08 · Kubernetes deployment, weight caching & streaming](08-kubernetes-deployment-storage-and-streaming.md) →
+> **03-DeepSeek · Part III — Serving · Chapter 07 of 20** · ← [Chapter 06 · Serving DeepSeek with vLLM](06-vllm-serving.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 08 · Kubernetes deployment, weight caching & streaming](08-kubernetes-deployment-storage-and-streaming.md) →
 
 | | |
 |---|---|
@@ -495,51 +495,9 @@ python3 tools/eval_harness.py --report results/llamacpp-q4-c*.json results/vllm-
 
 A common pattern: llama.cpp is competitive or faster at c=1 (fewer bytes to read per token), vLLM pulls ahead at c=16 (continuous batching). Note the accuracy column too: Q4 is not free.
 
-### Task 5.6b · The fast lane: gpt-oss-20b (MoE + MXFP4) next to r1-7b
+### Task 5.6b · The fast lane (moved)
 
-#### What this lab does (Deployment `lab/k8s/llamacpp/gpt-oss-20b.yaml`, alias `fast`)
-
-- **Why:** single-user speed on the GB10 is 273 GB/s ÷ bytes read per token. r1-7b in BF16 reads ~15 GB per token (≈ 13 tok/s measured). gpt-oss-20b is a mixture-of-experts model (~21B total, ~3.6B active) in its native MXFP4 4-bit format: ~2 GB per token, a ceiling around 130 tok/s. NVIDIA measured 82.7 tok/s for it with llama.cpp on DGX Spark.
-- **Serves it with llama.cpp** built for sm_121 (the Task 5.4 image), as Deployment and Service `llama-gptoss` on port 8080, **next to** `vllm` (r1-7b): 24 Gi (request = limit), 4 CPU, one slice. Weights (~12 GB) download once into `model-cache` under `/models/gguf`.
-- **Gateway:** LiteLLM's alias `fast` points at it (`k8s/apps/litellm.yaml`) and falls back to `reasoning-fast` while it isn't deployed.
-- **Measures it the same way** as every engine: the c = 1 / 8 / 32 sweep.
-
-#### What to look for
-
-1. **Rollout:** `successfully rolled out`; the log shows the model loaded with all layers on the GPU.
-2. **Sweep:** c=1 several times r1-7b's 13 tok/s; c=8 higher in total; c=32 no higher (llama.cpp batches less well than vLLM). Measured on a Spark (vLLM 25.09 era, llama.cpp b6500):
-
-   | | r1-7b · vLLM | gpt-oss-20b · llama.cpp, 8 slots |
-   |---|---|---|
-   | tok/s, 1 user | 13 | **74.6** (p50 answer 1.8 s, ~155 tokens) |
-   | tok/s total, 8 users | 108 | 115 (4 slots) · **141** (16 slots) |
-   | tok/s total, 32 users | 238 | 119 (16 slots: queueing, accuracy fell 0.85 → 0.65) |
-
-   `-c` is the **total** context, split across `--parallel` slots; 8 slots × 8K is the setting in the manifest. Use it as the fast lane for interactive users; vLLM still wins for many users at once.
-3. **Quota:** `serving-budget` memory ≈ 47 + 24 ≈ 71 of 90 Gi.
-
-**If something's off:** `ErrImageNeverPull` → the Task 5.4 image isn't imported into containerd. `unknown model architecture` → the llama.cpp build is older than gpt-oss support: rebuild with a newer `LLAMACPP_REF`. Pending with `exceeded quota` → park bge-m3 or the mock LLMs.
-
-#### Run it
-
-```bash
-# ▶ MacBook · 03-DeepSeek/lab
-kubectl --context spark-root apply -f k8s/llamacpp/gpt-oss-20b.yaml
-kubectl --context spark-root -n llm-serving rollout status deploy/llama-gptoss --timeout=30m   # first start downloads ~12 GB
-kubectl --context spark-root -n llm-serving logs deploy/llama-gptoss | grep -iE 'offloaded|model size|listening' | head
-pkill -f 'port-forward svc/llama-gptoss'; kubectl --context spark-root -n llm-serving port-forward svc/llama-gptoss 8080 >/dev/null & sleep 2
-run() { python3 tools/eval_harness.py --url http://localhost:8080 --model gpt-oss-20b --suites math --limit $2 --concurrency $1 --max-tokens 2048 | grep -E 'math|tok/s'; }
-echo "c=1";  run 1 8
-echo "c=8";  run 8 40
-echo "c=32"; run 32 40
-kill %1
-```
-
-Through the gateway and in Open WebUI (after `kubectl --context spark-root apply -k k8s/apps` and `rollout restart deploy/litellm`; re-run the Task 5.6 key patch of Chapter 12 afterwards): model `fast`. Open WebUI sees only the models **its key** allows, so add the alias to that key first: `curl -s $API/key/update "${H[@]}" -d "{\"key\":\"$WEBUI\",\"models\":[\"reasoning\",\"reasoning-fast\",\"embeddings\",\"fast\"]}"`, then refresh the connection in Admin Panel → Settings → Connections and make `fast` Public under Settings → Models.
-
-Bigger sibling: `ggml-org/gpt-oss-120b-GGUF` (~63 GB, ~5B active, NVIDIA measured 55 tok/s) fits the Spark **alone**: park vllm, swap the `-hf` line and raise memory to 80Gi.
-
-Remove: `kubectl --context spark-root delete -f k8s/llamacpp/gpt-oss-20b.yaml` (the GGUF stays in `model-cache`).
+The fast-lane work, gpt-oss-20b on this llama.cpp image next to r1-7b and the steps after it, is one story and lives in [Chapter 20 · The fast lane](20-fast-lane-more-tokens-per-second.md), step 1. The Task 5.4 image built here is what it runs on.
 
 ### Task 5.7 · Ollama in two commands (optional)
 

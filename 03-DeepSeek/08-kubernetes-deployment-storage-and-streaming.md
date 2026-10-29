@@ -1,6 +1,6 @@
 # Chapter 08 · Kubernetes deployment, weight caching & streaming
 
-> **03-DeepSeek · Part III — Serving · Chapter 08 of 19** · ← [Chapter 07 · Alternative engines](07-alternative-engines-sglang-llamacpp-trtllm.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 09 · Autoscaling & queueing](09-autoscaling-and-queueing.md) →
+> **03-DeepSeek · Part III — Serving · Chapter 08 of 20** · ← [Chapter 07 · Alternative engines](07-alternative-engines-sglang-llamacpp-trtllm.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 09 · Autoscaling & queueing](09-autoscaling-and-queueing.md) →
 
 | | |
 |---|---|

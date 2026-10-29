@@ -1,6 +1,6 @@
 # Chapter 12 · Open WebUI & the LiteLLM Gateway
 
-> **03-DeepSeek · Part V — Applications · Chapter 12 of 19** · ← [Chapter 11 · Distributed training & RL](11-distributed-training-and-rl.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 13 · RAG with Qdrant & BGE-M3](13-rag-with-qdrant-and-bge.md) →
+> **03-DeepSeek · Part V — Applications · Chapter 12 of 20** · ← [Chapter 11 · Distributed training & RL](11-distributed-training-and-rl.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 13 · RAG with Qdrant & BGE-M3](13-rag-with-qdrant-and-bge.md) →
 
 | | |
 |---|---|

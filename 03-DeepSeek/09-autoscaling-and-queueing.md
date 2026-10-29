@@ -1,6 +1,6 @@
 # Chapter 09 · Autoscaling & queueing: KEDA, KServe & Kueue
 
-> **03-DeepSeek · Part III — Serving · Chapter 09 of 19** · ← [Chapter 08 · Kubernetes deployment, weight caching & streaming](08-kubernetes-deployment-storage-and-streaming.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 10 · LoRA/QLoRA, Unsloth & LLaMA-Factory](10-lora-qlora-unsloth-and-llama-factory.md) →
+> **03-DeepSeek · Part III — Serving · Chapter 09 of 20** · ← [Chapter 08 · Kubernetes deployment, weight caching & streaming](08-kubernetes-deployment-storage-and-streaming.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 10 · LoRA/QLoRA, Unsloth & LLaMA-Factory](10-lora-qlora-unsloth-and-llama-factory.md) →
 
 | | |
 |---|---|

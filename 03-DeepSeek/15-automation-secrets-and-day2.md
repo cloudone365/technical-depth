@@ -1,6 +1,6 @@
 # Chapter 15 · Automation, Secrets & Day-2: Ansible, Vault, Weight Sync
 
-> **03-DeepSeek · Part VI — Operations · Chapter 15 of 19** · ← [Chapter 14 · Tool calling & agents](14-tool-calling-and-agents.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 16 · Telemetry](16-telemetry.md) →
+> **03-DeepSeek · Part VI — Operations · Chapter 15 of 20** · ← [Chapter 14 · Tool calling & agents](14-tool-calling-and-agents.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 16 · Telemetry](16-telemetry.md) →
 
 | | |
 |---|---|

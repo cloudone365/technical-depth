@@ -1,6 +1,6 @@
 # Chapter 10 · LoRA/QLoRA sizing, Unsloth & LLaMA-Factory
 
-> **03-DeepSeek · Part IV — Fine-tuning · Chapter 10 of 19** · ← [Chapter 09 · Autoscaling & queueing](09-autoscaling-and-queueing.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 11 · Distributed training & RL](11-distributed-training-and-rl.md) →
+> **03-DeepSeek · Part IV — Fine-tuning · Chapter 10 of 20** · ← [Chapter 09 · Autoscaling & queueing](09-autoscaling-and-queueing.md) · [All chapters](00-deepseek-step-by-step-guide.md) · [Chapter 11 · Distributed training & RL](11-distributed-training-and-rl.md) →
 
 | | |
 |---|---|
