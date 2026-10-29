@@ -184,7 +184,7 @@ If the 120B earns a permanent place, give it an alias (`k8s/apps/litellm.yaml`, 
 
 #### What to look for
 
-1. **Step A:** the tag has an `arm64` manifest, `vllm --version` prints a version newer than 0.10.1, and `--help` lists `--speculative-config` and an NVFP4 / `modelopt_fp4` quantization choice.
+1. **Step A:** the tag has an `arm64` manifest, `vllm --version` prints a version newer than 0.10.1 (26.01 = **0.13.0**), `--help=all` lists `--speculative-config`, and the quantization list has `modelopt_fp4` and `compressed-tensors`. A `CUDA Forward Compatibility mode ENABLED` banner means the image's CUDA (13.1) is newer than DGX OS's driver (580 / CUDA 13.0) and a compatibility layer inside the image bridges it: fine, also under Kubernetes; a DGX OS update removes the layer.
 2. **Step B:** `vllm-next` rolls out; its log names the quantization (nvfp4 / modelopt) and the KV size; the smoke answer makes sense.
 3. **Step C:** c=1 tok/s above llama.cpp's 75 for gpt-oss-20b, and higher again with MTP (acceptance rate in the log); c=8 / c=32 far above llama.cpp's 141 / 119 (vLLM batches better).
 4. **Quota and pool:** `serving-budget` ≈ 87 of 90 Gi with llama-gptoss paused; Σ util 0.56.
@@ -201,7 +201,8 @@ IMG=nvcr.io/nvidia/vllm:26.01-py3                                   # VLLM_NEXT_
 docker manifest inspect $IMG | grep -A2 '"architecture": "arm64"'   # must print an arm64 entry
 docker pull $IMG                                                     # several GB; containerd pulls it again for the pod
 docker run --rm --gpus all $IMG vllm --version
-docker run --rm --gpus all $IMG vllm serve --help | grep -iE 'speculative-config|nvfp4|modelopt|load-format|safetensors-load' | head
+docker run --rm --gpus all $IMG vllm serve --help=all 2>/dev/null | grep -iE 'speculative-config|safetensors-load|nvfp4|modelopt|kv-cache-dtype' | head   # plain --help is a summary in vLLM ≥ 0.11
+docker run --rm --gpus all $IMG python3 -c "from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS; print(sorted(QUANTIZATION_METHODS))" 2>/dev/null | tr ',' '\n' | grep -iE 'fp4|modelopt|compressed'
 ```
 
 **Step B · run it next to the current engine.**
