@@ -127,7 +127,9 @@ sequenceDiagram
 | `reasoning-sglang` | `openai/r1-32b-fp8` at `sglang:30000` | fallback target (Chapter 07) |
 | `agent` | `hosted_vllm/qwen2.5-7b-tools` at `vllm:8000` | tool calling, hermes parser (Chapter 14) |
 | `embeddings` | `hosted_vllm/bge-m3` at `bge-m3:8000` | Open WebUI uploads, RAG (Chapter 13) |
-| `fast` | `openai/gpt-oss-20b` at `llama-gptoss:8080` | MoE + MXFP4 on llama.cpp (Chapter 07, `k8s/llamacpp/gpt-oss-20b.yaml`); falls back to `reasoning-fast` while it isn't deployed |
+| `fast` | `hosted_vllm/qwen3.6-35b-nvfp4` at `vllm-next:8000`, thinking off (`extra_body.chat_template_kwargs.enable_thinking: false`) | the fast lane (Chapter 20 step 3): ~1 s chat answers; falls back to `fast-llamacpp`, then `reasoning-fast` |
+| `smart` | the same engine, thinking on | hard questions on the fast lane; falls back to `reasoning-fast` |
+| `fast-llamacpp` | `openai/gpt-oss-20b` at `llama-gptoss:8080` | Chapter 20 step 1; the Deployment is paused by default |
 | `reasoning-pool` | **two** deployments (vLLM, SGLang), `rpm: 60` each, cost per token set | load balancing, Task 5.9 |
 
 `reasoning`, `reasoning-fast` and `agent` all point at the same Service `vllm:8000` with different model names. Only the alias whose model is being served answers; the others get a 404 from vLLM, which is what triggers the fallback in Task 5.5. The `hosted_vllm/` prefix tells LiteLLM the backend is vLLM, so vLLM-specific fields such as `reasoning_content` pass through. `openai/` treats the backend as a generic OpenAI-compatible server.
@@ -276,7 +278,7 @@ done                                                                            
 
 #### What to look for
 
-1. **Alias list:** `reasoning`, `reasoning-fast`, `reasoning-sglang`, `agent`, `embeddings`, `fast`, `reasoning-pool`.
+1. **Alias list:** `reasoning`, `reasoning-fast`, `reasoning-sglang`, `agent`, `embeddings`, `fast`, `smart`, `fast-llamacpp`, `reasoning-pool`.
 2. **The answer JSON:** `model` names r1-7b, `answer` says 91 is not prime (7 × 13), and `thinking_chars` is above 0: the reasoning arrived in its own field.
 
 **If something's off:** `Could not resolve host` means the `/etc/hosts` line from Task 5.1 is missing. `thinking_chars: 0` with `<think>` in the answer means the backend has no reasoning parser, or the alias uses `openai/` instead of `hosted_vllm/`. More in §7.

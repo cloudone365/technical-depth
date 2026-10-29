@@ -17,7 +17,14 @@ data:
         litellm_params: {model: hosted_vllm/qwen2.5-7b-tools, api_base: http://vllm.llm-serving:8000/v1, api_key: none}
       - model_name: embeddings
         litellm_params: {model: hosted_vllm/bge-m3, api_base: http://bge-m3.llm-serving:8000/v1, api_key: none}
-      - model_name: fast                 # MoE + 4-bit fast lane (Chapter 07): gpt-oss-20b on llama.cpp, ~5x r1-7b per user
+      # The fast lane (Chapter 20): Qwen3.6-35B-A3B NVFP4 + MTP on the newer vLLM (vllm-next), 72 tok/s one user,
+      # 516 at 32. `fast` turns the model's thinking off (chat: ~20-token answers), `smart` leaves it on.
+      - model_name: fast
+        litellm_params: {model: hosted_vllm/qwen3.6-35b-nvfp4, api_base: http://vllm-next.llm-serving:8000/v1, api_key: none,
+                         extra_body: {chat_template_kwargs: {enable_thinking: false}}}
+      - model_name: smart
+        litellm_params: {model: hosted_vllm/qwen3.6-35b-nvfp4, api_base: http://vllm-next.llm-serving:8000/v1, api_key: none}
+      - model_name: fast-llamacpp        # step 1 of Chapter 20: gpt-oss-20b on llama.cpp (paused by default; fallback for `fast`)
         litellm_params: {model: openai/gpt-oss-20b, api_base: http://llama-gptoss.llm-serving:8080/v1, api_key: none}
       # Load balancing: two deployments behind one name. With one Spark both point at
       # engines on the same GPU; with dgx-spark-2 the second api_base moves there.
@@ -33,7 +40,7 @@ data:
       allowed_fails: 3                    # a deployment failing 3×/min is cooled down
       cooldown_time: 60
       timeout: 900                      # long reasoning chains
-      fallbacks: [{"reasoning": ["reasoning-sglang", "reasoning-fast"]}, {"fast": ["reasoning-fast"]}]
+      fallbacks: [{"reasoning": ["reasoning-sglang", "reasoning-fast"]}, {"fast": ["fast-llamacpp", "reasoning-fast"]}, {"smart": ["reasoning-fast"]}]
     litellm_settings:
       drop_params: true
       request_timeout: 900
