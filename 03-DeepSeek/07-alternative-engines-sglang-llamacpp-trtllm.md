@@ -557,21 +557,36 @@ docker manifest inspect nvcr.io/nvidia/tensorrt-llm/release:1.1.0 | grep -A2 '"a
 
 If there is no arm64 entry, pick the newest tag that has one (NGC lists DGX Spark support in the release notes) and update both `versions.env` and the manifest. Then, with every other engine parked and `free -g` noted:
 
+**Start TensorRT-LLM (once).** Run this block only when `trtllm` isn't already running: the manifest sets `replicas: 0`, so re-applying it stops a warmed-up pod and the next `scale` starts a fresh one that loads the 32B again.
+
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-park_vllm
+park_vllm                                                                             # prints "vllm parked"
 kubectl --context spark-root -n llm-serving get pods                                  # no engine pods left
 kubectl --context spark-root apply -f k8s/trtllm/trtllm-serve.yaml
 kubectl --context spark-root -n llm-serving scale deploy trtllm --replicas=1
 kubectl --context spark-root -n llm-serving rollout status deploy/trtllm --timeout=45m
-kubectl --context spark-root -n llm-serving logs deploy/trtllm | grep -iE 'kv cache|max_batch|fp8|listening' | head
-kubectl --context spark-root -n llm-serving port-forward svc/trtllm 8000 >/dev/null &
+until kubectl --context spark-root -n llm-serving exec deploy/trtllm -- python3 -c "import urllib.request as u; u.urlopen('http://localhost:8000/health', timeout=5)" 2>/dev/null; do sleep 10; done; echo "trtllm serving"
+kubectl --context spark-root -n llm-serving exec deploy/trtllm -- python3 -c "import json, urllib.request as u
+r = u.Request('http://localhost:8000/v1/chat/completions', json.dumps({'model': 'RedHatAI/DeepSeek-R1-Distill-Qwen-32B-FP8-dynamic', 'max_tokens': 32, 'messages': [{'role': 'user', 'content': 'Say OK.'}]}).encode(), {'Content-Type': 'application/json'})
+u.urlopen(r, timeout=600).read(); print('warm-up done')"
+kubectl --context spark-root -n llm-serving logs deploy/trtllm | grep -iE 'kv cache|max_batch|fp8|listening|Uvicorn' | head
+```
+
+The `until` loop waits for the server itself (a Ready pod can still be finishing its load), and the warm-up request takes the first-request cost out of the measurements.
+
+**Test (repeat as often as you like).** Nothing here restarts the engine.
+
+```bash
+# ▶ MacBook · 03-DeepSeek/lab
+pkill -f 'port-forward svc/(vllm|trtllm|sglang)'; kubectl --context spark-root -n llm-serving port-forward svc/trtllm 8000 >/dev/null & sleep 2
 M=RedHatAI/DeepSeek-R1-Distill-Qwen-32B-FP8-dynamic
 python3 ../../02-Kubernetes/lab/scripts/ttft_probe.py --url http://localhost:8000 --model $M -n 10 --max-tokens 16
 python3 tools/eval_harness.py --url http://localhost:8000 --model $M --suites json math --concurrency 8 \
   --out results/trtllm-32b-fp8.json
-python3 tools/eval_harness.py --report results/vllm-32b-fp8.json results/sglang-32b-fp8.json results/trtllm-32b-fp8.json
 kill %1
+ls results/*32b-fp8.json                                                             # report only the engines you have results for
+python3 tools/eval_harness.py --report results/vllm-32b-fp8.json results/sglang-32b-fp8.json results/trtllm-32b-fp8.json
 ```
 
 ```bash
