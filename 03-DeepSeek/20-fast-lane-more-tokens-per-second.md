@@ -65,7 +65,8 @@ Steps 1 and 3 run **next to** the current vLLM (two or three engines, Σ util �
 | bytes per weight | 2 (BF16) | 0.5 (MXFP4) | 0.5 (MXFP4) | 0.5 (NVFP4) |
 | read per token | ~15 GB | ~2 GB | ~3 GB | ~1.5–2 GB |
 | ceiling 273 ÷ read | 18 | ~130 | ~90 | ~150 |
-| measured / published, one user | **13** | **74.6** (57 % of ceiling) | 55 (NVIDIA) | 49 (vLLM) · 120 (Atlas, with MTP) |
+| measured / published, one user | **13** | **74.6** (57 % of ceiling) | 55 (NVIDIA) | **41.1 measured** plain (49 published) · 120 (Atlas, with MTP) |
+| measured, 32 users (total) | 238 | 119 | — | **313** |
 | pod memory, request = limit | 28 Gi | 24 Gi | 80 Gi | 40 Gi |
 | runs beside r1-7b? | — | yes | no | yes |
 
@@ -186,7 +187,7 @@ If the 120B earns a permanent place, give it an alias (`k8s/apps/litellm.yaml`, 
 
 1. **Step A:** the tag has an `arm64` manifest, `vllm --version` prints a version newer than 0.10.1 (26.01 = 0.13.0, which still lacks the `qwen3_5_moe` architecture; **26.09** loads it), `--help=all` lists `--speculative-config`, and the quantization list has `modelopt_fp4` and `compressed-tensors`. A `CUDA Forward Compatibility mode ENABLED` banner means the image's CUDA (13.1) is newer than DGX OS's driver (580 / CUDA 13.0) and a compatibility layer inside the image bridges it: fine, also under Kubernetes; a DGX OS update removes the layer.
 2. **Step B:** `vllm-next` rolls out; its log names the quantization (nvfp4 / modelopt) and the KV size; the smoke answer makes sense.
-3. **Step C:** c=1 tok/s above llama.cpp's 75 for gpt-oss-20b, and higher again with MTP (acceptance rate in the log); c=8 / c=32 far above llama.cpp's 141 / 119 (vLLM batches better).
+3. **Step C:** plain, measured on 26.09: c=1 **41** (below llama.cpp's 75 on gpt-oss-20b: Qwen 3.6's hybrid-attention kernels are young on sm_121), c=8 **195**, c=32 **313** (the lab's best crowd number, accuracy 1.00). MTP is the lever for c=1 (acceptance rate in the log). Note vLLM 0.29 returns thinking in `message.reasoning` (0.10: `reasoning_content`); `chat_template_kwargs: {enable_thinking: false}` turns the ~900-token thinking off for chat.
 4. **Quota and pool:** `serving-budget` ≈ 87 of 90 Gi with llama-gptoss paused; Σ util 0.56.
 
 **If something's off:** `no matching manifest for linux/arm64` → pick a newer tag from NGC's vLLM page (DGX Spark support is in the release notes) and change it in `versions.env` and the overlay. `Model architectures [...] are not supported`, or `model type qwen3_5_moe but Transformers does not recognize this architecture` (the pod dies 4 s after `Running`) → the model is newer than this image; take the newest NGC tag (`for t in 26.02 … 26.09; do docker manifest inspect nvcr.io/nvidia/vllm:$t-py3 >/dev/null 2>&1 && echo $t; done`), or an older model the image knows (Qwen3-Next-80B-A3B NVFP4 also has an MTP head). `quantization method nvfp4 is not supported` → the image has no FP4 kernels for sm_121; this tag is not step 3 material. OOM at start → park `llama-gptoss` and bge-m3 for the test. MTP errors → run without `--speculative-config` first; the method name differs per model family (`mtp`, `qwen3_next_mtp`): the vLLM recipe page for the model gives the right one.
@@ -247,7 +248,7 @@ Record (one line per engine, same sweep):
 |---|---|---|---|---|
 | vLLM 25.09 · r1-7b BF16 | 13 | 108 | 238 | baseline |
 | llama.cpp b6500 · gpt-oss-20b MXFP4 | 74.6 | 141 | 119 | step 1 |
-| vLLM next · qwen3.6-35b-nvfp4 | | | | step 3, plain |
+| vLLM next (26.09 = 0.29) · qwen3.6-35b-nvfp4 | 41.1 | 195 | **313** | step 3, plain · acc 1.00 / 0.95 / 1.00 · 87 % thinking, ~900 tok/answer, p50 23 s · KV 8.7 GiB = 372K tokens (hybrid attention, ~25 KB/token) · load 97 s for 20 GB |
 | vLLM next · qwen3.6-35b-nvfp4 + MTP | | | | step 3, MTP |
 
 **Step D · promote, or not.** If step C beats llama.cpp at c=1 and vLLM 25.09 at c=32, make it the lab's engine: set `VLLM_IMAGE` to the new tag in `02-Kubernetes/lab/versions.env` and `03-DeepSeek/lab/versions.env`, the `image:` in `02 …/90-serving/vllm/vllm.yaml`, delete the `images:` block from `k8s/upgrade/vllm-next/kustomization.yaml`, then `scripts/serve-model.sh r1-7b` and re-run [Chapter 05 Task 5.3](05-model-catalog-and-memory-math.md) and [Chapter 08 Task 5.4](08-kubernetes-deployment-storage-and-streaming.md): the loader time and overhead numbers in those chapters were measured on 25.09 and will change. Give LiteLLM an alias for the new model (`k8s/apps/litellm.yaml`, e.g. `fast-vllm` → `vllm-next.llm-serving:8000`) if you keep both engines. If it doesn't earn it: `kubectl --context spark-root delete -k k8s/upgrade/vllm-next`, `scale deploy llama-gptoss --replicas=1`, and note why in the table.
