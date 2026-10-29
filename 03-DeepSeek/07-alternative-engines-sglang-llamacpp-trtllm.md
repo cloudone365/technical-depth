@@ -261,9 +261,15 @@ Two helpers you will use between tasks:
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-park_vllm()  { kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite
-               while kubectl --context spark-root -n llm-serving get pod -l app=vllm -o name | grep -q .; do sleep 5; done; }
-resume_vllm(){ kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas-; }
+# With KEDA's ScaledObject (02 Chapter 20 §5.7) a plain `scale --replicas=0` is undone within seconds, so pause it;
+# without one, scale the Deployment. Define these in every new terminal (they vanish with it).
+park_vllm()  { if kubectl --context spark-root -n llm-serving get scaledobject vllm >/dev/null 2>&1; then
+                 kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite
+               else kubectl --context spark-root -n llm-serving scale deploy vllm --replicas=0; fi
+               while kubectl --context spark-root -n llm-serving get pod -l app=vllm -o name | grep -q .; do sleep 5; done; echo "vllm parked"; }
+resume_vllm(){ if kubectl --context spark-root -n llm-serving get scaledobject vllm >/dev/null 2>&1; then
+                 kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas-
+               else kubectl --context spark-root -n llm-serving scale deploy vllm --replicas=1; fi; }
 ```
 
 ### Task 5.1 · vLLM baseline on the same model
@@ -634,6 +640,7 @@ Write one paragraph per engine: for this model, on one Spark, which would you ru
 |---|---|---|
 | `bind: address already in use` for port 8000, then `lost connection to pod` / `RemoteDisconnected`, and the harness prints `0/8 … 0.0 tok/s` | an older `port-forward` (from a previous run) still holds port 8000 and pointed at the pod `serve-model.sh` just replaced | `pkill -f 'port-forward svc/vllm 8000'` (every lab line now starts with it), re-run; delete the empty `results/*.json` it saved |
 | `exec format error` / no sm_121 kernels (any engine) | x86 or pre-Blackwell image | the DGX Spark/arm64 tag from `versions.env`; check the current release |
+| `rollout status deploy/trtllm` (or `sglang`) stays at `0 out of 1 new replicas have been updated` until it times out | no pod was ever created: `serving-budget` refused it (`describe rs -l app=trtllm` → `exceeded quota`), usually because vLLM is still up: `park_vllm` wasn't defined in this terminal (`command not found`), or a plain `scale` was undone by KEDA | define the helpers (top of §5), `park_vllm` until it prints `vllm parked`, check `describe quota serving-budget`; park bge-m3 too if `requests.cpu` is the limit |
 | SGLang OOM at start | vLLM still running (pause not applied), or page cache full | `park_vllm`; drop the page cache on the Spark |
 | `--reasoning-parser` unknown (SGLang) | older SGLang | upgrade, or parse `<think>` client-side |
 | JSON schema ignored | `response_format` shape differs by version | `{"type":"json_object"}`, or SGLang's native `json_schema`/`regex` sampling params |

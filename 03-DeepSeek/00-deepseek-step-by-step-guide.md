@@ -360,9 +360,15 @@ The same R1 distill served by four engines on the root, one at a time, in the sa
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-park_vllm()  { kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite
-               while kubectl --context spark-root -n llm-serving get pod -l app=vllm -o name | grep -q .; do sleep 5; done; }
-resume_vllm(){ kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas-; }
+# With KEDA's ScaledObject (02 Chapter 20 §5.7) a plain `scale --replicas=0` is undone within seconds, so pause it;
+# without one, scale the Deployment. Define these in every new terminal (they vanish with it).
+park_vllm()  { if kubectl --context spark-root -n llm-serving get scaledobject vllm >/dev/null 2>&1; then
+                 kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas=0 --overwrite
+               else kubectl --context spark-root -n llm-serving scale deploy vllm --replicas=0; fi
+               while kubectl --context spark-root -n llm-serving get pod -l app=vllm -o name | grep -q .; do sleep 5; done; echo "vllm parked"; }
+resume_vllm(){ if kubectl --context spark-root -n llm-serving get scaledobject vllm >/dev/null 2>&1; then
+                 kubectl --context spark-root -n llm-serving annotate scaledobject vllm autoscaling.keda.sh/paused-replicas-
+               else kubectl --context spark-root -n llm-serving scale deploy vllm --replicas=1; fi; }
 scripts/serve-model.sh r1-32b-fp8                                   # vLLM baseline (Task 5.1)
 park_vllm
 kubectl --context spark-root apply -k k8s/sglang/r1-32b-fp8
