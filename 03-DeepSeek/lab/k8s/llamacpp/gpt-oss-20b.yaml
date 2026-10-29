@@ -2,7 +2,10 @@
 # (~21B total, ~3.6B active per token) in its native MXFP4 4-bit format, served by llama.cpp
 # built for sm_121 (Task 5.4 image). Each token reads ~2 GB instead of r1-7b's ~15 GB, so the
 # 273 GB/s ceiling moves from ~18 to ~130 tok/s; NVIDIA measured 82.7 tok/s with llama.cpp.
-# Weights ~12 GB + a 32K context for 4 slots stay under 20 GiB; the pod holds 24 Gi
+# -c is the TOTAL context, split across --parallel slots: 65536 / 8 = 8K per request.
+# Measured on dgx-spark-1 (math suite, max 2048 tokens): c=1 74.6 tok/s, p50 1.8 s; 4 slots c=8
+# 115 tok/s; 16 slots c=8 141 tok/s but c=32 only 119 and accuracy falling, so 8 slots it is.
+# Weights ~12 GB + 64K tokens of KV stay under 20 GiB; the pod holds 24 Gi
 # (request = limit). It runs NEXT TO vllm (r1-7b 28 Gi) inside serving-budget's 90 Gi.
 #   kubectl --context spark-root apply -f k8s/llamacpp/gpt-oss-20b.yaml      → svc/llama-gptoss:8080
 # Bigger sibling, same file: swap the -hf line for ggml-org/gpt-oss-120b-GGUF (~63 GB, ~5B active,
@@ -23,7 +26,7 @@ spec:
           image: spark-local/llama.cpp:server-sm121
           imagePullPolicy: Never              # imported into the root's containerd (Task 5.4)
           args: ["-hf", "ggml-org/gpt-oss-20b-GGUF", "--alias", "gpt-oss-20b",
-                 "-ngl", "999", "-c", "32768", "--parallel", "4", "--jinja", "-fa", "on",
+                 "-ngl", "999", "-c", "65536", "--parallel", "8", "--jinja", "-fa", "on",
                  "--host", "0.0.0.0", "--port", "8080", "--metrics"]
           env: [{name: LLAMA_CACHE, value: /models/gguf}]
           ports: [{name: http, containerPort: 8080}]

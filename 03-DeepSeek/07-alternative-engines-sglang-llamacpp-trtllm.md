@@ -507,7 +507,15 @@ A common pattern: llama.cpp is competitive or faster at c=1 (fewer bytes to read
 #### What to look for
 
 1. **Rollout:** `successfully rolled out`; the log shows the model loaded with all layers on the GPU.
-2. **Sweep:** c=1 several times r1-7b's 13 tok/s (expect ≈ 50–80); c=8 and c=32 higher in total.
+2. **Sweep:** c=1 several times r1-7b's 13 tok/s; c=8 higher in total; c=32 no higher (llama.cpp batches less well than vLLM). Measured on a Spark (vLLM 25.09 era, llama.cpp b6500):
+
+   | | r1-7b · vLLM | gpt-oss-20b · llama.cpp, 8 slots |
+   |---|---|---|
+   | tok/s, 1 user | 13 | **74.6** (p50 answer 1.8 s, ~155 tokens) |
+   | tok/s total, 8 users | 108 | 115 (4 slots) · **141** (16 slots) |
+   | tok/s total, 32 users | 238 | 119 (16 slots: queueing, accuracy fell 0.85 → 0.65) |
+
+   `-c` is the **total** context, split across `--parallel` slots; 8 slots × 8K is the setting in the manifest. Use it as the fast lane for interactive users; vLLM still wins for many users at once.
 3. **Quota:** `serving-budget` memory ≈ 47 + 24 ≈ 71 of 90 Gi.
 
 **If something's off:** `ErrImageNeverPull` → the Task 5.4 image isn't imported into containerd. `unknown model architecture` → the llama.cpp build is older than gpt-oss support: rebuild with a newer `LLAMACPP_REF`. Pending with `exceeded quota` → park bge-m3 or the mock LLMs.
