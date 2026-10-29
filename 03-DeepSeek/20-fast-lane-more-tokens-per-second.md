@@ -25,6 +25,16 @@ On a GB10, how fast one user gets tokens is set by one division: **273 GB/s of m
 | 2 | **quality at that speed** | the same recipe on a 120B MoE (~5B active), alone | ≈ 40–55 from a 120B model | to do |
 | 3 | **the engine** | newer vLLM: NVFP4 kernels compute on 4-bit directly, MTP gives 2–3 tokens per weight read | ≈ 50–120 (published: 49 vLLM, 120 Atlas on the same model) | to do |
 
+**How the steps relate.** They are independent experiments, not a pipeline: none needs the previous one's result, and each ends by restoring the lab. Do them in any order, or only one, but **one at a time**, because they compete for the same memory pool:
+
+| | Needs | Runs beside | Must not run at the same time as |
+|---|---|---|---|
+| Step 1 | the Chapter 07 Task 5.4 llama.cpp image | `vllm` (r1-7b) and bge-m3 | step 2 |
+| Step 2 | the same image | nothing: vLLM and the 20B parked, quota raised | steps 1 and 3 |
+| Step 3 | a newer NGC vLLM tag that passes its step A | `vllm` (r1-7b) and bge-m3; the 20B paused for quota | step 2 |
+
+Shared ground: the Chapter 06 sweep as the yardstick, LiteLLM aliases for whatever you keep, and `park_vllm` / `resume_vllm` from Chapter 07 §5. Keeping step 1's engine running is the recommended end state; steps 2 and 3 can be left running only if their table rows earn it, and step 3's promotion (its step D) is the one change that alters the rest of the lab.
+
 Everything else in the lab is kept: the three memory walls (every new pod has request = limit inside `serving-budget`), the gateway (one alias per engine, with fallback), and the measuring method ([Chapter 06 Task 5.6](06-vllm-serving.md): the same c = 1 / 8 / 32 sweep on the same maths set, so engines compare fairly).
 
 ## 2. Architecture — HLD
