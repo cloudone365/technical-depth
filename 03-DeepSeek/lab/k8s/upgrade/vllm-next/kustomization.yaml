@@ -1,0 +1,27 @@
+# Step 3 of the fast lane (Chapter 06 Task 5.8): try a NEWER NGC vLLM image NEXT TO the
+# running vllm (r1-7b on 25.09), on a model that needs it: Qwen3.6-35B-A3B in NVFP4
+# (Blackwell-native 4-bit) with a multi-token-prediction head. Same pattern as k8s/multi:
+# the catalog overlay, renamed vllm-next, relabelled app=vllm-next (svc/vllm never selects
+# these pods), its own Service, the model-cache PVC shared.
+#   kubectl --context spark-root apply -k k8s/upgrade/vllm-next      → svc/vllm-next:8000
+# Budget: util 0.30 ≈ 37 GiB and 40 Gi (request = limit) next to r1-7b: Σ util 0.56 with
+# bge-m3, quota ≈ 47 + 40 = 87 of 90 Gi (pause llama-gptoss, or park bge-m3, while testing).
+# Verify the tag has an arm64 manifest first (Task 5.8 step A), then pin it here AND in
+# versions.env (VLLM_NEXT_IMAGE) so CI and the docs agree.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../models/qwen3.6-35b-nvfp4
+nameSuffix: -next
+labels:
+  - pairs: {app: vllm-next}
+    includeSelectors: true
+images:
+  - name: nvcr.io/nvidia/vllm
+    newTag: 26.01-py3
+patches:
+  - target: {kind: ServiceMonitor}
+    patch: |-
+      - op: replace
+        path: /spec/selector/matchLabels/app
+        value: vllm-next

@@ -25,6 +25,7 @@
 #   r1-32b-fp8 (or v2-lite / coder-v2-lite) + bge-m3 + apps   0.51   58 + 9 + ~9 Gi
 #   mixtral-8x7b-fp8 + bge-m3 + apps                      0.61   70 + 9 + ~9 Gi
 #   r1-32b alone                                          0.70   87 Gi (+ Qdrant 2 Gi)
+#   r1-7b + qwen3.6-35b-nvfp4 (vllm-next) + bge-m3 + apps  0.56   28 + 40 + 9 + ~9 Gi
 models:
   - name: r1-1.5b
     hf: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
@@ -99,6 +100,14 @@ models:
     weights: 20GB
     args: [--quantization=awq_marlin, --max-num-seqs=32, --reasoning-parser=deepseek_r1]
     use: Qwen's own reasoning model on the same Qwen2.5-32B base — RL-trained vs R1-distilled (Chapter 18)
+  - name: qwen3.6-35b-nvfp4
+    hf: RedHatAI/Qwen3.6-35B-A3B-NVFP4
+    util: 0.30
+    max_len: 32768
+    mem: 40Gi
+    weights: 20GB
+    args: [--reasoning-parser=qwen3, --max-num-seqs=32]
+    use: step 3 of the fast lane (Chapter 06 Task 5.8) - MoE 35B/3B active in Blackwell-native NVFP4 with an MTP head; needs the newer vLLM image (k8s/upgrade/vllm-next), not 25.09
   - name: llama-3.1-8b
     hf: meta-llama/Llama-3.1-8B-Instruct
     util: 0.20

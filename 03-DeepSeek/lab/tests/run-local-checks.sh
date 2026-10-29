@@ -33,7 +33,7 @@ echo "== overlays in sync";    python3 scripts/gen_overlays.py --check
 echo "== budgets: request = limit, serving-budget, training window, catalog sets"
 python3 tests/budget_check.py | tail -3
 echo "== kustomize + kubeconform"
-for d in . k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/lora/* k8s/multi/* k8s/serving k8s/sglang/* k8s/apps observability breakfix/*; do "$KUBECTL" kustomize "$d" | kc -; done
+for d in . k8s/models/* k8s/spec-decode/* k8s/long-context/* k8s/lora/* k8s/multi/* k8s/upgrade/* k8s/serving k8s/sglang/* k8s/apps observability breakfix/*; do "$KUBECTL" kustomize "$d" | kc -; done
 for f in k8s/jobs/*.yaml k8s/ops/*.yaml k8s/trtllm/*.yaml k8s/llamacpp/*.yaml k8s/multinode/*.yaml k8s/autoscale/*.yaml k8s/kserve/*.yaml k8s/rl/*.yaml gitops/*.yaml; do kc "$f"; done
 echo "== promtool";            promtool check rules <(python3 -c "
 import yaml
