@@ -184,12 +184,12 @@ If the 120B earns a permanent place, give it an alias (`k8s/apps/litellm.yaml`, 
 
 #### What to look for
 
-1. **Step A:** the tag has an `arm64` manifest, `vllm --version` prints a version newer than 0.10.1 (26.01 = **0.13.0**), `--help=all` lists `--speculative-config`, and the quantization list has `modelopt_fp4` and `compressed-tensors`. A `CUDA Forward Compatibility mode ENABLED` banner means the image's CUDA (13.1) is newer than DGX OS's driver (580 / CUDA 13.0) and a compatibility layer inside the image bridges it: fine, also under Kubernetes; a DGX OS update removes the layer.
+1. **Step A:** the tag has an `arm64` manifest, `vllm --version` prints a version newer than 0.10.1 (26.01 = 0.13.0, which still lacks the `qwen3_5_moe` architecture; **26.09** loads it), `--help=all` lists `--speculative-config`, and the quantization list has `modelopt_fp4` and `compressed-tensors`. A `CUDA Forward Compatibility mode ENABLED` banner means the image's CUDA (13.1) is newer than DGX OS's driver (580 / CUDA 13.0) and a compatibility layer inside the image bridges it: fine, also under Kubernetes; a DGX OS update removes the layer.
 2. **Step B:** `vllm-next` rolls out; its log names the quantization (nvfp4 / modelopt) and the KV size; the smoke answer makes sense.
 3. **Step C:** c=1 tok/s above llama.cpp's 75 for gpt-oss-20b, and higher again with MTP (acceptance rate in the log); c=8 / c=32 far above llama.cpp's 141 / 119 (vLLM batches better).
 4. **Quota and pool:** `serving-budget` ≈ 87 of 90 Gi with llama-gptoss paused; Σ util 0.56.
 
-**If something's off:** `no matching manifest for linux/arm64` → pick a newer tag from NGC's vLLM page (DGX Spark support is in the release notes) and change it in `versions.env` and the overlay. `Model architectures [...] are not supported` → the model is newer than this vLLM; try the next tag or an older Qwen3.5 NVFP4 build. `quantization method nvfp4 is not supported` → the image has no FP4 kernels for sm_121; this tag is not step 3 material. OOM at start → park `llama-gptoss` and bge-m3 for the test. MTP errors → run without `--speculative-config` first; the method name differs per model family (`mtp`, `qwen3_next_mtp`): the vLLM recipe page for the model gives the right one.
+**If something's off:** `no matching manifest for linux/arm64` → pick a newer tag from NGC's vLLM page (DGX Spark support is in the release notes) and change it in `versions.env` and the overlay. `Model architectures [...] are not supported`, or `model type qwen3_5_moe but Transformers does not recognize this architecture` (the pod dies 4 s after `Running`) → the model is newer than this image; take the newest NGC tag (`for t in 26.02 … 26.09; do docker manifest inspect nvcr.io/nvidia/vllm:$t-py3 >/dev/null 2>&1 && echo $t; done`), or an older model the image knows (Qwen3-Next-80B-A3B NVFP4 also has an MTP head). `quantization method nvfp4 is not supported` → the image has no FP4 kernels for sm_121; this tag is not step 3 material. OOM at start → park `llama-gptoss` and bge-m3 for the test. MTP errors → run without `--speculative-config` first; the method name differs per model family (`mtp`, `qwen3_next_mtp`): the vLLM recipe page for the model gives the right one.
 
 #### Run it
 
@@ -197,7 +197,7 @@ If the 120B earns a permanent place, give it an alias (`k8s/apps/litellm.yaml`, 
 
 ```bash
 # ▶ dgx-spark-1 (ssh dgx-spark-1)
-IMG=nvcr.io/nvidia/vllm:26.01-py3                                   # VLLM_NEXT_IMAGE in versions.env; try the newest tag NGC lists if this one is gone
+IMG=nvcr.io/nvidia/vllm:26.09-py3                                   # VLLM_NEXT_IMAGE in versions.env: the newest tag NGC lists (26.01 = vLLM 0.13 predates Qwen 3.5/3.6's qwen3_5_moe architecture)
 docker manifest inspect $IMG | grep -A2 '"architecture": "arm64"'   # must print an arm64 entry
 docker pull $IMG                                                     # several GB; containerd pulls it again for the pod
 docker run --rm --gpus all $IMG vllm --version

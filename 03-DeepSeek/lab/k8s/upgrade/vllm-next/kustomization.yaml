@@ -18,7 +18,7 @@ labels:
     includeSelectors: true
 images:
   - name: nvcr.io/nvidia/vllm
-    newTag: 26.01-py3
+    newTag: 26.09-py3
 patches:
   - target: {kind: ServiceMonitor}
     patch: |-
