@@ -1,0 +1,44 @@
+# Fast lane (Chapter 07, "beyond 13 tok/s"): OpenAI's gpt-oss-20b, a mixture-of-experts model
+# (~21B total, ~3.6B active per token) in its native MXFP4 4-bit format, served by llama.cpp
+# built for sm_121 (Task 5.4 image). Each token reads ~2 GB instead of r1-7b's ~15 GB, so the
+# 273 GB/s ceiling moves from ~18 to ~130 tok/s; NVIDIA measured 82.7 tok/s with llama.cpp.
+# Weights ~12 GB + a 32K context for 4 slots stay under 20 GiB; the pod holds 24 Gi
+# (request = limit). It runs NEXT TO vllm (r1-7b 28 Gi) inside serving-budget's 90 Gi.
+#   kubectl --context spark-root apply -f k8s/llamacpp/gpt-oss-20b.yaml      → svc/llama-gptoss:8080
+# Bigger sibling, same file: swap the -hf line for ggml-org/gpt-oss-120b-GGUF (~63 GB, ~5B active,
+# NVIDIA measured 55 tok/s) and raise memory to 80Gi, with vllm parked first (it runs alone).
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llama-gptoss, namespace: llm-serving, labels: {app: llama-gptoss}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: llama-gptoss}}
+  template:
+    metadata: {labels: {app: llama-gptoss}}
+    spec:
+      priorityClassName: spark-serving
+      containers:
+        - name: llama
+          image: spark-local/llama.cpp:server-sm121
+          imagePullPolicy: Never              # imported into the root's containerd (Task 5.4)
+          args: ["-hf", "ggml-org/gpt-oss-20b-GGUF", "--alias", "gpt-oss-20b",
+                 "-ngl", "999", "-c", "32768", "--parallel", "4", "--jinja", "-fa", "on",
+                 "--host", "0.0.0.0", "--port", "8080", "--metrics"]
+          env: [{name: LLAMA_CACHE, value: /models/gguf}]
+          ports: [{name: http, containerPort: 8080}]
+          startupProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, failureThreshold: 120}
+          readinessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 5}
+          resources:
+            requests: {cpu: "4", memory: 24Gi, nvidia.com/gpu: "1"}   # request = limit (shared LLM pool)
+            limits: {memory: 24Gi, nvidia.com/gpu: "1"}
+          volumeMounts: [{name: models, mountPath: /models}]
+      volumes:
+        - {name: models, persistentVolumeClaim: {claimName: model-cache}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: llama-gptoss, namespace: llm-serving}
+spec:
+  selector: {app: llama-gptoss}
+  ports: [{name: http, port: 8080, targetPort: http}]
