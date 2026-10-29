@@ -65,8 +65,8 @@ Steps 1 and 3 run **next to** the current vLLM (two or three engines, Σ util �
 | bytes per weight | 2 (BF16) | 0.5 (MXFP4) | 0.5 (MXFP4) | 0.5 (NVFP4) |
 | read per token | ~15 GB | ~2 GB | ~3 GB | ~1.5–2 GB |
 | ceiling 273 ÷ read | 18 | ~130 | ~90 | ~150 |
-| measured / published, one user | **13** | **74.6** (57 % of ceiling) | 55 (NVIDIA) | **41.1 measured** plain (49 published) · 120 (Atlas, with MTP) |
-| measured, 32 users (total) | 238 | 119 | — | **313** |
+| measured / published, one user | **13** | **74.6** (57 % of ceiling) | 55 (NVIDIA) | 41.1 plain · **72.0 with MTP** (acceptance 91–95 %) · 120 (Atlas) |
+| measured, 32 users (total) | 238 | 119 | — | 313 plain · **516 with MTP** |
 | pod memory, request = limit | 28 Gi | 24 Gi | 80 Gi | 40 Gi |
 | runs beside r1-7b? | — | yes | no | yes |
 
@@ -249,7 +249,7 @@ Record (one line per engine, same sweep):
 | vLLM 25.09 · r1-7b BF16 | 13 | 108 | 238 | baseline |
 | llama.cpp b6500 · gpt-oss-20b MXFP4 | 74.6 | 141 | 119 | step 1 |
 | vLLM next (26.09 = 0.29) · qwen3.6-35b-nvfp4 | 41.1 | 195 | **313** | step 3, plain · acc 1.00 / 0.95 / 1.00 · 87 % thinking, ~900 tok/answer, p50 23 s · KV 8.7 GiB = 372K tokens (hybrid attention, ~25 KB/token) · load 97 s for 20 GB |
-| vLLM next · qwen3.6-35b-nvfp4 + MTP | | | | step 3, MTP |
+| vLLM next · qwen3.6-35b-nvfp4 + MTP (`method: mtp`, 2 tokens) | **72.0** | **275** | **516** | step 3, MTP · acceptance 91–95 % · acc 0.75 (6/8, noise: rerun with 40) / 0.97 / 0.95 · MTP helped at every concurrency, ×1.75 at c=1, ×1.65 at c=32 |
 
 **Step D · promote, or not.** If step C beats llama.cpp at c=1 and vLLM 25.09 at c=32, make it the lab's engine: set `VLLM_IMAGE` to the new tag in `02-Kubernetes/lab/versions.env` and `03-DeepSeek/lab/versions.env`, the `image:` in `02 …/90-serving/vllm/vllm.yaml`, delete the `images:` block from `k8s/upgrade/vllm-next/kustomization.yaml`, then `scripts/serve-model.sh r1-7b` and re-run [Chapter 05 Task 5.3](05-model-catalog-and-memory-math.md) and [Chapter 08 Task 5.4](08-kubernetes-deployment-storage-and-streaming.md): the loader time and overhead numbers in those chapters were measured on 25.09 and will change. Give LiteLLM an alias for the new model (`k8s/apps/litellm.yaml`, e.g. `fast-vllm` → `vllm-next.llm-serving:8000`) if you keep both engines. If it doesn't earn it: `kubectl --context spark-root delete -k k8s/upgrade/vllm-next`, `scale deploy llama-gptoss --replicas=1`, and note why in the table.
 

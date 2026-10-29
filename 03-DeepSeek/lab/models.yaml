@@ -106,7 +106,7 @@ models:
     max_len: 32768
     mem: 40Gi
     weights: 20GB
-    args: [--reasoning-parser=qwen3, --max-num-seqs=32]
+    args: [--reasoning-parser=qwen3, --max-num-seqs=32, '--speculative-config={"method":"mtp","num_speculative_tokens":2}']
     use: step 3 of the fast lane (Chapter 06 Task 5.8) - MoE 35B/3B active in Blackwell-native NVFP4 with an MTP head; needs the newer vLLM image (k8s/upgrade/vllm-next), not 25.09
   - name: llama-3.1-8b
     hf: meta-llama/Llama-3.1-8B-Instruct

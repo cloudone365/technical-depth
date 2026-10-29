@@ -25,6 +25,7 @@ patches:
       - --download-dir=/models/hf
       - --reasoning-parser=qwen3
       - --max-num-seqs=32
+      - --speculative-config={"method":"mtp","num_speculative_tokens":2}
     - op: replace
       path: /spec/template/spec/containers/0/env/0/value
       value: RedHatAI/Qwen3.6-35B-A3B-NVFP4
