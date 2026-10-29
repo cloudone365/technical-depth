@@ -535,7 +535,7 @@ echo "c=32"; run 32 40
 kill %1
 ```
 
-Through the gateway and in Open WebUI (after `kubectl --context spark-root apply -k k8s/apps` and `rollout restart deploy/litellm`; re-run the Task 5.6 key patch of Chapter 12 afterwards): model `fast`. Make it Public in Open WebUI's Admin Panel → Settings → Models.
+Through the gateway and in Open WebUI (after `kubectl --context spark-root apply -k k8s/apps` and `rollout restart deploy/litellm`; re-run the Task 5.6 key patch of Chapter 12 afterwards): model `fast`. Open WebUI sees only the models **its key** allows, so add the alias to that key first: `curl -s $API/key/update "${H[@]}" -d "{\"key\":\"$WEBUI\",\"models\":[\"reasoning\",\"reasoning-fast\",\"embeddings\",\"fast\"]}"`, then refresh the connection in Admin Panel → Settings → Connections and make `fast` Public under Settings → Models.
 
 Bigger sibling: `ggml-org/gpt-oss-120b-GGUF` (~63 GB, ~5B active, NVIDIA measured 55 tok/s) fits the Spark **alone**: park vllm, swap the `-hf` line and raise memory to 80Gi.
 
