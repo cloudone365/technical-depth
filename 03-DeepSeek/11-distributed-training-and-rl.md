@@ -369,7 +369,7 @@ scripts/publish-adapter.sh grpo-vllm
 kubectl --context spark-root apply -k k8s/models/r1-1.5b                        # any small base overlay
 kubectl --context spark-root -n llm-serving set env deploy/vllm MODEL=/models/adapters/grpo-vllm SERVED_NAME=grpo-0.5b
 kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=20m
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 python3 tools/format_check.py --url http://localhost:8000 --model grpo-0.5b -n 50
 ```
 

@@ -554,7 +554,7 @@ Restart `uma-watch.sh` on the new pod. Watch `MemAvailable` fall in two steps (w
 # ▶ MacBook · 03-DeepSeek/lab
 for m in r1-32b-fp8 qwen2.5-32b-awq; do
   scripts/serve-model.sh $m
-  kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 3
+  pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 3
   temp=$([ $m = r1-32b-fp8 ] && echo 0.6 || echo 0.7)
   python3 tools/eval_harness.py --url http://localhost:8000 --model $m --temperature $temp \
     --suites math json --max-tokens 8192 --concurrency 8 --out results/$m.json
@@ -628,7 +628,7 @@ Re-run the maths suite and compare with `r1-32b-fp8`. [Chapter 02](02-fp8-traini
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh coder-v2-lite
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & sleep 2
 python3 - <<'PY'
 import json, urllib.request
 def post(path, body):

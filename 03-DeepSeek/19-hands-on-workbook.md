@@ -115,7 +115,7 @@ Every model change (new revision, quantisation, engine) must not reduce accuracy
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 2
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 2
 # once, on the accepted version
 python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math json --out results/baseline-r1-7b.json
 # on every candidate

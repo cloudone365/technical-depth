@@ -323,7 +323,7 @@ If Argo CD manages these paths ([02-Kubernetes Chapter 28](../02-Kubernetes/28-p
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh r1-7b
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
   "model":"r1-7b","temperature":0.6,"top_p":0.95,"max_tokens":4096,
   "messages":[{"role":"user","content":"A cluster has 12 nodes with 4 GPUs each and 7 are drained. How many GPUs are available? Please reason step by step, and put your final answer within \\boxed{}."}]}' \
@@ -357,7 +357,7 @@ R1-Distill-Qwen-7B and Qwen2.5-7B-Instruct share the same base architecture; the
 python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math json --out results/r1-7b.json
 kill %1
 scripts/serve-model.sh qwen2.5-7b-tools
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 python3 tools/eval_harness.py --url http://localhost:8000 --model qwen2.5-7b-tools --suites math json --out results/qwen7b.json
 kill %1
 python3 tools/eval_harness.py --report results/r1-7b.json results/qwen7b.json
@@ -370,7 +370,7 @@ Then the classic failure:
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh r1-7b
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 scripts/breakfix.sh inject D06          # prints a harness command at temperature 0 — run it
 python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math --limit 5 --temperature 0.6 --max-tokens 8192
 scripts/breakfix.sh answer D06

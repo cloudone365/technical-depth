@@ -299,7 +299,7 @@ Do this before the window, while serving has its everyday quota.
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh r1-1.5b
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 python3 tools/format_check.py --url http://localhost:8000 --model r1-1.5b -n 50
 ```
 
@@ -471,7 +471,7 @@ for a in sft-lora unsloth-lora lf-lora; do scripts/publish-adapter.sh "$a"; done
 kubectl --context spark-root apply -k k8s/lora/r1-1.5b-sft                 # base + r1-sft
 kubectl --context spark-root -n llm-serving set env deploy/vllm VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
 kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=20m
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 for n in unsloth lf; do
   curl -s localhost:8000/v1/load_lora_adapter -H 'Content-Type: application/json' \
     -d "{\"lora_name\":\"r1-$n\",\"lora_path\":\"/models/adapters/$n-lora\"}"; echo

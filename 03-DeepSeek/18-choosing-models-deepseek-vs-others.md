@@ -358,7 +358,7 @@ Answer from your table: how many points of math accuracy did distillation add to
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh r1-llama-8b
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 2
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 2
 for t in 0 0.6 1.0; do
   python3 tools/eval_harness.py --url http://localhost:8000 --model r1-llama-8b --suites math --limit 20 \
     --temperature $t --max-tokens 8192 | grep -E '^math'
@@ -426,7 +426,7 @@ Read the format control first: `r1-32b` vs `r1-32b-fp8`. The accuracy difference
 # ▶ MacBook · 03-DeepSeek/lab
 MAX_TOKENS=8192 scripts/compare-models.sh r1-7b qwen2.5-7b-tools
 scripts/serve-model.sh qwen2.5-7b-tools
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 2
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 2
 python3 tools/agent_tools.py "What share of 15 GPU slices is 6, in percent, and what is 20% of 121.7 GiB?" \
   --url http://localhost:8000 --model qwen2.5-7b-tools
 kill $pf
@@ -459,7 +459,7 @@ Single-stream speed for each model, compared with the ceiling in §3.4:
 # ▶ MacBook · 03-DeepSeek/lab
 for m in mistral-7b mixtral-8x7b-fp8 v2-lite r1-7b; do
   scripts/serve-model.sh $m
-  kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 3
+  pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 3
   python3 tools/stream_probe.py --url http://localhost:8000 --model $m --max-tokens 512 \
     --prompt "Explain, in about 300 words, how a mixture-of-experts router chooses experts." | grep -E 'ITL|total'
   kill $pf
@@ -472,7 +472,7 @@ Fill in the "Measured" column of §3.4 with `1000 / ITL p50`. Expected ranking: 
 # ▶ MacBook · 03-DeepSeek/lab
 for m in mixtral-8x7b-fp8 v2-lite mistral-7b; do
   scripts/serve-model.sh $m
-  kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 3
+  pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 3
   for c in 1 4 16; do
     python3 tools/eval_harness.py --url http://localhost:8000 --model $m --suites json --limit 8 \
       --concurrency $c --max-tokens 512 | grep 'tok/s aggregate' | sed "s/^/$m c=$c  /"
@@ -552,7 +552,7 @@ Now measure what the neighbour does to latency:
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf1=$!
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & sleep 2; pf1=$!
 kubectl --context spark-root -n llm-serving port-forward svc/vllm-qwen2-5-7b-tools 8001:8000 >/dev/null & pf2=$!
 sleep 3
 python3 tools/stream_probe.py --url http://localhost:8000 --model r1-7b --max-tokens 512 | grep ITL     # alone
@@ -628,7 +628,7 @@ Measure wall power under load first (PDU or smart plug; `nvidia-smi --query-gpu=
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh r1-32b-fp8
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 2
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 2
 python3 tools/eval_harness.py --url http://localhost:8000 --model r1-32b-fp8 --suites math json \
   --concurrency 8 --max-tokens 16384 --power-w 200 --out results/local-r1-32b-fp8.json
 kill $pf
@@ -702,7 +702,7 @@ Apply, park vLLM (`kubectl --context spark-root -n llm-serving annotate scaledob
 # ▶ MacBook · 03-DeepSeek/lab
 kubectl --context spark-root delete -k k8s/multi/qwen2.5-7b-tools --ignore-not-found
 scripts/serve-model.sh nemotron-nano-8b
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 2
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 2
 for mode in on off; do
   temp=$([[ $mode == on ]] && echo 0.6 || echo 0)
   curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d "{\"model\":\"nemotron-nano-8b\",

@@ -323,7 +323,7 @@ Each `MISS` line names the question, the expected file and what ranked first. Re
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & sleep 2
 python3 tools/rag_demo.py ask "Why does the vLLM Deployment use Recreate and a preStop drain?" $E \
   --chat-url http://localhost:8000 --chat-model r1-7b --show-context | tail -15
 python3 tools/rag_demo.py ask "What is the capital of Australia?" $E \

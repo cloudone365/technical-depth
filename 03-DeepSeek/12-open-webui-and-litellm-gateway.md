@@ -569,7 +569,7 @@ The direct-to-vLLM comparison and the D08 command use `localhost:8000`, so start
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 scripts/breakfix.sh inject D04      # LiteLLM timeout lowered to 30 s: long answers cut off
 scripts/breakfix.sh hint D04
 scripts/breakfix.sh reset D04

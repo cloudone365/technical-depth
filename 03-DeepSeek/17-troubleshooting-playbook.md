@@ -269,7 +269,7 @@ Target: under 10 minutes each. `llm-triage.sh` flags D01, D04, D05 and D07 direc
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 KEY="sk-..."   # a LiteLLM virtual key allowed to use reasoning-fast (Chapter 12)
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 2
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 2
 python3 tools/stream_probe.py --url http://localhost:8000 --model r1-7b --max-tokens 8192            # direct
 python3 tools/stream_probe.py --url http://192.168.0.115 --host api.lab.local --api-key "$KEY" \
   --model reasoning-fast --max-tokens 8192                                                         # via Traefik → LiteLLM

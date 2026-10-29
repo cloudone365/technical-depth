@@ -263,7 +263,7 @@ Close the window, then serve R1 and measure the cost of thinking (Chapter 03 Tas
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh r1-7b
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math json --out results/r1-7b.json
 scripts/breakfix.sh inject D06          # prints a harness command at temperature 0 — run it
 scripts/breakfix.sh answer D06
@@ -286,7 +286,7 @@ python3 tools/eplb_sim.py --experts 64 --gpus 8 --redundant 8 --loads results/v2
 scripts/serve-model.sh r1-7b                          # cache the weights, baseline
 kubectl --context spark-root apply -k k8s/long-context/r1-7b-128k
 kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=30m
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 python3 tools/needle_test.py --url http://localhost:8000 --model r1-7b \
   --lengths 4000 16000 64000 120000 --depths 0.1 0.5 0.9
 kill %1
@@ -420,7 +420,7 @@ The streaming tasks (5.7–5.9) need the LiteLLM gateway: on the fast path, depl
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 KEY=$(kubectl --context spark-root -n llm-serving get secret litellm-master-key -o jsonpath='{.data.key}' | base64 -d)
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 kubectl --context spark-root -n llm-serving port-forward svc/litellm 4000 &
 python3 tools/stream_probe.py --url http://localhost:8000 --model r1-7b                                  # hop 1: vLLM
 python3 tools/stream_probe.py --url http://localhost:4000 --api-key "$KEY" --model reasoning-fast         # hop 2: + LiteLLM
@@ -483,7 +483,7 @@ A sizing habit and a full adapter lifecycle: predict LoRA, QLoRA and full fine-t
 # ▶ MacBook · 03-DeepSeek/lab
 python3 tools/lora_calc.py deepseek-r1-distill-qwen-1.5b --method lora --rank 16
 scripts/serve-model.sh r1-1.5b
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 python3 tools/format_check.py --url http://localhost:8000 --model r1-1.5b -n 50     # baseline
 kill %1
 ```
@@ -507,7 +507,7 @@ Close the window, then publish and serve the adapters (Chapter 10 Tasks 5.8–5.
 # ▶ MacBook · 03-DeepSeek/lab
 for a in sft-lora unsloth-lora lf-lora; do scripts/publish-adapter.sh "$a"; done
 kubectl --context spark-root apply -k k8s/lora/r1-1.5b-sft                 # base + r1-sft
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 for m in r1-1.5b r1-sft r1-unsloth r1-lf; do
   python3 tools/format_check.py --url http://localhost:8000 --model "$m" -n 50 --show 0
 done
@@ -603,7 +603,7 @@ kubectl --context spark-root apply -f k8s/jobs/rag-ingest.yaml
 kubectl --context spark-root -n llm-serving logs -f job/rag-ingest -c ingest
 kubectl --context spark-root -n llm-serving port-forward svc/qdrant 6333 >/dev/null &
 kubectl --context spark-root -n llm-serving port-forward svc/bge-m3 8001:8000 >/dev/null &
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & sleep 2
 E=(--qdrant http://localhost:6333 --embed-url http://localhost:8001)      # an array: works in zsh and bash
 for k in 1 3 5 10; do python3 tools/rag_demo.py eval "${E[@]}" -k $k | tail -1; done
 python3 tools/rag_demo.py ask "Why does the vLLM Deployment use Recreate and a preStop drain?" "${E[@]}" \
@@ -622,7 +622,7 @@ A small agent that uses the Spark's own models to call three tools (calculator, 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh qwen2.5-7b-tools
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & sleep 2
 kubectl --context spark-root -n llm-serving port-forward svc/qdrant 6333 >/dev/null &
 kubectl --context spark-root -n llm-serving port-forward svc/bge-m3 8001:8000 >/dev/null &
 export QDRANT_URL=http://localhost:6333 EMBED_URL=http://localhost:8001
@@ -693,7 +693,7 @@ python3 observability/gen_dashboard.py | diff -q - observability/deepseek-servin
 kubectl --context spark-root apply -k observability
 kubectl --context spark-root -n observability get prometheusrule spark-reasoning -o jsonpath='{.spec.groups[*].name}'; echo
 scripts/serve-model.sh r1-7b
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 2
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 2
 python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math --concurrency 16 --max-tokens 8192
 kill $pf
 ```
@@ -763,7 +763,7 @@ Proof that you can do what this module teaches: 30 exercises with objective pass
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 2
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & pf=$!; sleep 2
 python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math json --out results/baseline-r1-7b.json
 python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math json \
   --gate results/baseline-r1-7b.json --tolerance 0.02 --out results/candidate-r1-7b.json

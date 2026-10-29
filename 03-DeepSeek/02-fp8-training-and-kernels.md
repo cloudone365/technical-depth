@@ -403,7 +403,7 @@ An unsupported backend should fail at startup with a message about compute capab
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 for c in 1 4 16 32; do
   python3 tools/eval_harness.py --url http://localhost:8000 --model v2-lite --suites json math \
     --concurrency $c --temperature 0.3 --out results/v2lite-c$c.json | grep 'tok/s aggregate'
@@ -450,13 +450,13 @@ kill %1
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh r1-32b
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 python3 tools/eval_harness.py --url http://localhost:8000 --model r1-32b --out results/r1-32b-bf16.json
 kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -E 'Model loading took|KV cache size'
 kill %1
 
 scripts/serve-model.sh r1-32b-fp8
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 python3 tools/eval_harness.py --url http://localhost:8000 --model r1-32b-fp8 --out results/r1-32b-fp8.json
 kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -E 'Model loading took|KV cache size'
 kill %1

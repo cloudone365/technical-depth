@@ -520,11 +520,11 @@ With `v2-lite` still serving:
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 python3 tools/eval_harness.py --url http://localhost:8000 --model v2-lite --suites json --concurrency 1 --out results/v2lite-c1.json | grep 'tok/s aggregate'
 kill %1
 scripts/serve-model.sh qwen2.5-7b-tools
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 python3 tools/eval_harness.py --url http://localhost:8000 --model qwen2.5-7b-tools --suites json --concurrency 1 --out results/qwen7b-c1.json | grep 'tok/s aggregate'
 kill %1
 ```
@@ -564,20 +564,20 @@ Baseline first, then the two speculative overlays of the same model. The draft o
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh r1-1.5b                       # caches the draft weights in model-cache
 scripts/serve-model.sh r1-7b
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math --concurrency 1 --out results/r1-7b-base.json
 kill %1
 
 kubectl --context spark-root apply -k k8s/spec-decode/r1-7b-draft
 kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=30m
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math --concurrency 1 --out results/r1-7b-draft.json
 curl -s localhost:8000/metrics | grep -E '^vllm:spec_decode_num_(accepted|draft)_tokens_total'
 kill %1
 
 kubectl --context spark-root apply -k k8s/spec-decode/r1-7b-ngram
 kubectl --context spark-root -n llm-serving rollout status deploy/vllm --timeout=20m
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math --concurrency 1 --out results/r1-7b-ngram.json
 kill %1
 python3 tools/eval_harness.py --report results/r1-7b-*.json

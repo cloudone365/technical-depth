@@ -190,7 +190,7 @@ Read both values from `models.yaml` (or `scripts/serve-model.sh list`) before yo
 # ▶ MacBook · 03-DeepSeek/lab
 export KUBECONFIG="$PWD/../../01-Ansible/lab/.cache/kubeconfig-spark-lab.yaml"
 scripts/serve-model.sh qwen2.5-7b-tools
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & sleep 2
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
   "model":"qwen2.5-7b-tools","tool_choice":"auto",
   "tools":[{"type":"function","function":{"name":"calculator","parameters":{"type":"object",

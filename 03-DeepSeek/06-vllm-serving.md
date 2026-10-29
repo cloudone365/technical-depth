@@ -349,7 +349,7 @@ kubectl --context spark-root -n llm-serving logs deploy/vllm | grep -E 'Availabl
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & sleep 2
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
   "model":"r1-7b","temperature":0.6,"top_p":0.95,"max_tokens":2048,
   "messages":[{"role":"user","content":"A GB10 has 121.7 GiB. How many GiB is 0.20 of that? Answer with one number."}]}' \
@@ -373,7 +373,7 @@ Dots are thinking tokens, then the answer follows. For tool calls switch to `qwe
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh qwen2.5-7b-tools
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & sleep 2
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
   "model":"qwen2.5-7b-tools","tool_choice":"auto","max_tokens":256,
   "messages":[{"role":"user","content":"How much memory does the vllm pod in llm-serving request?"}],
@@ -454,7 +454,7 @@ Check it against [Chapter 05 §3.4](05-model-catalog-and-memory-math.md): with b
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh r1-7b
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & sleep 2
 sleep 2
 for c in 1 8 32; do
   echo "concurrency $c:"

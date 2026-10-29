@@ -640,7 +640,7 @@ Prerequisites: `kubectl --context spark-root apply -k k8s/apps` (Chapter 12), an
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 KEY=$(kubectl --context spark-root -n llm-serving get secret litellm-master-key -o jsonpath='{.data.key}' | base64 -d)
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 kubectl --context spark-root -n llm-serving port-forward svc/litellm 4000 &
 python3 tools/stream_probe.py --url http://localhost:8000 --model r1-7b                                  # hop 1: vLLM
 python3 tools/stream_probe.py --url http://localhost:4000 --api-key "$KEY" --model reasoning-fast         # hop 2: + LiteLLM

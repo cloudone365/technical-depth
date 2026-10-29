@@ -428,7 +428,7 @@ vLLM logs the maximum concurrency at 131,072 tokens per request; `model_math.py`
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 & sleep 2
 python3 tools/needle_test.py --url http://localhost:8000 --model r1-7b \
   --lengths 4000 16000 64000 120000 --depths 0.1 0.5 0.9
 kill %1

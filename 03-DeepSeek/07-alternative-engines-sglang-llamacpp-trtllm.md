@@ -292,7 +292,7 @@ resume_vllm(){ kubectl --context spark-root -n llm-serving annotate scaledobject
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab
 scripts/serve-model.sh r1-32b-fp8
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & sleep 2
 python3 ../../02-Kubernetes/lab/scripts/ttft_probe.py --url http://localhost:8000 --model r1-32b-fp8 -n 10 --max-tokens 16
 python3 tools/eval_harness.py --url http://localhost:8000 --model r1-32b-fp8 --suites json math \
   --concurrency 8 --out results/vllm-32b-fp8.json
@@ -471,7 +471,7 @@ kill %1
 kubectl --context spark-root -n llm-serving scale deploy llama-server --replicas=0
 resume_vllm
 scripts/serve-model.sh r1-7b
-kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null &
+pkill -f 'port-forward svc/vllm 8000'; kubectl --context spark-root -n llm-serving port-forward svc/vllm 8000 >/dev/null & sleep 2
 for c in 1 16; do
   python3 tools/eval_harness.py --url http://localhost:8000 --model r1-7b --suites math json \
     --concurrency $c --out results/vllm-bf16-c$c.json
@@ -632,6 +632,7 @@ Write one paragraph per engine: for this model, on one Spark, which would you ru
 
 | You see | Cause | Fix |
 |---|---|---|
+| `bind: address already in use` for port 8000, then `lost connection to pod` / `RemoteDisconnected`, and the harness prints `0/8 … 0.0 tok/s` | an older `port-forward` (from a previous run) still holds port 8000 and pointed at the pod `serve-model.sh` just replaced | `pkill -f 'port-forward svc/vllm 8000'` (every lab line now starts with it), re-run; delete the empty `results/*.json` it saved |
 | `exec format error` / no sm_121 kernels (any engine) | x86 or pre-Blackwell image | the DGX Spark/arm64 tag from `versions.env`; check the current release |
 | SGLang OOM at start | vLLM still running (pause not applied), or page cache full | `park_vllm`; drop the page cache on the Spark |
 | `--reasoning-parser` unknown (SGLang) | older SGLang | upgrade, or parse `<think>` client-side |
