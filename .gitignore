@@ -7,3 +7,5 @@ diag-*.tar.gz
 04-Qwen/lab/out/
 04-Qwen/lab/results/
 .ansible/
+.DS_Store
+**/.DS_Store
