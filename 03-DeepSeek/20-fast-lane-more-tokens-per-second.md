@@ -4,10 +4,10 @@
 
 | | |
 |---|---|
-| **You will build** | Three steps, in order, that take one user from 13 tok/s to 75 and beyond without touching the Spark's hardware: a MoE + 4-bit model on llama.cpp next to the current vLLM (step 1, done: 74.6 tok/s), a 120B model that is still faster than the old 7B (step 2), and a newer vLLM with Blackwell-native NVFP4 kernels and multi-token prediction (step 3). Each step is measured with the same sweep, routed through LiteLLM, and leaves the rest of the lab as it was |
+| **You will build** | Three steps that take one user from 13 tok/s to 72 and a crowd of 32 from 238 to 516 tok/s, without touching the Spark's hardware: a MoE + 4-bit model on llama.cpp next to the current vLLM (step 1: 74.6 tok/s), a 120B model that is still faster than the old 7B (step 2, optional), and a newer NGC vLLM image with Blackwell-native NVFP4 kernels and multi-token prediction as a second engine, `vllm-next` (step 3: 72 / 275 / 516 tok/s). The end state, which this chapter leaves running: LiteLLM alias `fast` answers chat in ~0.6 s with the model's thinking turned off, `smart` keeps thinking on, and r1-7b stays as the book's baseline and the fallback |
 | **Hardware** | dgx-spark-1 |
 | **Time** | step 1: 1 h (incl. the llama.cpp build) · step 2: 1.5 h (63 GB download) · step 3: 2 h |
-| **Risk** | Low for steps 1–2 (new Deployments beside the existing ones; step 2 runs alone with a temporary quota change). Step 3's last part (promoting the image) changes the lab's engine and needs Chapters 05–08 retested |
+| **Risk** | Low for steps 1–3 (new Deployments beside the existing ones; step 2 runs alone with a temporary quota change). Step 3's optional last part, promoting the image for the base `vllm`, changes the lab's engine and needs Chapters 05–08 retested |
 | **Clusters** | `spark-root`, namespace `llm-serving` |
 | **Lab files** | [`k8s/llamacpp/gpt-oss-20b.yaml`](lab/k8s/llamacpp/gpt-oss-20b.yaml), [`k8s/llamacpp/gpt-oss-120b.yaml`](lab/k8s/llamacpp/gpt-oss-120b.yaml), [`k8s/llamacpp/Dockerfile`](lab/k8s/llamacpp/Dockerfile), [`k8s/upgrade/vllm-next`](lab/k8s/upgrade/vllm-next/kustomization.yaml), [`models.yaml`](lab/models.yaml) (`qwen3.6-35b-nvfp4`), [`k8s/apps/litellm.yaml`](lab/k8s/apps/litellm.yaml) (alias `fast`), [`tools/eval_harness.py`](lab/tools/eval_harness.py) |
 
@@ -19,11 +19,11 @@ Prerequisites: [Chapter 06](06-vllm-serving.md) (r1-7b served, the Task 5.6 swee
 
 On a GB10, how fast one user gets tokens is set by one division: **273 GB/s of memory bandwidth ÷ the bytes the model reads per token**. Nothing in Kubernetes or in the hardware raises the numerator. The everyday setup of Chapters 05–08 sits at the slow end of the denominator: a dense 7B model in BF16 reads ~15 GB per token (18 tok/s ceiling, 13 measured) and spends ~90 % of its tokens thinking. This chapter moves the denominator, in three steps that each change one thing:
 
-| Step | Lever | What changes | One user | Status |
+| Step | Lever | What changes | One user · 32 users | Status (2026-10-29) |
 |---|---|---|---|---|
-| 1 | **the model's bytes** | MoE (reads ~3.6B of 21B parameters) in 4-bit MXFP4, on llama.cpp built for sm_121 | 13 → **74.6** (measured) | done |
-| 2 | **quality at that speed** | the same recipe on a 120B MoE (~5B active), alone | ≈ 40–55 from a 120B model | to do |
-| 3 | **the engine** | newer vLLM: NVFP4 kernels compute on 4-bit directly, MTP gives 2–3 tokens per weight read | ≈ 50–120 (published: 49 vLLM, 120 Atlas on the same model) | to do |
+| 1 | **the model's bytes** | MoE (reads ~3.6B of 21B parameters) in 4-bit MXFP4, on llama.cpp built for sm_121 | **74.6** · 119 | measured; engine kept as the `fast-llamacpp` fallback, paused |
+| 2 | **quality at that speed** | the same recipe on a 120B MoE (~5B active), alone | ≈ 40–55 (published) | optional, not run |
+| 3 | **the engine** | newer NGC vLLM (26.09 = vLLM 0.29): NVFP4 kernels compute on 4-bit directly, MTP gives 2–3 tokens per weight read | plain **41** · 313 → with MTP **72** · **516** | measured; `vllm-next` is the lab's fast lane (`fast`, `smart`) |
 
 **How the steps relate.** They are independent experiments, not a pipeline: none needs the previous one's result, and each ends by restoring the lab. Do them in any order, or only one, but **one at a time**, because they compete for the same memory pool:
 
@@ -33,7 +33,7 @@ On a GB10, how fast one user gets tokens is set by one division: **273 GB/s of m
 | Step 2 | the same image | nothing: vLLM and the 20B parked, quota raised | steps 1 and 3 |
 | Step 3 | a newer NGC vLLM tag that passes its step A | `vllm` (r1-7b) and bge-m3; the 20B paused for quota | step 2 |
 
-Shared ground: the Chapter 06 sweep as the yardstick, LiteLLM aliases for whatever you keep, and `park_vllm` / `resume_vllm` from Chapter 07 §5. Keeping step 1's engine running is the recommended end state; steps 2 and 3 can be left running only if their table rows earn it, and step 3's promotion (its step D) is the one change that alters the rest of the lab.
+Shared ground: the Chapter 06 sweep as the yardstick, LiteLLM aliases for whatever you keep, and `park_vllm` / `resume_vllm` from Chapter 07 §5. Step 3's engine earned the permanent place (it beats step 1 everywhere except 3 tok/s at c=1, and batches 4× better), so the end state is `vllm` + `vllm-next` + bge-m3 + apps (≈ 86 of 90 Gi), with step 1's engine paused as a fallback. Step 3's image promotion (its step D, part 2) is the one change that alters the rest of the lab and is left for its own session.
 
 Everything else in the lab is kept: the three memory walls (every new pod has request = limit inside `serving-budget`), the gateway (one alias per engine, with fallback), and the measuring method ([Chapter 06 Task 5.6](06-vllm-serving.md): the same c = 1 / 8 / 32 sweep on the same maths set, so engines compare fairly).
 
@@ -41,21 +41,24 @@ Everything else in the lab is kept: the three memory walls (every new pod has re
 
 ```mermaid
 flowchart LR
-  U["Open WebUI · curl"] --> L["LiteLLM"]
-  L -->|"fast"| G["llama.cpp sm_121<br/>gpt-oss-20b MXFP4<br/>step 1 · 74.6 tok/s"]
-  L -.->|"smart (step 2, alone)"| H["llama.cpp sm_121<br/>gpt-oss-120b MXFP4<br/>≈ 50 tok/s"]
-  L -.->|"fast-vllm (step 3)"| N["vLLM next (NVFP4 + MTP)<br/>qwen3.6-35b-nvfp4<br/>≈ 50–120 tok/s"]
-  L -->|"reasoning-fast · reasoning"| V["vLLM 25.09<br/>r1-7b BF16<br/>13 tok/s · 238 at 32 users"]
-  L -->|"embeddings"| E["bge-m3"]
+  U["Open WebUI · curl · SDK"] --> L["LiteLLM<br/>alias → engine · key allow-list · fallbacks"]
+  L -->|"fast · thinking off<br/>(0.6 s answers)"| N["vllm-next · vLLM 0.29 (NGC 26.09)<br/>qwen3.6-35b-nvfp4 + MTP · util 0.30 · 40 Gi<br/>72 tok/s one user · 516 at 32"]
+  L -->|"smart · thinking on"| N
+  L -->|"reasoning-fast · reasoning<br/>(the book's baseline)"| V["vllm · vLLM 0.10 (NGC 25.09)<br/>r1-7b BF16 · util 0.20 · 28 Gi<br/>13 tok/s · 238 at 32"]
+  L -->|"embeddings"| E["bge-m3 · util 0.06 · 9 Gi"]
+  L -.->|"fast-llamacpp (fallback, paused)"| G["llama-gptoss · llama.cpp sm_121<br/>gpt-oss-20b MXFP4 · 24 Gi<br/>step 1 · 74.6 tok/s"]
+  L -.->|"step 2, optional, alone"| H["llama-gptoss-120b<br/>gpt-oss-120b MXFP4 · 80 Gi<br/>≈ 50 tok/s"]
   classDef gpu fill:#e8f5d0,stroke:#76b900,stroke-width:2px,color:#000
   classDef k8s fill:#dbe9ff,stroke:#1f6feb,stroke-width:2px,color:#000
   classDef ext fill:#f6f8fa,stroke:#57606a,color:#000
-  class G,H,N,V,E gpu
+  classDef off fill:#f6f8fa,stroke:#76b900,stroke-dasharray:4 3,color:#000
+  class N,V,E gpu
+  class G,H off
   class L k8s
   class U ext
 ```
 
-Steps 1 and 3 run **next to** the current vLLM (two or three engines, Σ util ≲ 0.72, quota ≤ 90 Gi). Step 2 runs **alone**. The gateway decides who answers: `fast` for chat, `reasoning*` for hard problems and crowds (vLLM still batches best: 238 tok/s at 32 users against llama.cpp's 119).
+Solid boxes run; dashed ones are paused or optional. Two vLLM images coexist: the 25.09 base that the rest of the module measured (`vllm`, managed by `serve-model.sh`), and 26.09 as `vllm-next` (managed by the `k8s/upgrade/vllm-next` overlay, model from the catalog entry `qwen3.6-35b-nvfp4`). The gateway decides who answers: `fast` for chat (thinking off, baked into the alias), `smart` for hard questions, `reasoning*` for the chapters and comparisons that assume r1-7b. Fallbacks: `fast` → `fast-llamacpp` → `reasoning-fast`; `smart` → `reasoning-fast`. A paused backend behind a Service drops connections rather than refusing them, so a fallback only kicks in after the 900 s timeout; keep fallbacks pointed at engines that are up.
 
 ## 3. LLD · the numbers behind each step
 
@@ -67,10 +70,19 @@ Steps 1 and 3 run **next to** the current vLLM (two or three engines, Σ util �
 | ceiling 273 ÷ read | 18 | ~130 | ~90 | ~150 |
 | measured / published, one user | **13** | **74.6** (57 % of ceiling) | 55 (NVIDIA) | 41.1 plain · **72.0 with MTP** (acceptance 91–95 %) · 120 (Atlas) |
 | measured, 32 users (total) | 238 | 119 | — | 313 plain · **516 with MTP** |
+| KV cache per token · what the pod's share holds | 56 KB · 110K tokens | — | — | ~25 KB (hybrid attention) · **372K tokens = 11 full 32K chats** in 8.7 GiB |
+| load time (weights on NVMe) | 77 s / 14 GB | seconds (mmap) | seconds (mmap) | 97 s / 20 GB (same ~200 MB/s loader; `--safetensors-load-strategy` exists in 0.29 to test) |
 | pod memory, request = limit | 28 Gi | 24 Gi | 80 Gi | 40 Gi |
 | runs beside r1-7b? | — | yes | no | yes |
+| state on 2026-10-29 | running (`reasoning-fast`) | paused (`fast-llamacpp`) | not created | **running (`fast`, `smart`)** |
 
-Two details that bite: llama.cpp's `-c` is the **total** context split across `--parallel` slots (the repo uses 8 × 8K), and llama.cpp batches less well than vLLM (16 slots gave 141 tok/s at c=8 but only 119 at c=32). Step 3's MTP needs a model trained with an MTP head (Qwen3.5/3.6, DeepSeek-V3); gpt-oss has none.
+Details that bite, all measured here:
+
+- llama.cpp's `-c` is the **total** context split across `--parallel` slots (the repo uses 8 × 8K); 16 slots gave 141 tok/s at c=8 but only 119 at c=32, because llama.cpp batches less well than vLLM.
+- MTP needs a model trained with an MTP head (Qwen 3.5/3.6, DeepSeek-V3); gpt-oss has none. On Qwen 3.6 vLLM resolved `Qwen3_5MoeMTP` from `--speculative-config={"method":"mtp","num_speculative_tokens":2}` and accepted 91–95 % of drafts; the gain held at every concurrency (×1.75 at c=1, ×1.65 at c=32), not only for one user.
+- Qwen 3.6 thinks by default: ~900 tokens (87 %) per maths answer, 343 tokens for "is 91 prime". `chat_template_kwargs: {enable_thinking: false}` gives the same answer in 22 tokens; the `fast` alias bakes that in (`extra_body` in `litellm.yaml`), `smart` leaves it on. vLLM 0.29 returns thinking in `message.reasoning` (0.10 used `reasoning_content`); `eval_harness.py` reads both.
+- Image tags matter more than version numbers suggest: 26.01 (vLLM 0.13) rejects `qwen3_5_moe`; 26.09 (vLLM 0.29) runs it. Probe tags with `docker manifest inspect` before pulling 10 GB.
+- The 26.09 image runs with `CUDA Forward Compatibility mode ENABLED` on DGX OS's 580 driver: fine, also under Kubernetes; a DGX OS update removes the layer.
 
 ## 4. Integrations
 
@@ -262,11 +274,11 @@ Record (one line per engine, same sweep):
 kubectl --context spark-root -n llm-serving get deploy vllm llama-gptoss llama-gptoss-120b vllm-next 2>/dev/null     # which engines are up
 kubectl --context spark-root -n llm-serving describe quota serving-budget | grep -E 'limits.memory|requests.cpu'
 KEY=$(kubectl --context spark-root -n llm-serving get secret litellm-master-key -o jsonpath='{.data.key}' | base64 -d)
-for a in fast reasoning-fast; do printf '%-16s' $a; curl -s -o /tmp/r.json -w '%{http_code} ' http://api.lab.local/v1/chat/completions -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+for a in fast smart reasoning-fast; do printf '%-16s' $a; curl -s -o /tmp/r.json -w '%{http_code} ' http://api.lab.local/v1/chat/completions -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
   -d "{\"model\":\"$a\",\"max_tokens\":100,\"messages\":[{\"role\":\"user\",\"content\":\"Say OK.\"}]}"; jq -r .model /tmp/r.json; done
 ```
 
-✅ **Done when** the step-1 sweep is in the table (c=1 ≥ 60 tok/s), `fast` answers through the gateway and shows in Open WebUI, and the lab is back to its everyday state after each step (r1-7b serving, quota 90 Gi, no stray port-forwards).
+✅ **Done when** the §3 table holds your sweeps for every engine you ran, `fast` answers through the gateway in about a second and `smart` with thinking, both from `qwen3.6-35b-nvfp4`, Open WebUI lists both (the `open-webui` key allows them), the 20B is paused, and the quota reads ≈ 86 of 90 Gi with no stray port-forwards.
 
 ## 7. Troubleshooting
 
@@ -278,6 +290,10 @@ for a in fast reasoning-fast; do printf '%-16s' $a; curl -s -o /tmp/r.json -w '%
 | c=32 lower than c=8 on llama.cpp | more slots than it batches well | keep 8 slots; send crowds to vLLM |
 | step 2: `exceeded quota` | quota patch missing, or vllm / llama-gptoss still up | patch to 100Gi, `park_vllm`, scale the 20B to 0 |
 | step 3: no arm64 manifest / `nvfp4 not supported` / `architectures not supported` | wrong tag for the GB10, or the model is newer than the image | newest NGC tag with DGX Spark in its notes; or an older NVFP4 model |
+| step 3: pod dies 4 s after `Running`, log `model type qwen3_5_moe but Transformers does not recognize` | the image's Transformers predates the model (26.01) | 26.09 or newer |
+| `fast` hangs ~440 s, then answers as `hosted_vllm/r1-7b` | LiteLLM still on the old config, `fast` pointed at the paused llama.cpp Service (Cilium drops, no refusal) | `git pull` really happened? (`git status`); `apply -k k8s/apps`, `rollout restart deploy/litellm`, check `/v1/models` lists `smart` |
+| `git pull` refused: local changes to `models.yaml` | your own catalog entry | `git stash; git pull --ff-only; git stash pop`, then commit the entry |
+| `curl $API/...` loops or errors in a new terminal | `$API`, `$KEY`, `$WEBUI` are per shell | set them again (Chapter 12 tab of the notes, or Task 5.2) |
 
 ## 8. Scale-out path
 
@@ -287,5 +303,6 @@ A second Spark doubles total throughput (one engine per node behind `reasoning-p
 
 - [ ] Step 1: llama.cpp image built and imported; `llama-gptoss` beside `vllm`; sweep recorded; alias `fast` in LiteLLM, the Open WebUI key and the model list
 - [ ] Step 2: 120B measured alone (sweep + `--report` against the 20B and the 32Bs); quota back to 90 Gi; lab restored
-- [ ] Step 3: image verified on the Spark (step A); `vllm-next` beside `vllm` (B); plain and MTP sweeps (C); promote or remove (D), with Chapters 05–08 retested if promoted
+- [ ] Step 3: image verified on the Spark (step A); `vllm-next` beside `vllm` (B); plain and MTP sweeps (C); aliases `fast` / `smart` live and the 20B paused (D part 1); image promoted and Chapters 05–08 retested (D part 2, optional)
 - [ ] The table in §3 filled with your own numbers
+- [ ] Open WebUI: `smart` Public, `fast` the default model for new chats

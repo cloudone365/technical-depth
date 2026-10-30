@@ -137,7 +137,7 @@ Times are rough working times on one Spark, not counting reading or first-time d
 | ☐ | 18 | [DeepSeek vs other model families](18-choosing-models-deepseek-vs-others.md) | Controlled pairs, two families at once, local vs hosted | 4–6 h | Alias table backed by your numbers |
 | ☐ | 19 | [Hands-on workbook](19-hands-on-workbook.md) | 30 exercises, the release gate, the capstone | 3–5 days | Capstone report saved |
 | | **Part VIII** | **Going faster** | | | |
-| ☐ | 20 | [The fast lane](20-fast-lane-more-tokens-per-second.md) | MoE + 4-bit beside vLLM (done: 74.6 tok/s), a 120B alone, a newer vLLM with NVFP4 + MTP | 1 + 1.5 + 2 h | One table, your numbers, engines compared with the same sweep |
+| ☐ | 20 | [The fast lane](20-fast-lane-more-tokens-per-second.md) | MoE + 4-bit on llama.cpp (74.6 tok/s), a 120B alone (optional), a newer vLLM with NVFP4 + MTP as `vllm-next` (72 / 516 tok/s; `fast` and `smart` aliases) | 1 + 1.5 + 2 h | One table, your numbers, engines compared with the same sweep |
 
 ## Overview
 
@@ -785,7 +785,7 @@ For the capstone, rebuild with the Semaphore template `15.1 Deploy DeepSeek` (Ch
 
 ## Chapter 20 · The fast lane → [document](20-fast-lane-more-tokens-per-second.md)
 
-One user's speed on a GB10 is 273 GB/s ÷ bytes read per token. Three steps change that denominator and the engine, each measured with the Chapter 06 sweep and kept beside the everyday setup: gpt-oss-20b (MoE, MXFP4) on llama.cpp as alias `fast` (13 → 74.6 tok/s, done), gpt-oss-120b alone, and a newer vLLM image with NVFP4 kernels and multi-token prediction tried as `vllm-next` before it is promoted.
+One user's speed on a GB10 is 273 GB/s ÷ bytes read per token. Three steps change that denominator and the engine, each measured with the Chapter 06 sweep and kept beside the everyday setup: gpt-oss-20b (MoE, MXFP4) on llama.cpp (13 → 74.6 tok/s for one user), gpt-oss-120b alone (optional), and a newer NGC vLLM image (26.09 = vLLM 0.29) with NVFP4 kernels and multi-token prediction as a second engine, `vllm-next` (72 tok/s one user, 516 at 32). End state: alias `fast` (thinking off, ~0.6 s answers) and `smart` on `vllm-next`, r1-7b kept as the baseline and fallback.
 
 ```bash
 # ▶ MacBook · 03-DeepSeek/lab

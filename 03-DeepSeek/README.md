@@ -104,7 +104,7 @@ flowchart TB
 | | 17 | [Troubleshooting playbook](17-troubleshooting-playbook.md) | decision tree, `llm-triage.sh`, symptom index, drills D01–D07, support bundle |
 | VII · Choosing models | 18 | [DeepSeek vs Llama, Qwen, Mistral, o1/Claude & multi-ecosystem](18-choosing-models-deepseek-vs-others.md) | controlled comparisons, bandwidth-predicted speed, break-even vs hosted APIs, two families at once, a routing table |
 | | 19 | [Hands-on workbook](19-hands-on-workbook.md) | 30 graded exercises, the release gate, a capstone |
-| VIII · Going faster | 20 | [The fast lane: more tokens per second](20-fast-lane-more-tokens-per-second.md) | three measured steps from 13 to 75+ tok/s on the same Spark: MoE + 4-bit on llama.cpp beside vLLM, a 120B alone, a newer vLLM with NVFP4 and MTP |
+| VIII · Going faster | 20 | [The fast lane: more tokens per second](20-fast-lane-more-tokens-per-second.md) | three measured steps on the same Spark: MoE + 4-bit on llama.cpp (75 tok/s), a 120B alone (optional), a newer NGC vLLM with NVFP4 + MTP as a second engine (72 tok/s one user, 516 at 32; chat answers in 0.6 s via alias `fast`) |
 
 ### Learning order
 
