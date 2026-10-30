@@ -140,6 +140,24 @@ Through the gateway and in Open WebUI (after `kubectl --context spark-root apply
 
 Remove: `kubectl --context spark-root delete -f k8s/llamacpp/gpt-oss-20b.yaml` (the GGUF stays in `model-cache`).
 
+#### What each command does
+
+| Command | What it does | Why |
+|---|---|---|
+| `docker build -t spark-local/llama.cpp:server-sm121 …` (Spark, Chapter 07 Task 5.4) | compiles llama.cpp with CUDA kernels for compute capability 12.1 (the GB10) into a local image | NGC has no llama.cpp image for the GB10; kernels built for other GPUs don't run here |
+| `docker save … \| sudo ctr -n k8s.io images import -` | copies the image from Docker's store into containerd's `k8s.io` namespace | Kubernetes pulls from containerd, not Docker; `imagePullPolicy: Never` in the manifest means "use what's there" |
+| `apply -f k8s/llamacpp/gpt-oss-20b.yaml` | creates Deployment + Service `llama-gptoss` beside `vllm` | a second engine in the same namespace; its 24 Gi request = limit is counted by `serving-budget` |
+| `rollout status deploy/llama-gptoss --timeout=30m` | waits until the pod is Ready | the first start downloads the GGUF (~12 GB) into `/models/gguf` on `model-cache` |
+| `logs … \| grep -iE 'offloaded\|model size\|listening'` | the three lines that matter from llama.cpp's start-up | `offloaded N/N layers to GPU` proves nothing fell back to the CPU; the size and the listening port confirm the model and the Service |
+| `pkill -f 'port-forward svc/llama-gptoss'; … port-forward svc/llama-gptoss 8080 … & sleep 2` | closes any old tunnel on 8080, opens a new one to this Service, gives it 2 s to come up | the harness runs on the MacBook; a stale tunnel from an earlier engine would answer with `0/48 results` or hang |
+| `run() { python3 tools/eval_harness.py --url … --model gpt-oss-20b --suites math --limit $2 --concurrency $1 --max-tokens 2048 \| grep … }` | a shell function: N maths problems, C in flight, up to 2,048 tokens each; prints only the accuracy and tok/s lines | the same yardstick as every other engine ([Chapter 06 Task 5.6](06-vllm-serving.md)) |
+| `run 1 8` · `run 8 40` · `run 32 40` | one user on 8 problems (speed per user), then 8 and 32 users on all 40 (total throughput) | 8 problems are enough at c=1; the crowd runs need all 40 so that 32 can really be in flight |
+| `kill %1` | closes the tunnel (shell job 1) | leaving tunnels open is the usual cause of the next engine's "stuck" test |
+| `apply -k k8s/apps` · `rollout restart deploy/litellm` | re-applies the ConfigMap `litellm-config` and restarts LiteLLM, which reads it only at start | makes the alias visible through the gateway |
+| Chapter 12 Task 5.6 key patch | puts Open WebUI's own key back into the StatefulSet | `apply -k k8s/apps` resets it to the master key |
+| `curl $API/key/update … "models":[…]` | adds the alias to the Open WebUI key's allow-list | `/v1/models` is filtered per key: a model not on the list never appears in Open WebUI |
+| `delete -f k8s/llamacpp/gpt-oss-20b.yaml` | removes the Deployment and Service | frees 24 Gi; the GGUF stays on disk for the next time |
+
 ### Step 2 · gpt-oss-120b, alone: a 120B model faster than the old 7B
 
 #### What this lab does (Deployment `lab/k8s/llamacpp/gpt-oss-120b.yaml`)
@@ -185,6 +203,20 @@ kubectl --context spark-root -n llm-serving scale deploy llama-gptoss --replicas
 ```
 
 If the 120B earns a permanent place, give it an alias (`k8s/apps/litellm.yaml`, e.g. `smart` → `llama-gptoss-120b.llm-serving:8080`) and decide which engine is parked by default; the quota change then belongs in `02 … root-llms/10-tenancy/quotas.yaml`, not in a patch.
+
+#### What each command does
+
+| Command | What it does | Why |
+|---|---|---|
+| `park_vllm` | pauses the KEDA ScaledObject (or scales `vllm` to 0) and waits until the r1-7b pod is gone | the 120B needs the pool: a plain `scale` is undone by KEDA within seconds, so the helper pauses it first |
+| `scale deploy llama-gptoss --replicas=0` | stops the 20B | same pool, same quota |
+| `patch resourcequota serving-budget … 100Gi` | raises the namespace's memory quota from 90 to 100 Gi for the run | 80 Gi for the model + ~16 Gi of apps > 90 Gi; the node has ~101.7 GiB for the root, so 100 is still inside the hardware |
+| `apply -f k8s/llamacpp/gpt-oss-120b.yaml` · `rollout status … --timeout=60m` | creates `llama-gptoss-120b` and waits | ~63 GB download the first time |
+| the `port-forward` / `run` / `kill` lines | the same sweep as step 1, model name `gpt-oss-120b` | comparable numbers |
+| `eval_harness.py --suites math json --concurrency 4 --out results/gpt-oss-120b.json` | the full accuracy run, saved to a file | quality is the point of this step; a saved file can be compared later |
+| `eval_harness.py --report a.json b.json c.json` | one table from several saved runs | 120B vs 20B vs the 32Bs on accuracy, tokens per correct answer and tok/s |
+| `scale deploy llama-gptoss-120b --replicas=0` · quota back to `90Gi` · `resume_vllm` · `serve-model.sh r1-7b` · 20B back to 1 | undoes every change of this step, in reverse order | the lab's everyday state is the contract the other chapters rely on |
+
 
 ### Step 3 · a newer vLLM with NVFP4 and multi-token prediction
 
@@ -263,7 +295,42 @@ Record (one line per engine, same sweep):
 | vLLM next (26.09 = 0.29) · qwen3.6-35b-nvfp4 | 41.1 | 195 | **313** | step 3, plain · acc 1.00 / 0.95 / 1.00 · 87 % thinking, ~900 tok/answer, p50 23 s · KV 8.7 GiB = 372K tokens (hybrid attention, ~25 KB/token) · load 97 s for 20 GB |
 | vLLM next · qwen3.6-35b-nvfp4 + MTP (`method: mtp`, 2 tokens) | **72.0** | **275** | **516** | step 3, MTP · acceptance 91–95 % · acc 0.75 (6/8, noise: rerun with 40) / 0.97 / 0.95 · MTP helped at every concurrency, ×1.75 at c=1, ×1.65 at c=32 |
 
+#### What each command does (steps A–C)
+
+| Command | What it does | Why |
+|---|---|---|
+| `docker manifest inspect $IMG \| grep -A2 '"architecture": "arm64"'` (Spark) | asks the registry which CPU architectures the tag is built for | the Spark is arm64; an x86-only tag fails with `exec format error` after a 10 GB pull |
+| `docker pull $IMG` | downloads the image into Docker on the Spark | lets the checks below run locally; containerd pulls its own copy for the pod later |
+| `docker run --rm --gpus all $IMG vllm --version` | prints the vLLM version inside the image | the NGC tag (26.09) and the vLLM version (0.29) are different numbering schemes; the version decides which models and flags exist |
+| `… vllm serve --help=all \| grep -iE 'speculative-config\|safetensors-load\|nvfp4\|modelopt\|kv-cache-dtype'` | lists the flags this step depends on | plain `--help` is a summary in vLLM ≥ 0.11 and misses them |
+| `… python3 -c "from vllm… import QUANTIZATION_METHODS; …"` | prints the quantisation formats this build can load | `compressed-tensors` is the format of the RedHatAI NVFP4 checkpoint; `modelopt_fp4` NVIDIA's; without them the model can't load |
+| `for t in 26.02 … 26.09; do docker manifest inspect …; done` | probes which newer tags exist | needed when a tag rejects the model's architecture (26.01 did) |
+| `scale deploy llama-gptoss --replicas=0` | pauses the 20B | its 24 Gi of quota goes to `vllm-next` (28 + 40 + 9 + ~9.5 ≈ 86 of 90 Gi) |
+| `apply -k k8s/upgrade/vllm-next` | renders the catalog overlay with `nameSuffix: -next`, label `app: vllm-next`, image tag 26.09, and applies Deployment + Service `vllm-next` | the `k8s/multi` pattern: a second vLLM beside the first, never selected by `svc/vllm` |
+| `get pods -l app=vllm-next -w` · `rollout status deploy/vllm-next` | watches the pod: `ContainerCreating` (image pull), `Running 0/1` (download + load), `1/1` (Ready) | a pod that goes `Running` → `Error` within seconds is a start-up error: read `logs --previous` |
+| `logs deploy/vllm-next \| grep -iE 'version\|quantization\|Model loading took\|KV cache size\|Maximum concurrency'` | the start-up facts | version, format, weight memory, KV tokens and how many full-length chats fit |
+| `exec deploy/vllm-next -- curl -s localhost:8000/v1/chat/completions …` | one question from inside the pod | proves the engine answers before any tunnel is involved; `max_tokens` must cover the thinking (≥ 1500) or `content` comes back null |
+| `jq '{answer, thinking_chars: ((.message.reasoning // .message.reasoning_content // "") \| length)}'` | reads the answer and the thinking from either field name | vLLM 0.29 returns `reasoning`, 0.10 returned `reasoning_content` |
+| `… "chat_template_kwargs":{"enable_thinking":false}` in the request body | turns the model's thinking off for that request | the same answer in ~20 tokens instead of ~340; the `fast` alias bakes this in |
+| `port-forward svc/vllm-next 8000` · `run 1 8` / `run 8 40` / `run 32 40` | the sweep against the new engine, model name `qwen3.6-35b-nvfp4` | same yardstick; the plain numbers go in the table before MTP |
+| `patch deploy vllm-next --type json -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--speculative-config={…mtp…}"}]'` | appends the MTP flag to the running Deployment's args (a restart follows) | a quick test without regenerating overlays; once it works, the flag lives in `models.yaml` (it does now) and `gen_overlays.py` writes it into the overlay |
+| `logs … \| grep -oiE 'acceptance[^,]*\|accepted[^,]*'` | the share of drafted tokens the model kept | the gain from MTP is roughly proportional to it: 91–95 % here |
+
 **Step D · keep the engine (done), promote the image (later).** The two are separate decisions. Keeping `vllm-next` as the fast lane is low-risk and is the lab's state from 2026-10-29: `k8s/apps/litellm.yaml` maps `fast` (thinking off via `extra_body.chat_template_kwargs.enable_thinking: false`) and `smart` (thinking on) to `vllm-next:8000`, `fast-llamacpp` keeps the step-1 engine as a fallback, and `llama-gptoss` is paused (r1-7b 28 + vllm-next 40 + apps ~16 ≈ 84 of 90 Gi). Apply with `kubectl --context spark-root apply -k k8s/apps`, `rollout restart deploy/litellm`, the Chapter 12 Task 5.6 key patch, and add `smart` to the Open WebUI key (`/key/update`).
+
+#### What each command does (step D, part 1)
+
+| Command | What it does | Why |
+|---|---|---|
+| `git pull --ff-only` | brings the repo's `litellm.yaml` (aliases `fast`, `smart`, `fast-llamacpp`) to the MacBook | the gateway only changes if the file you apply has changed; a refused pull (local edits) is the usual reason "nothing happened" |
+| `apply -k k8s/apps` | re-applies the app manifests, including ConfigMap `litellm-config` | LiteLLM's model list lives in that ConfigMap |
+| `rollout restart deploy/litellm` · `rollout status` | restarts LiteLLM and waits | it reads the ConfigMap only at start |
+| `patch sts open-webui … webui-litellm-key` | restores Open WebUI's own key | `apply -k k8s/apps` resets it to the master key (Chapter 12 Task 5.6) |
+| `curl $API/v1/models -H "Authorization: Bearer $KEY"` | the aliases the gateway knows (master key sees all) | `smart` and `fast-llamacpp` listed = the new config is live; a non-JSON reply right after the restart is Traefik's 502/503 while the pod comes up: retry |
+| `curl $API/key/update … "models":["fast","smart",…]` | adds the aliases to the Open WebUI key | per-key filtering, as in step 1 |
+| `curl … -d '{"model":"fast",…}'` / `"smart"` with `-w '%{time_total}s'` | one question per alias, timed | `fast` ≈ 0.6 s and ~20 tokens, `smart` several seconds with thinking; both report `model: …qwen3.6-35b-nvfp4` |
+| `scale deploy llama-gptoss --replicas=0` | pauses the step-1 engine | it is the `fast-llamacpp` fallback now; its 24 Gi is better spent on `vllm-next` |
+| `describe quota serving-budget \| grep -E 'limits.memory\|requests.cpu'` | the booking after the change | ≈ 86 of 90 Gi, 5 of 8 CPU |
 
 **Promoting the image** means the base `vllm` runs 26.09 too: Step C did (72 vs 75 at c=1, 516 vs 238 at c=32), so it has earned it; do it as its own session: set `VLLM_IMAGE` to the new tag in `02-Kubernetes/lab/versions.env` and `03-DeepSeek/lab/versions.env`, the `image:` in `02 …/90-serving/vllm/vllm.yaml`, delete the `images:` block from `k8s/upgrade/vllm-next/kustomization.yaml`, then `scripts/serve-model.sh r1-7b` and re-run [Chapter 05 Task 5.3](05-model-catalog-and-memory-math.md) and [Chapter 08 Task 5.4](08-kubernetes-deployment-storage-and-streaming.md): the loader time and overhead numbers in those chapters were measured on 25.09 and will change. Give LiteLLM an alias for the new model (`k8s/apps/litellm.yaml`, e.g. `fast-vllm` → `vllm-next.llm-serving:8000`) if you keep both engines. If it doesn't earn it: `kubectl --context spark-root delete -k k8s/upgrade/vllm-next`, `scale deploy llama-gptoss --replicas=1`, and note why in the table.
 
